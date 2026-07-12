@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "allowSyntheticDefaultImports": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@lamasync/core": ["./packages/core/src/index.ts"],
+      "@lamasync/core/*": ["./packages/core/src/*"],
+      "@lamasync/server": ["./packages/server/src/index.ts"],
+      "@lamasync/daemon": ["./packages/daemon/src/index.ts"],
+      "@lamasync/tui": ["./packages/tui/src/index.ts"]
+    }
+  },
+  "include": ["packages/**/src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

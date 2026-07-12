@@ -1,0 +1,9 @@
+{
+  "name": "@lamasync/agent-skill",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "echo 'agent-skill has no build step'"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "lamasync",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "bun run --watch packages/server/src/index.ts",
+    "dev:daemon": "bun run packages/daemon/src/index.ts",
+    "dev:tui": "bun run packages/tui/src/index.ts",
+    "build": "bun run --filter='*' build",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}
