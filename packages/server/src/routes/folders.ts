@@ -20,6 +20,11 @@ interface AssignmentRow {
   remote_name: string | null;
   sync_expr: string | null;
   enabled: number;
+  conflict_strategy: string | null;
+  pre_sync_cmd: string | null;
+  post_sync_cmd: string | null;
+  ignore_path: string | null;
+  timeout_sec: number | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
@@ -36,6 +41,11 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     remoteName: r.remote_name,
     syncExpr: r.sync_expr,
     enabled: r.enabled === 1,
+    conflictStrategy: (r.conflict_strategy as FolderAssignment["conflictStrategy"]) ?? null,
+    preSyncCmd: r.pre_sync_cmd,
+    postSyncCmd: r.post_sync_cmd,
+    ignorePath: r.ignore_path,
+    timeoutSec: r.timeout_sec,
   };
 }
 
@@ -184,12 +194,26 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .delete(
     "/folders/:id",
     ({ params, set }) => {
+      // Capture assignment ids first; SQLite has no FK cascade on these tables.
+      const assignmentIds = db
+        .query<{ id: string }, [string]>(
+          "SELECT id FROM folder_assignments WHERE folder_id = ?",
+        )
+        .all(params.id)
+        .map((r) => r.id);
+      if (assignmentIds.length > 0) {
+        const placeholders = assignmentIds.map(() => "?").join(",");
+        db.run(
+          `DELETE FROM schedule_state WHERE folder_assignment_id IN (${placeholders})`,
+          assignmentIds,
+        );
+      }
+      db.run("DELETE FROM folder_assignments WHERE folder_id = ?", [params.id]);
       const result = db.run("DELETE FROM folders WHERE id = ?", [params.id]);
       if (result.changes === 0) {
         set.status = 404;
         return { error: "Folder not found" };
       }
-      db.run("DELETE FROM folder_assignments WHERE folder_id = ?", [params.id]);
       set.status = 204;
       return null;
     },
@@ -225,12 +249,18 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         remoteName?: string | null;
         syncExpr?: string | null;
         enabled?: boolean;
+        conflictStrategy?: string | null;
+        preSyncCmd?: string | null;
+        postSyncCmd?: string | null;
+        ignorePath?: string | null;
+        timeoutSec?: number | null;
       };
       const id = crypto.randomUUID();
       db.run(
         `INSERT INTO folder_assignments
-           (id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+            conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, timeout_sec)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           params.id,
@@ -240,11 +270,17 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           b.remoteName ?? null,
           b.syncExpr ?? null,
           b.enabled === false ? 0 : 1,
+          b.conflictStrategy ?? null,
+          b.preSyncCmd ?? null,
+          b.postSyncCmd ?? null,
+          b.ignorePath ?? null,
+          b.timeoutSec ?? null,
         ],
       );
       const row = db
         .query<AssignmentRow, [string]>(
-          `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled
+          `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, timeout_sec
            FROM folder_assignments WHERE id = ?`,
         )
         .get(id);

@@ -38,8 +38,13 @@ export interface FolderAssignment {
   role: string; // "source" | "target" | "both"
   localPath: string;
   remoteName?: string | null;
-  syncExpr?: string | null;
+  syncExpr?: string | null; // cron expression
   enabled: boolean;
+  conflictStrategy?: ConflictStrategy | null;
+  preSyncCmd?: string | null;
+  postSyncCmd?: string | null;
+  ignorePath?: string | null; // path to .lamasyncignore relative to localPath
+  timeoutSec?: number | null; // per-operation timeout
 }
 
 export interface DotfileManifest {
@@ -57,6 +62,7 @@ export interface DotfileVersion {
   tarballPath: string;
   sizeBytes?: number | null;
   checksum?: string | null;
+  description?: string | null; // optional label, e.g. "before nvim plugin rewrite"
 }
 
 export interface OperationLog {
@@ -68,6 +74,7 @@ export interface OperationLog {
   status: OperationStatus;
   summary?: string | null;
   details?: string | null;
+  durationMs?: number | null;
 }
 
 // API request/response shapes
@@ -84,12 +91,14 @@ export interface HostConfig {
   folders: Folder[];
   manifests: DotfileManifest[];
   rcloneConfig: string;
+  serverTailnetIp: string | null;
 }
 
 export interface HealthReport {
   hostId: string;
   timestamp: number;
   status: HostStatus;
+  uptimeSec?: number;
 }
 
 export interface OperationReport {
@@ -100,4 +109,15 @@ export interface OperationReport {
   summary?: string | null;
   details?: string | null;
   timestamp?: number;
+  durationMs?: number | null;
+}
+
+// WebSocket event payload broadcast on /api/v1/ws
+export type WSEvent =
+  | { kind: "operation"; entry: OperationLog }
+  | { kind: "host"; host: Host };
+
+export interface PruneResult {
+  deleted: number;
+  olderThanMs: number;
 }

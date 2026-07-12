@@ -161,9 +161,14 @@ export class LamaSyncApiClient {
     );
   }
 
-  async uploadDotfile(appName: string, tarball: Blob): Promise<DotfileVersion> {
+  async uploadDotfile(
+    appName: string,
+    tarball: Blob,
+    opts: { description?: string } = {},
+  ): Promise<DotfileVersion> {
     const form = new FormData();
     form.append("tarball", tarball, `${appName}.tar.gz`);
+    if (opts.description) form.append("description", opts.description);
     const res = await this.fetchImpl(
       `${this.baseUrl}/api/v1/dotfiles/${encodeURIComponent(appName)}`,
       {
@@ -202,14 +207,31 @@ export class LamaSyncApiClient {
   listOperations(opts: {
     hostId?: string;
     status?: string;
+    folderId?: string;
     limit?: number;
   } = {}): Promise<OperationLog[]> {
     const params = new URLSearchParams();
     if (opts.hostId) params.set("hostId", opts.hostId);
     if (opts.status) params.set("status", opts.status);
+    if (opts.folderId) params.set("folderId", opts.folderId);
     if (typeof opts.limit === "number") params.set("limit", String(opts.limit));
     const qs = params.toString();
     const path = qs ? `/api/v1/operations?${qs}` : "/api/v1/operations";
     return this.request<OperationLog[]>("GET", path);
+  }
+
+  pruneOperations(olderThanMs: number): Promise<{ deleted: number; olderThanMs: number }> {
+    return this.request("POST", `/api/v1/admin/prune?olderThanMs=${olderThanMs}`);
+  }
+
+  deleteHost(hostId: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/hosts/${encodeURIComponent(hostId)}`);
+  }
+
+  listDotfilesForHost(hostId: string): Promise<DotfileVersion[]> {
+    return this.request<DotfileVersion[]>(
+      "GET",
+      `/api/v1/dotfiles?hostId=${encodeURIComponent(hostId)}`,
+    );
   }
 }

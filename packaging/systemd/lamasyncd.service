@@ -1,0 +1,29 @@
+[Unit]
+Description=LamaSync Daemon
+Documentation=https://github.com/aliforfaen/LamaSync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h expands to $HOME for the user running the service
+ExecStart=%h/.local/bin/lamasyncd
+Restart=on-failure
+RestartSec=10s
+# Logs to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lamasyncd
+# Hardening (relaxed for development; tighten in production)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+# Allow the daemon to create its socket in $HOME
+ReadWritePaths=%h/.config/lamasync %h/lamasync.sock
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%%
+
+[Install]
+WantedBy=default.target

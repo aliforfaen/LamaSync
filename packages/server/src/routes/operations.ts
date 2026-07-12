@@ -14,6 +14,7 @@ interface OpRow {
   status: string;
   summary: string | null;
   details: string | null;
+  duration_ms: number | null;
 }
 
 function rowToLog(r: OpRow): OperationLog {
@@ -26,15 +27,17 @@ function rowToLog(r: OpRow): OperationLog {
     status: r.status as OperationStatus,
     summary: r.summary,
     details: r.details,
+    durationMs: r.duration_ms,
   };
 }
 
 export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   "/operations",
   ({ query }) => {
-    const { hostId, status, limit } = query as {
+    const { hostId, status, folderId, limit } = query as {
       hostId?: string;
       status?: string;
+      folderId?: string;
       limit?: number | string;
     };
 
@@ -49,6 +52,10 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       where.push("status = ?");
       args.push(status);
     }
+    if (folderId) {
+      where.push("folder_id = ?");
+      args.push(folderId);
+    }
 
     const limNum =
       typeof limit === "number"
@@ -61,7 +68,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       : DEFAULT_LIMIT;
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const sql = `SELECT id, timestamp, host_id, folder_id, operation, status, summary, details
+    const sql = `SELECT id, timestamp, host_id, folder_id, operation, status, summary, details, duration_ms
                  FROM operation_log
                  ${whereSql}
                  ORDER BY timestamp DESC
@@ -73,6 +80,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
     query: t.Object({
       hostId: t.Optional(t.String()),
       status: t.Optional(t.String()),
+      folderId: t.Optional(t.String()),
       limit: t.Optional(t.Union([t.Number(), t.String()])),
     }),
     detail: {
@@ -85,4 +93,5 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
     },
   },
 );
+
 

@@ -13,6 +13,7 @@ interface VersionRow {
   tarball_path: string;
   size_bytes: number | null;
   checksum: string | null;
+  description: string | null;
 }
 
 function rowToVersion(r: VersionRow): DotfileVersion {
@@ -23,6 +24,7 @@ function rowToVersion(r: VersionRow): DotfileVersion {
     tarballPath: r.tarball_path,
     sizeBytes: r.size_bytes,
     checksum: r.checksum,
+    description: r.description,
   };
 }
 
@@ -51,11 +53,42 @@ function ensureManifest(appName: string): string | null {
 
 export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
+    "/dotfiles",
+    ({ query }) => {
+      const hostId = (query as { hostId?: string }).hostId;
+      if (!hostId) {
+        return [];
+      }
+      const rows = db
+        .query<VersionRow, [string]>(
+          `SELECT v.id, v.manifest_id, v.timestamp, v.tarball_path, v.size_bytes, v.checksum, v.description
+           FROM dotfile_versions v
+           WHERE v.manifest_id IN (SELECT id FROM dotfile_manifests WHERE host_id = ?)
+           ORDER BY v.timestamp DESC`,
+        )
+        .all(hostId);
+      return rows.map(rowToVersion);
+    },
+    {
+      query: t.Object({
+        hostId: t.Optional(t.String()),
+      }),
+      detail: {
+        summary: "List dotfile versions for all apps owned by a host",
+        tags: ["Dotfiles"],
+        responses: {
+          200: { description: "Version list for the host (empty when hostId omitted)" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .get(
     "/dotfiles/:appName",
     ({ params }) => {
       const rows = db
         .query<VersionRow, [string]>(
-          `SELECT v.id, v.manifest_id, v.timestamp, v.tarball_path, v.size_bytes, v.checksum
+          `SELECT v.id, v.manifest_id, v.timestamp, v.tarball_path, v.size_bytes, v.checksum, v.description
            FROM dotfile_versions v
            JOIN dotfile_manifests m ON m.id = v.manifest_id
            WHERE m.app_name = ?
@@ -91,6 +124,12 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Missing 'tarball' field in multipart body" };
       }
 
+      const descriptionRaw = form.get("description");
+      const description =
+        typeof descriptionRaw === "string" && descriptionRaw.length > 0
+          ? descriptionRaw
+          : null;
+
       const appDir = join(BACKUP_DIR, "dotfiles", params.appName);
       mkdirSync(appDir, { recursive: true });
 
@@ -105,14 +144,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       const id = crypto.randomUUID();
       db.run(
         `INSERT INTO dotfile_versions
-           (id, manifest_id, timestamp, tarball_path, size_bytes)
-         VALUES (?, ?, ?, ?, ?)`,
-        [id, manifestId, timestamp, relPath, buf.length],
+           (id, manifest_id, timestamp, tarball_path, size_bytes, description)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, manifestId, timestamp, relPath, buf.length, description],
       );
 
       const row = db
         .query<VersionRow, [string]>(
-          "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum FROM dotfile_versions WHERE id = ?",
+          "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description FROM dotfile_versions WHERE id = ?",
         )
         .get(id);
 
@@ -137,7 +176,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, set }) => {
       const row = db
         .query<VersionRow, [string]>(
-          "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum FROM dotfile_versions WHERE id = ?",
+          "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description FROM dotfile_versions WHERE id = ?",
         )
         .get(params.version);
       if (!row) {
@@ -173,7 +212,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, set }) => {
       const row = db
         .query<VersionRow, [string]>(
-          "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum FROM dotfile_versions WHERE id = ?",
+          "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description FROM dotfile_versions WHERE id = ?",
         )
         .get(params.version);
       if (!row) {

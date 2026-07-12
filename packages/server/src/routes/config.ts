@@ -31,6 +31,11 @@ interface AssignmentRow {
   remote_name: string | null;
   sync_expr: string | null;
   enabled: number;
+  conflict_strategy: string | null;
+  pre_sync_cmd: string | null;
+  post_sync_cmd: string | null;
+  ignore_path: string | null;
+  timeout_sec: number | null;
 }
 
 interface ManifestRow {
@@ -55,6 +60,11 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     remoteName: r.remote_name,
     syncExpr: r.sync_expr,
     enabled: r.enabled === 1,
+    conflictStrategy: (r.conflict_strategy as FolderAssignment["conflictStrategy"]) ?? null,
+    preSyncCmd: r.pre_sync_cmd,
+    postSyncCmd: r.post_sync_cmd,
+    ignorePath: r.ignore_path,
+    timeoutSec: r.timeout_sec,
   };
 }
 
@@ -78,16 +88,35 @@ function generateRcloneConfig(
   hostId: string,
   folders: Folder[],
   assignments: FolderAssignment[],
+  serverTailnetIp: string | null,
+  backupDir: string,
 ): string {
-  const lines: string[] = [`# Generated for ${hostId} at ${new Date().toISOString()}`];
+  const lines: string[] = [
+    `# Generated for ${hostId} at ${new Date().toISOString()}`,
+    `# Server tailnet IP: ${serverTailnetIp ?? "(unset)"}`,
+    "",
+  ];
   for (const a of assignments) {
     const folder = folders.find((f) => f.id === a.folderId);
     if (!folder) continue;
     const remoteName = a.remoteName ?? `lamasync-${folder.id}`;
     lines.push(`[${remoteName}]`);
-    lines.push(`type = local`);
-    lines.push(`description = "${folder.name} (${folder.type})"`);
-    lines.push(`# local_path = ${a.localPath}`);
+    if (folder.type === "dotfile") {
+      lines.push(`type = local`);
+      lines.push(`description = "${folder.name} (dotfile backup)"`);
+      lines.push(`# local path on client: ${a.localPath}`);
+      lines.push(`# server path: ${backupDir}/dotfiles/${folder.name}/`);
+    } else if (serverTailnetIp) {
+      lines.push(`type = sftp`);
+      lines.push(`host = ${serverTailnetIp}`);
+      lines.push(`user = lamasync`);
+      lines.push(`description = "${folder.name} (${folder.type})"`);
+      lines.push(`# local path on client: ${a.localPath}`);
+    } else {
+      lines.push(`type = local`);
+      lines.push(`description = "${folder.name} (${folder.type}) — server unavailable"`);
+      lines.push(`# local path on client: ${a.localPath}`);
+    }
     lines.push("");
   }
   return lines.join("\n");
@@ -109,7 +138,8 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
 
     const assignmentRows = db
       .query<AssignmentRow, [string]>(
-        `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled
+        `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+                conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, timeout_sec
          FROM folder_assignments WHERE host_id = ?`,
       )
       .all(hostId);
@@ -136,6 +166,9 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const folders = folderRows.map(rowToFolder);
     const manifests = manifestRows.map(rowToManifest);
 
+    const serverTailnetIp = process.env.LAMASYNC_TAILNET_IP ?? null;
+    const backupDir = process.env.LAMASYNC_BACKUP_DIR ?? "/backups";
+
     const response: HostConfig = {
       host: {
         id: host.id,
@@ -147,20 +180,21 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
       assignments,
       folders,
       manifests,
-      rcloneConfig: generateRcloneConfig(hostId, folders, assignments),
+      rcloneConfig: generateRcloneConfig(hostId, folders, assignments, serverTailnetIp, backupDir),
+      serverTailnetIp,
     };
     return response;
   },
-  {
-    params: t.Object({ hostId: t.String() }),
-    detail: {
-      summary: "Fetch full configuration for a host",
-      tags: ["Config"],
-      responses: {
-        200: { description: "Host configuration bundle" },
-        404: { description: "Host not found" },
-        401: { description: "Unauthorized" },
+    {
+      params: t.Object({ hostId: t.String() }),
+      detail: {
+        summary: "Fetch full configuration for a host",
+        tags: ["Config"],
+        responses: {
+          200: { description: "Host configuration bundle" },
+          404: { description: "Host not found" },
+          401: { description: "Unauthorized" },
+        },
       },
     },
-  },
-);
+  );

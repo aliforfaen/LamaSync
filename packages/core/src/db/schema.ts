@@ -17,14 +17,19 @@ CREATE TABLE IF NOT EXISTS folders (
 );
 
 CREATE TABLE IF NOT EXISTS folder_assignments (
-    id            TEXT PRIMARY KEY,
-    folder_id     TEXT NOT NULL REFERENCES folders(id),
-    host_id       TEXT NOT NULL REFERENCES hosts(id),
-    role          TEXT NOT NULL,
-    local_path    TEXT NOT NULL,
-    remote_name   TEXT,
-    sync_expr     TEXT,
-    enabled       INTEGER DEFAULT 1,
+    id                  TEXT PRIMARY KEY,
+    folder_id           TEXT NOT NULL REFERENCES folders(id),
+    host_id             TEXT NOT NULL REFERENCES hosts(id),
+    role                TEXT NOT NULL,
+    local_path          TEXT NOT NULL,
+    remote_name         TEXT,
+    sync_expr           TEXT,
+    enabled             INTEGER DEFAULT 1,
+    conflict_strategy   TEXT,
+    pre_sync_cmd        TEXT,
+    post_sync_cmd       TEXT,
+    ignore_path         TEXT,
+    timeout_sec         INTEGER,
     UNIQUE(folder_id, host_id)
 );
 
@@ -43,7 +48,8 @@ CREATE TABLE IF NOT EXISTS dotfile_versions (
     timestamp     INTEGER NOT NULL,
     tarball_path  TEXT NOT NULL,
     size_bytes    INTEGER,
-    checksum      TEXT
+    checksum      TEXT,
+    description   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS operation_log (
@@ -54,11 +60,12 @@ CREATE TABLE IF NOT EXISTS operation_log (
     operation   TEXT NOT NULL,
     status      TEXT NOT NULL,
     summary     TEXT,
-    details     TEXT
+    details     TEXT,
+    duration_ms INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS schedule_state (
-    folder_assignment_id TEXT NOT NULL REFERENCES folder_assignments(id),
+    folder_assignment_id TEXT NOT NULL UNIQUE REFERENCES folder_assignments(id),
     last_run             INTEGER,
     next_run             INTEGER,
     last_status          TEXT

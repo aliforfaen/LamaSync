@@ -68,6 +68,45 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       },
     },
   )
+.delete(
+    "/hosts/:hostId",
+    ({ params, set }) => {
+      const result = db.run("DELETE FROM hosts WHERE id = ?", [params.hostId]);
+      if (result.changes === 0) {
+        set.status = 404;
+        return { error: "Host not found" };
+      }
+      db.run("DELETE FROM folder_assignments WHERE host_id = ?", [params.hostId]);
+      const manifestIds = db
+        .query<{ id: string }, [string]>(
+          "SELECT id FROM dotfile_manifests WHERE host_id = ?",
+        )
+        .all(params.hostId)
+        .map((r) => r.id);
+      if (manifestIds.length > 0) {
+        const placeholders = manifestIds.map(() => "?").join(",");
+        db.run(
+          `DELETE FROM dotfile_versions WHERE manifest_id IN (${placeholders})`,
+          manifestIds,
+        );
+      }
+      db.run("DELETE FROM dotfile_manifests WHERE host_id = ?", [params.hostId]);
+      set.status = 204;
+      return null;
+    },
+    {
+      params: t.Object({ hostId: t.String() }),
+      detail: {
+        summary: "Delete a host and cascade its data",
+        tags: ["Hosts"],
+        responses: {
+          204: { description: "Host removed" },
+          404: { description: "Not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
   .post(
     "/report/health",
     ({ body, set }) => {
