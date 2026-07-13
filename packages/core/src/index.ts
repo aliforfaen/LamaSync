@@ -1,6 +1,6 @@
 // Public surface of @lamasync/core.
 export * from "./types.ts";
-export { SERVER_SCHEMA } from "./db/schema.ts";
+export { SERVER_SCHEMA, MIGRATIONS } from "./db/schema.ts";
 export { initDb } from "./db/client.ts";
 export type { Database } from "./db/client.ts";
 export {

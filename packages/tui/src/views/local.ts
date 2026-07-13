@@ -8,13 +8,23 @@ export type LocalAction =
   | "fleet"
   | "logs"
   | "dotfiles"
+  | "cache-profile"
+  | "switch-type"
+  | "network-shares"
   | "quit";
+
+export type LocalFolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
+
+export type CacheProfileKind = "normal" | "media" | "minimal";
 
 export interface LocalFolder {
   id: string;
   name: string;
+  type?: LocalFolderType;
   lastStatus?: string;
   lastRun?: number | null;
+  cacheProfile?: CacheProfileKind | null;
+  cacheMaxSize?: string | null;
 }
 
 export interface LocalState {
@@ -40,12 +50,20 @@ const HOTKEYS: Array<{ key: string; label: string; action: LocalAction }> = [
   { key: "4", label: "fleet", action: "fleet" },
   { key: "5", label: "logs", action: "logs" },
   { key: "6", label: "dotfiles", action: "dotfiles" },
+  { key: "c", label: "cache-profile", action: "cache-profile" },
+  { key: "s", label: "switch-type", action: "switch-type" },
+  { key: "n", label: "network-shares", action: "network-shares" },
   { key: "q", label: "quit", action: "quit" },
 ];
 
 function describeFolder(folder: LocalFolder): string {
   const status = folder.lastStatus ?? "unknown";
-  return status;
+  const type = folder.type ?? "sync";
+  const cache =
+    type === "mount" && folder.cacheProfile
+      ? ` (cache: ${folder.cacheProfile}${folder.cacheMaxSize ? `/${folder.cacheMaxSize}` : ""})`
+      : "";
+  return `${type}${cache} — ${status}`;
 }
 
 function toRows(folders: LocalFolder[]): FolderRow[] {
@@ -98,4 +116,48 @@ function hotkeyFooter(): VNode {
     cells.push(Text({ content: `[${hk.key}] ${hk.label}` }));
   }
   return Box({ flexDirection: "row", gap: 1 }, ...cells);
+}
+
+/**
+ * Cycle through cache profiles in the order the daemon applies them. The TUI
+ * does not persist this selection; the daemon's mount flow is the source of
+ * truth. The view fires `cache-profile` and the index layer is responsible
+ * for sending the updated assignment to the server.
+ */
+export const CACHE_PROFILE_ORDER: readonly CacheProfileKind[] = [
+  "normal",
+  "media",
+  "minimal",
+];
+
+export function nextCacheProfile(
+  current: CacheProfileKind | null | undefined,
+): CacheProfileKind {
+  const idx = CACHE_PROFILE_ORDER.indexOf(current ?? "normal");
+  const safeIdx = idx === -1 ? 0 : idx;
+  const next = CACHE_PROFILE_ORDER[(safeIdx + 1) % CACHE_PROFILE_ORDER.length];
+  // Safe: index is within the readonly tuple.
+  return next as CacheProfileKind;
+}
+
+export interface FstabShareInput {
+  id: string;
+  server: string;
+  path: string;
+  type: "nfs" | "smb";
+  options: string;
+}
+
+/**
+ * Build the `/etc/fstab` line for a network share. The TUI only displays
+ * the line — it never writes to /etc/fstab itself. Root operations belong
+ * to the operator or to a privileged helper.
+ */
+export function buildFstabLine(
+  share: FstabShareInput,
+  mountPoint: string,
+): string {
+  const fsType = share.type === "nfs" ? "nfs" : "cifs";
+  const options = share.options && share.options.length > 0 ? share.options : "defaults";
+  return `${share.server}:${share.path} ${mountPoint} ${fsType} ${options} 0 0 # lamasync:${share.id}`;
 }

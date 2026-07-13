@@ -8,6 +8,7 @@ import type {
   HostConfig,
   OperationLog,
   OperationReport,
+  Share,
 } from "./types.ts";
 
 export class LamaSyncApiError extends Error {
@@ -220,6 +221,62 @@ export class LamaSyncApiClient {
     return this.request<OperationLog[]>("GET", path);
   }
 
+  // Lock coordination
+  async acquireLock(folderId: string, hostId: string): Promise<{ lockId: string; ttl: number; acquired: boolean } | { error: string; lockedBy: string; remainingSec: number }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/v1/operations/acquire`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ folderId, hostId }),
+      },
+    );
+    const body = await res.json();
+    if (!res.ok) throw new LamaSyncApiError(res.status, JSON.stringify(body));
+    return body;
+  }
+
+  async heartbeatLock(folderId: string, hostId: string): Promise<{ ok: boolean; renewedAt: number }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/v1/operations/heartbeat`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ folderId, hostId }),
+      },
+    );
+    const body = await res.json();
+    if (!res.ok) throw new LamaSyncApiError(res.status, JSON.stringify(body));
+    return body;
+  }
+
+  async releaseLock(folderId: string, hostId: string, status: string, summary?: string): Promise<{ ok: boolean }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/v1/operations/release`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ folderId, hostId, status, summary }),
+      },
+    );
+    const body = await res.json();
+    if (!res.ok) throw new LamaSyncApiError(res.status, JSON.stringify(body));
+    return body;
+  }
+
+  async listLocks(): Promise<{ folderId: string; lockedBy: string; lockedAt: number; lockTtl: number }[]> {
+    return this.request("GET", "/api/v1/operations/locks");
+  }
+
   pruneOperations(olderThanMs: number): Promise<{ deleted: number; olderThanMs: number }> {
     return this.request("POST", `/api/v1/admin/prune?olderThanMs=${olderThanMs}`);
   }
@@ -233,5 +290,10 @@ export class LamaSyncApiClient {
       "GET",
       `/api/v1/dotfiles?hostId=${encodeURIComponent(hostId)}`,
     );
+  }
+
+  // Shares
+  listShares(): Promise<Share[]> {
+    return this.request<Share[]>("GET", "/api/v1/shares");
   }
 }

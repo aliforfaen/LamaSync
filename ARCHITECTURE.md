@@ -7,10 +7,11 @@
 │  lamasync-server                                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
 │  │ REST API │ │ Scheduler│ │ Dotfile  │ │ rclone Config  │  │
-│  │          │ │          │ │ Registry │ │ Generator      │  │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───────┬────────┘  │
+│  │ (Elysia) │ │(heartbeat│ │ Registry │ │ Generator      │  │
+│  │          │ │ + cron)  │ │          │ │                │  │
+│  └────┬─────┘ └────┬─────┘ └────┬────┘ └───────┬────────┘  │
 │       └──────────────┴───────────┴───────────────┘           │
-│                         │ SQLite                             │
+│                         │ SQLite (bun:sqlite)                │
 │  Volumes: /data (DB), /backups (tarballs)                    │
 └──────────────────────────┼──────────────────────────────────┘
                            │ Tailnet
@@ -24,27 +25,44 @@
 └───────────────┘  └───────────────┘  └───────────────┘
 ```
 
-Two binaries per client:
-- **`lamasyncd`** — background daemon (systemd `--user`), manages rclone processes, schedules, reports to server
-- **`lamasync-tui`** — OpenTUI frontend, talks to local daemon via Unix socket, optionally connects to server for fleet view
+Three binaries per machine:
 
-One binary on the server:
-- **`lamasync-server`** — REST API, config registry, dotfile store, scheduler coordination
+- **`lamasync-server`** — REST API + WS event stream, host & folder registry,
+  dotfile storage, scheduler, rclone config generator. Runs in Docker on
+  TrueNAS.
+- **`lamasyncd`** — background daemon (`systemd --user`), spawns and supervises
+  rclone processes, runs cron-driven sync schedules, reports status to the
+  server, exposes a Unix socket for the local TUI.
+- **`lamasync-tui`** — OpenTUI frontend, talks to the local daemon over a
+  Unix socket for the local view and to the server REST/WS for the fleet view.
+
+The agent skill at `packages/agent-skill/lamasync-server.md` lets external
+agents register, manage folders, and report on operations against the same API.
 
 ---
 
 ## Folder Types
 
-| Type | Direction | Engine | Use Case |
-|------|-----------|--------|----------|
-| `sync` | Bidirectional | `rclone bisync` | LamaFiles between desktop + laptop |
-| `mount` | Remote → local | `rclone mount` + VFS cache | Large repos you don't want downloaded |
-| `backup` | Local → server | `rclone copy` (one-way) | `/opt/appdata`, home dir snapshots |
-| `dotfile` | Local → server | `tar czf` + rclone push | Per-app configs, versioned on server |
+| Type     | Direction      | Engine                           | Use Case                              |
+|----------|----------------|----------------------------------|---------------------------------------|
+| `sync`   | Bidirectional  | `rclone bisync`                  | LamaFiles between desktop + laptop    |
+| `mount`  | Remote → local | `rclone mount` + VFS cache       | Large repos you don't want downloaded |
+| `backup` | Local → server | `rclone copy` (one-way)          | `/opt/appdata`, home dir snapshots     |
+| `dotfile`| Local → server | `tar czf` + rclone `copyto`      | Per-app configs, versioned on server  |
+| `git`    | Local ↔ origin | `git fetch` + `git pull --rebase`| Git repos synced without re-downloading tree |
+
+The `git` type runs a plain `git` binary instead of rclone. The daemon rejects
+sync when the worktree is dirty, when no `origin` remote exists, or when the
+upstream branch is not configured. The report includes `commitsAhead`,
+`commitsBehind`, `dirtyFiles`, and `lastCommit` for monitoring.
 
 ---
 
-## Database Schema (SQLite, server-side)
+## Database Schema (SQLite, server-side, `bun:sqlite`)
+
+The full schema lives in `packages/core/src/db/schema.ts` and is applied on
+DB open via `initDb()`. New columns are added in the same file's
+`MIGRATIONS` array (idempotent `ALTER TABLE`).
 
 ```sql
 -- Registered hosts (clients + server itself)
@@ -52,28 +70,42 @@ CREATE TABLE hosts (
     id          TEXT PRIMARY KEY,  -- hostname or uuid
     hostname    TEXT NOT NULL,
     tailnet_ip  TEXT,
+    lan_ip      TEXT,              -- first non-internal IPv4 for LAN peer sync
     last_seen   INTEGER,
     status      TEXT DEFAULT 'unknown'  -- online, offline, degraded
 );
 
 -- Folder definitions (canonical, created once)
 CREATE TABLE folders (
-    id          TEXT PRIMARY KEY,  -- uuid
-    name        TEXT NOT NULL,     -- "LamaFiles", "dotfiles-nvim"
-    type        TEXT NOT NULL,     -- sync, mount, backup, dotfile
-    created_at  INTEGER
+    id              TEXT PRIMARY KEY,   -- uuid
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL,      -- sync, mount, backup, dotfile, git
+    encrypted       INTEGER DEFAULT 0,  -- rclone crypt wrapper
+    crypt_password  TEXT,               -- base64 password (and password2 salt)
+    created_at      INTEGER
 );
 
 -- Which hosts participate in which folders, and how
 CREATE TABLE folder_assignments (
-    id            TEXT PRIMARY KEY,
-    folder_id     TEXT NOT NULL REFERENCES folders(id),
-    host_id       TEXT NOT NULL REFERENCES hosts(id),
-    role          TEXT NOT NULL,        -- source, target, both
-    local_path    TEXT NOT NULL,        -- /home/user/LamaFiles
-    remote_name   TEXT,                 -- rclone remote name for this pairing
-    sync_expr     TEXT,                 -- cron expression
-    enabled       INTEGER DEFAULT 1,
+    id                          TEXT PRIMARY KEY,
+    folder_id                   TEXT NOT NULL REFERENCES folders(id),
+    host_id                     TEXT NOT NULL REFERENCES hosts(id),
+    role                        TEXT NOT NULL,        -- source, target, both
+    local_path                  TEXT NOT NULL,
+    remote_name                 TEXT,
+    sync_expr                   TEXT,                 -- cron expression
+    enabled                     INTEGER DEFAULT 1,
+    conflict_strategy           TEXT,                 -- newer_wins, source_wins, keep_both, manual
+    pre_sync_cmd                TEXT,
+    post_sync_cmd               TEXT,
+    ignore_path                 TEXT,
+    mount_ignore_path           TEXT,
+    timeout_sec                 INTEGER,
+    bandwidth_schedule          TEXT,                 -- rclone --bwlimit value
+    max_retries                 INTEGER DEFAULT 3,
+    available_space_threshold   INTEGER,              -- bytes; pre-flight check
+    cache_profile               TEXT,                 -- normal / media / minimal
+    cache_max_size              TEXT,                 -- e.g. "1G"
     UNIQUE(folder_id, host_id)
 );
 
@@ -81,9 +113,9 @@ CREATE TABLE folder_assignments (
 CREATE TABLE dotfile_manifests (
     id          TEXT PRIMARY KEY,
     host_id     TEXT NOT NULL REFERENCES hosts(id),
-    app_name    TEXT NOT NULL,          -- "nvim", "omp", "fish"
-    paths       TEXT NOT NULL,          -- JSON array of paths
-    schedule    TEXT,                   -- cron expression
+    app_name    TEXT NOT NULL,
+    paths       TEXT NOT NULL,        -- JSON array of paths
+    schedule    TEXT,                 -- cron expression
     UNIQUE(host_id, app_name)
 );
 
@@ -103,20 +135,28 @@ CREATE TABLE operation_log (
     timestamp   INTEGER NOT NULL,
     host_id     TEXT NOT NULL,
     folder_id   TEXT,
-    operation   TEXT NOT NULL,          -- sync, mount, backup, dotfile_push, dotfile_pull
-    status      TEXT NOT NULL,          -- started, success, failed, conflict
+    operation   TEXT NOT NULL,          -- sync, mount, backup, dotfile_push, dotfile_pull, git
+    status      TEXT NOT NULL,          -- started, success, failed, conflict, recovery, retry
     summary     TEXT,                   -- "42 files up, 3 conflicts"
-    details     TEXT                    -- JSON: file list, error messages
+    details     TEXT,                    -- JSON: file list, error messages
+    duration_ms INTEGER
 );
 
--- Server-side schedule tracking (avoids cron on every client)
+-- Per-assignment schedule + lock coordination
 CREATE TABLE schedule_state (
-    folder_assignment_id TEXT NOT NULL REFERENCES folder_assignments(id),
+    folder_assignment_id TEXT NOT NULL UNIQUE REFERENCES folder_assignments(id),
     last_run             INTEGER,
     next_run             INTEGER,
-    last_status          TEXT
+    last_status          TEXT,
+    locked_by            TEXT,           -- host id holding the lock
+    locked_at            INTEGER,
+    lock_ttl             INTEGER DEFAULT 1200
 );
 ```
+
+Retention: a daily prune deletes `operation_log` rows older than
+`LAMASYNC_LOG_RETENTION_DAYS` (default `90`), preserving the most recent
+entry per host so offline hosts keep their last-known status.
 
 ---
 
@@ -124,7 +164,7 @@ CREATE TABLE schedule_state (
 
 ```
 GET    /api/v1/health                          → fleet summary + host statuses
-GET    /api/v1/config/:host_id                 → full config for a host (folders, schedules, dotfile manifests)
+GET    /api/v1/config/:host_id                 → full config for a host
 POST   /api/v1/register                        → new host self-registration
 POST   /api/v1/report                          → client submits operation result
 POST   /api/v1/report/health                   → client heartbeat + local stats
@@ -141,14 +181,30 @@ DELETE /api/v1/folders/:id                     → remove folder
 POST   /api/v1/folders/:id/assign              → assign folder to host
 DELETE /api/v1/folders/:id/assign/:host_id     → unassign
 
-WS     /api/v1/ws                              → live event stream (operations, health changes)
+POST   /api/v1/operations/acquire              → acquire sync lock
+POST   /api/v1/operations/heartbeat            → renew sync lock
+POST   /api/v1/operations/release              → release sync lock
+GET    /api/v1/operations/locks                → list active locks
+GET    /api/v1/operations                      → list operation_log entries
+
+GET    /api/v1/templates                       → dotfile template packs
+POST   /api/v1/folders/from-template           → create folder + manifests from template
+
+GET    /api/v1/shares                          → NFS/SMB share catalog (env-driven)
+POST   /api/v1/admin/prune                     → manual operation_log prune
+
+WS     /api/v1/ws                              → live event stream (operations, mounts, locks)
 ```
 
 ### Auth
-- Pre-shared API key in server config
-- Clients store it in `~/.config/lamasync/client.toml`
-- All requests include `Authorization: Bearer <key>`
-- Tailnet provides transport encryption; API key is a lightweight "you're allowed" check
+
+- Pre-shared API key in `LAMASYNC_API_KEY`.
+- Clients store it in `~/.config/lamasync/client.toml`.
+- All REST requests include `Authorization: Bearer <key>`.
+- WebSocket upgrades authenticate via `Sec-WebSocket-Protocol: lamasync-auth, <base64(key)>`.
+  The query-string `?apiKey=...` form is deprecated.
+- Tailnet provides transport encryption; the API key is a lightweight
+  "you're allowed" check.
 
 ---
 
@@ -167,67 +223,73 @@ WS     /api/v1/ws                              → live event stream (operations
 │       │            │              │      │
 │  ┌────┴────────────┴──────────────┴────┐ │
 │  │         rclone Executor             │ │
-│  │  - spawns rclone mount/sync/copy    │ │
-│  │  - monitors child processes         │ │
-│  │  - captures output, detects errors  │ │
+│  │  - bisync / sync / copy / mount     │ │
+│  │  - retry + backoff                  │ │
+│  │  - bisync state recovery            │ │
+│  │  - mount lifecycle (stale detect)   │ │
+│  │  - git (folders of type "git")      │ │
+│  │  - disk-space pre-flight            │ │
+│  │  - LAN peer sync (rclone serve sftp)│ │
 │  └─────────────────────────────────────┘ │
 │                                          │
-│  Unix socket: /run/user/1000/lamasync.sock
+│  Unix socket: $LAMASYNC_SOCKET_PATH      │
 └──────────────────────────────────────────┘
 ```
 
 **Lifecycle of a sync:**
-1. Scheduler fires (or manual trigger from TUI)
-2. Pulls folder config from local cache (synced with server)
-3. Ensures rclone remote is configured
-4. Spawns `rclone bisync source:path dest:path --config /tmp/lamasync-rclone.conf`
-5. Parses output for conflicts, errors, transfer count
-6. Reports to server via `POST /report`
-7. On conflict: queues for TUI resolution if strategy is `manual`
 
-**rclone config management:**
-- Server generates rclone config fragments
-- Client assembles them into a temp config file per operation
-- Each folder assignment gets a named remote: `[lamasync-folderId]`
-- Avoids polluting the user's own rclone config
+1. Scheduler fires (or manual trigger from the TUI).
+2. Pulls folder config from local cache (synced with the server).
+3. Acquires the server-side lock for the folder (`acquireLock`).
+4. Pre-flight checks: rclone binary present, disk space >= threshold.
+5. Spawns `rclone bisync source:path dest:path --config /tmp/lamasync-rclone.conf`.
+6. Streams `--use-json-log` for transfer stats.
+7. Detects bisync state corruption and auto-recovers (`--resync`).
+8. Post-hook runs on success.
+9. Releases the lock and posts the report via `POST /report`.
+
+**Mount lifecycle (LAMA-130/LAMA-113):**
+
+- Daemon owns the rclone process and tracks its PID in
+  `/run/user/<uid>/lamasync/mounts/<folderId>.pid`.
+- Cache profiles (`normal` / `media` / `minimal`) configure `--vfs-cache-mode`,
+  `--vfs-cache-max-age`, and `--vfs-cache-max-size` defaults.
+- Stale mounts (dead PID, FUSE still attached) are force-unmounted.
+- On crash, restart backoff is 1 min → 5 min → 15 min, then give up.
+
+**Sync ↔ Mount switch (LAMA-131):**
+
+- `switch-to-mount`: flush sync, move local contents to
+  `~/.local/share/lamasync/trash/<folderId>_<ts>/`, start the mount,
+  schedule trash deletion in 24h.
+- `switch-to-sync`: stop the mount, run a one-way rclone copy to pull files
+  local.
+
+**LAN peer sync (LAMA-123):**
+
+- When two hosts are on the same `/24` subnet and both are online, the
+  server emits a peer rclone remote.
+- The lexicographically smaller host id serves via `rclone serve sftp` for
+  the duration of the sync; the other connects SFTP to the peer's LAN IP.
+- On 5s connection timeout, fall back to the standard server relay.
 
 ### `lamasync-tui` (OpenTUI)
 
 **Local mode** (default, connects to Unix socket):
-```
-┌─────────────────────────────────────────────────┐
-│ LamaSync — desktop                              │  ← hostname
-│                                                 │
-│ Folders                           Status        │
-│ ├─ LamaFiles/                     ▲ synced 2m   │
-│ ├─ dotfiles-nvim/                 ▲ backed 1h   │
-│ ├─ opt-appdata/                   ▼ failed      │
-│ └─ projects-mount/                ◆ mounted     │
-│                                                 │
-│ [1] Sync All  [2] Backup All  [3] Details       │
-│ [4] Restore Dotfiles  [5] Logs  [6] Fleet View  │
-└─────────────────────────────────────────────────┘
-```
+- Folder list with hotkeys `1`–`6`: sync-all, sync-one, refresh, fleet, logs,
+  dotfiles; `p` dry-run preview, `s` switch type, `c` cache profile (mount),
+  `n` network shares, `q` quit.
 
-**Fleet mode** (connects to server API):
-```
-┌─────────────────────────────────────────────────┐
-│ LamaSync — Fleet                                │
-│                                                 │
-│ Host          Status     Folders   Last Seen     │
-│ desktop       ● online     4/4      now          │
-│ laptop        ● online     3/4      2m ago       │
-│ homelab       ○ offline    0/4      3h ago       │
-│                                                 │
-│ [1] Host Details  [2] Trigger Sync  [3] Refresh │
-└─────────────────────────────────────────────────┘
-```
+**Fleet mode** (connects to server REST + WS):
+- Host list with hotkeys `r/l/d/b/q`: refresh, logs, dotfiles, local, quit.
+- The fleet view subscribes to the WS event stream for live updates.
 
 ---
 
 ## Dotfile Flow
 
 ### Backup (client → server)
+
 ```
 TUI trigger / cron
        │
@@ -250,6 +312,7 @@ Cleanup temp tarball
 ```
 
 ### Restore (server → client)
+
 ```
 TUI: "Restore dotfiles" → select app → select host → select version
        │
@@ -263,64 +326,78 @@ lamasyncd downloads tarball, shows preview (file list)
 User confirms → extract to original paths (or custom dir)
 ```
 
+### Template bootstrap (LAMA-121)
+
+`packages/server/templates/dotfiles.json` ships templates like `dev-node`,
+`dev-python`, `omp`. `POST /api/v1/folders/from-template` creates a folder
+plus one manifest and assignment per app in one call.
+
 ---
 
 ## Server Config Distribution
 
-When a new client registers (`POST /api/v1/register` with hostname + tailnet IP):
+When a new client registers (`POST /api/v1/register`):
 
-1. Server creates `hosts` row
-2. If pre-configured folders exist for this hostname, assigns them
-3. Client does `GET /api/v1/config/:host_id` → receives:
-   - All folder assignments with `local_path`, `role`, schedule
-   - All dotfile manifests with paths
-   - rclone config fragments for each remote pairing
-   - Server's tailnet IP for rclone SFTP remotes
-4. Client writes local config cache, sets up systemd timer units for schedules
-5. Client runs initial sync for each assigned folder
+1. Server upserts the `hosts` row with `tailnetIp` (and `lanIp` on the next
+   health report).
+2. Client does `GET /api/v1/config/:host_id` and receives:
+   - All folder assignments with `local_path`, `role`, schedule, cache profile.
+   - All dotfile manifests with paths.
+   - rclone config fragments: each folder becomes a named remote. Encrypted
+     folders emit a backend remote plus a `crypt` wrapper. When a LAN peer
+     is detected, an extra peer remote is added.
+   - Server's tailnet IP for SFTP remotes.
+3. Client writes local config cache, sets up timers for schedules.
+4. Client runs initial sync for each assigned folder.
 
 ---
 
 ## Conflict Resolution Strategies
 
-Configured per folder, stored in `folder_assignments`:
+Configured per folder, stored in `folder_assignments.conflict_strategy`:
 
-| Strategy | Behavior |
-|----------|----------|
-| `newer_wins` | Last-modified timestamp decides |
-| `source_wins` | Designated source host always wins |
-| `keep_both` | Rename conflicting file with `.conflict-YYYYMMDD` suffix |
-| `manual` | Queue conflict, notify TUI, pause that folder until resolved |
+| Strategy      | Behavior                                                |
+|---------------|---------------------------------------------------------|
+| `newer_wins`  | Last-modified timestamp decides                         |
+| `source_wins` | Designated source host always wins                      |
+| `keep_both`   | Rename conflicting file with `.conflict-YYYYMMDD` suffix|
+| `manual`      | Queue conflict, notify TUI, pause folder until resolved|
 
 ---
 
 ## Sanity Checks (per-operation)
 
-1. **Pre-flight:** source path exists, destination reachable, disk space > threshold
-2. **In-flight:** rclone exit code check, timeout detection (stalled transfer)
-3. **Post-flight:** file count diff, checksum spot-check, permission audit
-4. **Periodic:** integrity scan compares checksums of last N backups against source
+1. **Pre-flight:** rclone installed, source path exists, destination
+   reachable, disk space >= `availableSpaceThreshold`.
+2. **In-flight:** rclone exit code, timeout detection, JSON-log stats.
+3. **Post-flight:** post-hook (optional), bisync state recovery on
+   corruption markers.
+4. **Periodic:** operation_log retention prune (daily).
 
-Failures → `POST /api/v1/report` with structured error → server logs → optional NTFY webhook.
+Failures → `POST /api/v1/report` with structured `OperationReport` → server
+logs to `operation_log`, broadcasts a WS `operation` event, optionally
+notifies via NTFY.
 
 ---
 
 ## Technology Stack
 
-| Layer | Choice | Rationale |
-|-------|--------|-----------|
-| Language | Rust | OpenTUI ecosystem, single binary, no runtime |
-| TUI | OpenTUI (ratatui) | Already chosen, mature Rust TUI |
-| HTTP server | axum | Async, well-typed, tower middleware |
-| HTTP client | reqwest | De facto Rust HTTP client |
-| Database | SQLite via rusqlite | Zero-admin, embedded |
-| Serialization | serde + serde_json | Standard |
-| Config format | TOML | Human-writable, serde support |
-| Async runtime | tokio | Required by axum, standard |
-| rclone integration | std::process::Command | Shell-out, parse JSON output (`--use-json-log`) |
-| Unix socket | tokio::net::UnixListener | daemon ↔ TUI IPC |
-| Logging | tracing | Structured, levels, multiple subscribers |
-| Testing | cargo test + testcontainers (integration) | Standard Rust |
+| Layer              | Choice                      | Rationale                                                |
+|--------------------|-----------------------------|----------------------------------------------------------|
+| Language           | TypeScript                  | Single-language stack across server, daemon, TUI         |
+| Runtime            | Bun ≥ 1.3                   | `bun:sqlite`, `Bun.spawn`, single-file `--compile` binaries |
+| HTTP server        | Elysia                      | Lightweight, built-in validation, Swagger plugin         |
+| HTTP client        | global `fetch` (Bun)        | Zero-dependency HTTP                                      |
+| WebSocket          | Elysia `ws`                 | Built-in, no extra dependency                            |
+| Database           | SQLite via `bun:sqlite`     | Zero-admin, embedded, synchronous API                    |
+| Schema migrations  | Idempotent `ALTER TABLE`    | Applied in `initDb()`; duplicate-column errors ignored   |
+| Serialization      | `JSON.parse` / `JSON.stringify` | Standard, no schema framework needed for internal use |
+| Config format      | TOML (server, client)       | Human-writable; server uses env for runtime config       |
+| TUI framework      | OpenTUI (`@opentui/core`)   | Native terminal rendering with vnode model               |
+| rclone integration | `Bun.spawn(["rclone", ...])`| Direct argv; no shell escaping concerns                   |
+| Unix socket        | `node:net.Server`           | Daemon ↔ TUI control channel                             |
+| Testing            | `bun:test`                  | Built-in test runner                                     |
+| Build              | `bun build --compile`       | Produces standalone binaries per package                  |
 
 ---
 
@@ -329,54 +406,71 @@ Failures → `POST /api/v1/report` with structured error → server logs → opt
 ### Server (Docker on TrueNAS)
 
 ```dockerfile
-FROM rust:alpine AS builder
-# ... build release binary
+FROM oven/bun:1.3 AS builder
+WORKDIR /src
+COPY package.json bun.lock ./
+COPY packages packages
+RUN bun install --frozen-lockfile && bun run build
 
-FROM alpine:latest
-RUN apk add --no-cache rclone ca-certificates
-COPY --from=builder /app/lamasync-server /usr/local/bin/
-VOLUME /data /backups
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends rclone ca-certificates tini && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/packages/server/dist/lamasync-server /usr/local/bin/
+VOLUME ["/data", "/backups"]
 EXPOSE 8080
-ENTRYPOINT ["lamasync-server"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lamasync-server"]
 ```
 
 ```yaml
 # docker-compose.yml
 services:
   lamasync:
+    build: .
     image: lamasync-server:latest
     volumes:
-      - /mnt/tank/lamasync/data:/data      # SQLite DB
-      - /mnt/tank/lamasync/backups:/backups  # dotfile tarballs
+      - /mnt/tank/lamasync/data:/data
+      - /mnt/tank/lamasync/backups:/backups
     ports:
-      - "100.64.0.1:8080:8080"  # Tailnet IP only, not exposed to LAN
+      - "100.64.0.1:8080:8080"  # Tailnet IP only
     environment:
       - LAMASYNC_API_KEY=...
-      - LAMASYNC_NTFY_URL=https://ntfy.sh/...
+      - LAMASYNC_LOG_RETENTION_DAYS=90
+      - LAMASYNC_TAILNET_IP=100.64.0.1
     restart: unless-stopped
 ```
+
+The image ships the precompiled Bun binary plus rclone and tini. Health check
+pings `GET /api/v1/health` with the bearer token.
 
 ### Client
 
 ```bash
-# One-liner install
+# One-liner install — pulls the platform-specific binary
 curl -sSL https://your-server/install.sh | bash
-# → downloads binary, creates ~/.config/lamasync/, installs systemd user unit
+# → downloads lamasyncd and lamasync-tui, creates ~/.config/lamasync/,
+#   installs systemd --user unit (see packaging/systemd/)
 ```
 
 ```
 ~/.config/lamasync/
 ├── client.toml          # server URL, API key, hostname
 ├── config-cache.json     # last pulled config from server
-└── rclone/
-    └── lamasync.conf     # generated rclone remotes
+└── smb-credentials/      # LAMA-132: SMB credentials per share (mode 0600)
 
 ~/.local/share/lamasync/
+├── bisync/<folderId>/    # persistent bisync state
+├── trash/                # LAMA-131: 24h trash after sync→mount
 └── logs/
+
+~/.cache/lamasync/
+└── vfs/<folderId>/       # mount VFS cache
+
+/run/user/<uid>/lamasync/
+├── lamasync.sock         # daemon control socket
+└── mounts/<folderId>.pid # LAMA-113: mount PID tracking
 ```
 
 ```
-# ~/.config/systemd/user/lamasyncd.service
+# packaging/systemd/lamasyncd.service (template)
 [Unit]
 Description=LamaSync Daemon
 
@@ -394,30 +488,56 @@ WantedBy=default.target
 
 ```
 lamasync/
-├── ARCHITECTURE.md
-├── Cargo.toml              # workspace
-├── crates/
-│   ├── lamasync-core/      # shared types, DB schema, config models
-│   ├── lamasync-server/    # axum server, API handlers, scheduler
-│   ├── lamasync-daemon/    # client daemon binary
-│   ├── lamasync-tui/       # OpenTUI application
-│   └── lamasync-cli/       # thin CLI for quick ops, service install
+├── package.json              # Bun workspace root
+├── tsconfig.json             # strict, bundler resolution, .ts extensions
+├── bun.lock
+├── AGENTS.md                 # working reference (source of truth for behavior)
+├── ARCHITECTURE.md           # this file
 ├── docker/
-│   ├── Dockerfile
+│   ├── Dockerfile.server     # multi-stage: bun build → debian-slim + rclone
 │   └── docker-compose.yml
-├── config-examples/
-│   ├── server.toml
-│   └── client.toml
-└── tests/
-    └── integration/
+├── packages/
+│   ├── core/                 # @lamasync/core — shared types, DB, config, API client
+│   │   ├── src/types.ts      # Host, Folder, FolderAssignment, HealthReport, …
+│   │   ├── src/db/schema.ts  # SERVER_SCHEMA + MIGRATIONS
+│   │   └── src/api-client.ts # 16 endpoint methods
+│   ├── server/               # @lamasync/server — Elysia REST + WS
+│   │   ├── src/auth.ts
+│   │   ├── src/ws.ts         # WS auth via Sec-WebSocket-Protocol
+│   │   └── src/routes/       # health, hosts, config, folders, dotfiles,
+│   │                          # operations, report, admin, templates, shares
+│   ├── daemon/               # @lamasync/daemon — lamasyncd
+│   │   ├── src/index.ts      # heartbeat, scheduler, mount lifecycle
+│   │   ├── src/executor.ts   # rclone / git dispatch table
+│   │   ├── src/mounts.ts     # mount registry, restart, health-check
+│   │   ├── src/socket.ts     # Unix socket control protocol
+│   │   └── src/lock.ts       # server-side lock coordination
+│   ├── tui/                  # @lamasync/tui — OpenTUI frontend
+│   │   ├── src/index.ts
+│   │   └── src/views/        # menu, local, fleet, logs, dotfiles
+│   └── agent-skill/          # OMP-managed lamasync-server skill
+│       └── lamasync-server.md
+├── packaging/
+│   ├── install/              # curl | bash installer
+│   └── systemd/              # lamasyncd.service template
+└── config-examples/
+    ├── server.toml
+    └── client.toml
 ```
 
 ---
 
 ## Open Questions / Future
 
-1. **rclone bisync vs `rclone sync`** — bisync is bidirectional but newer and less battle-tested. Start with one-way `sync` per direction and graduate to bisync when stable.
-2. **Delta transfers** — rclone doesn't do block-level delta. For large files that change frequently, consider `rsync` as an optional backend for specific folders.
-3. **Encryption at rest** — rclone crypt remote on top of SFTP for sensitive folders. Trivial to add later since rclone handles it.
+1. **rclone bisync vs `rclone sync`** — bisync is bidirectional and well
+   supported, with auto-recovery in our wrapper. We keep bisync as the
+   default.
+2. **Delta transfers** — rclone doesn't do block-level delta. For large
+   frequently-changing files, an rsync backend per folder is a future
+   addition.
+3. **Encryption at rest** — implemented (LAMA-124) as an rclone `crypt`
+   remote on top of SFTP. The crypt password is distributed inside the
+   generated rclone config (which is itself 0o600 on disk).
 4. **Mobile** — out of scope. This is a Linux-to-Linux tool.
-5. **Windows/WSL** — not a priority, but Rust + rclone both work on Windows. Design the paths to be configurable, not hardcoded to `/home`.
+5. **Windows/WSL** — paths are hardcoded to Unix conventions. rclone works
+   on Windows but the daemon does not.

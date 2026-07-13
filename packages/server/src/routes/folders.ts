@@ -1,14 +1,17 @@
 import { Elysia, t } from "elysia";
+import { randomBytes } from "crypto";
 import { db } from "../db.ts";
 import type { Folder, FolderAssignment, FolderType } from "@lamasync/core";
 
-const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile"];
+const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
 
 interface FolderRow {
   id: string;
   name: string;
   type: string;
   created_at: number | null;
+  encrypted: number | null;
+  crypt_password: string | null;
 }
 
 interface AssignmentRow {
@@ -24,11 +27,24 @@ interface AssignmentRow {
   pre_sync_cmd: string | null;
   post_sync_cmd: string | null;
   ignore_path: string | null;
+  mount_ignore_path: string | null;
   timeout_sec: number | null;
+  bandwidth_schedule: string | null;
+  max_retries: number | null;
+  available_space_threshold: number | null;
+  cache_profile: string | null;
+  cache_max_size: string | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
-  return { id: r.id, name: r.name, type: r.type as FolderType, createdAt: r.created_at ?? undefined };
+  return {
+    id: r.id,
+    name: r.name,
+    type: r.type as FolderType,
+    createdAt: r.created_at ?? undefined,
+    encrypted: (r.encrypted ?? 0) === 1,
+    cryptPassword: r.crypt_password,
+  };
 }
 
 function rowToAssignment(r: AssignmentRow): FolderAssignment {
@@ -45,7 +61,13 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     preSyncCmd: r.pre_sync_cmd,
     postSyncCmd: r.post_sync_cmd,
     ignorePath: r.ignore_path,
+    mountIgnorePath: r.mount_ignore_path,
     timeoutSec: r.timeout_sec,
+    bandwidthSchedule: r.bandwidth_schedule,
+    maxRetries: r.max_retries,
+    availableSpaceThreshold: r.available_space_threshold,
+    cacheProfile: (r.cache_profile as FolderAssignment["cacheProfile"]) ?? null,
+    cacheMaxSize: r.cache_max_size,
   };
 }
 
@@ -55,7 +77,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     () => {
       const rows = db
         .query<FolderRow, []>(
-          "SELECT id, name, type, created_at FROM folders ORDER BY created_at DESC",
+          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders ORDER BY created_at DESC",
         )
         .all();
       return rows.map(rowToFolder);
@@ -74,19 +96,40 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/folders",
     ({ body, set }) => {
-      const { name, type } = body as { name: string; type: FolderType };
+      const { name, type, encrypted, cryptPassword } = body as {
+        name: string;
+        type: FolderType;
+        encrypted?: boolean;
+        cryptPassword?: string | null;
+      };
       if (!FOLDER_TYPES.includes(type)) {
         set.status = 400;
         return { error: `Invalid folder type: ${type}` };
       }
+      const isEncrypted = encrypted === true;
+      const password =
+        isEncrypted && (cryptPassword === null || cryptPassword === undefined || cryptPassword === "")
+          ? randomBytes(32).toString("base64")
+          : (cryptPassword ?? null);
+      if (isEncrypted && (password === null || password === "")) {
+        set.status = 500;
+        return { error: "Failed to generate crypt password" };
+      }
       const id = crypto.randomUUID();
       const now = Date.now();
       db.run(
-        "INSERT INTO folders (id, name, type, created_at) VALUES (?, ?, ?, ?)",
-        [id, name, type, now],
+        "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password) VALUES (?, ?, ?, ?, ?, ?)",
+        [id, name, type, now, isEncrypted ? 1 : 0, password],
       );
       set.status = 201;
-      return { id, name, type, createdAt: now };
+      return {
+        id,
+        name,
+        type,
+        createdAt: now,
+        encrypted: isEncrypted,
+        cryptPassword: password,
+      };
     },
     {
       body: t.Object({
@@ -96,7 +139,10 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           t.Literal("mount"),
           t.Literal("backup"),
           t.Literal("dotfile"),
+          t.Literal("git"),
         ]),
+        encrypted: t.Optional(t.Boolean()),
+        cryptPassword: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Create a folder definition",
@@ -114,7 +160,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, set }) => {
       const row = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!row) {
@@ -141,29 +187,48 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, body, set }) => {
       const existing = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!existing) {
         set.status = 404;
         return { error: "Folder not found" };
       }
-      const patch = body as { name?: string; type?: FolderType };
+      const patch = body as {
+        name?: string;
+        type?: FolderType;
+        encrypted?: boolean;
+        cryptPassword?: string | null;
+      };
       if (patch.type && !FOLDER_TYPES.includes(patch.type)) {
         set.status = 400;
         return { error: `Invalid folder type: ${patch.type}` };
       }
       const newName = patch.name ?? existing.name;
       const newType = patch.type ?? (existing.type as FolderType);
-      db.run("UPDATE folders SET name = ?, type = ? WHERE id = ?", [
-        newName,
-        newType,
-        params.id,
-      ]);
+      const existingEncrypted = (existing.encrypted ?? 0) === 1;
+      const newEncrypted =
+        patch.encrypted === undefined ? existingEncrypted : patch.encrypted === true;
+      const wantsPassword = patch.cryptPassword !== undefined;
+      const newPassword = wantsPassword
+        ? patch.cryptPassword === null || patch.cryptPassword === ""
+          ? (newEncrypted ? randomBytes(32).toString("base64") : null)
+          : patch.cryptPassword
+        : existing.crypt_password;
+      if (newEncrypted && (newPassword === null || newPassword === "")) {
+        set.status = 500;
+        return { error: "Failed to generate crypt password" };
+      }
+      db.run(
+        "UPDATE folders SET name = ?, type = ?, encrypted = ?, crypt_password = ? WHERE id = ?",
+        [newName, newType, newEncrypted ? 1 : 0, newPassword ?? null, params.id],
+      );
       return rowToFolder({
         ...existing,
         name: newName,
         type: newType,
+        encrypted: newEncrypted ? 1 : 0,
+        crypt_password: newPassword ?? null,
       });
     },
     {
@@ -176,8 +241,11 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
             t.Literal("mount"),
             t.Literal("backup"),
             t.Literal("dotfile"),
+            t.Literal("git"),
           ]),
         ),
+        encrypted: t.Optional(t.Boolean()),
+        cryptPassword: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Update folder name or type",
@@ -235,7 +303,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, body, set }) => {
       const folder = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!folder) {
@@ -253,14 +321,22 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         preSyncCmd?: string | null;
         postSyncCmd?: string | null;
         ignorePath?: string | null;
+        mountIgnorePath?: string | null;
         timeoutSec?: number | null;
+        bandwidthSchedule?: string | null;
+        maxRetries?: number | null;
+        availableSpaceThreshold?: number | null;
+        cacheProfile?: string | null;
+        cacheMaxSize?: string | null;
       };
       const id = crypto.randomUUID();
       db.run(
         `INSERT INTO folder_assignments
            (id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
-            conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, timeout_sec)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+            timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
+            cache_profile, cache_max_size)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           params.id,
@@ -274,13 +350,21 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           b.preSyncCmd ?? null,
           b.postSyncCmd ?? null,
           b.ignorePath ?? null,
+          b.mountIgnorePath ?? null,
           b.timeoutSec ?? null,
+          b.bandwidthSchedule ?? null,
+          b.maxRetries ?? null,
+          b.availableSpaceThreshold ?? null,
+          b.cacheProfile ?? null,
+          b.cacheMaxSize ?? null,
         ],
       );
       const row = db
         .query<AssignmentRow, [string]>(
           `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
-                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, timeout_sec
+                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                  timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
+                  cache_profile, cache_max_size
            FROM folder_assignments WHERE id = ?`,
         )
         .get(id);
@@ -300,6 +384,24 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         remoteName: t.Optional(t.Union([t.String(), t.Null()])),
         syncExpr: t.Optional(t.Union([t.String(), t.Null()])),
         enabled: t.Optional(t.Boolean()),
+        conflictStrategy: t.Optional(t.Union([t.String(), t.Null()])),
+        preSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
+        postSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
+        ignorePath: t.Optional(t.Union([t.String(), t.Null()])),
+        mountIgnorePath: t.Optional(t.Union([t.String(), t.Null()])),
+        timeoutSec: t.Optional(t.Number()),
+        bandwidthSchedule: t.Optional(t.String({ maxLength: 256 })),
+        maxRetries: t.Optional(t.Number()),
+        availableSpaceThreshold: t.Optional(t.Number()),
+        cacheProfile: t.Optional(
+          t.Union([
+            t.Literal("normal"),
+            t.Literal("media"),
+            t.Literal("minimal"),
+            t.Null(),
+          ]),
+        ),
+        cacheMaxSize: t.Optional(t.String({ pattern: "^\\d+[KMGT]?$" })),
       }),
       detail: {
         summary: "Assign a folder to a host",

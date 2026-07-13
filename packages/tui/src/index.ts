@@ -11,13 +11,16 @@ import type { Host as ServerHost } from "@lamasync/core";
 import { buildClient } from "./api.ts";
 import type { TuiClient } from "./api.ts";
 import { runCliFallback } from "./cli-fallback.ts";
+import {
+  requestSwitchMount,
+  requestSwitchSync,
+} from "./socket-client.ts";
 import { renderMenu } from "./views/menu.ts";
 import type { MenuItem } from "./views/menu.ts";
-import { renderLocal } from "./views/local.ts";
+import { buildFstabLine, renderLocal } from "./views/local.ts";
 import type { LocalAction, LocalFolder } from "./views/local.ts";
-import { renderFleet } from "./views/fleet.ts";
 import type { FleetAction, FleetHost, FleetSubscription } from "./views/fleet.ts";
-import { openFleetSubscription } from "./views/fleet.ts";
+import { openFleetSubscription, renderFleet } from "./views/fleet.ts";
 import { renderDotfiles } from "./views/dotfiles.ts";
 import type { DotfilesAction, DotfilesController } from "./views/dotfiles.ts";
 import { renderLogs } from "./views/logs.ts";
@@ -188,6 +191,9 @@ function handleLocalKey(char: string, state: AppState): void {
     "4": "fleet",
     "5": "logs",
     "6": "dotfiles",
+    c: "cache-profile",
+    s: "switch-type",
+    n: "network-shares",
     q: "quit",
   };
   const action = map[char];
@@ -214,11 +220,20 @@ function applyLocalAction(action: LocalAction, state: AppState): void {
     case "logs":
       navigate(state, "logs", renderer);
       return;
-    case "dotfiles":
-      navigate(state, "dotfiles", renderer);
-      return;
     case "quit":
       destroyRenderer(renderer);
+      return;
+    case "cache-profile":
+      console.log("(local) cache-profile invoked");
+      redraw(state);
+      return;
+    case "switch-type":
+      console.log("(local) switch-type invoked");
+      void runSwitchType(state);
+      return;
+    case "network-shares":
+      console.log("(local) network-shares invoked");
+      void runNetworkShares(state);
       return;
   }
   redraw(state);
@@ -392,12 +407,65 @@ async function refreshLocalFolders(state: AppState): Promise<void> {
     state.localFolders = folders.map((f) => ({
       id: f.id,
       name: f.name,
+      type: f.type,
       lastStatus: undefined,
+      lastRun: null,
+      cacheProfile: null,
+      cacheMaxSize: null,
     }));
   } catch {
     state.localFolders = [];
   }
   redraw(state);
+}
+
+function selectedLocalFolder(state: AppState): LocalFolder | null {
+  return state.localFolders[0] ?? null;
+}
+
+async function runSwitchType(state: AppState): Promise<void> {
+  const folder = selectedLocalFolder(state);
+  if (!folder) {
+    console.log("(local) switch-type: no folder selected");
+    return;
+  }
+  const folderType = folder.type ?? "sync";
+  const target: "sync" | "mount" = folderType === "mount" ? "sync" : "mount";
+  console.log(
+    `(local) switch-type: folder=${folder.id} ${folderType} -> ${target}; awaiting confirmation`,
+  );
+  try {
+    const data =
+      target === "mount"
+        ? await requestSwitchMount(folder.id)
+        : await requestSwitchSync(folder.id);
+    console.log(`(local) switch-type result: ${JSON.stringify(data)}`);
+  } catch (err) {
+    console.error(
+      `(local) switch-type failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+async function runNetworkShares(state: AppState): Promise<void> {
+  try {
+    const shares = await state.client.client.listShares();
+    if (shares.length === 0) {
+      console.log(
+        "(local) network-shares: no shares configured (LAMASYNC_SHARES / shares.json)",
+      );
+      return;
+    }
+    for (const share of shares) {
+      const mountPoint = `/mnt/lamasync/${share.id}`;
+      const line = buildFstabLine(share, mountPoint);
+      console.log(`(local) fstab: ${line}`);
+    }
+  } catch (err) {
+    console.error(
+      `(local) network-shares failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 async function refreshFleet(state: AppState): Promise<void> {

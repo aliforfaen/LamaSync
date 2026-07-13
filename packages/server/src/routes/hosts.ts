@@ -8,6 +8,7 @@ interface HostRow {
   tailnet_ip: string | null;
   last_seen: number | null;
   status: string | null;
+  lan_ip: string | null;
 }
 
 function rowToHost(row: HostRow): Host {
@@ -15,6 +16,7 @@ function rowToHost(row: HostRow): Host {
     id: row.id,
     hostname: row.hostname,
     tailnetIp: row.tailnet_ip,
+    lanIp: row.lan_ip,
     lastSeen: row.last_seen,
     status: (row.status ?? "unknown") as HostStatus,
   };
@@ -42,7 +44,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       );
       const row = db
         .query<HostRow, [string]>(
-          "SELECT id, hostname, tailnet_ip, last_seen, status FROM hosts WHERE id = ?",
+          "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip FROM hosts WHERE id = ?",
         )
         .get(id);
       if (!row) {
@@ -110,14 +112,23 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/report/health",
     ({ body, set }) => {
-      const { hostId, timestamp, status } = body as {
+      const { hostId, timestamp, status, lanIp } = body as {
         hostId: string;
         timestamp: number;
         status: HostStatus;
+        lanIp?: string | null;
       };
       const result = db.run(
-        `UPDATE hosts SET last_seen = ?, status = ? WHERE id = ?`,
-        [timestamp, status, hostId],
+        // Only overwrite lan_ip when the heartbeat actually carries one —
+        // heartbeats without a LAN IP keep whatever the last registration
+        // or heartbeat stored, so transient blank reports don't blank the
+        // subnet we use for peer detection.
+        lanIp
+          ? `UPDATE hosts SET last_seen = ?, status = ?, lan_ip = ? WHERE id = ?`
+          : `UPDATE hosts SET last_seen = ?, status = ? WHERE id = ?`,
+        lanIp
+          ? [timestamp, status, lanIp, hostId]
+          : [timestamp, status, hostId],
       );
       if (result.changes === 0) {
         set.status = 404;
@@ -136,6 +147,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
           t.Literal("degraded"),
           t.Literal("unknown"),
         ]),
+        lanIp: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Update host heartbeat",

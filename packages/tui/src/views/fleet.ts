@@ -114,12 +114,21 @@ export function openFleetSubscription(
   if (WS === null) return null;
 
   const base = serverUrl.replace(/^http/, "ws");
-  const url = `${base}/api/v1/ws?apiKey=${encodeURIComponent(apiKey)}`;
+  const url = `${base}/api/v1/ws`;
+  // Bun's WebSocket constructor only accepts RFC 6455 token characters in
+  // subprotocol names; base64 uses `+`/`/`/`=`, so the API key MUST be
+  // transported as a base64 token with padding stripped. The server reads
+  // `sec-websocket-protocol: lamasync-auth, <token>` and decodes it.
+  const token = (typeof btoa === "function"
+    ? btoa(apiKey)
+    : Buffer.from(apiKey).toString("base64")
+  ).replace(/=+$/, "");
+  const protocols = ["lamasync-auth", token];
   let socket: WebSocket | null = null;
   let closed = false;
 
   try {
-    socket = new WS(url) as WebSocket;
+    socket = new WS(url, protocols) as WebSocket;
   } catch {
     return null;
   }

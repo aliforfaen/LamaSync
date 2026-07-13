@@ -6,14 +6,17 @@ CREATE TABLE IF NOT EXISTS hosts (
     hostname    TEXT NOT NULL,
     tailnet_ip  TEXT,
     last_seen   INTEGER,
-    status      TEXT DEFAULT 'unknown'
+    status      TEXT DEFAULT 'unknown',
+    lan_ip      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS folders (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    type        TEXT NOT NULL,
-    created_at  INTEGER
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    created_at      INTEGER,
+    encrypted       BOOLEAN DEFAULT 0,
+    crypt_password  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS folder_assignments (
@@ -29,7 +32,13 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     pre_sync_cmd        TEXT,
     post_sync_cmd       TEXT,
     ignore_path         TEXT,
+    mount_ignore_path   TEXT,
     timeout_sec         INTEGER,
+    bandwidth_schedule  TEXT,
+    max_retries         INTEGER DEFAULT 3,
+    available_space_threshold INTEGER,
+    cache_profile       TEXT,
+    cache_max_size      TEXT,
     UNIQUE(folder_id, host_id)
 );
 
@@ -68,7 +77,10 @@ CREATE TABLE IF NOT EXISTS schedule_state (
     folder_assignment_id TEXT NOT NULL UNIQUE REFERENCES folder_assignments(id),
     last_run             INTEGER,
     next_run             INTEGER,
-    last_status          TEXT
+    last_status          TEXT,
+    locked_by            TEXT,
+    locked_at            INTEGER,
+    lock_ttl             INTEGER DEFAULT 1200
 );
 
 CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
@@ -76,3 +88,20 @@ CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
 CREATE INDEX IF NOT EXISTS idx_dotfile_versions_manifest_ts
     ON dotfile_versions(manifest_id, timestamp);
 `;
+
+// Columns to attempt adding for existing databases that predate the schema update.
+// Each ALTER TABLE is tried; "duplicate column" errors are ignored.
+export const MIGRATIONS: string[] = [
+  "ALTER TABLE folder_assignments ADD COLUMN mount_ignore_path TEXT",
+  "ALTER TABLE folder_assignments ADD COLUMN bandwidth_schedule TEXT",
+  "ALTER TABLE folder_assignments ADD COLUMN max_retries INTEGER DEFAULT 3",
+  "ALTER TABLE folder_assignments ADD COLUMN available_space_threshold INTEGER",
+  "ALTER TABLE folders ADD COLUMN encrypted BOOLEAN DEFAULT 0",
+  "ALTER TABLE folders ADD COLUMN crypt_password TEXT",
+  "ALTER TABLE folder_assignments ADD COLUMN cache_profile TEXT",
+  "ALTER TABLE folder_assignments ADD COLUMN cache_max_size TEXT",
+  "ALTER TABLE schedule_state ADD COLUMN locked_by TEXT",
+  "ALTER TABLE schedule_state ADD COLUMN locked_at INTEGER",
+  "ALTER TABLE schedule_state ADD COLUMN lock_ttl INTEGER DEFAULT 1200",
+  "ALTER TABLE hosts ADD COLUMN lan_ip TEXT",
+];

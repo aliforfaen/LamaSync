@@ -108,3 +108,38 @@ function sendRequest(
 
   return promise;
 }
+
+/**
+ * Convenience wrappers around the daemon socket for switch-to-mount /
+ * switch-to-sync commands. Both return the dispatch `data` on success and
+ * throw on transport or dispatch error.
+ */
+export async function requestSwitchMount(
+  folderId: string,
+): Promise<unknown> {
+  const client = await connectSocket();
+  try {
+    const res = await client.cmd({ cmd: "switch-to-mount", folderId });
+    if (!res.ok) {
+      throw new Error(res.error ?? "switch-to-mount failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}
+
+export async function requestSwitchSync(
+  folderId: string,
+): Promise<unknown> {
+  const client = await connectSocket();
+  try {
+    const res = await client.cmd({ cmd: "switch-to-sync", folderId });
+    if (!res.ok) {
+      throw new Error(res.error ?? "switch-to-sync failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}

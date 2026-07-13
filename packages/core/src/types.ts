@@ -2,13 +2,15 @@
 
 export type HostStatus = "online" | "offline" | "degraded" | "unknown";
 
-export type FolderType = "sync" | "mount" | "backup" | "dotfile";
+export type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
 export type OperationStatus =
   | "started"
   | "success"
   | "failed"
-  | "conflict";
+  | "conflict"
+  | "recovery"  // bisync state was corrupted and recovered
+  | "retry";    // transient failure, will retry
 
 export type ConflictStrategy =
   | "newer_wins"
@@ -16,10 +18,37 @@ export type ConflictStrategy =
   | "keep_both"
   | "manual";
 
+// rclone VFS cache profiles for mount type
+export type CacheProfile = "normal" | "media" | "minimal";
+
+// Active lock state for concurrent sync prevention
+export interface LockInfo {
+  folderId: string;
+  lockedBy: string;
+  lockedAt: number;
+  lockTtl: number;
+}
+
+// Mount registry entry (daemon-side, exposed via socket)
+export interface MountEntry {
+  folderId: string;
+  pid: number;
+  path: string;
+  cacheDir: string;
+  startedAt: number;
+  status: "starting" | "mounted" | "dead" | "unmounting";
+  restartCount: number;
+  cacheProfile: CacheProfile;
+}
+
+// rclone filter mode for selective sync
+export type FilterMode = "sync" | "mount";
+
 export interface Host {
   id: string;
   hostname: string;
   tailnetIp?: string | null;
+  lanIp?: string | null;
   lastSeen?: number | null;
   status: HostStatus;
 }
@@ -29,6 +58,8 @@ export interface Folder {
   name: string;
   type: FolderType;
   createdAt?: number;
+  encrypted?: boolean;
+  cryptPassword?: string | null;
 }
 
 export interface FolderAssignment {
@@ -44,7 +75,13 @@ export interface FolderAssignment {
   preSyncCmd?: string | null;
   postSyncCmd?: string | null;
   ignorePath?: string | null; // path to .lamasyncignore relative to localPath
+  mountIgnorePath?: string | null; // path to .lamasyncmountignore (falls back to ignorePath)
   timeoutSec?: number | null; // per-operation timeout
+  bandwidthSchedule?: string | null; // rclone --bwlimit schedule e.g. "08:00,512K 12:00,10M"
+  maxRetries?: number | null; // max sync retries on transient failure (default 3)
+  availableSpaceThreshold?: number | null; // bytes, skip sync if less than this free
+  cacheProfile?: CacheProfile | null; // mount VFS cache profile
+  cacheMaxSize?: string | null; // e.g. "1G" for --vfs-cache-max-size
 }
 
 export interface DotfileManifest {
@@ -92,6 +129,24 @@ export interface HostConfig {
   manifests: DotfileManifest[];
   rcloneConfig: string;
   serverTailnetIp: string | null;
+  // LAN peers detected at config-generation time. When the current host's
+  // role is "serve", the daemon will spawn `rclone serve sftp` so the peer
+  // can sync directly. When the role is "use", the daemon can swap the
+  // server-relayed remote for `peerRemote` for the listed folder ids.
+  peers: Peer[];
+}
+
+// LAN direct peer entry — server-detected same-/24 host that can be reached
+// without going through the public server. The server picks a single
+// consistent role (serve or use) for the pair so both sides agree.
+export type PeerRole = "serve" | "use";
+
+export interface Peer {
+  peerHostId: string;
+  peerLanIp: string;
+  peerRemote: string; // rclone section name in HostConfig.rcloneConfig
+  role: PeerRole;
+  folderIds: string[]; // folder ids whose rclone remotes can be replaced with the peer
 }
 
 export interface HealthReport {
@@ -99,6 +154,7 @@ export interface HealthReport {
   timestamp: number;
   status: HostStatus;
   uptimeSec?: number;
+  lanIp?: string | null;
 }
 
 export interface OperationReport {
@@ -115,9 +171,22 @@ export interface OperationReport {
 // WebSocket event payload broadcast on /api/v1/ws
 export type WSEvent =
   | { kind: "operation"; entry: OperationLog }
-  | { kind: "host"; host: Host };
+  | { kind: "host"; host: Host }
+  | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released"; status?: string }
+  | { kind: "mount"; folderId: string; status: MountEntry["status"]; path: string };
 
 export interface PruneResult {
   deleted: number;
   olderThanMs: number;
+}
+
+// Network share definition (NFS / SMB). The server exposes its list via
+// GET /api/v1/shares; the TUI renders an fstab line per share.
+export interface Share {
+  id: string;
+  name: string;
+  server: string;
+  path: string;
+  type: "nfs" | "smb";
+  options: string;
 }

@@ -16,6 +16,7 @@ import type {
   OperationLog,
   OperationStatus,
 } from "@lamasync/core";
+import { switchToMount, switchToSync } from "./index.ts";
 
 export interface SocketAssignment {
   folderId: string;
@@ -41,7 +42,9 @@ type Command =
   | { cmd: "status" }
   | { cmd: "list-folders" }
   | { cmd: "list-ops" }
-  | { cmd: "sync"; folderId: string };
+  | { cmd: "sync"; folderId: string }
+  | { cmd: "switch-to-mount"; folderId: string }
+  | { cmd: "switch-to-sync"; folderId: string };
 
 const BUFFER_LIMIT = 64 * 1024;
 
@@ -95,16 +98,18 @@ function handleConnection(socket: Socket, opts: StartSocketOptions): void {
       finish();
       return;
     }
-    try {
-      const data = dispatch(cmd, opts);
-      reply({ ok: true, data });
-    } catch (err) {
-      reply({
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    finish();
+    void (async () => {
+      try {
+        const data = await dispatch(cmd, opts);
+        reply({ ok: true, data });
+      } catch (err) {
+        reply({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      finish();
+    })();
   });
 
   socket.on("error", () => {
@@ -159,7 +164,7 @@ export function startSocketServer(
   return { close };
 }
 
-function dispatch(cmd: Command, opts: StartSocketOptions): unknown {
+export async function dispatch(cmd: Command, opts: StartSocketOptions): Promise<unknown> {
   const state = opts.getState();
   switch (cmd.cmd) {
     case "status":
@@ -175,6 +180,14 @@ function dispatch(cmd: Command, opts: StartSocketOptions): unknown {
     case "sync": {
       if (opts.onSyncRequest) opts.onSyncRequest(cmd.folderId);
       return { started: true, folderId: cmd.folderId };
+    }
+    case "switch-to-mount": {
+      const result = await switchToMount(cmd.folderId);
+      return { folderId: cmd.folderId, ...result };
+    }
+    case "switch-to-sync": {
+      const result = await switchToSync(cmd.folderId);
+      return { folderId: cmd.folderId, ...result };
     }
     default: {
       // Exhaustiveness check: TypeScript narrows `cmd` to `never` here.
