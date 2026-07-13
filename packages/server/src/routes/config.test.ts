@@ -1,3 +1,7 @@
+// config.ts transitively imports db.ts which does mkdirSync(LAMASYNC_DATA_DIR || "/data")
+// at module-init time. Set the env before any import reaches that side-effect.
+process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-test-data";
+
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";

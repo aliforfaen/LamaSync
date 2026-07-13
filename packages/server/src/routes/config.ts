@@ -214,6 +214,11 @@ export function generateRcloneConfig(
     const folder = folders.find((f) => f.id === a.folderId);
     if (!folder) continue;
     const remoteName = a.remoteName ?? `lamasync-${folder.id}`;
+    // Encrypted folders: the crypt section is always `lamasync-<folderId>`
+    // (matching the daemon's getRemoteName default). A custom
+    // assignment.remoteName on an encrypted folder is ignored for the
+    // section name — the operator must remove it.
+    const cryptName = `lamasync-${folder.id}`;
     const isEncrypted =
       folder.encrypted === true &&
       folder.cryptPassword !== null &&
@@ -235,7 +240,7 @@ export function generateRcloneConfig(
         lines.push(`# local path on client: ${a.localPath}`);
       }
       lines.push("");
-      lines.push(`[${remoteName}]`);
+      lines.push(`[${cryptName}]`);
       lines.push("type = crypt");
       lines.push(`remote = ${backendName}:${folder.name}`);
       lines.push(`password = ${folder.cryptPassword}`);
