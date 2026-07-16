@@ -63,11 +63,12 @@ function rowToLog(r: OpRow): OperationLog {
 export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   "/operations",
   ({ query }) => {
-    const { hostId, status, folderId, limit } = query as {
+    const { hostId, status, folderId, limit, offset } = query as {
       hostId?: string;
       status?: string;
       folderId?: string;
       limit?: number | string;
+      offset?: number | string;
     };
 
     const where: string[] = [];
@@ -96,13 +97,23 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       ? Math.min(Math.max(1, limNum), MAX_LIMIT)
       : DEFAULT_LIMIT;
 
+    const offNum =
+      typeof offset === "number"
+        ? offset
+        : offset
+          ? Number.parseInt(offset, 10)
+          : 0;
+    const safeOffset = Number.isFinite(offNum) && offNum > 0 ? Math.floor(offNum) : 0;
+
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const sql = `SELECT id, timestamp, host_id, folder_id, operation, status, summary, details, duration_ms
                  FROM operation_log
                  ${whereSql}
                  ORDER BY timestamp DESC
-                 LIMIT ?`;
-    const rows = activeDb.query<OpRow, (string | number)[]>(sql).all(...args, safeLimit);
+                 LIMIT ? OFFSET ?`;
+    const rows = activeDb
+      .query<OpRow, (string | number)[]>(sql)
+      .all(...args, safeLimit, safeOffset);
     return rows.map(rowToLog);
   },
   {
@@ -111,6 +122,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       status: t.Optional(t.String()),
       folderId: t.Optional(t.String()),
       limit: t.Optional(t.Union([t.Number(), t.String()])),
+      offset: t.Optional(t.Union([t.Number(), t.String()])),
     }),
     detail: {
       summary: "Query operation log (newest first)",

@@ -36,6 +36,7 @@ export interface StartSocketOptions {
   socketPath: string;
   getState: () => SocketState;
   onSyncRequest?: (folderId: string) => void;
+  onSyncAllRequest?: () => void;
 }
 
 type Command =
@@ -43,6 +44,7 @@ type Command =
   | { cmd: "list-folders" }
   | { cmd: "list-ops" }
   | { cmd: "sync"; folderId: string }
+  | { cmd: "sync-all" }
   | { cmd: "switch-to-mount"; folderId: string }
   | { cmd: "switch-to-sync"; folderId: string };
 
@@ -180,6 +182,10 @@ export async function dispatch(cmd: Command, opts: StartSocketOptions): Promise<
     case "sync": {
       if (opts.onSyncRequest) opts.onSyncRequest(cmd.folderId);
       return { started: true, folderId: cmd.folderId };
+    }
+    case "sync-all": {
+      if (opts.onSyncAllRequest) opts.onSyncAllRequest();
+      return { started: true, all: true };
     }
     case "switch-to-mount": {
       const result = await switchToMount(cmd.folderId);

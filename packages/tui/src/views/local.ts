@@ -22,6 +22,7 @@ export type CacheProfileKind = "normal" | "media" | "minimal";
 
 export interface LocalFolder {
   id: string;
+  hostId: string;
   name: string;
   type?: LocalFolderType;
   lastStatus?: string;
@@ -31,10 +32,11 @@ export interface LocalFolder {
   gitProvider?: GitProvider | null;
   gitRemote?: string | null;
 }
-
 export interface LocalState {
   folders: LocalFolder[];
   hostname: string;
+  status: string | null;
+  statusKind: "info" | "error" | "success";
 }
 
 export interface RenderLocalOpts {
@@ -63,7 +65,7 @@ const HOTKEYS: Array<{ key: string; label: string; action: LocalAction }> = [
   { key: "q", label: "quit", action: "quit" },
 ];
 
-function describeFolder(folder: LocalFolder): string {
+export function describeFolder(folder: LocalFolder): string {
   const status = folder.lastStatus ?? "unknown";
   const type = folder.type ?? "sync";
   let displayType: string = type;
@@ -104,6 +106,7 @@ export function renderLocal(opts: RenderLocalOpts): VNode {
     Text({ content: "" }),
     foldersBody(opts.state, select),
     Text({ content: "" }),
+    statusLine(opts.state),
     hotkeyFooter(),
   );
 }
@@ -120,6 +123,13 @@ function foldersBody(state: LocalState, select: VNode): VNode {
     { flexDirection: "column", flexGrow: 1 },
     select,
   );
+}
+
+function statusLine(state: LocalState): VNode | null {
+  if (!state.status) return null;
+  const prefix =
+    state.statusKind === "error" ? "[!] " : state.statusKind === "success" ? "[ok] " : "[i] ";
+  return Text({ content: prefix + state.status });
 }
 
 function hotkeyFooter(): VNode {

@@ -98,6 +98,7 @@ export async function fetchLogPage(
 ): Promise<OperationLog[]> {
   const opts: Parameters<LamaSyncApiClient["listOperations"]>[0] = {
     limit: PAGE_SIZE,
+    offset: state.page * PAGE_SIZE,
   };
   if (state.hostId) opts.hostId = state.hostId;
   if (state.status !== "all") opts.status = state.status;

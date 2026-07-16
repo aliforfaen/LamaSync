@@ -659,7 +659,14 @@ async function main(): Promise<void> {
       }
       void runOnce(assignment);
     },
-  });
+    onSyncAllRequest: () => {
+      const assignments = hostConfig?.assignments ?? [];
+      console.log(`[socket] sync-all requested; queueing ${assignments.length} assignment(s)`);
+      for (const assignment of assignments) {
+        void runOnce(assignment);
+      }
+    },
+   });
   console.log(`[socket] listening at ${socketPath}`);
 
   startMountHealthChecks();
@@ -773,81 +780,83 @@ function parseMountArg(argv: readonly string[]): string | null {
   return null;
 }
 // --version flag
-if (process.argv.includes("--version") || process.argv.includes("-V")) {
-  console.log(`lamasyncd ${VERSION}`);
-  process.exit(0);
-}
+if (import.meta.main) {
+  if (process.argv.includes("--version") || process.argv.includes("-V")) {
+    console.log(`lamasyncd ${VERSION}`);
+    process.exit(0);
+  }
 
-// --check-update flag: print latest release vs current, exit.
-if (process.argv.includes("--check-update")) {
-  (async () => {
-    const latest = await fetchLatestRelease();
-    if (!latest) {
-      console.error("lamasyncd --check-update: unable to reach GitHub");
+  // --check-update flag: print latest release vs current, exit.
+  if (process.argv.includes("--check-update")) {
+    (async () => {
+      const latest = await fetchLatestRelease();
+      if (!latest) {
+        console.error("lamasyncd --check-update: unable to reach GitHub");
+        process.exit(1);
+      }
+      if (isNewer(VERSION, latest.version)) {
+        console.log(
+          `update available: current=v${VERSION} latest=${latest.tag} (published ${latest.publishedAt})`,
+        );
+        process.exit(0);
+      }
+      console.log(`up to date: current=v${VERSION} latest=${latest.tag}`);
+      process.exit(0);
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`lamasyncd --check-update failed: ${msg}`);
       process.exit(1);
-    }
-    if (isNewer(VERSION, latest.version)) {
+    });
+  } else if (process.argv.includes("--update")) {
+    // --update flag: fetch latest, pick the matching asset, replace this binary.
+    (async () => {
+      const latest = await fetchLatestRelease();
+      if (!latest) {
+        console.error("lamasyncd --update: unable to reach GitHub");
+        process.exit(1);
+      }
+      if (!isNewer(VERSION, latest.version)) {
+        console.log(`lamasyncd --update: already at latest (v${VERSION})`);
+        process.exit(0);
+      }
+      const asset = latest.assets.find((a) => a.name === process.env.LAMASYNC_UPDATE_ASSET)
+        ?? latest.assets.find((a) => a.name === "lamasyncd")
+        ?? latest.assets.find((a) => a.name.startsWith("lamasyncd-") || a.name.startsWith("lamasync-"));
+      if (!asset) {
+        console.error(
+          `lamasyncd --update: no suitable asset in release ${latest.tag} (have: ${latest.assets.map((a) => a.name).join(", ")})`,
+        );
+        process.exit(1);
+      }
+      const target = process.argv[1] ?? "lamasyncd";
+      const ok = await downloadAndReplace(asset.downloadUrl, target);
+      if (!ok) {
+        console.error("lamasyncd --update: download/replace failed");
+        process.exit(1);
+      }
       console.log(
-        `update available: current=v${VERSION} latest=${latest.tag} (published ${latest.publishedAt})`,
+        `lamasyncd --update: replaced ${target} with ${asset.name} from ${latest.tag}`,
       );
       process.exit(0);
-    }
-    console.log(`up to date: current=v${VERSION} latest=${latest.tag}`);
-    process.exit(0);
-  })().catch((err) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`lamasyncd --check-update failed: ${msg}`);
-    process.exit(1);
-  });
-} else if (process.argv.includes("--update")) {
-  // --update flag: fetch latest, pick the matching asset, replace this binary.
-  (async () => {
-    const latest = await fetchLatestRelease();
-    if (!latest) {
-      console.error("lamasyncd --update: unable to reach GitHub");
-      process.exit(1);
-    }
-    if (!isNewer(VERSION, latest.version)) {
-      console.log(`lamasyncd --update: already at latest (v${VERSION})`);
-      process.exit(0);
-    }
-    const asset = latest.assets.find((a) => a.name === process.env.LAMASYNC_UPDATE_ASSET)
-      ?? latest.assets.find((a) => a.name === "lamasyncd")
-      ?? latest.assets.find((a) => a.name.startsWith("lamasyncd-") || a.name.startsWith("lamasync-"));
-    if (!asset) {
-      console.error(
-        `lamasyncd --update: no suitable asset in release ${latest.tag} (have: ${latest.assets.map((a) => a.name).join(", ")})`,
-      );
-      process.exit(1);
-    }
-    const target = process.argv[1] ?? "lamasyncd";
-    const ok = await downloadAndReplace(asset.downloadUrl, target);
-    if (!ok) {
-      console.error("lamasyncd --update: download/replace failed");
-      process.exit(1);
-    }
-    console.log(
-      `lamasyncd --update: replaced ${target} with ${asset.name} from ${latest.tag}`,
-    );
-    process.exit(0);
-  })().catch((err) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`lamasyncd --update failed: ${msg}`);
-    process.exit(1);
-  });
-} else {
-  const mountFolderId = parseMountArg(process.argv.slice(2));
-  if (mountFolderId !== null) {
-    runMountCommand(mountFolderId).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`lamasyncd mount fatal: ${message}`);
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`lamasyncd --update failed: ${msg}`);
       process.exit(1);
     });
   } else {
-    main().catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`lamasyncd fatal: ${message}`);
-      process.exit(1);
-    });
+    const mountFolderId = parseMountArg(process.argv.slice(2));
+    if (mountFolderId !== null) {
+      runMountCommand(mountFolderId).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`lamasyncd mount fatal: ${message}`);
+        process.exit(1);
+      });
+    } else {
+      main().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`lamasyncd fatal: ${message}`);
+        process.exit(1);
+      });
+    }
   }
 }

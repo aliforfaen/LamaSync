@@ -162,6 +162,43 @@ describe("dispatch — sync helpers", () => {
     expect(requested).toBe("f1");
     expect(data).toEqual({ started: true, folderId: "f1" });
   });
+
+  test("sync-all fires onSyncAllRequest and returns started shape", async () => {
+    let called = false;
+    const opts = {
+      socketPath: "/tmp/x",
+      getState: () => ({
+        localHostname: "host1",
+        assignments: [],
+        operations: [],
+      }),
+      onSyncAllRequest: () => {
+        called = true;
+      },
+    };
+    const data = await (dispatch as unknown as (
+      c: unknown,
+      o: unknown,
+    ) => Promise<unknown>)({ cmd: "sync-all" }, opts);
+    expect(called).toBe(true);
+    expect(data).toEqual({ started: true, all: true });
+  });
+
+  test("sync-all with no onSyncAllRequest does not throw", async () => {
+    const opts = {
+      socketPath: "/tmp/x",
+      getState: () => ({
+        localHostname: "host1",
+        assignments: [],
+        operations: [],
+      }),
+    };
+    const data = await (dispatch as unknown as (
+      c: unknown,
+      o: unknown,
+    ) => Promise<unknown>)({ cmd: "sync-all" }, opts);
+    expect(data).toEqual({ started: true, all: true });
+  });
 });
 
 describe("dispatch — switch-to-mount", () => {

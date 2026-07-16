@@ -1,0 +1,43 @@
+# Example server configuration for `@lamasync/server`.
+#
+# Copy to `/etc/lamasync/server.toml` (or any path you choose) and run:
+#
+#   lamasync-server --config /etc/lamasync/server.toml
+#
+# Or set the equivalent `LAMASYNC_*` environment variables and skip the file.
+# The TOML file is the documented, user-friendly form. Environment variables
+# always override these values when both are present.
+
+# Required: the pre-shared API key every client must present as
+# `Authorization: Bearer <apiKey>`. Use a long random string in production.
+# Generate one with: `openssl rand -hex 32`
+apiKey = "change-me-to-a-long-random-string"
+
+# TCP port the HTTP/WS server binds to. Default: 8080
+# Set via LAMASYNC_PORT (env takes precedence over this value).
+port = 8080
+
+# Where the SQLite database file (`lamasync.db`) and uploaded dotfile
+# tarball index live. Default: /data
+# Set via LAMASYNC_DATA_DIR.
+dataDir = "/data"
+
+# Where uploaded dotfile tarballs and restic repositories are stored.
+# Default: /backups
+# Set via LAMASYNC_BACKUP_DIR.
+backupDir = "/backups"
+
+# Optional: ntfy.sh topic URL for operation-log notifications.
+# Leave commented out to disable notifications.
+# Set via LAMASYNC_NTFY_URL.
+# ntfyUrl = "https://ntfy.sh/lamasync-my-host"
+
+# How many days of `operation_log` rows to keep. The server prunes older
+# rows daily on the first health request after midnight. Default: 90
+# Set via LAMASYNC_LOG_RETENTION_DAYS.
+# logRetentionDays = 90
+
+# Optional: tailnet IP printed into the agent-skill copy and TUI defaults.
+# Pure documentation; the server does not bind to it. Set via
+# LAMASYNC_TAILNET_IP.
+# tailnetIp = "100.64.0.1"

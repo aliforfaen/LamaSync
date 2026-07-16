@@ -19,7 +19,9 @@ lamasync/                     # Bun workspace root
   docker/
     Dockerfile.server         # multi-stage: bun compile → debian-slim + rclone
     docker-compose.yml        # volumes for /data, /backups; tailnet-bound port
+    docker-compose.yml        # volumes for /data, /backups; tailnet-bound port (override IP for local test)
     .env.example
+  config-examples/            # reference TOML configs (server.toml, client.toml)
   packages/
     core/                     # @lamasync/core — shared types, DB, config, API client
       src/
@@ -116,7 +118,7 @@ lamasync/                     # Bun workspace root
 | Agent skill (`lamasync-server.md`) | done (+ installed) |
 | Docker: `Dockerfile.server`, `docker-compose.yml` | done |
 | `bun run build` → standalone binaries | working |
-| Unit tests (core + server + daemon + self-update) | **47 passing** (9 files) |
+| Unit tests (core + server + daemon + self-update + TUI + executor + offset) | **67 passing** (11 files) |
 | End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI) | done |
 
 ### Implemented features (LAMA-114..132)
@@ -150,7 +152,7 @@ lamasync/                     # Bun workspace root
 - **Operation log retention beyond daily pruning** — retention is configurable; long-term archival is not.
 
 ### TUI
-- **OpenTUI component audit** — the TUI already uses OpenTUI's factory components (`Box`, `Text`, `Select`, `Input`, `MarkdownRenderable`) via VNode proxies. The remaining gap is richer navigation (e.g. `TabSelect` for view switching, scrollable lists) and replacing hotkey-driven stubs with real interactive widgets where it improves UX.
+- **OpenTUI component audit** — the TUI already uses OpenTUI's factory components (`Box`, `Text`, `Select`, `Input`, `MarkdownRenderable`) via VNode proxies. The remaining gap is richer navigation (e.g. `TabSelect` for view switching, scrollable lists) and replacing hotkey-driven stubs with real interactive widgets where it improves UX. *(Local-view status line, sync-all, sync-one, cache-profile, switch-type, and network-shares now dispatch real socket/API calls; remaining stubs are only the cosmetic ones.)*
 - **Dotfile diff preview** — restore does not yet show a diff against current disk files before extraction.
 
 ### Infrastructure
@@ -294,9 +296,9 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 ## Current status (as of 2026-07-16)
 
 - Project version: **0.2.0**
-- Tests: **47 passing** across 9 files, 0 failures
-- Open Multica issues: **6** (down from 9)
-- Recently closed: LAMA-103 (systemd), LAMA-150 (CI/CD), LAMA-151 (self-update)
+- Tests: **67 passing** across 11 files, 0 failures
+- Open Multica issues: **5** (down from 7)
+- Recently closed: LAMA-108 (agent skill refresh), LAMA-161 (completionist test prep), plus the v0.2.0 systemd/CI/self-update batch
 
 ## Next session options
 

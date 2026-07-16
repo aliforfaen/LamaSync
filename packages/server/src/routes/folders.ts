@@ -494,4 +494,122 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         },
       },
     },
+  )
+  .patch(
+    "/folders/:id/assign/:hostId",
+    ({ params, body, set }) => {
+      const b = body as {
+        cacheProfile?: string | null;
+        cacheMaxSize?: string | null;
+        syncExpr?: string | null;
+        enabled?: boolean;
+        preSyncCmd?: string | null;
+        postSyncCmd?: string | null;
+        conflictStrategy?: string | null;
+        timeoutSec?: number | null;
+        maxRetries?: number | null;
+        availableSpaceThreshold?: number | null;
+      };
+      const sets: string[] = [];
+      const args: (string | number | null)[] = [];
+      if (b.cacheProfile !== undefined) {
+        sets.push("cache_profile = ?");
+        args.push(b.cacheProfile);
+      }
+      if (b.cacheMaxSize !== undefined) {
+        sets.push("cache_max_size = ?");
+        args.push(b.cacheMaxSize);
+      }
+      if (b.syncExpr !== undefined) {
+        sets.push("sync_expr = ?");
+        args.push(b.syncExpr);
+      }
+      if (b.enabled !== undefined) {
+        sets.push("enabled = ?");
+        args.push(b.enabled ? 1 : 0);
+      }
+      if (b.preSyncCmd !== undefined) {
+        sets.push("pre_sync_cmd = ?");
+        args.push(b.preSyncCmd);
+      }
+      if (b.postSyncCmd !== undefined) {
+        sets.push("post_sync_cmd = ?");
+        args.push(b.postSyncCmd);
+      }
+      if (b.conflictStrategy !== undefined) {
+        sets.push("conflict_strategy = ?");
+        args.push(b.conflictStrategy);
+      }
+      if (b.timeoutSec !== undefined) {
+        sets.push("timeout_sec = ?");
+        args.push(b.timeoutSec);
+      }
+      if (b.maxRetries !== undefined) {
+        sets.push("max_retries = ?");
+        args.push(b.maxRetries);
+      }
+      if (b.availableSpaceThreshold !== undefined) {
+        sets.push("available_space_threshold = ?");
+        args.push(b.availableSpaceThreshold);
+      }
+      if (sets.length === 0) {
+        set.status = 400;
+        return { error: "No fields to update" };
+      }
+      args.push(params.id, params.hostId);
+      const result = db.run(
+        `UPDATE folder_assignments SET ${sets.join(", ")} WHERE folder_id = ? AND host_id = ?`,
+        args,
+      );
+      if (result.changes === 0) {
+        set.status = 404;
+        return { error: "Assignment not found" };
+      }
+      const row = db
+        .query<AssignmentRow, [string, string]>(
+          `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                  timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
+                  cache_profile, cache_max_size, restic_repository, restic_password
+           FROM folder_assignments WHERE folder_id = ? AND host_id = ?`,
+        )
+        .get(params.id, params.hostId);
+      if (!row) {
+        set.status = 500;
+        return { error: "Failed to load assignment" };
+      }
+      return rowToAssignment(row);
+    },
+    {
+      params: t.Object({ id: t.String(), hostId: t.String() }),
+      body: t.Object({
+        cacheProfile: t.Optional(
+          t.Union([
+            t.Literal("normal"),
+            t.Literal("media"),
+            t.Literal("minimal"),
+            t.Null(),
+          ]),
+        ),
+        cacheMaxSize: t.Optional(t.Union([t.String(), t.Null()])),
+        syncExpr: t.Optional(t.Union([t.String(), t.Null()])),
+        enabled: t.Optional(t.Boolean()),
+        preSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
+        postSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
+        conflictStrategy: t.Optional(t.Union([t.String(), t.Null()])),
+        timeoutSec: t.Optional(t.Union([t.Number(), t.Null()])),
+        maxRetries: t.Optional(t.Union([t.Number(), t.Null()])),
+        availableSpaceThreshold: t.Optional(t.Union([t.Number(), t.Null()])),
+      }),
+      detail: {
+        summary: "Update an existing assignment",
+        tags: ["Folders"],
+        responses: {
+          200: { description: "Assignment updated" },
+          400: { description: "No fields to update" },
+          404: { description: "Assignment not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
   );

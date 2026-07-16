@@ -136,6 +136,19 @@ export async function requestSyncOne(folderId: string): Promise<unknown> {
   }
 }
 
+export async function requestSyncAll(): Promise<unknown> {
+  const client = await connectSocket();
+  try {
+    const res = await client.cmd({ cmd: "sync-all" });
+    if (!res.ok) {
+      throw new Error(res.error ?? "sync-all failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}
+
 export async function requestSwitchSync(
   folderId: string,
 ): Promise<unknown> {

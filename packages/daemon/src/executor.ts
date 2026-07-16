@@ -511,7 +511,78 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
 // ---------------------------------------------------------------------------
 // rclone runner
 // ---------------------------------------------------------------------------
-async function runCommand(command: string[], timeoutSec: number): Promise<CommandResult> {
+export interface RcloneCommandOptions {
+  folderType: FolderType;
+  remotePath: string;
+  localPath: string;
+  configPath: string;
+  excludeFilePath: string | null;
+  dryRun?: boolean;
+  bandwidthSchedule?: string | null;
+  /**
+   * When true, include the `--workdir` + `--resilient` flags used by long-lived
+   * bisync state and add `--resync` on the first run. Set false for one-shot
+   * dry-run bisync invocations.
+   */
+  bisyncStateful?: boolean;
+  bisyncStateDir?: string;
+}
+
+export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
+  const command: string[] = [];
+  const dry = opts.dryRun === true;
+  switch (opts.folderType) {
+    case "sync": {
+      command.push(
+        "bisync",
+        opts.remotePath,
+        opts.localPath,
+        "--config",
+        opts.configPath,
+        "--use-json-log",
+        "-v",
+      );
+      if (dry) {
+        command.push("--dry-run");
+      } else if (opts.bisyncStateful) {
+        const sd = opts.bisyncStateDir ?? "/tmp";
+        command.push("--workdir", sd, "--resilient", "--recover", "--max-lock", "10m");
+      }
+      break;
+    }
+    case "backup":
+      command.push(
+        "copy",
+        opts.localPath,
+        opts.remotePath,
+        "--config",
+        opts.configPath,
+        "--use-json-log",
+        "-v",
+      );
+      if (dry) command.push("--dry-run");
+      break;
+    case "mount":
+      command.push(
+        "mount",
+        opts.remotePath,
+        opts.localPath,
+        "--config",
+        opts.configPath,
+        "--daemon",
+      );
+      break;
+    default:
+      throw new Error(`buildRcloneCommand: unsupported folder type ${opts.folderType}`);
+  }
+  if (opts.excludeFilePath) command.push("--filter-from", opts.excludeFilePath);
+  if (opts.bandwidthSchedule && opts.bandwidthSchedule.trim().length > 0) {
+    command.push("--bwlimit", opts.bandwidthSchedule.trim());
+  }
+  return command;
+}
+
+ async function runCommand(command: string[], timeoutSec: number): Promise<CommandResult> {
   const t0 = Date.now();
   const proc = Bun.spawn(["rclone", ...command], { stdout: "pipe", stderr: "pipe" });
   let timedOut = false;

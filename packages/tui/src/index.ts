@@ -16,6 +16,7 @@ import {
   requestSwitchMount,
   requestSwitchSync,
   requestSyncOne,
+  requestSyncAll,
 } from "./socket-client.ts";
 import { renderMenu } from "./views/menu.ts";
 import type { MenuItem } from "./views/menu.ts";
@@ -55,7 +56,6 @@ interface GhController {
   view: VNode;
   handleKey: (e: KeyEvent) => boolean;
 }
-
 interface AppState {
   view: ViewName;
   renderer: CliRenderer | null;
@@ -72,6 +72,14 @@ interface AppState {
   fleetSubscription: FleetSubscription | null;
   apiBaseUrl: string;
   apiKey: string;
+  status: string | null;
+  statusKind: "info" | "error" | "success";
+}
+
+function setStatus(state: AppState, text: string, kind: "info" | "error" | "success" = "info"): void {
+  state.status = text;
+  state.statusKind = kind;
+  redraw(state);
 }
 export async function main(): Promise<void> {
   if (process.argv.includes("--version") || process.argv.includes("-V")) {
@@ -118,7 +126,9 @@ async function runTui(): Promise<void> {
     fleetSubscription: null,
     apiBaseUrl: serverBaseUrl(),
     apiKey: process.env.LAMASYNC_API_KEY ?? "dev-key",
-  };
+    status: null,
+    statusKind: "info",
+   };
 
   if (configError) {
     renderConfigError(renderer, configError);
@@ -253,10 +263,10 @@ function applyLocalAction(action: LocalAction, state: AppState): void {
   if (!renderer) return;
   switch (action) {
     case "sync-all":
-      console.log("(local) sync-all invoked");
+      void runSyncAll(state);
       break;
     case "sync-one":
-      console.log("(local) sync-one invoked");
+      void runSyncOne(state);
       break;
     case "refresh":
       void refreshLocalFolders(state);
@@ -274,15 +284,12 @@ function applyLocalAction(action: LocalAction, state: AppState): void {
       destroyRenderer(renderer);
       return;
     case "cache-profile":
-      console.log("(local) cache-profile invoked");
-      redraw(state);
+      void runCacheProfile(state);
       return;
     case "switch-type":
-      console.log("(local) switch-type invoked");
       void runSwitchType(state);
       return;
     case "network-shares":
-      console.log("(local) network-shares invoked");
       void runNetworkShares(state);
       return;
     case "gh":
@@ -440,10 +447,14 @@ function renderCurrent(state: AppState) {
       });
     case "local":
       return renderLocal({
-        state: { folders: state.localFolders, hostname: state.hostname },
+        state: {
+          folders: state.localFolders,
+          hostname: state.hostname,
+          status: state.status,
+          statusKind: state.statusKind,
+        },
         onAction: (a: LocalAction) => applyLocalAction(a, state),
       });
-    case "fleet":
       return renderFleet({
         state: { hosts: state.fleetHosts },
         serverUrl: state.apiBaseUrl,
@@ -474,47 +485,146 @@ function renderCurrent(state: AppState) {
 
 async function refreshLocalFolders(state: AppState): Promise<void> {
   try {
-    const folders = await state.client.client.listFolders();
-    state.localFolders = folders.map((f) => ({
-      id: f.id,
-      name: f.name,
-      type: f.type,
-      lastStatus: undefined,
-      lastRun: null,
-      cacheProfile: null,
-      cacheMaxSize: null,
-      gitProvider: f.gitProvider ?? null,
-      gitRemote: f.gitRemote ?? null,
-    }));
+    const [folders, config] = await Promise.all([
+      state.client.client.listFolders(),
+      state.client.client.getConfig(state.hostname).catch(() => null),
+    ]);
+    const byId = new Map(
+      (config?.assignments ?? []).map((a) => [a.folderId, a]),
+    );
+    state.localFolders = folders.map((f) => {
+      const a = byId.get(f.id);
+      return {
+        id: f.id,
+        hostId: a?.hostId ?? state.hostname,
+        name: f.name,
+        type: f.type,
+        lastStatus: undefined,
+        lastRun: null,
+        cacheProfile: a?.cacheProfile ?? null,
+        cacheMaxSize: a?.cacheMaxSize ?? null,
+        gitProvider: f.gitProvider ?? null,
+        gitRemote: f.gitRemote ?? null,
+      };
+    });
   } catch {
     state.localFolders = [];
   }
 }
-
 function selectedLocalFolder(state: AppState): LocalFolder | null {
   return state.localFolders[0] ?? null;
+}
+
+async function runSyncAll(state: AppState): Promise<void> {
+  setStatus(state, "Queueing sync for every assigned folder…", "info");
+  try {
+    const res = (await requestSyncAll()) as { started: boolean; all: boolean };
+    setStatus(
+      state,
+      res?.started
+        ? "Sync queued for all assigned folders."
+        : "Daemon accepted sync-all but returned no started flag.",
+      "success",
+    );
+  } catch (err) {
+    setStatus(
+      state,
+      `sync-all failed: ${err instanceof Error ? err.message : String(err)}`,
+      "error",
+    );
+  }
+}
+
+async function runSyncOne(state: AppState): Promise<void> {
+  const folder = selectedLocalFolder(state);
+  if (!folder) {
+    setStatus(state, "sync-one: no folder selected.", "error");
+    return;
+  }
+  setStatus(state, `Queueing sync for ${folder.name}…`, "info");
+  try {
+    const res = (await requestSyncOne(folder.id)) as { started: boolean; folderId: string };
+    setStatus(
+      state,
+      res?.started
+        ? `Sync queued for ${folder.name}.`
+        : `Daemon accepted sync but returned no started flag for ${folder.name}.`,
+      "success",
+    );
+  } catch (err) {
+    setStatus(
+      state,
+      `sync-one failed: ${err instanceof Error ? err.message : String(err)}`,
+      "error",
+    );
+  }
+}
+
+async function runCacheProfile(state: AppState): Promise<void> {
+  const folder = selectedLocalFolder(state);
+  if (!folder) {
+    setStatus(state, "cache-profile: no folder selected.", "error");
+    return;
+  }
+  if (folder.type !== "mount") {
+    setStatus(
+      state,
+      `cache-profile only applies to mount folders; ${folder.name} is ${folder.type ?? "sync"}.`,
+      "error",
+    );
+    return;
+  }
+  const order: Array<"normal" | "media" | "minimal"> = ["normal", "media", "minimal"];
+  const current = folder.cacheProfile ?? "normal";
+  const next = order[(order.indexOf(current) + 1) % order.length];
+  setStatus(
+    state,
+    `cache-profile: ${folder.name} ${current} -> ${next} (writing through server)…`,
+    "info",
+  );
+  try {
+    await state.client.client.updateAssignment(folder.id, folder.hostId, {
+      cacheProfile: next,
+    });
+    setStatus(state, `cache-profile updated: ${folder.name} -> ${next}.`, "success");
+    await refreshLocalFolders(state);
+  } catch (err) {
+    setStatus(
+      state,
+      `cache-profile failed: ${err instanceof Error ? err.message : String(err)}`,
+      "error",
+    );
+  }
 }
 
 async function runSwitchType(state: AppState): Promise<void> {
   const folder = selectedLocalFolder(state);
   if (!folder) {
-    console.log("(local) switch-type: no folder selected");
+    setStatus(state, "switch-type: no folder selected.", "error");
     return;
   }
   const folderType = folder.type ?? "sync";
   const target: "sync" | "mount" = folderType === "mount" ? "sync" : "mount";
-  console.log(
-    `(local) switch-type: folder=${folder.id} ${folderType} -> ${target}; awaiting confirmation`,
+  setStatus(
+    state,
+    `switch-type: ${folder.name} ${folderType} -> ${target}; awaiting daemon…`,
+    "info",
   );
   try {
     const data =
       target === "mount"
         ? await requestSwitchMount(folder.id)
         : await requestSwitchSync(folder.id);
-    console.log(`(local) switch-type result: ${JSON.stringify(data)}`);
+    setStatus(
+      state,
+      `switch-type ok: ${folder.name} -> ${target} (${JSON.stringify(data)})`,
+      "success",
+    );
   } catch (err) {
-    console.error(
-      `(local) switch-type failed: ${err instanceof Error ? err.message : String(err)}`,
+    setStatus(
+      state,
+      `switch-type failed: ${err instanceof Error ? err.message : String(err)}`,
+      "error",
     );
   }
 }
@@ -523,19 +633,32 @@ async function runNetworkShares(state: AppState): Promise<void> {
   try {
     const shares = await state.client.client.listShares();
     if (shares.length === 0) {
-      console.log(
-        "(local) network-shares: no shares configured (LAMASYNC_SHARES / shares.json)",
+      setStatus(
+        state,
+        "network-shares: no shares configured (set LAMASYNC_SHARES or shares.json).",
+        "error",
       );
       return;
     }
+    const lines: string[] = [];
     for (const share of shares) {
       const mountPoint = `/mnt/lamasync/${share.id}`;
       const line = buildFstabLine(share, mountPoint);
-      console.log(`(local) fstab: ${line}`);
+      lines.push(line);
     }
+    // The TUI never writes to /etc/fstab itself. Surface the fstab lines plus
+    // the exact `sudo mount -a` (or per-share `sudo mount <spec> <mountPoint>`)
+    // command for the operator to run.
+    setStatus(
+      state,
+      `network-shares: copy these lines into /etc/fstab, then run \`sudo mount -a\`:\n  ${lines.join("\n  ")}`,
+      "info",
+    );
   } catch (err) {
-    console.error(
-      `(local) network-shares failed: ${err instanceof Error ? err.message : String(err)}`,
+    setStatus(
+      state,
+      `network-shares failed: ${err instanceof Error ? err.message : String(err)}`,
+      "error",
     );
   }
 }

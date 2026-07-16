@@ -39,7 +39,7 @@ const app = new Elysia()
       documentation: {
         info: {
           title: "LamaSync API",
-          version: "0.1.0",
+          version: "0.2.0",
           description:
             "LamaSync server: fleet registration, configuration distribution, folder management, dotfile storage, and operation reporting.",
         },
@@ -90,7 +90,7 @@ export type App = typeof app;
 
 console.log(`LamaSync server v${VERSION} listening on http://${app.server!.hostname}:${app.server!.port}`);
 console.log(`Swagger UI: http://${app.server!.hostname}:${app.server!.port}/swagger`);
-console.log(`WebSocket:  ws://${app.server!.hostname}:${app.server!.port}/api/v1/ws?apiKey=...`);
+console.log(`WebSocket:  ws://${app.server!.hostname}:${app.server!.port}/api/v1/ws (subprotocol: lamasync-auth, <base64(apiKey)>)`);
 
 // Run one prune on startup, then a daily interval (with unref so the timer
 // never keeps the process alive on its own).

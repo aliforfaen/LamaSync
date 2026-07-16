@@ -158,6 +158,19 @@ export class LamaSyncApiClient {
     );
   }
 
+  updateAssignment(
+    folderId: string,
+    hostId: string,
+    body: Partial<FolderAssignment>,
+  ): Promise<FolderAssignment> {
+    return this.request<FolderAssignment>(
+      "PATCH",
+      `/api/v1/folders/${encodeURIComponent(folderId)}/assign/${encodeURIComponent(hostId)}`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
   // Dotfiles
   listDotfileVersions(appName: string): Promise<DotfileVersion[]> {
     return this.request<DotfileVersion[]>(
@@ -188,7 +201,6 @@ export class LamaSyncApiClient {
     }
     return (await res.json()) as DotfileVersion;
   }
-
   async downloadDotfile(appName: string, version: string): Promise<Blob> {
     const res = await this.fetchImpl(
       `${this.baseUrl}/api/v1/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
@@ -214,12 +226,14 @@ export class LamaSyncApiClient {
     status?: string;
     folderId?: string;
     limit?: number;
+    offset?: number;
   } = {}): Promise<OperationLog[]> {
     const params = new URLSearchParams();
     if (opts.hostId) params.set("hostId", opts.hostId);
     if (opts.status) params.set("status", opts.status);
     if (opts.folderId) params.set("folderId", opts.folderId);
     if (typeof opts.limit === "number") params.set("limit", String(opts.limit));
+    if (typeof opts.offset === "number") params.set("offset", String(opts.offset));
     const qs = params.toString();
     const path = qs ? `/api/v1/operations?${qs}` : "/api/v1/operations";
     return this.request<OperationLog[]>("GET", path);

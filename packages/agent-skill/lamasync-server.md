@@ -60,6 +60,10 @@ Missing or wrong key → `401 Unauthorized`.
 | POST   | `/api/v1/dotfiles/:appName`                       | Upload a new version (multipart `tarball` field) |
 | GET    | `/api/v1/dotfiles/:appName/:version`              | Download a tarball                               |
 | DELETE | `/api/v1/dotfiles/:appName/:version`              | Delete a version (DB row + file)                 |
+| GET    | `/api/v1/templates`                               | List dotfile template packs                      |
+| POST   | `/api/v1/folders/from-template`                   | Create a folder from a template pack             |
+| GET    | `/api/v1/shares`                                  | List configured NFS/SMB shares                   |
+| POST   | `/api/v1/admin/prune`                             | Manually trim operation_log by age               |
 | GET    | `/api/v1/operations`                              | Query the operation log                          |
 | POST   | `/api/v1/report`                                  | Append an operation_log entry                    |
 | GET    | `/api/v1/restic/snapshots`                        | List restic snapshot metadata                    |
@@ -70,9 +74,9 @@ Missing or wrong key → `401 Unauthorized`.
 | GET    | `/api/v1/conflicts`                               | List manual sync conflicts                       |
 | POST   | `/api/v1/conflicts`                               | Bulk-create conflicts from daemon                |
 | POST   | `/api/v1/conflicts/:id/resolve`                   | Resolve a conflict (local/remote/both)           |
+| GET    | `/api/v1/ws` (WebSocket)                          | Fleet event stream (subprotocol auth)            |
 | GET    | `/swagger/json`                                   | Live OpenAPI 3 spec (use to resolve schemas)     |
 | GET    | `/swagger`                                        | Swagger UI                                       |
-
 ### `GET /api/v1/operations` query params
 
 | Param   | Type   | Default | Notes                                          |
@@ -147,7 +151,7 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/folders/<id>/assign
 ```
 
-`type` must be one of: `sync`, `mount`, `backup`, `dotfile`.
+`type` must be one of: `sync`, `mount`, `backup`, `dotfile`, `git`.
 
 ### Upload / list / download a dotfile version
 
@@ -165,6 +169,21 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   -o nvim.tar.gz \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/nvim/<version-id>
+```
+
+### Open the WebSocket fleet stream
+
+The WebSocket endpoint uses the `Sec-WebSocket-Protocol` header for auth. The
+server expects the second subprotocol value to be the base64 encoding of the
+API key (no padding):
+
+```js
+const token = btoa(LAMASYNC_API_KEY).replace(/=+$/, "");
+const ws = new WebSocket(
+  "ws://<lamasync-server-tailnet-ip>:8080/api/v1/ws",
+  ["lamasync-auth", token],
+);
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
 ```
 
 ## Schemas
@@ -191,8 +210,9 @@ All `?` fields are nullable. Timestamps are milliseconds since epoch
   while the server is running.
 - Tarballs live under `<LAMASYNC_BACKUP_DIR>/dotfiles/<appName>/<timestamp>.tar.gz`.
   Deleting a version removes both the DB row and the file.
-- `operation_log` is append-only; the server never trims it. Build a separate
-  prune job if retention becomes a concern.
+- `operation_log` rows older than `LAMASYNC_LOG_RETENTION_DAYS` (default 90) are
+  pruned on startup and then once every 24 hours. You can also force a prune
+  with `POST /api/v1/admin/prune?olderThanMs=<ms>`.
 - `schedule_state` is updated automatically when a `POST /report` includes a
   `folderId` that matches an existing assignment.
 

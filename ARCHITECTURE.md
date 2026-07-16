@@ -567,3 +567,10 @@ lamasync/
 4. **Mobile** — out of scope. This is a Linux-to-Linux tool.
 5. **Windows/WSL** — paths are hardcoded to Unix conventions. rclone works
    on Windows but the daemon does not.
+6. **v0.2.0 completionist verification** — the test-platform checklist
+   (server via Docker, daemon + TUI from compiled binaries, end-to-end
+   exercise of all 12 surface areas) landed 67 unit tests across 11 files
+   and is captured in Multica LAMA-161. Two steps (mount lifecycle and
+   sync↔mount switch safety) require a real SFTP/NFS target to fully
+   verify end-to-end; the code paths are exercised and return the
+   expected error states.

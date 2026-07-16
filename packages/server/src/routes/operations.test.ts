@@ -141,3 +141,67 @@ describe("operations lock routes", () => {
     });
   });
 });
+
+describe("operations GET /operations", () => {
+  const seedOperationRows = (): void => {
+    const now = Date.now();
+    db.exec(`DELETE FROM operation_log;`);
+    const insert = db.prepare(
+      `INSERT INTO operation_log (timestamp, host_id, folder_id, operation, status, summary)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    // 5 entries: newest first is host-a/success at now+4, oldest is host-b/failed at now.
+    for (let i = 0; i < 5; i++) {
+      insert.run(
+        now + i,
+        i % 2 === 0 ? "host-a" : "host-b",
+        "f1",
+        "sync",
+        i % 2 === 0 ? "success" : "failed",
+        `entry-${i}`,
+      );
+    }
+  };
+
+  test("defaults to newest-first ordering with default limit", async () => {
+    seedOperationRows();
+    const res = await app.handle(request("/api/v1/operations"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{ summary: string; timestamp: number }>;
+    expect(body).toHaveLength(5);
+    // Newest first.
+    expect(body[0]?.summary).toBe("entry-4");
+    expect(body.at(-1)?.summary).toBe("entry-0");
+  });
+
+  test("honors ?limit=N", async () => {
+    seedOperationRows();
+    const res = await app.handle(request("/api/v1/operations?limit=2"));
+    const body = (await res.json()) as Array<{ summary: string }>;
+    expect(body).toHaveLength(2);
+    expect(body[0]?.summary).toBe("entry-4");
+    expect(body[1]?.summary).toBe("entry-3");
+  });
+
+  test("honors ?offset=N for pagination", async () => {
+    seedOperationRows();
+    const res = await app.handle(request("/api/v1/operations?limit=2&offset=2"));
+    const body = (await res.json()) as Array<{ summary: string }>;
+    expect(body).toHaveLength(2);
+    expect(body[0]?.summary).toBe("entry-2");
+    expect(body[1]?.summary).toBe("entry-1");
+  });
+
+  test("filters by hostId and status", async () => {
+    seedOperationRows();
+    const res = await app.handle(
+      request("/api/v1/operations?hostId=host-a&status=success"),
+    );
+    const body = (await res.json()) as Array<{ hostId: string; status: string }>;
+    expect(body.length).toBeGreaterThan(0);
+    for (const row of body) {
+      expect(row.hostId).toBe("host-a");
+      expect(row.status).toBe("success");
+    }
+  });
+});

@@ -1,0 +1,29 @@
+# Example client configuration for `lamasyncd`.
+#
+# Copy to `~/.config/lamasync/client.toml` and run:
+#
+#   lamasyncd
+#
+# Or set the equivalent `LAMASYNC_*` environment variables and skip the file.
+
+# Required: full URL of the server's REST/WS API.
+# Default: http://localhost:8080. Set via LAMASYNC_SERVER_URL.
+serverUrl = "http://127.0.0.1:8080"
+
+# Required: the same pre-shared API key configured on the server.
+# Set via LAMASYNC_API_KEY.
+apiKey = "change-me-to-a-long-random-string"
+
+# Required: this machine's identifier. It is sent to the server on
+# registration and used to fetch the per-host config bundle. Default
+# is `hostname -s`. Set via LAMASYNC_HOSTNAME.
+hostname = "my-laptop"
+
+# Where the daemon stores its local state cache and the offline config
+# snapshot. Default: ~/.local/share/lamasync.
+# Set via LAMASYNC_DATA_DIR.
+dataDir = "~/.local/share/lamasync"
+
+# Optional: path to the Unix socket the TUI uses to talk to the daemon.
+# Default: ~/lamasync.sock. Set via LAMASYNC_SOCKET_PATH.
+# socketPath = "/run/user/1000/lamasync.sock"

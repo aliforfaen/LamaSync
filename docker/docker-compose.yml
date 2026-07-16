@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.server
-    image: lamasync/lamasync-server:0.1.0
+    image: lamasync/lamasync-server:0.2.0
     container_name: lamasync-server
     restart: unless-stopped
     env_file:
@@ -14,10 +14,11 @@ services:
       # LAMASYNC_API_KEY is required — set it in .env (the env_file above)
       # PORT defaults to 8080 inside the image.
     ports:
-      # Replace 100.64.0.1 with the server's actual tailnet IP, or remove the
-      # IP prefix to publish on all host interfaces. The tailnet form avoids
-      # exposing the API to the LAN.
-      - "100.64.0.1:8080:8080"
+      # For a local test platform, loopback is enough. For production, replace
+      # 127.0.0.1 with the server's tailnet IP (e.g. 100.64.0.1) — or remove
+      # the IP prefix to publish on every host interface (exposes the API to
+      # the LAN).
+      - "127.0.0.1:8080:8080"
     volumes:
       - lamasync-data:/data
       - lamasync-backups:/backups
