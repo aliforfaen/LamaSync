@@ -93,9 +93,10 @@ export async function heartbeatLock(
   client: LamaSyncApiClient,
   folderId: string,
   hostId: string,
+  handle?: LockHandle,
 ): Promise<boolean> {
   try {
-    const result = await client.heartbeatLock(folderId, hostId);
+    const result = await client.heartbeatLock(folderId, hostId, handle?.lockId);
     return result.ok;
   } catch (error) {
     console.error(
@@ -111,9 +112,10 @@ export async function releaseLock(
   hostId: string,
   status: string,
   summary?: string,
+  handle?: LockHandle,
 ): Promise<void> {
   try {
-    await client.releaseLock(folderId, hostId, status, summary);
+    await client.releaseLock(folderId, hostId, status, summary, handle?.lockId);
   } catch (error) {
     console.error(
       `[lock] failed to release folder=${folderId}: ${errorMessage(error)}`,
@@ -122,7 +124,6 @@ export async function releaseLock(
     activeLocks.delete(folderId);
   }
 }
-
 export async function releaseStaleLocks(
   client: LamaSyncApiClient,
   hostId: string,

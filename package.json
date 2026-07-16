@@ -1,7 +1,6 @@
 {
   "name": "lamasync",
-  "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -10,7 +9,7 @@
     "dev:server": "bun run --watch packages/server/src/index.ts",
     "dev:daemon": "bun run packages/daemon/src/index.ts",
     "dev:tui": "bun run packages/tui/src/index.ts",
-    "build": "bun run --filter='*' build",
+    "build": "bun scripts/gen-version.ts && bun run --filter='*' build",
     "test": "bun test"
   },
   "devDependencies": {

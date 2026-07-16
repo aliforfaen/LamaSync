@@ -8,13 +8,16 @@ export type LocalAction =
   | "fleet"
   | "logs"
   | "dotfiles"
+  | "conflicts"
   | "cache-profile"
   | "switch-type"
   | "network-shares"
+  | "gh"
   | "quit";
 
 export type LocalFolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
+export type GitProvider = "git" | "gh";
 export type CacheProfileKind = "normal" | "media" | "minimal";
 
 export interface LocalFolder {
@@ -25,6 +28,8 @@ export interface LocalFolder {
   lastRun?: number | null;
   cacheProfile?: CacheProfileKind | null;
   cacheMaxSize?: string | null;
+  gitProvider?: GitProvider | null;
+  gitRemote?: string | null;
 }
 
 export interface LocalState {
@@ -50,20 +55,27 @@ const HOTKEYS: Array<{ key: string; label: string; action: LocalAction }> = [
   { key: "4", label: "fleet", action: "fleet" },
   { key: "5", label: "logs", action: "logs" },
   { key: "6", label: "dotfiles", action: "dotfiles" },
-  { key: "c", label: "cache-profile", action: "cache-profile" },
+  { key: "c", label: "conflicts", action: "conflicts" },
+  { key: "p", label: "cache-profile", action: "cache-profile" },
   { key: "s", label: "switch-type", action: "switch-type" },
   { key: "n", label: "network-shares", action: "network-shares" },
+  { key: "g", label: "github repos", action: "gh" },
   { key: "q", label: "quit", action: "quit" },
 ];
 
 function describeFolder(folder: LocalFolder): string {
   const status = folder.lastStatus ?? "unknown";
   const type = folder.type ?? "sync";
+  let displayType: string = type;
+  if (type === "git" && folder.gitProvider === "gh") {
+    const remote = folder.gitRemote ? `:${folder.gitRemote}` : "";
+    displayType = `gh${remote}`;
+  }
   const cache =
     type === "mount" && folder.cacheProfile
       ? ` (cache: ${folder.cacheProfile}${folder.cacheMaxSize ? `/${folder.cacheMaxSize}` : ""})`
       : "";
-  return `${type}${cache} — ${status}`;
+  return `${displayType}${cache} — ${status}`;
 }
 
 function toRows(folders: LocalFolder[]): FolderRow[] {

@@ -28,12 +28,13 @@ const CACHE_PROFILE_DEFAULTS: Record<
 
 const mounts = new Map<string, MountEntry>();
 
-interface InternalMount extends MountEntry {
+export interface InternalMount extends MountEntry {
   remotePath: string;
   configPath: string;
   restartTimer: ReturnType<typeof setTimeout> | null;
   proc: Bun.Subprocess | null;
   stoppedByUs: boolean;
+  restartCount: number;
 }
 
 const internals = new Map<string, InternalMount>();
@@ -196,13 +197,57 @@ async function attemptRestart(folderId: string): Promise<void> {
     scheduleRestart(folderId);
   }
 }
-
 export function getMountStatus(folderId: string): MountEntry | null {
   return mounts.get(folderId) ?? null;
 }
 
 export function listMounts(): MountEntry[] {
   return Array.from(mounts.values());
+}
+
+export function getInternalMount(folderId: string): InternalMount | null {
+  return internals.get(folderId) ?? null;
+}
+
+/**
+ * Register a mount that was started externally (currently by a systemd user
+ * unit launched via `--mount <folderId>`) into the daemon's mounts map. If
+ * the recorded PID is dead or the mount path isn't FUSE-mounted, returns
+ * `null` so the caller can fall back to starting the mount in-process.
+ */
+export function adoptMount(
+  folderId: string,
+  opts: {
+    mountPath: string;
+    cacheProfile: CacheProfile;
+    remotePath: string;
+    configPath: string;
+  },
+): MountEntry | null {
+  const pid = readPidFile(getPidFilePath(folderId));
+  if (pid === null || !isProcessAlive(pid)) return null;
+  if (!isFuseMounted(opts.mountPath)) return null;
+
+  const entry: MountEntry = {
+    folderId,
+    pid,
+    path: opts.mountPath,
+    cacheDir: getCacheDir(folderId),
+    startedAt: Date.now(),
+    status: "mounted",
+    restartCount: 0,
+    cacheProfile: opts.cacheProfile,
+  };
+  mounts.set(folderId, entry);
+  internals.set(folderId, {
+    ...entry,
+    remotePath: opts.remotePath,
+    configPath: opts.configPath,
+    restartTimer: null,
+    proc: null,
+    stoppedByUs: false,
+  });
+  return mounts.get(folderId)!;
 }
 
 export async function startMount(opts: {

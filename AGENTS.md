@@ -26,6 +26,7 @@ lamasync/                     # Bun workspace root
         types.ts              # Host, Folder, FolderAssignment, DotfileVersion, …
         config.ts             # TOML parsers for server & client config
         api-client.ts         # LamaSyncApiClient (all endpoint methods)
+        version.ts            # generated version constant (from root package.json)
         db/
           schema.ts           # SERVER_SCHEMA + MIGRATIONS
           client.ts           # initDb(path) : opens SQLite + applies schema
@@ -33,23 +34,26 @@ lamasync/                     # Bun workspace root
         test.test.ts          # core unit tests
     server/                   # @lamasync/server — Elysia REST API + Swagger + WS
       src/
-        index.ts              # swagger → auth → routes → listen(:8080)
-        auth.ts               # Bearer token middleware (skips Upgrade: websocket)
+        index.ts              # swagger → routes → listen(:8080); --version flag
+        auth.ts               # lazy Bearer token middleware (skips Upgrade: websocket)
         db.ts                 # singleton SQLite handle (lazy + test-safe)
         ws.ts                 # WebSocket event stream (subprotocol auth)
         routes/
           health.ts           # GET /api/v1/health
           hosts.ts            # POST /register, POST /report/health
           config.ts           # GET /config/:hostId (assignments + rclone + peers)
-          folders.ts          # CRUD + assign/unassign
+          folders.ts          # CRUD + assign/unassign + templates
           dotfiles.ts         # upload (multipart), list, download, delete
           operations.ts       # GET /operations (filterable, newest-first)
           report.ts           # POST /report (log + schedule_state update)
           shares.ts           # GET /api/v1/shares (NFS shares)
           admin.ts            # operation-log pruning, retention helpers
+          restic.ts           # restic config for backup/dotfile types
+          conflicts.ts        # conflict resolution API
+          release.ts          # GET /api/v1/release/latest
     daemon/                   # @lamasync/daemon — client sync daemon
       src/
-        index.ts              # heartbeat + Unix socket server + switch commands
+        index.ts              # heartbeat + Unix socket server + --version/--check-update/--update
         config.ts             # reads ~/.config/lamasync/client.toml
         server.ts             # LamaSyncApiClient singleton
         socket.ts             # Unix socket server (commands + status)
@@ -63,9 +67,13 @@ lamasync/                     # Bun workspace root
         lan-peer.ts           # LAN IP detection + peer SFTP discovery
         lock.ts               # per-folder operation locking
         config-cache.ts       # cached server config for offline operation
+        self-update.ts        # GitHub release check + binary replacement
+        self-update.test.ts   # self-update unit tests
+        systemd.ts            # systemd unit generation helpers
+        systemd.test.ts       # systemd unit template tests
     tui/                      # @lamasync/tui — OpenTUI frontend
       src/
-        index.ts              # menu, local/fleet views, CLI fallback
+        index.ts              # menu, local/fleet views, --version, CLI fallback
         api.ts                # client builder (env → config file → defaults)
         socket-client.ts      # Unix socket client for local mode
         cli-fallback.ts       # LAMASYNC_NO_TUI=1 CLI mode
@@ -74,10 +82,27 @@ lamasync/                     # Bun workspace root
           local.ts            # local daemon status + commands
           fleet.ts            # fleet view + WebSocket events
           dotfiles.ts         # dotfile list/restore
+          conflicts.ts        # conflict resolution UI
+          gh-selector.ts      # GitHub repo selector for GH CLI integration
           logs.ts             # operation log viewer
     agent-skill/              # @lamasync/agent-skill — OMP managed skill
       lamasync-server.md      # skill body: endpoint table, auth, example workflows
       README.md               # install instructions for OMP managed-skills dir
+  docker/
+    Dockerfile.server         # multi-stage: bun compile → debian-slim + rclone
+    docker-compose.yml        # volumes for /data, /backups; tailnet-bound port
+    .env.example
+  scripts/
+    gen-version.ts            # writes packages/core/src/version.ts from root package.json
+  packaging/
+    install/                  # curl | bash installer
+      install.sh              # install lamasyncd (+ optional TUI) and systemd unit
+      update.sh               # standalone self-update script
+    systemd/                  # lamasyncd.service template
+      lamasyncd.service
+  .github/
+    workflows/
+      ci.yml                  # type-check, test, build, release, docker push
 ```
 
 ## What's implemented (v0.2.0)
@@ -91,7 +116,7 @@ lamasync/                     # Bun workspace root
 | Agent skill (`lamasync-server.md`) | done (+ installed) |
 | Docker: `Dockerfile.server`, `docker-compose.yml` | done |
 | `bun run build` → standalone binaries | working |
-| Unit tests (core + server + daemon) | 27 passing |
+| Unit tests (core + server + daemon + self-update) | **47 passing** (9 files) |
 | End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI) | done |
 
 ### Implemented features (LAMA-114..132)
@@ -112,24 +137,25 @@ lamasync/                     # Bun workspace root
 | LAMA-130 | Cache profile validation | `server/src/routes/folders.ts` |
 | LAMA-131 | Switch-to-mount / sync, trash quarantine | `daemon/src/index.ts`, `daemon/src/mounts.ts`, `tui/src/views/local.ts` |
 | LAMA-132 | NFS shares endpoint + TUI `n` hotkey | `server/src/routes/shares.ts`, `tui/src/views/fleet.ts` |
+| LAMA-133 | Restic integration for `backup` and `dotfile` types | `core/src/types.ts`, `core/src/db/schema.ts`, `server/src/routes/restic.ts`, `daemon/src/executor.ts`, `daemon/src/index.ts` |
+| LAMA-103 | `systemd --user` service management (polished) | `packaging/systemd/lamasyncd.service`, `packaging/install/install.sh`, `packaging/install/update.sh` |
+| LAMA-150 | CI/CD Pipeline | `.github/workflows/ci.yml` |
+| LAMA-151 | Self-update (daemon + server release proxy) | `daemon/src/self-update.ts`, `server/src/routes/release.ts`, `packaging/install/update.sh` |
 
 ## What's deferred (not yet implemented)
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
-- **Self-update** — the server binary self-update mechanism is not built. Docker redeployment is the current path.
 - **Ntfy notifications** — server config has `ntfyUrl` but it's unused.
 - **Operation log retention beyond daily pruning** — retention is configurable; long-term archival is not.
 
 ### TUI
-- **Conflict resolution UI** — `manual` conflict strategy is accepted by the schema but the TUI does not yet pause and show per-file resolution (keep A, keep B, merge).
-- **Real OpenTUI components** — the TUI uses raw `Box`/`Text` vnodes with a custom key handler. A production UI should use OpenTUI's `Select`, `Markdown`, `TabSelect`, or `Input` components for richer interaction. Currently `Select` is avoided because the vnode event model differs from what was initially assumed.
+- **OpenTUI component audit** — the TUI already uses OpenTUI's factory components (`Box`, `Text`, `Select`, `Input`, `MarkdownRenderable`) via VNode proxies. The remaining gap is richer navigation (e.g. `TabSelect` for view switching, scrollable lists) and replacing hotkey-driven stubs with real interactive widgets where it improves UX.
 - **Dotfile diff preview** — restore does not yet show a diff against current disk files before extraction.
 
 ### Infrastructure
-- **Systemd unit files** — `lamasyncd` should install as a systemd `--user` service. Provide a `lamasyncd.service` template and an install script (`curl | sh` or package).
-- **CI/CD** — no GitHub Actions or build pipeline.
 - **Windows/WSL support** — paths hardcoded to Unix conventions. rclone works on Windows but the daemon does not.
+- **Server-side in-place self-update** — Docker/CI/CD is the path for the server; a live binary replacement path for the server is not built (the daemon/TUI self-update exists, LAMA-151).
 
 ### Future ideas (not planned)
 - Health dashboard with predictive transfer-throughput alerts.
@@ -214,10 +240,15 @@ LAMASYNC_NO_TUI=1 \
 Tests use `bun:test` (`describe`, `test`, `expect`). Place them alongside the source files as `*.test.ts`. Run with `bun test` from the repo root.
 
 Current coverage:
-- `packages/core/src/test.test.ts` — DB schema, config parsing
+- `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
 - `packages/server/src/routes/config.test.ts` — rclone config generation, encryption, peer detection
 - `packages/server/src/routes/shares.test.ts` — shares parsing and endpoint
+- `packages/server/src/routes/operations.test.ts` — operation locks and API
+- `packages/server/src/routes/restic.test.ts` — restic config generation
+- `packages/server/src/routes/conflicts.test.ts` — conflict resolution API
 - `packages/daemon/src/socket.test.ts` — socket command handling
+- `packages/daemon/src/systemd.test.ts` — systemd unit template generation
+- `packages/daemon/src/self-update.test.ts` — release parsing and version comparison
 
 ### Adding a new API endpoint
 
@@ -251,3 +282,41 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **Pre-shared API key** — no user management. Tailnet provides transport encryption; the key is a lightweight "you're allowed" check.
 - **No route prefix middleware** — each route file declares its own `prefix: "/api/v1"`. This keeps each file self-contained and Swagger tags scoped.
 - **OpenTUI** — the design calls for OpenTUI native rendering. If OpenTUI can't load (native binary mismatch, missing DYLD/LD path), the TUI falls back to CLI mode via `LAMASYNC_NO_TUI=1`. This is configured in `packages/tui/src/index.ts` `main()`.
+
+## Version and release
+
+- **Version source of truth**: root `package.json` `version` field (currently `0.2.0`).
+- **Generated constant**: `scripts/gen-version.ts` writes `packages/core/src/version.ts`, which is re-exported from `@lamasync/core`.
+- **All three binaries** support `--version` and `-V`.
+- **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.
+- **Self-update**: daemon checks GitHub Releases on startup and supports `lamasyncd --check-update` / `lamasyncd --update`. The server proxies release info at `GET /api/v1/release/latest`. A standalone `curl | bash` updater lives in `packaging/install/update.sh`.
+
+## Current status (as of 2026-07-16)
+
+- Project version: **0.2.0**
+- Tests: **47 passing** across 9 files, 0 failures
+- Open Multica issues: **6** (down from 9)
+- Recently closed: LAMA-103 (systemd), LAMA-150 (CI/CD), LAMA-151 (self-update)
+
+## Next session options
+
+Ready-to-pick work, ordered by likely value/urgency:
+
+1. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
+   - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
+
+2. **LAMA-105 — Backend storage** (backlog, urgent)
+   - Support S3 / WebDAV / local backends beyond the current SFTP assumption. Touches rclone config generation and folder validation.
+
+3. **LAMA-104 — Error handling** (backlog, high)
+   - Harden error propagation, structured error responses, and retry/circuit-breaker behavior across the daemon and server.
+
+4. **LAMA-147 — Management Web UI** (backlog, none)
+   - Browser-based dashboard for folder/assignment management. Big surface; pairs with LAMA-110.
+
+5. **LAMA-109 — App-specific backup dotfiles** (backlog, none)
+   - Expand dotfile support to per-app backup bundles with richer restore semantics.
+
+6. **Polish / tech debt**
+   - TUI component audit (scrollable lists, real widgets), dotfile diff preview, OpenTUI native-renderer quirks.
+   - ntfy notifications, multi-user auth scoping, operation-log archival.

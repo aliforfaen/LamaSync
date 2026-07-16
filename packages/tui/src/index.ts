@@ -1,12 +1,13 @@
-import { hostname as osHostname } from "os";
+import { join } from "path";
+import { hostname as osHostname, homedir } from "os";
 import {
   Box,
   Text,
   createCliRenderer,
 } from "@opentui/core";
-import type { CliRenderer, KeyEvent } from "@opentui/core";
-
-import type { Host as ServerHost } from "@lamasync/core";
+import type { CliRenderer, KeyEvent, VNode } from "@opentui/core";
+import { VERSION } from "@lamasync/core";
+import type { Folder, Host as ServerHost } from "@lamasync/core";
 
 import { buildClient } from "./api.ts";
 import type { TuiClient } from "./api.ts";
@@ -14,6 +15,7 @@ import { runCliFallback } from "./cli-fallback.ts";
 import {
   requestSwitchMount,
   requestSwitchSync,
+  requestSyncOne,
 } from "./socket-client.ts";
 import { renderMenu } from "./views/menu.ts";
 import type { MenuItem } from "./views/menu.ts";
@@ -26,8 +28,33 @@ import type { DotfilesAction, DotfilesController } from "./views/dotfiles.ts";
 import { renderLogs } from "./views/logs.ts";
 import type { LogsAction, LogsState } from "./views/logs.ts";
 import { fetchLogPage, nextStatusFilter } from "./views/logs.ts";
+import { renderConflicts } from "./views/conflicts.ts";
+import type { ConflictsAction, ConflictsController } from "./views/conflicts.ts";
+import { handleGhKey, renderGhSelector } from "./views/gh-selector.ts";
+import type { GhRepo } from "./views/gh-selector.ts";
 
-type ViewName = "menu" | "local" | "fleet" | "dotfiles" | "logs";
+type ViewName =
+  | "menu"
+  | "local"
+  | "fleet"
+  | "dotfiles"
+  | "logs"
+  | "conflicts"
+  | "gh";
+
+interface GhControllerState {
+  repos: GhRepo[];
+  loading: boolean;
+  error: string | null;
+  busy: boolean;
+  busyMessage: string | null;
+}
+
+interface GhController {
+  state: GhControllerState;
+  view: VNode;
+  handleKey: (e: KeyEvent) => boolean;
+}
 
 interface AppState {
   view: ViewName;
@@ -40,12 +67,18 @@ interface AppState {
   fleetLoading: boolean;
   logs: LogsState;
   dotfiles: DotfilesController | null;
+  conflicts: ConflictsController | null;
+  gh: GhController | null;
   fleetSubscription: FleetSubscription | null;
   apiBaseUrl: string;
   apiKey: string;
 }
-
 export async function main(): Promise<void> {
+  if (process.argv.includes("--version") || process.argv.includes("-V")) {
+    console.log(`lamasync-tui ${VERSION}`);
+    process.exit(0);
+  }
+
   if (process.env.LAMASYNC_NO_TUI === "1") {
     await runCliFallback();
     return;
@@ -80,6 +113,8 @@ async function runTui(): Promise<void> {
     fleetLoading: false,
     logs: { entries: [], status: "all", hostId: null, page: 0 },
     dotfiles: null,
+    conflicts: null,
+    gh: null,
     fleetSubscription: null,
     apiBaseUrl: serverBaseUrl(),
     apiKey: process.env.LAMASYNC_API_KEY ?? "dev-key",
@@ -131,6 +166,17 @@ function installKeyHandler(renderer: CliRenderer, state: AppState): void {
     }
     if (state.view === "logs") {
       handleLogsKey(char, state);
+      return;
+    }
+    if (state.view === "conflicts") {
+      state.conflicts?.handleKey(e);
+      redraw(state);
+      return;
+    }
+    if (state.view === "gh") {
+      if (state.gh?.handleKey(e)) {
+        redraw(state);
+      }
       return;
     }
     if (state.view === "dotfiles") {
@@ -191,16 +237,17 @@ function handleLocalKey(char: string, state: AppState): void {
     "4": "fleet",
     "5": "logs",
     "6": "dotfiles",
-    c: "cache-profile",
+    c: "conflicts",
+    p: "cache-profile",
     s: "switch-type",
     n: "network-shares",
+    g: "gh",
     q: "quit",
   };
   const action = map[char];
   if (!action || !state.renderer) return;
   applyLocalAction(action, state);
 }
-
 function applyLocalAction(action: LocalAction, state: AppState): void {
   const renderer = state.renderer;
   if (!renderer) return;
@@ -220,6 +267,9 @@ function applyLocalAction(action: LocalAction, state: AppState): void {
     case "logs":
       navigate(state, "logs", renderer);
       return;
+    case "conflicts":
+      navigate(state, "conflicts", renderer);
+      return;
     case "quit":
       destroyRenderer(renderer);
       return;
@@ -234,6 +284,10 @@ function applyLocalAction(action: LocalAction, state: AppState): void {
     case "network-shares":
       console.log("(local) network-shares invoked");
       void runNetworkShares(state);
+      return;
+    case "gh":
+      navigate(state, "gh", renderer);
+      void runGhRepoSelector(state);
       return;
   }
   redraw(state);
@@ -339,6 +393,16 @@ function navigate(
       },
     });
   }
+  if (view === "conflicts" && !state.conflicts) {
+    state.conflicts = renderConflicts({
+      api: state.client.client,
+      currentHostId: state.client.hostname,
+      onAction: (a: ConflictsAction) => {
+        if (a === "menu") navigate(state, "menu", renderer);
+        else if (a === "quit") destroyRenderer(renderer);
+      },
+    });
+  }
   state.view = view;
   if (view === "fleet") {
     void refreshFleet(state);
@@ -398,6 +462,13 @@ function renderCurrent(state: AppState) {
         state: state.logs,
         onAction: (a: LogsAction) => applyLogsAction(a, state),
       });
+    case "conflicts":
+      return state.conflicts?.view ?? Text({ content: "Loading conflicts…" });
+    case "gh":
+      return (
+        state.gh?.view ??
+        Text({ content: "Loading GitHub repos…" })
+      );
   }
 }
 
@@ -412,11 +483,12 @@ async function refreshLocalFolders(state: AppState): Promise<void> {
       lastRun: null,
       cacheProfile: null,
       cacheMaxSize: null,
+      gitProvider: f.gitProvider ?? null,
+      gitRemote: f.gitRemote ?? null,
     }));
   } catch {
     state.localFolders = [];
   }
-  redraw(state);
 }
 
 function selectedLocalFolder(state: AppState): LocalFolder | null {
@@ -466,6 +538,209 @@ async function runNetworkShares(state: AppState): Promise<void> {
       `(local) network-shares failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+async function refreshGhRepos(state: AppState): Promise<void> {
+  const gh = state.gh;
+  if (!gh) return;
+  gh.state.loading = true;
+  gh.state.error = null;
+  gh.view = renderGhSelector({
+    repos: gh.state.repos,
+    loading: true,
+    onSelect: () => undefined,
+    onCancel: () => {
+      navigate(state, "local", state.renderer!);
+    },
+    onRefresh: () => {
+      void refreshGhRepos(state);
+    },
+  });
+  redraw(state);
+  if (!Bun.which("gh")) {
+    gh.state.loading = false;
+    gh.state.error = "gh CLI not found in PATH";
+    gh.view = renderGhSelector({
+      repos: [],
+      error: gh.state.error,
+      onSelect: () => undefined,
+      onCancel: () => {
+        navigate(state, "local", state.renderer!);
+      },
+      onRefresh: () => {
+        void refreshGhRepos(state);
+      },
+    });
+    redraw(state);
+    return;
+  }
+  const proc = Bun.spawnSync({
+    cmd: ["gh", "repo", "list", "--json", "name,nameWithOwner,url", "-L", "100"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    gh.state.loading = false;
+    const errTail = new TextDecoder().decode(proc.stderr).slice(-500);
+    gh.state.error = `gh repo list failed (exit ${proc.exitCode}): ${errTail}`;
+    gh.view = renderGhSelector({
+      repos: [],
+      error: gh.state.error,
+      onSelect: () => undefined,
+      onCancel: () => {
+        navigate(state, "local", state.renderer!);
+      },
+      onRefresh: () => {
+        void refreshGhRepos(state);
+      },
+    });
+    redraw(state);
+    return;
+  }
+  try {
+    const stdout = new TextDecoder().decode(proc.stdout);
+    const parsed: unknown = JSON.parse(stdout);
+    const repos: GhRepo[] = Array.isArray(parsed)
+      ? parsed
+          .filter((r): r is Record<string, unknown> => Boolean(r) && typeof r === "object")
+          .map((r) => ({
+            name: typeof r.name === "string" ? r.name : "",
+            nameWithOwner:
+              typeof r.nameWithOwner === "string" ? r.nameWithOwner : "",
+            url: typeof r.url === "string" ? r.url : "",
+          }))
+          .filter((r) => r.name !== "" && r.nameWithOwner !== "")
+      : [];
+    gh.state.repos = repos;
+    gh.state.error = null;
+  } catch (err) {
+    gh.state.error =
+      err instanceof Error ? err.message : `failed to parse gh output: ${String(err)}`;
+    gh.state.repos = [];
+  } finally {
+    gh.state.loading = false;
+  }
+  gh.view = renderGhSelector({
+    repos: gh.state.repos,
+    error: gh.state.error,
+    loading: gh.state.loading,
+    onSelect: (repo) => {
+      void adoptGhRepo(state, repo);
+    },
+    onCancel: () => {
+      navigate(state, "local", state.renderer!);
+    },
+    onRefresh: () => {
+      void refreshGhRepos(state);
+    },
+  });
+  redraw(state);
+}
+
+async function adoptGhRepo(state: AppState, repo: GhRepo): Promise<void> {
+  const renderer = state.renderer;
+  if (!renderer) return;
+  const gh = state.gh;
+  if (!gh) return;
+  if (gh.state.busy) return;
+  gh.state.busy = true;
+  gh.state.busyMessage = `Creating folder for ${repo.nameWithOwner}…`;
+  gh.view = renderGhSelector({
+    repos: gh.state.repos,
+    error: gh.state.error,
+    loading: gh.state.loading,
+    onSelect: () => undefined,
+    onCancel: () => undefined,
+  });
+  redraw(state);
+  try {
+    const folder = await state.client.client.createFolder({
+      name: repo.name,
+      type: "git",
+      gitProvider: "gh",
+      gitRemote: repo.nameWithOwner,
+      encrypted: false,
+      cryptPassword: null,
+    });
+    gh.state.busyMessage = `Assigning folder to ${state.hostname}…`;
+    redraw(state);
+    await state.client.client.assignFolder(folder.id, {
+      folderId: folder.id,
+      hostId: state.hostname,
+      role: "both",
+      localPath: join(homedir(), "projects", repo.name),
+      enabled: true,
+    });
+    gh.state.busyMessage = "Triggering initial sync…";
+    redraw(state);
+    await requestSyncOne(folder.id);
+  } catch (err) {
+    gh.state.error =
+      err instanceof Error ? err.message : `failed to adopt repo: ${String(err)}`;
+    gh.state.busy = false;
+    gh.state.busyMessage = null;
+    gh.view = renderGhSelector({
+      repos: gh.state.repos,
+      error: gh.state.error,
+      loading: gh.state.loading,
+      onSelect: (r) => {
+        void adoptGhRepo(state, r);
+      },
+      onCancel: () => {
+        navigate(state, "local", renderer);
+      },
+    });
+    redraw(state);
+    return;
+  }
+  gh.state.busy = false;
+  gh.state.busyMessage = null;
+  navigate(state, "local", renderer);
+  void refreshLocalFolders(state);
+  redraw(state);
+}
+
+function runGhRepoSelector(state: AppState): void {
+  const renderer = state.renderer;
+  if (!renderer) return;
+  const view: VNode = renderGhSelector({
+    repos: [],
+    loading: true,
+    onSelect: () => undefined,
+    onCancel: () => {
+      navigate(state, "local", renderer);
+    },
+    onRefresh: () => {
+      void refreshGhRepos(state);
+    },
+  });
+  state.gh = {
+    state: {
+      repos: [],
+      loading: true,
+      error: null,
+      busy: false,
+      busyMessage: null,
+    },
+    view,
+    handleKey: (e: KeyEvent) => {
+      if (!state.gh) return false;
+      return handleGhKey(e, {
+        repos: state.gh.state.repos,
+        error: state.gh.state.error,
+        loading: state.gh.state.loading,
+        onSelect: () => undefined,
+        onCancel: () => {
+          navigate(state, "local", renderer);
+        },
+        onRefresh: () => {
+          void refreshGhRepos(state);
+        },
+      });
+    },
+  };
+  redraw(state);
+  void refreshGhRepos(state);
 }
 
 async function refreshFleet(state: AppState): Promise<void> {

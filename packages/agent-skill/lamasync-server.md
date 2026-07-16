@@ -48,6 +48,7 @@ Missing or wrong key → `401 Unauthorized`.
 | POST   | `/api/v1/register`                                | Register or update a host                        |
 | POST   | `/api/v1/report/health`                           | Host heartbeat (last_seen, status)               |
 | GET    | `/api/v1/config/:hostId`                          | Bundled config (assignments, manifests, rclone)  |
+| GET    | `/api/v1/release/latest`                          | Latest GitHub release info (proxy)               |
 | GET    | `/api/v1/folders`                                 | List all folder definitions                      |
 | POST   | `/api/v1/folders`                                 | Create a folder definition                       |
 | GET    | `/api/v1/folders/:id`                             | Read a single folder                             |
@@ -61,6 +62,14 @@ Missing or wrong key → `401 Unauthorized`.
 | DELETE | `/api/v1/dotfiles/:appName/:version`              | Delete a version (DB row + file)                 |
 | GET    | `/api/v1/operations`                              | Query the operation log                          |
 | POST   | `/api/v1/report`                                  | Append an operation_log entry                    |
+| GET    | `/api/v1/restic/snapshots`                        | List restic snapshot metadata                    |
+| POST   | `/api/v1/restic/snapshots`                        | Daemon reports a new snapshot                    |
+| GET    | `/api/v1/restic/restore`                          | List restic restore jobs                         |
+| POST   | `/api/v1/restic/restore`                          | Create a restore job for a target host           |
+| POST   | `/api/v1/restic/restore/:id/status`               | Update restore job status (daemon ack)           |
+| GET    | `/api/v1/conflicts`                               | List manual sync conflicts                       |
+| POST   | `/api/v1/conflicts`                               | Bulk-create conflicts from daemon                |
+| POST   | `/api/v1/conflicts/:id/resolve`                   | Resolve a conflict (local/remote/both)           |
 | GET    | `/swagger/json`                                   | Live OpenAPI 3 spec (use to resolve schemas)     |
 | GET    | `/swagger`                                        | Swagger UI                                       |
 
@@ -165,10 +174,13 @@ you need exact request/response field names or want to verify a schema before
 issuing a write. The high-level shapes are:
 
 - `Host { id, hostname, tailnetIp?, lastSeen?, status }`
-- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile', createdAt? }`
-- `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled }`
+- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword? }`
+- `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }`
-- `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum? }`
+- `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum?, description? }`
+- `ResticSnapshot { id, folderId, hostId, snapshotId, timestamp, paths[], sizeBytes?, tags? }`
+- `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, status, createdAt, resolvedAt?, error? }`
+- `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
 
 All `?` fields are nullable. Timestamps are milliseconds since epoch
 (`Date.now()`).

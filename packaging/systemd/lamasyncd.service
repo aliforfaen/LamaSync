@@ -7,7 +7,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 # %h expands to $HOME for the user running the service
+# ExecStartPre runs a non-blocking update check before the daemon starts.
+# The leading `-` tells systemd to ignore the exit code so an offline or
+# rate-limited GitHub API never blocks daemon startup.
+ExecStartPre=-%h/.local/bin/lamasyncd --check-update
 ExecStart=%h/.local/bin/lamasyncd
+# Future-proofing: SIGHUP triggers a config reload. Keep this line even when
+# the daemon doesn't yet wire the signal — systemd will accept it as a no-op
+# until the handler lands.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10s
 # Logs to journald
@@ -19,11 +27,17 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-# Allow the daemon to create its socket in $HOME
-ReadWritePaths=%h/.config/lamasync %h/lamasync.sock
+# ReadWritePaths lists the directories and socket files the daemon needs
+# to write. Paths must be absolute (systemd does not expand %h here) and
+# must NOT live under $HOME itself, because ProtectHome=read-only blanks
+# the whole tree. Add custom project mount roots here, e.g.:
+#   ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/lamasync.sock %h/your/project/root
+ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/lamasync.sock
+# Standardize socket path so the daemon, TUI, and per-mount units agree.
+Environment=LAMASYNC_SOCKET_PATH=%h/lamasync.sock
 # Resource limits
 MemoryMax=512M
-CPUQuota=50%%
+CPUQuota=50%
 
 [Install]
 WantedBy=default.target

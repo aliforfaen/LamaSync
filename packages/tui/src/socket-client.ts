@@ -13,13 +13,7 @@ export interface SocketClient {
   close(): void;
 }
 
-const DEFAULT_SOCKET_PATH = join(
-  homedir(),
-  ".local",
-  "share",
-  "lamasync",
-  "lamasync.sock",
-);
+const DEFAULT_SOCKET_PATH = join(homedir(), "lamasync.sock");
 
 
 /**
@@ -122,6 +116,19 @@ export async function requestSwitchMount(
     const res = await client.cmd({ cmd: "switch-to-mount", folderId });
     if (!res.ok) {
       throw new Error(res.error ?? "switch-to-mount failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}
+
+export async function requestSyncOne(folderId: string): Promise<unknown> {
+  const client = await connectSocket();
+  try {
+    const res = await client.cmd({ cmd: "sync", folderId });
+    if (!res.ok) {
+      throw new Error(res.error ?? "sync failed");
     }
     return res.data;
   } finally {

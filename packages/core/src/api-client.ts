@@ -1,4 +1,6 @@
 import type {
+  Conflict,
+  ConflictResolution,
   DotfileVersion,
   Folder,
   FolderAssignment,
@@ -8,6 +10,8 @@ import type {
   HostConfig,
   OperationLog,
   OperationReport,
+  ResticRestoreJob,
+  ResticSnapshot,
   Share,
 } from "./types.ts";
 
@@ -239,7 +243,7 @@ export class LamaSyncApiClient {
     return body;
   }
 
-  async heartbeatLock(folderId: string, hostId: string): Promise<{ ok: boolean; renewedAt: number }> {
+  async heartbeatLock(folderId: string, hostId: string, lockId?: string): Promise<{ ok: boolean; renewedAt: number }> {
     const res = await this.fetchImpl(
       `${this.baseUrl}/api/v1/operations/heartbeat`,
       {
@@ -248,7 +252,7 @@ export class LamaSyncApiClient {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ folderId, hostId }),
+        body: JSON.stringify({ folderId, hostId, ...(lockId !== undefined ? { lockId } : {}) }),
       },
     );
     const body = await res.json();
@@ -256,7 +260,7 @@ export class LamaSyncApiClient {
     return body;
   }
 
-  async releaseLock(folderId: string, hostId: string, status: string, summary?: string): Promise<{ ok: boolean }> {
+  async releaseLock(folderId: string, hostId: string, status: string, summary?: string, lockId?: string): Promise<{ ok: boolean }> {
     const res = await this.fetchImpl(
       `${this.baseUrl}/api/v1/operations/release`,
       {
@@ -265,13 +269,14 @@ export class LamaSyncApiClient {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ folderId, hostId, status, summary }),
+        body: JSON.stringify({ folderId, hostId, status, ...(summary !== undefined ? { summary } : {}), ...(lockId !== undefined ? { lockId } : {}) }),
       },
     );
     const body = await res.json();
     if (!res.ok) throw new LamaSyncApiError(res.status, JSON.stringify(body));
     return body;
   }
+
 
   async listLocks(): Promise<{ folderId: string; lockedBy: string; lockedAt: number; lockTtl: number }[]> {
     return this.request("GET", "/api/v1/operations/locks");
@@ -295,5 +300,78 @@ export class LamaSyncApiClient {
   // Shares
   listShares(): Promise<Share[]> {
     return this.request<Share[]>("GET", "/api/v1/shares");
+  }
+
+  // Restic snapshots
+  listResticSnapshots(opts: { folderId?: string; hostId?: string } = {}): Promise<ResticSnapshot[]> {
+    const params = new URLSearchParams();
+    if (opts.folderId) params.set("folderId", opts.folderId);
+    if (opts.hostId) params.set("hostId", opts.hostId);
+    const qs = params.toString();
+    const path = qs ? `/api/v1/restic/snapshots?${qs}` : "/api/v1/restic/snapshots";
+    return this.request<ResticSnapshot[]>("GET", path);
+  }
+
+  reportResticSnapshot(snapshot: Omit<ResticSnapshot, "id">): Promise<ResticSnapshot> {
+    return this.request<ResticSnapshot>(
+      "POST",
+      "/api/v1/restic/snapshots",
+      JSON.stringify(snapshot),
+      "application/json",
+    );
+  }
+
+  requestResticRestore(snapshotId: string, folderId: string, targetHostId: string, targetPath: string): Promise<ResticRestoreJob> {
+    return this.request<ResticRestoreJob>(
+      "POST",
+      "/api/v1/restic/restore",
+      JSON.stringify({ snapshotId, folderId, targetHostId, targetPath }),
+      "application/json",
+    );
+  }
+
+  listResticRestoreJobs(targetHostId?: string): Promise<ResticRestoreJob[]> {
+    const path = targetHostId
+      ? `/api/v1/restic/restore?targetHostId=${encodeURIComponent(targetHostId)}`
+      : "/api/v1/restic/restore";
+    return this.request<ResticRestoreJob[]>("GET", path);
+  }
+
+  updateResticRestoreJob(id: string, status: ResticRestoreJob["status"], error?: string | null): Promise<ResticRestoreJob> {
+    return this.request<ResticRestoreJob>(
+      "POST",
+      `/api/v1/restic/restore/${encodeURIComponent(id)}/status`,
+      JSON.stringify({ status, error: error ?? null }),
+      "application/json",
+    );
+  }
+
+  // Conflicts
+  listConflicts(opts: { hostId?: string; folderId?: string; status?: string } = {}): Promise<Conflict[]> {
+    const params = new URLSearchParams();
+    if (opts.hostId) params.set("hostId", opts.hostId);
+    if (opts.folderId) params.set("folderId", opts.folderId);
+    if (opts.status) params.set("status", opts.status);
+    const qs = params.toString();
+    const path = qs ? `/api/v1/conflicts?${qs}` : "/api/v1/conflicts";
+    return this.request<Conflict[]>("GET", path);
+  }
+
+  createConflicts(conflicts: Array<Omit<Conflict, "id" | "createdAt" | "status" | "resolvedAt">>): Promise<Conflict[]> {
+    return this.request<Conflict[]>(
+      "POST",
+      "/api/v1/conflicts",
+      JSON.stringify({ conflicts }),
+      "application/json",
+    );
+  }
+
+  resolveConflict(id: string, resolution: ConflictResolution): Promise<Conflict> {
+    return this.request<Conflict>(
+      "POST",
+      `/api/v1/conflicts/${encodeURIComponent(id)}/resolve`,
+      JSON.stringify({ resolution }),
+      "application/json",
+    );
   }
 }

@@ -8,11 +8,12 @@ import type {
   HostConfig,
   OperationLog,
   OperationReport,
+  ResticRestoreJob,
 } from "@lamasync/core";
-import { LamaSyncApiClient } from "@lamasync/core";
+import { LamaSyncApiClient, VERSION } from "@lamasync/core";
 import { loadConfig } from "./config.ts";
 import { CACHE_PATH, loadCache, saveCache } from "./config-cache.ts";
-import { executeAssignment } from "./executor.ts";
+import { executeAssignment, executeResticRestore } from "./executor.ts";
 import { Scheduler } from "./scheduler.ts";
 import {
   buildSocketState,
@@ -22,12 +23,25 @@ import {
 import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
 import { acquireLock, heartbeatLock, releaseLock, releaseStaleLocks } from "./lock.ts";
 import {
+  adoptMount,
+  getInternalMount,
   listMounts,
   startMount,
   startMountHealthChecks,
   stopAllMounts,
   stopMount,
 } from "./mounts.ts";
+import {
+  disableMountUnit,
+  isMountUnitActive,
+  isSystemdAvailable,
+  removeMountUnit,
+  startMountUnit,
+  stopMountUnit,
+  waitForMountUnitActive,
+  writeMountUnit,
+} from "./systemd.ts";
+import { downloadAndReplace, fetchLatestRelease, isNewer } from "./self-update.ts";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CONFIG_REFRESH_MS = 5 * 60 * 1000;
@@ -129,6 +143,53 @@ function removeTrash(trashDir: string): void {
     rmSync(trashDir, { recursive: true, force: true });
   } catch {
     // best-effort
+  }
+}
+
+async function processResticRestoreJobs(
+  client: LamaSyncApiClient,
+  hostId: string,
+  getHostConfig: () => HostConfig | null,
+): Promise<void> {
+  let jobs: ResticRestoreJob[];
+  try {
+    jobs = await client.listResticRestoreJobs(hostId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[restic-restore] failed to list jobs: ${msg}`);
+    return;
+  }
+  for (const job of jobs) {
+    if (job.status !== "pending") continue;
+    const cfg = getHostConfig();
+    const assignment = cfg?.assignments.find((a) => a.folderId === job.folderId);
+    if (!assignment || !assignment.resticRepository || !assignment.resticPassword) {
+      try {
+        await client.updateResticRestoreJob(job.id, "failed", "target host lacks restic assignment");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[restic-restore] failed to mark job ${job.id} failed: ${msg}`);
+      }
+      continue;
+    }
+
+    try {
+      await client.updateResticRestoreJob(job.id, "running");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[restic-restore] failed to mark job ${job.id} running: ${msg}`);
+    }
+
+    const result = await executeResticRestore(assignment, job, assignment.timeoutSec ?? 600);
+    try {
+      await client.updateResticRestoreJob(job.id, result.ok ? "done" : "failed", result.error);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[restic-restore] failed to ack job ${job.id}: ${msg}`);
+    }
+    console.log(
+      `[restic-restore] job=${job.id} snapshot=${job.snapshotId} target=${job.targetPath} ok=${result.ok}`,
+    );
   }
 }
 
@@ -256,7 +317,111 @@ export async function switchToSync(folderId: string): Promise<SwitchResult> {
   return { ok: true };
 }
 
+/**
+ * Bring up a mount via systemd if available; otherwise run the in-process
+ * rclone spawn. Returns the result of the underlying mount lifecycle helper
+ * so callers (notably switchToMount) can remain backend-agnostic.
+ */
+async function systemdAwareStartMount(opts: {
+  folderId: string;
+  remotePath: string;
+  mountPath: string;
+  configPath: string;
+  cacheProfile?: "normal" | "media" | "minimal";
+  cacheMaxSize?: string;
+}): Promise<unknown> {
+  if (!isSystemdAvailable()) {
+    return startMount(opts);
+  }
+
+  let unitWritten = false;
+  try {
+    writeMountUnit(opts.folderId);
+    unitWritten = true;
+    startMountUnit(opts.folderId);
+    const active = await waitForMountUnitActive(opts.folderId);
+    if (!active) {
+      console.warn(
+        `[systemd] mount unit for folder=${opts.folderId} did not become active; falling back`,
+      );
+      return startMount(opts);
+    }
+    const adopted = adoptMount(opts.folderId, {
+      mountPath: opts.mountPath,
+      cacheProfile: opts.cacheProfile ?? "normal",
+      remotePath: opts.remotePath,
+      configPath: opts.configPath,
+    });
+    if (adopted === null) {
+      console.warn(
+        `[systemd] could not adopt folder=${opts.folderId}; falling back to in-process`,
+      );
+      return startMount(opts);
+    }
+    return adopted;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!unitWritten) {
+      console.warn(
+        `[systemd] writeMountUnit failed for folder=${opts.folderId} (${msg}); falling back`,
+      );
+    }
+    return startMount(opts);
+  }
+}
+
+/**
+ * Stop a mount that was started by systemd if available; otherwise invoke the
+ * in-process stopMount. Best-effort: never throws.
+ */
+async function systemdAwareStopMount(folderId: string): Promise<void> {
+  if (!isSystemdAvailable()) {
+    await stopMount(folderId);
+    return;
+  }
+  try {
+    disableMountUnit(folderId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[systemd] disable failed for folder=${folderId}: ${msg}`);
+  }
+  try {
+    stopMountUnit(folderId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[systemd] stop failed for folder=${folderId}: ${msg}`);
+  }
+  removeMountUnit(folderId);
+  // The unit may not have populated the in-process registry; clear regardless.
+  await stopMount(folderId);
+}
+
+/**
+ * Boot-time adoption: when the daemon restarts while mounts are still active
+ * under their systemd units, register each in the in-process `mounts` map so
+ * the scheduler and TUI see them as live.
+ */
+function adoptExistingMountUnits(getAssignments: () => FolderAssignment[]): void {
+  if (!isSystemdAvailable()) return;
+  for (const assignment of getAssignments()) {
+    if (assignment.role === "source") continue;
+    if (listMounts().some((m) => m.folderId === assignment.folderId)) continue;
+    if (!isMountUnitActive(assignment.folderId)) continue;
+    const adopted = adoptMount(assignment.folderId, {
+      mountPath: assignment.localPath,
+      cacheProfile: assignment.cacheProfile ?? "normal",
+      remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${assignment.folderId}`,
+      configPath: "/dev/null",
+    });
+    if (adopted) {
+      console.log(
+        `[boot] adopted existing mount unit for folder=${assignment.folderId}`,
+      );
+    }
+  }
+}
 async function main(): Promise<void> {
+
   const clientConfig = loadConfig();
   const hostId = clientConfig.hostname;
   const socketPath = defaultSocketPath();
@@ -283,6 +448,7 @@ async function main(): Promise<void> {
         `[config] refreshed host=${hostId} assignments=${cfg.assignments.length}`,
       );
       scheduler.refresh();
+      adoptExistingMountUnits(() => cfg.assignments);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[config] refresh failed: ${msg}`);
@@ -346,7 +512,7 @@ async function main(): Promise<void> {
     }
 
     const heartbeatTimer = setInterval(() => {
-      void heartbeatLock(client, assignment.folderId, hostId);
+      void heartbeatLock(client, assignment.folderId, hostId, lock);
     }, 30_000);
 
     const { configPath, cleanup } = writeRcloneConfig(hostConfig.rcloneConfig);
@@ -362,12 +528,19 @@ async function main(): Promise<void> {
       console.log(
         `[run] folder=${folder.name} type=${folder.type} status=${report.status} summary=${report.summary ?? ""}`,
       );
-      await releaseLock(client, folder.id, hostId, report.status, report.summary ?? undefined);
+      await releaseLock(
+        client,
+        folder.id,
+        hostId,
+        report.status,
+        report.summary ?? undefined,
+        lock,
+      );
       await reportOperation(report);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[run] executor threw: ${msg}`);
-      await releaseLock(client, folder.id, hostId, "failed", msg);
+      await releaseLock(client, folder.id, hostId, "failed", msg, lock);
       await reportOperation({
         hostId,
         folderId: folder.id,
@@ -393,8 +566,8 @@ async function main(): Promise<void> {
     runOnce: (assignment) => runOnce(assignment),
     getHostConfig: () => hostConfig,
     getRemoteName,
-    startMount,
-    stopMount,
+    startMount: systemdAwareStartMount,
+    stopMount: systemdAwareStopMount,
     updateFolderType: (folderId, type) => client.updateFolder(folderId, { type }),
   });
 
@@ -425,6 +598,18 @@ async function main(): Promise<void> {
   } else {
     scheduler.start();
   }
+  // One-shot update check on startup. Never throws — just logs.
+  try {
+    const latest = await fetchLatestRelease();
+    if (latest && isNewer(VERSION, latest.version)) {
+      console.log(
+        `[update] newer release available: ${latest.tag} (current: v${VERSION})`,
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[update] startup check failed: ${msg}`);
+  }
 
   const heartbeatTimer = setInterval(() => {
     const now = Date.now();
@@ -449,6 +634,17 @@ async function main(): Promise<void> {
     void refreshConfig();
   }, CONFIG_REFRESH_MS);
   refreshTimer.unref?.();
+
+  const restoreTimer = setInterval(() => {
+    void processResticRestoreJobs(client, hostId, () => hostConfig);
+  }, 60_000);
+  restoreTimer.unref?.();
+  // Run once shortly after startup if config is already cached.
+  if (hostConfig) {
+    setTimeout(() => {
+      void processResticRestoreJobs(client, hostId, () => hostConfig);
+    }, 5_000).unref?.();
+  }
 
   const socketServer = startSocketServer({
     socketPath,
@@ -475,6 +671,7 @@ async function main(): Promise<void> {
     void stopAllMounts();
     clearInterval(heartbeatTimer);
     clearInterval(refreshTimer);
+    clearInterval(restoreTimer);
     if (existsSync(socketPath)) {
       try { unlinkSync(socketPath); } catch { /* ignore */ }
     }
@@ -488,8 +685,169 @@ async function main(): Promise<void> {
   await new Promise<void>(() => {});
 }
 
-main().catch((err) => {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(`lamasyncd fatal: ${message}`);
-  process.exit(1);
-});
+/**
+ * Foreground mount entry point: `lamasyncd --mount <folderId>`. Writes the
+ * rclone config, kicks off the mount, and blocks until the rclone process
+ * exits. Started by the systemd user unit for the folder so the kernel
+ * mount survives a daemon restart.
+ */
+async function runMountCommand(folderId: string): Promise<void> {
+  const config = loadConfig();
+  const hostId = config.hostname;
+  const client = new LamaSyncApiClient(config.serverUrl, config.apiKey);
+
+  let hostConfig: HostConfig | null = null;
+  try {
+    hostConfig = await client.getConfig(hostId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[mount-cmd] getConfig failed (${msg}); trying cache`);
+    hostConfig = loadCache();
+  }
+
+  if (!hostConfig) {
+    console.error(`[mount-cmd] no host config available for host=${hostId}`);
+    process.exit(1);
+  }
+
+  const folder = hostConfig.folders.find((f) => f.id === folderId);
+  const assignment = hostConfig.assignments.find((a) => a.folderId === folderId);
+  if (!folder || !assignment) {
+    console.error(`[mount-cmd] folder=${folderId} not configured on this host`);
+    process.exit(1);
+  }
+
+  const { configPath, cleanup } = writeRcloneConfig(hostConfig.rcloneConfig);
+  const remotePath = `${getRemoteName(assignment.remoteName, folderId)}:${folder.name}`;
+  const mountPath = assignment.localPath;
+  const cacheProfile = (assignment.cacheProfile ?? "normal") as
+    | "normal"
+    | "media"
+    | "minimal";
+
+  let exitCode = 0;
+  try {
+    await startMount({
+      folderId,
+      remotePath,
+      mountPath,
+      configPath,
+      cacheProfile,
+      cacheMaxSize: assignment.cacheMaxSize ?? undefined,
+    });
+
+    const internal = getInternalMount(folderId);
+    if (internal?.proc) {
+      exitCode = await internal.proc.exited;
+    } else {
+      // Externally-started mount (e.g. rclone spawn issued elsewhere);
+      // block until signaled.
+      await new Promise<number>(() => {});
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[mount-cmd] folder=${folderId} failed: ${msg}`);
+    exitCode = 1;
+  } finally {
+    await stopMount(folderId).catch(() => undefined);
+    cleanup();
+  }
+  process.exit(exitCode ?? 0);
+}
+
+function parseMountArg(argv: readonly string[]): string | null {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--mount") {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        console.error("lamasyncd: --mount requires a folderId argument");
+        process.exit(2);
+      }
+      return next;
+    }
+    if (arg?.startsWith("--mount=")) {
+      return arg.slice("--mount=".length);
+    }
+  }
+  return null;
+}
+// --version flag
+if (process.argv.includes("--version") || process.argv.includes("-V")) {
+  console.log(`lamasyncd ${VERSION}`);
+  process.exit(0);
+}
+
+// --check-update flag: print latest release vs current, exit.
+if (process.argv.includes("--check-update")) {
+  (async () => {
+    const latest = await fetchLatestRelease();
+    if (!latest) {
+      console.error("lamasyncd --check-update: unable to reach GitHub");
+      process.exit(1);
+    }
+    if (isNewer(VERSION, latest.version)) {
+      console.log(
+        `update available: current=v${VERSION} latest=${latest.tag} (published ${latest.publishedAt})`,
+      );
+      process.exit(0);
+    }
+    console.log(`up to date: current=v${VERSION} latest=${latest.tag}`);
+    process.exit(0);
+  })().catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`lamasyncd --check-update failed: ${msg}`);
+    process.exit(1);
+  });
+} else if (process.argv.includes("--update")) {
+  // --update flag: fetch latest, pick the matching asset, replace this binary.
+  (async () => {
+    const latest = await fetchLatestRelease();
+    if (!latest) {
+      console.error("lamasyncd --update: unable to reach GitHub");
+      process.exit(1);
+    }
+    if (!isNewer(VERSION, latest.version)) {
+      console.log(`lamasyncd --update: already at latest (v${VERSION})`);
+      process.exit(0);
+    }
+    const asset = latest.assets.find((a) => a.name === process.env.LAMASYNC_UPDATE_ASSET)
+      ?? latest.assets.find((a) => a.name === "lamasyncd")
+      ?? latest.assets.find((a) => a.name.startsWith("lamasyncd-") || a.name.startsWith("lamasync-"));
+    if (!asset) {
+      console.error(
+        `lamasyncd --update: no suitable asset in release ${latest.tag} (have: ${latest.assets.map((a) => a.name).join(", ")})`,
+      );
+      process.exit(1);
+    }
+    const target = process.argv[1] ?? "lamasyncd";
+    const ok = await downloadAndReplace(asset.downloadUrl, target);
+    if (!ok) {
+      console.error("lamasyncd --update: download/replace failed");
+      process.exit(1);
+    }
+    console.log(
+      `lamasyncd --update: replaced ${target} with ${asset.name} from ${latest.tag}`,
+    );
+    process.exit(0);
+  })().catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`lamasyncd --update failed: ${msg}`);
+    process.exit(1);
+  });
+} else {
+  const mountFolderId = parseMountArg(process.argv.slice(2));
+  if (mountFolderId !== null) {
+    runMountCommand(mountFolderId).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`lamasyncd mount fatal: ${message}`);
+      process.exit(1);
+    });
+  } else {
+    main().catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`lamasyncd fatal: ${message}`);
+      process.exit(1);
+    });
+  }
+}

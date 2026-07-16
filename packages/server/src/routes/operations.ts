@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
-import { db } from "../db.ts";
+import type { Database } from "bun:sqlite";
+import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import type { OperationLog, OperationStatus } from "@lamasync/core";
 
@@ -8,15 +9,22 @@ const MAX_LIMIT = 500;
 
 const DEFAULT_LOCK_TTL = 1200;
 
-interface LockStateRow {
-  id: string;
+// Test seam: allows unit tests to substitute the production DB.
+let activeDb: Database = defaultDb;
+export function __setDb(next: Database): void {
+  activeDb = next;
+}
+
+interface LockRow {
   locked_by: string | null;
   locked_at: number | null;
   lock_ttl: number | null;
+  lock_id: string | null;
 }
 
 interface LockOwnerRow {
   locked_by: string | null;
+  lock_id: string | null;
 }
 
 interface ActiveLockRow {
@@ -94,7 +102,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
                  ${whereSql}
                  ORDER BY timestamp DESC
                  LIMIT ?`;
-    const rows = db.query<OpRow, (string | number)[]>(sql).all(...args, safeLimit);
+    const rows = activeDb.query<OpRow, (string | number)[]>(sql).all(...args, safeLimit);
     return rows.map(rowToLog);
   },
   {
@@ -118,12 +126,11 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
     "/operations/acquire",
     ({ body: { folderId, hostId }, set }) => {
       const now = Date.now();
-      const lock = db
-        .query<LockStateRow, [string]>(
-          `SELECT fa.id, ss.locked_by, ss.locked_at, ss.lock_ttl
-           FROM folder_assignments fa
-           LEFT JOIN schedule_state ss ON ss.folder_assignment_id = fa.id
-           WHERE fa.folder_id = ?`,
+      const lock = activeDb
+        .query<LockRow, [string]>(
+          `SELECT locked_by, locked_at, lock_ttl, lock_id
+           FROM folder_locks
+           WHERE folder_id = ?`,
         )
         .get(folderId);
 
@@ -146,18 +153,17 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
         };
       }
 
-      db.query<never, [string, string, number, number]>(
-        `INSERT OR REPLACE INTO schedule_state
-           (folder_assignment_id, locked_by, locked_at, lock_ttl)
-         VALUES ((SELECT id FROM folder_assignments WHERE folder_id = ?), ?, ?, ?)`,
-      ).run(folderId, hostId, now, DEFAULT_LOCK_TTL);
-      broadcast({ kind: "lock", folderId, hostId, action: "acquired" });
+      const lockId = crypto.randomUUID();
+      activeDb
+        .query<never, [string, string, number, number, string]>(
+          `INSERT OR REPLACE INTO folder_locks
+             (folder_id, locked_by, locked_at, lock_ttl, lock_id)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(folderId, hostId, now, DEFAULT_LOCK_TTL, lockId);
+      broadcast({ kind: "lock", folderId, hostId, action: "acquired", lockId });
 
-      return {
-        lockId: crypto.randomUUID(),
-        ttl: DEFAULT_LOCK_TTL,
-        acquired: true,
-      };
+      return { lockId, ttl: DEFAULT_LOCK_TTL, acquired: true };
     },
     {
       body: t.Object({
@@ -172,14 +178,12 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .post(
     "/operations/heartbeat",
-    ({ body: { folderId, hostId }, set }) => {
-      const lock = db
-        .query<LockOwnerRow, [string]>(
-          `SELECT locked_by
-           FROM schedule_state
-           WHERE folder_assignment_id = (
-             SELECT id FROM folder_assignments WHERE folder_id = ?
-           )`,
+    ({ body: { folderId, hostId, lockId }, set }) => {
+      const lock = activeDb
+        .query<LockRow, [string]>(
+          `SELECT locked_by, locked_at, lock_ttl, lock_id
+           FROM folder_locks
+           WHERE folder_id = ?`,
         )
         .get(folderId);
 
@@ -192,21 +196,31 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
         return { error: "lock_held_by_other", lockedBy: lock.locked_by };
       }
 
-      const renewedAt = Date.now();
-      db.query<never, [number, string]>(
-        `UPDATE schedule_state
-         SET locked_at = ?
-         WHERE folder_assignment_id = (
-           SELECT id FROM folder_assignments WHERE folder_id = ?
-         )`,
-      ).run(renewedAt, folderId);
+      const now = Date.now();
+      const lockedAt = lock.locked_at ?? 0;
+      const lockTtl = lock.lock_ttl ?? DEFAULT_LOCK_TTL;
+      if (now - lockedAt >= lockTtl * 1000) {
+        set.status = 404;
+        return { error: "lock_expired" };
+      }
+      if (lockId !== undefined && lockId !== lock.lock_id) {
+        set.status = 409;
+        return { error: "lock_id_mismatch" };
+      }
 
-      return { ok: true, renewedAt };
+      activeDb
+        .query<never, [number, string]>(
+          "UPDATE folder_locks SET locked_at = ? WHERE folder_id = ?",
+        )
+        .run(now, folderId);
+
+      return { ok: true, renewedAt: now };
     },
     {
       body: t.Object({
         folderId: t.String(),
         hostId: t.String(),
+        lockId: t.Optional(t.String()),
       }),
       detail: {
         summary: "Renew a folder operation lock",
@@ -216,15 +230,43 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .post(
     "/operations/release",
-    ({ body: { folderId, hostId, status } }) => {
-      db.query<never, [number, string, string]>(
-        `UPDATE schedule_state
-         SET locked_by = NULL, locked_at = NULL, last_run = ?, last_status = ?
-         WHERE folder_assignment_id = (
-           SELECT id FROM folder_assignments WHERE folder_id = ?
-         )`,
-      ).run(Date.now(), status, folderId);
-      broadcast({ kind: "lock", folderId, hostId, action: "released", status });
+    ({ body: { folderId, hostId, status, lockId }, set }) => {
+      const lock = activeDb
+        .query<LockOwnerRow, [string]>(
+          `SELECT locked_by, lock_id
+           FROM folder_locks
+           WHERE folder_id = ?`,
+        )
+        .get(folderId);
+
+      if (!lock) {
+        set.status = 404;
+        return { error: "no_active_lock" };
+      }
+      if (lock.locked_by !== hostId) {
+        set.status = 409;
+        return { error: "lock_held_by_other" };
+      }
+      if (lockId !== undefined && lockId !== lock.lock_id) {
+        set.status = 409;
+        return { error: "lock_id_mismatch" };
+      }
+
+      const releasedLockId = lock.lock_id ?? undefined;
+      const now = Date.now();
+      activeDb
+        .query<never, [string]>("DELETE FROM folder_locks WHERE folder_id = ?")
+        .run(folderId);
+      activeDb
+        .query<never, [number, string, string, string]>(
+          `UPDATE schedule_state
+           SET last_run = ?, last_status = ?
+           WHERE folder_assignment_id = (
+             SELECT id FROM folder_assignments WHERE folder_id = ? AND host_id = ?
+           )`,
+        )
+        .run(now, status, folderId, hostId);
+      broadcast({ kind: "lock", folderId, hostId, action: "released", lockId: releasedLockId, status });
 
       return { ok: true };
     },
@@ -234,6 +276,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
         hostId: t.String(),
         status: t.String(),
         summary: t.Optional(t.String()),
+        lockId: t.Optional(t.String()),
       }),
       detail: {
         summary: "Release a folder operation lock",
@@ -244,12 +287,11 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   .get(
     "/operations/locks",
     () => {
-      const rows = db
+      const rows = activeDb
         .query<ActiveLockRow, []>(
-          `SELECT fa.folder_id, ss.locked_by, ss.locked_at, ss.lock_ttl
-           FROM schedule_state ss
-           JOIN folder_assignments fa ON fa.id = ss.folder_assignment_id
-           WHERE ss.locked_by IS NOT NULL`,
+          `SELECT folder_id, locked_by, locked_at, lock_ttl
+           FROM folder_locks
+           WHERE locked_by IS NOT NULL`,
         )
         .all();
 

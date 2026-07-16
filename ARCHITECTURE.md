@@ -191,6 +191,7 @@ GET    /api/v1/templates                       → dotfile template packs
 POST   /api/v1/folders/from-template           → create folder + manifests from template
 
 GET    /api/v1/shares                          → NFS/SMB share catalog (env-driven)
+GET    /api/v1/release/latest                  → latest GitHub release info (server proxy)
 POST   /api/v1/admin/prune                     → manual operation_log prune
 
 WS     /api/v1/ws                              → live event stream (operations, mounts, locks)
@@ -247,6 +248,14 @@ WS     /api/v1/ws                              → live event stream (operations
 7. Detects bisync state corruption and auto-recovers (`--resync`).
 8. Post-hook runs on success.
 9. Releases the lock and posts the report via `POST /report`.
+
+### Self-update (LAMA-151)
+
+The daemon checks for updates against GitHub Releases on startup and exposes
+`--check-update` / `--update` CLI flags. The server provides
+`GET /api/v1/release/latest` as a proxy so clients behind firewalls can fetch
+release metadata without direct GitHub access. The `packaging/install/update.sh`
+script is a standalone `curl | bash` updater for clients.
 
 **Mount lifecycle (LAMA-130/LAMA-113):**
 
@@ -441,13 +450,30 @@ services:
 The image ships the precompiled Bun binary plus rclone and tini. Health check
 pings `GET /api/v1/health` with the bearer token.
 
+### CI/CD and releases
+
+`.github/workflows/ci.yml` runs on every push/PR and on `v*` tags:
+
+1. `check` job: type-check (`bun x tsc --noEmit`) and test (`bun test`).
+2. `build` job: compile all three binaries and upload them as artifacts.
+3. `release` job (tag push only): publish binaries to a GitHub Release and push a
+   Docker image to `ghcr.io/<owner>/lamasync-server:<version>` and `:latest`.
+
+The daemon also supports `lamasyncd --update` to fetch the latest binaries from a
+GitHub Release directly. See `packaging/install/update.sh` for the standalone
+`curl | bash` update path.
+
 ### Client
 
 ```bash
 # One-liner install — pulls the platform-specific binary
-curl -sSL https://your-server/install.sh | bash
+# (omit --with-tui if you only need the daemon)
+curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/install.sh | bash -s -- --with-tui
 # → downloads lamasyncd and lamasync-tui, creates ~/.config/lamasync/,
 #   installs systemd --user unit (see packaging/systemd/)
+
+# One-liner update (checks GitHub Releases and replaces binaries)
+curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/update.sh | bash
 ```
 
 ```

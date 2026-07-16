@@ -33,6 +33,10 @@ its local paths and reports results back.
   log viewer
 - **Systemd user service** with hardened sandbox
 - **One-line install** on clients
+- **Self-update** from GitHub Releases (`lamasyncd --update` or `curl | bash update.sh`)
+- **CI/CD** with GitHub Actions (tests, builds, releases, Docker push)
+
+![CI](https://github.com/aliforfaen/LamaSync/actions/workflows/ci.yml/badge.svg)
 
 ## Getting started
 
@@ -70,14 +74,20 @@ or use the install script.
 
 ```bash
 # On the client, with lamasyncd built and the server URL handy:
+# (add --with-tui to also install lamasync-tui)
 curl -sSL https://github.com/aliforfaen/LamaSync/raw/main/packaging/install/install.sh | bash -s -- \
   --server-url http://100.64.0.1:8080 \
-  --api-key "$LAMASYNC_API_KEY"
+  --api-key "$LAMASYNC_API_KEY" \
+  --with-tui
 
 # Or run from the repo:
 ./packaging/install/install.sh \
   --server-url http://100.64.0.1:8080 \
-  --api-key "$LAMASYNC_API_KEY"
+  --api-key "$LAMASYNC_API_KEY" \
+  --with-tui
+
+# Update an existing install:
+curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/update.sh | bash
 ```
 
 The script:

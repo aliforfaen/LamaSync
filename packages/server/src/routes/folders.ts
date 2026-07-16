@@ -12,6 +12,8 @@ interface FolderRow {
   created_at: number | null;
   encrypted: number | null;
   crypt_password: string | null;
+  git_provider: string | null;
+  git_remote: string | null;
 }
 
 interface AssignmentRow {
@@ -34,9 +36,14 @@ interface AssignmentRow {
   available_space_threshold: number | null;
   cache_profile: string | null;
   cache_max_size: string | null;
+  restic_repository: string | null;
+  restic_password: string | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
+  const provider = r.git_provider;
+  const gitProvider: Folder["gitProvider"] =
+    provider === "git" || provider === "gh" ? provider : null;
   return {
     id: r.id,
     name: r.name,
@@ -44,6 +51,8 @@ function rowToFolder(r: FolderRow): Folder {
     createdAt: r.created_at ?? undefined,
     encrypted: (r.encrypted ?? 0) === 1,
     cryptPassword: r.crypt_password,
+    gitProvider,
+    gitRemote: r.git_remote,
   };
 }
 
@@ -68,6 +77,8 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     availableSpaceThreshold: r.available_space_threshold,
     cacheProfile: (r.cache_profile as FolderAssignment["cacheProfile"]) ?? null,
     cacheMaxSize: r.cache_max_size,
+    resticRepository: r.restic_repository,
+    resticPassword: r.restic_password,
   };
 }
 
@@ -77,7 +88,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     () => {
       const rows = db
         .query<FolderRow, []>(
-          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders ORDER BY created_at DESC",
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote FROM folders ORDER BY created_at DESC",
         )
         .all();
       return rows.map(rowToFolder);
@@ -96,11 +107,13 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/folders",
     ({ body, set }) => {
-      const { name, type, encrypted, cryptPassword } = body as {
+      const { name, type, encrypted, cryptPassword, gitProvider, gitRemote } = body as {
         name: string;
         type: FolderType;
         encrypted?: boolean;
         cryptPassword?: string | null;
+        gitProvider?: "git" | "gh" | null;
+        gitRemote?: string | null;
       };
       if (!FOLDER_TYPES.includes(type)) {
         set.status = 400;
@@ -115,11 +128,18 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to generate crypt password" };
       }
+      if (gitProvider === "gh" && (typeof gitRemote !== "string" || gitRemote.trim() === "")) {
+        set.status = 400;
+        return { error: "gitRemote is required when gitProvider is \"gh\"" };
+      }
+      const normalizedGitRemote =
+        gitProvider === "gh" && typeof gitRemote === "string" ? gitRemote.trim() : (gitRemote ?? null);
+      const normalizedGitProvider = gitProvider ?? null;
       const id = crypto.randomUUID();
       const now = Date.now();
       db.run(
-        "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password) VALUES (?, ?, ?, ?, ?, ?)",
-        [id, name, type, now, isEncrypted ? 1 : 0, password],
+        "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, name, type, now, isEncrypted ? 1 : 0, password, normalizedGitProvider, normalizedGitRemote],
       );
       set.status = 201;
       return {
@@ -129,6 +149,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         createdAt: now,
         encrypted: isEncrypted,
         cryptPassword: password,
+        gitProvider: normalizedGitProvider,
+        gitRemote: normalizedGitRemote,
       };
     },
     {
@@ -143,6 +165,10 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         ]),
         encrypted: t.Optional(t.Boolean()),
         cryptPassword: t.Optional(t.Union([t.String(), t.Null()])),
+        gitProvider: t.Optional(
+          t.Union([t.Literal("git"), t.Literal("gh"), t.Null()]),
+        ),
+        gitRemote: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Create a folder definition",
@@ -160,7 +186,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, set }) => {
       const row = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!row) {
@@ -187,7 +213,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, body, set }) => {
       const existing = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!existing) {
@@ -199,6 +225,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         type?: FolderType;
         encrypted?: boolean;
         cryptPassword?: string | null;
+        gitProvider?: "git" | "gh" | null;
+        gitRemote?: string | null;
       };
       if (patch.type && !FOLDER_TYPES.includes(patch.type)) {
         set.status = 400;
@@ -219,9 +247,23 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to generate crypt password" };
       }
+      const existingProvider = (existing.git_provider === "git" || existing.git_provider === "gh")
+        ? existing.git_provider
+        : null;
+      const effectiveGitProvider = patch.gitProvider === undefined ? existingProvider : patch.gitProvider;
+      const providedRemote = patch.gitRemote;
+      const effectiveGitRemote = providedRemote === undefined
+        ? existing.git_remote
+        : (providedRemote === null
+            ? null
+            : (typeof providedRemote === "string" ? providedRemote.trim() || null : existing.git_remote));
+      if (effectiveGitProvider === "gh" && (effectiveGitRemote === null || effectiveGitRemote === "")) {
+        set.status = 400;
+        return { error: "gitRemote is required when gitProvider is \"gh\"" };
+      }
       db.run(
-        "UPDATE folders SET name = ?, type = ?, encrypted = ?, crypt_password = ? WHERE id = ?",
-        [newName, newType, newEncrypted ? 1 : 0, newPassword ?? null, params.id],
+        "UPDATE folders SET name = ?, type = ?, encrypted = ?, crypt_password = ?, git_provider = ?, git_remote = ? WHERE id = ?",
+        [newName, newType, newEncrypted ? 1 : 0, newPassword ?? null, effectiveGitProvider, effectiveGitRemote, params.id],
       );
       return rowToFolder({
         ...existing,
@@ -229,9 +271,11 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         type: newType,
         encrypted: newEncrypted ? 1 : 0,
         crypt_password: newPassword ?? null,
+        git_provider: effectiveGitProvider,
+        git_remote: effectiveGitRemote,
       });
-    },
-    {
+     },
+     {
       params: t.Object({ id: t.String() }),
       body: t.Object({
         name: t.Optional(t.String()),
@@ -246,6 +290,10 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         ),
         encrypted: t.Optional(t.Boolean()),
         cryptPassword: t.Optional(t.Union([t.String(), t.Null()])),
+        gitProvider: t.Optional(
+          t.Union([t.Literal("git"), t.Literal("gh"), t.Null()]),
+        ),
+        gitRemote: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Update folder name or type",
@@ -257,8 +305,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           401: { description: "Unauthorized" },
         },
       },
-    },
-  )
+     },
+   )
   .delete(
     "/folders/:id",
     ({ params, set }) => {
@@ -303,7 +351,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, body, set }) => {
       const folder = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at, encrypted, crypt_password FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!folder) {
@@ -328,6 +376,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         availableSpaceThreshold?: number | null;
         cacheProfile?: string | null;
         cacheMaxSize?: string | null;
+        resticRepository?: string | null;
+        resticPassword?: string | null;
       };
       const id = crypto.randomUUID();
       db.run(
@@ -335,8 +385,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
            (id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
             conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
             timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-            cache_profile, cache_max_size)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            cache_profile, cache_max_size, restic_repository, restic_password)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           params.id,
@@ -357,6 +407,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           b.availableSpaceThreshold ?? null,
           b.cacheProfile ?? null,
           b.cacheMaxSize ?? null,
+          b.resticRepository ?? null,
+          b.resticPassword ?? null,
         ],
       );
       const row = db
@@ -364,7 +416,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
                   conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-                  cache_profile, cache_max_size
+                  cache_profile, cache_max_size, restic_repository, restic_password
            FROM folder_assignments WHERE id = ?`,
         )
         .get(id);
@@ -402,6 +454,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           ]),
         ),
         cacheMaxSize: t.Optional(t.String({ pattern: "^\\d+[KMGT]?$" })),
+        resticRepository: t.Optional(t.Union([t.String(), t.Null()])),
+        resticPassword: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Assign a folder to a host",

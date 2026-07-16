@@ -18,6 +18,10 @@ export type ConflictStrategy =
   | "keep_both"
   | "manual";
 
+export type ConflictStatus = "pending" | "resolved";
+
+export type ConflictResolution = "local" | "remote" | "both";
+
 // rclone VFS cache profiles for mount type
 export type CacheProfile = "normal" | "media" | "minimal";
 
@@ -60,6 +64,8 @@ export interface Folder {
   createdAt?: number;
   encrypted?: boolean;
   cryptPassword?: string | null;
+  gitProvider?: "git" | "gh" | null;
+  gitRemote?: string | null;
 }
 
 export interface FolderAssignment {
@@ -82,6 +88,8 @@ export interface FolderAssignment {
   availableSpaceThreshold?: number | null; // bytes, skip sync if less than this free
   cacheProfile?: CacheProfile | null; // mount VFS cache profile
   cacheMaxSize?: string | null; // e.g. "1G" for --vfs-cache-max-size
+  resticRepository?: string | null; // absolute path or rclone remote for restic snapshots
+  resticPassword?: string | null; // restic repository password
 }
 
 export interface DotfileManifest {
@@ -100,6 +108,42 @@ export interface DotfileVersion {
   sizeBytes?: number | null;
   checksum?: string | null;
   description?: string | null; // optional label, e.g. "before nvim plugin rewrite"
+}
+
+export interface Conflict {
+  id: string;
+  hostId: string;
+  folderId: string;
+  path: string;
+  localMtime?: number | null;
+  remoteMtime?: number | null;
+  status: ConflictStatus;
+  resolution?: ConflictResolution | null;
+  createdAt: number;
+  resolvedAt?: number | null;
+}
+
+export interface ResticSnapshot {
+  id: string; // LamaSync snapshot row id
+  snapshotId: string; // restic's own snapshot id (short or long)
+  folderId: string;
+  hostId: string;
+  timestamp: number;
+  paths: string[];
+  sizeBytes?: number | null;
+  tags?: string[];
+}
+
+export interface ResticRestoreJob {
+  id: string;
+  snapshotId: string;
+  folderId: string;
+  targetHostId: string;
+  targetPath: string;
+  status: "pending" | "running" | "done" | "failed";
+  createdAt: number;
+  resolvedAt?: number | null;
+  error?: string | null;
 }
 
 export interface OperationLog {
@@ -172,8 +216,11 @@ export interface OperationReport {
 export type WSEvent =
   | { kind: "operation"; entry: OperationLog }
   | { kind: "host"; host: Host }
-  | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released"; status?: string }
-  | { kind: "mount"; folderId: string; status: MountEntry["status"]; path: string };
+  | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released"; status?: string; lockId?: string }
+  | { kind: "mount"; folderId: string; status: MountEntry["status"]; path: string }
+  | { kind: "conflict"; conflict: Conflict }
+  | { kind: "restic_snapshot"; snapshot: ResticSnapshot }
+  | { kind: "restic_restore"; job: ResticRestoreJob };
 
 export interface PruneResult {
   deleted: number;

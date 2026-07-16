@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS folders (
     type            TEXT NOT NULL,
     created_at      INTEGER,
     encrypted       BOOLEAN DEFAULT 0,
-    crypt_password  TEXT
+    crypt_password  TEXT,
+    git_provider    TEXT,
+    git_remote      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS folder_assignments (
@@ -39,6 +41,8 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     available_space_threshold INTEGER,
     cache_profile       TEXT,
     cache_max_size      TEXT,
+    restic_repository   TEXT,
+    restic_password     TEXT,
     UNIQUE(folder_id, host_id)
 );
 
@@ -61,6 +65,52 @@ CREATE TABLE IF NOT EXISTS dotfile_versions (
     description   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS restic_snapshots (
+    id            TEXT PRIMARY KEY,
+    folder_id     TEXT NOT NULL REFERENCES folders(id),
+    host_id       TEXT NOT NULL REFERENCES hosts(id),
+    snapshot_id   TEXT NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    paths         TEXT NOT NULL, -- JSON array
+    size_bytes    INTEGER,
+    tags          TEXT -- JSON array
+);
+
+CREATE INDEX IF NOT EXISTS idx_restic_snapshots_folder_host
+    ON restic_snapshots(folder_id, host_id);
+
+CREATE TABLE IF NOT EXISTS restic_restore_jobs (
+    id            TEXT PRIMARY KEY,
+    snapshot_id   TEXT NOT NULL,
+    folder_id     TEXT NOT NULL REFERENCES folders(id),
+    target_host_id TEXT NOT NULL,
+    target_path   TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    resolved_at   INTEGER,
+    error         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_restic_restore_jobs_target
+    ON restic_restore_jobs(target_host_id, status);
+
+CREATE TABLE IF NOT EXISTS conflicts (
+    id            TEXT PRIMARY KEY,
+    host_id       TEXT NOT NULL,
+    folder_id     TEXT NOT NULL REFERENCES folders(id),
+    path          TEXT NOT NULL,
+    local_mtime   INTEGER,
+    remote_mtime  INTEGER,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    resolution    TEXT,
+    created_at    INTEGER NOT NULL,
+    resolved_at   INTEGER,
+    UNIQUE(host_id, folder_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conflicts_host_folder
+    ON conflicts(host_id, folder_id, status);
+
 CREATE TABLE IF NOT EXISTS operation_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp   INTEGER NOT NULL,
@@ -82,11 +132,21 @@ CREATE TABLE IF NOT EXISTS schedule_state (
     locked_at            INTEGER,
     lock_ttl             INTEGER DEFAULT 1200
 );
-
 CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
     ON operation_log(host_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_dotfile_versions_manifest_ts
     ON dotfile_versions(manifest_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS folder_locks (
+    folder_id   TEXT PRIMARY KEY,
+    locked_by   TEXT,
+    locked_at   INTEGER,
+    lock_ttl    INTEGER DEFAULT 1200,
+    lock_id     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_folder_locks_locked_by
+    ON folder_locks(locked_by);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -104,4 +164,12 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE schedule_state ADD COLUMN locked_at INTEGER",
   "ALTER TABLE schedule_state ADD COLUMN lock_ttl INTEGER DEFAULT 1200",
   "ALTER TABLE hosts ADD COLUMN lan_ip TEXT",
+  "ALTER TABLE folder_assignments ADD COLUMN restic_repository TEXT",
+  "ALTER TABLE folder_assignments ADD COLUMN restic_password TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_conflicts_host_folder ON conflicts(host_id, folder_id, status)",
+  "ALTER TABLE folders ADD COLUMN git_provider TEXT",
+  "ALTER TABLE folders ADD COLUMN git_remote TEXT",
+  "CREATE TABLE IF NOT EXISTS folder_locks (folder_id TEXT PRIMARY KEY, locked_by TEXT, locked_at INTEGER, lock_ttl INTEGER DEFAULT 1200, lock_id TEXT)",
+  "INSERT OR REPLACE INTO folder_locks (folder_id, locked_by, locked_at, lock_ttl) SELECT fa.folder_id, ss.locked_by, ss.locked_at, ss.lock_ttl FROM folder_assignments fa JOIN schedule_state ss ON ss.folder_assignment_id = fa.id WHERE ss.locked_by IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_folder_locks_locked_by ON folder_locks(locked_by)",
 ];

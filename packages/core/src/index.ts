@@ -14,3 +14,4 @@ export {
   LamaSyncApiError,
   type LamaSyncApiClientOptions,
 } from "./api-client.ts";
+export { VERSION } from "./version.ts";

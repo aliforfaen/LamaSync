@@ -1,6 +1,6 @@
 import { Elysia } from "elysia";
 import swagger from "@elysiajs/swagger";
-import { authPlugin } from "./auth.ts";
+import { getAuthPlugin } from "./auth.ts";
 import { healthRoutes } from "./routes/health.ts";
 import { hostsRoutes } from "./routes/hosts.ts";
 import { configRoutes } from "./routes/config.ts";
@@ -9,6 +9,11 @@ import { dotfilesRoutes } from "./routes/dotfiles.ts";
 import { reportRoutes } from "./routes/report.ts";
 import { sharesRoutes } from "./routes/shares.ts";
 import { adminRoutes, pruneOperationLog } from "./routes/admin.ts";
+import { resticRoutes } from "./routes/restic.ts";
+import { conflictsRoutes } from "./routes/conflicts.ts";
+import { operationsRoutes } from "./routes/operations.ts";
+import { releaseRoutes } from "./routes/release.ts";
+import { VERSION } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
 
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -20,6 +25,12 @@ const retentionDays = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 90;
 })();
 const retentionMs = retentionDays * 24 * 60 * 60 * 1000;
+
+// --version flag
+if (process.argv.includes("--version") || process.argv.includes("-V")) {
+  console.log(`lamasync-server ${VERSION}`);
+  process.exit(0);
+}
 
 
 const app = new Elysia()
@@ -43,6 +54,8 @@ const app = new Elysia()
             description: "Job reporting and log queries",
           },
           { name: "Admin", description: "Destructive admin operations" },
+          { name: "Restic", description: "Restic snapshot and restore jobs" },
+          { name: "Conflicts", description: "Manual sync conflict queue" },
         ],
         components: {
           securitySchemes: {
@@ -58,7 +71,7 @@ const app = new Elysia()
     }),
   )
   .use(wsRoutes)
-  .use(authPlugin)
+  .use(getAuthPlugin())
   .use(healthRoutes)
   .use(hostsRoutes)
   .use(configRoutes)
@@ -67,11 +80,15 @@ const app = new Elysia()
   .use(reportRoutes)
   .use(sharesRoutes)
   .use(adminRoutes)
-  .listen({ port, hostname: "0.0.0.0" });
+  .use(resticRoutes)
+  .use(conflictsRoutes)
+  .use(operationsRoutes)
+  .use(releaseRoutes)
+   .listen({ port, hostname: "0.0.0.0" });
 
 export type App = typeof app;
 
-console.log(`LamaSync server listening on http://${app.server!.hostname}:${app.server!.port}`);
+console.log(`LamaSync server v${VERSION} listening on http://${app.server!.hostname}:${app.server!.port}`);
 console.log(`Swagger UI: http://${app.server!.hostname}:${app.server!.port}/swagger`);
 console.log(`WebSocket:  ws://${app.server!.hostname}:${app.server!.port}/api/v1/ws?apiKey=...`);
 
