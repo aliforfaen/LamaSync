@@ -111,11 +111,12 @@ CREATE TABLE folder_assignments (
 
 -- Dotfile manifests: which paths belong to which app
 CREATE TABLE dotfile_manifests (
-    id          TEXT PRIMARY KEY,
-    host_id     TEXT NOT NULL REFERENCES hosts(id),
-    app_name    TEXT NOT NULL,
-    paths       TEXT NOT NULL,        -- JSON array of paths
-    schedule    TEXT,                 -- cron expression
+    id            TEXT PRIMARY KEY,
+    host_id       TEXT NOT NULL,      -- hosts.id or '_global' for shared app definitions
+    app_name      TEXT NOT NULL,
+    paths         TEXT NOT NULL,      -- JSON array of paths
+    schedule      TEXT,               -- cron expression
+    instructions  TEXT,               -- setup notes shown during restore
     UNIQUE(host_id, app_name)
 );
 
@@ -126,7 +127,8 @@ CREATE TABLE dotfile_versions (
     timestamp     INTEGER NOT NULL,
     tarball_path  TEXT NOT NULL,        -- relative to /backups volume
     size_bytes    INTEGER,
-    checksum      TEXT                  -- sha256
+    checksum      TEXT,                 -- sha256
+    description   TEXT                  -- optional label, e.g. "before nvim rewrite"
 );
 
 -- Operation log (sync runs, backups, errors)
@@ -169,9 +171,13 @@ POST   /api/v1/register                        → new host self-registration
 POST   /api/v1/report                          → client submits operation result
 POST   /api/v1/report/health                   → client heartbeat + local stats
 
+GET    /api/v1/dotfiles/manifests              → list effective manifests (global + host overrides)
+POST   /api/v1/dotfiles/manifests              → create/update a manifest
+PUT    /api/v1/dotfiles/manifests/:id          → update a manifest
+DELETE /api/v1/dotfiles/manifests/:id          → delete a manifest and its versions
 GET    /api/v1/dotfiles/:app_name              → list available versions
 GET    /api/v1/dotfiles/:app_name/:version     → download tarball
-POST   /api/v1/dotfiles/:app_name              → upload new version (multipart)
+POST   /api/v1/dotfiles/:app_name              → upload new version (multipart; records sha256 checksum)
 DELETE /api/v1/dotfiles/:app_name/:version     → prune old version
 
 GET    /api/v1/folders                         → list all folders
@@ -187,8 +193,7 @@ POST   /api/v1/operations/release              → release sync lock
 GET    /api/v1/operations/locks                → list active locks
 GET    /api/v1/operations                      → list operation_log entries
 
-GET    /api/v1/templates                       → dotfile template packs
-POST   /api/v1/folders/from-template           → create folder + manifests from template
+
 
 GET    /api/v1/shares                          → NFS/SMB share catalog (env-driven)
 GET    /api/v1/release/latest                  → latest GitHub release info (server proxy)
@@ -297,24 +302,30 @@ script is a standalone `curl | bash` updater for clients.
 
 ## Dotfile Flow
 
+### Manifest model
+
+- Manifests are keyed by `(host_id, app_name)`. `host_id = "_global"` defines a
+  shared app (e.g. `opencode`) for every host. A host-specific manifest for the
+  same `app_name` overrides the global one, enabling per-machine subsets like
+  restoring only `~/.config/opencode/agents` on an existing client.
+- Manifests carry `paths` and optional `instructions` (setup notes shown in the
+  TUI after restore).
+
 ### Backup (client → server)
 
 ```
 TUI trigger / cron
        │
        ▼
-lamasyncd reads dotfile manifest for app (e.g., nvim)
+lamasyncd reads effective dotfile manifest for app (e.g., opencode)
        │
        ▼
-tar czf /tmp/lamasync-dotfile-nvim-20260712.tar.gz \
-    ~/.config/nvim ~/.local/share/nvim
+tar czf /tmp/lamasync-dotfile-opencode-<ts>.tar.gz \
+    ~/.config/opencode
        │
        ▼
-rclone copyto /tmp/lamasync-*.tar.gz \
-    lamasync-server:/backups/dotfiles/nvim/20260712_143022.tar.gz
-       │
-       ▼
-POST /api/v1/dotfiles/nvim  → server records version in DB
+POST /api/v1/dotfiles/opencode (multipart tarball)
+  → server stores file, computes sha256, records version in DB
        │
        ▼
 Cleanup temp tarball
@@ -323,23 +334,20 @@ Cleanup temp tarball
 ### Restore (server → client)
 
 ```
-TUI: "Restore dotfiles" → select app → select host → select version
+TUI: "Dotfiles"
        │
        ▼
-GET /api/v1/dotfiles/nvim/20260712_143022
+Setup (fresh install): restore latest version of every effective app to /
+  OR
+Select app → select version → preview file list
        │
        ▼
-lamasyncd downloads tarball, shows preview (file list)
+GET /api/v1/dotfiles/opencode/<version-id>
        │
        ▼
-User confirms → extract to original paths (or custom dir)
+Extract to original absolute paths (target = /) or a custom directory;
+optionally filter by subpath(s) (e.g. extract only agents/)
 ```
-
-### Template bootstrap (LAMA-121)
-
-`packages/server/templates/dotfiles.json` ships templates like `dev-node`,
-`dev-python`, `omp`. `POST /api/v1/folders/from-template` creates a folder
-plus one manifest and assignment per app in one call.
 
 ---
 

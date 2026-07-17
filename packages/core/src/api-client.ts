@@ -1,6 +1,7 @@
 import type {
   Conflict,
   ConflictResolution,
+  DotfileManifest,
   DotfileVersion,
   Folder,
   FolderAssignment,
@@ -18,27 +19,75 @@ import type {
 export class LamaSyncApiError extends Error {
   status: number;
   body: string;
+  code?: string;
   constructor(status: number, body: string, message?: string) {
-    super(message ?? `LamaSync API error ${status}: ${body}`);
+    let code: string | undefined;
+    if (message === undefined) {
+      try {
+        const parsed = JSON.parse(body);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          "error" in parsed &&
+          typeof parsed.error === "string"
+        ) {
+          code = parsed.error;
+        }
+      } catch {
+        // body is not JSON; leave code undefined.
+      }
+    }
+    super(
+      message ??
+        (code
+          ? `LamaSync API error ${status}: ${code}`
+          : `LamaSync API error ${status}: ${body}`),
+    );
     this.name = "LamaSyncApiError";
     this.status = status;
     this.body = body;
+    this.code = code;
   }
 }
 
 export interface LamaSyncApiClientOptions {
   fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  maxRetries?: number;
 }
 
 export class LamaSyncApiClient {
   readonly baseUrl: string;
   readonly apiKey: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
 
   constructor(baseUrl: string, apiKey: string, opts: LamaSyncApiClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.maxRetries = opts.maxRetries ?? 2;
+  }
+
+  private isRetriableError(error: unknown): boolean {
+    return (
+      error instanceof TypeError ||
+      (error instanceof Error &&
+        (error.name === "AbortError" || error.name === "TimeoutError"))
+    );
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+    return this.fetchImpl(url, {
+      ...init,
+      signal: init.signal ?? AbortSignal.timeout(this.timeoutMs),
+    });
   }
 
   private async request<T>(
@@ -51,21 +100,43 @@ export class LamaSyncApiClient {
       Authorization: `Bearer ${this.apiKey}`,
     };
     if (contentType) headers["Content-Type"] = contentType;
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: body ?? null,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new LamaSyncApiError(res.status, text);
+
+    const idempotent = method === "GET" || method === "HEAD" || method === "OPTIONS";
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      try {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}${path}`, {
+          method,
+          headers,
+          body: body ?? null,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          if (idempotent && res.status >= 500 && res.status < 600 && attempt < this.maxRetries) {
+            lastError = new LamaSyncApiError(res.status, text);
+            await this.delay(1_000 * 2 ** attempt);
+            continue;
+          }
+          throw new LamaSyncApiError(res.status, text);
+        }
+        if (res.status === 204) return undefined as unknown as T;
+        const ct = res.headers.get("content-type") ?? "";
+        if (ct.includes("application/json")) {
+          return (await res.json()) as T;
+        }
+        return (await res.text()) as unknown as T;
+      } catch (error) {
+        if (idempotent && attempt < this.maxRetries && this.isRetriableError(error)) {
+          lastError = error;
+          await this.delay(1_000 * 2 ** attempt);
+          continue;
+        }
+        throw error;
+      }
     }
-    if (res.status === 204) return undefined as unknown as T;
-    const ct = res.headers.get("content-type") ?? "";
-    if (ct.includes("application/json")) {
-      return (await res.json()) as T;
-    }
-    return (await res.text()) as unknown as T;
+
+    throw lastError ?? new Error("request retries exhausted");
   }
 
   // Health & config
@@ -172,6 +243,33 @@ export class LamaSyncApiClient {
   }
 
   // Dotfiles
+  listDotfileManifests(hostId?: string): Promise<DotfileManifest[]> {
+    const qs = hostId ? `?hostId=${encodeURIComponent(hostId)}` : "";
+    return this.request<DotfileManifest[]>("GET", `/api/v1/dotfiles/manifests${qs}`);
+  }
+
+  createDotfileManifest(body: Omit<DotfileManifest, "id">): Promise<DotfileManifest> {
+    return this.request<DotfileManifest>(
+      "POST",
+      "/api/v1/dotfiles/manifests",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  updateDotfileManifest(id: string, body: Partial<DotfileManifest>): Promise<DotfileManifest> {
+    return this.request<DotfileManifest>(
+      "PUT",
+      `/api/v1/dotfiles/manifests/${encodeURIComponent(id)}`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  deleteDotfileManifest(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/dotfiles/manifests/${encodeURIComponent(id)}`);
+  }
+
   listDotfileVersions(appName: string): Promise<DotfileVersion[]> {
     return this.request<DotfileVersion[]>(
       "GET",
@@ -182,12 +280,13 @@ export class LamaSyncApiClient {
   async uploadDotfile(
     appName: string,
     tarball: Blob,
-    opts: { description?: string } = {},
+    opts: { description?: string; hostId?: string } = {},
   ): Promise<DotfileVersion> {
     const form = new FormData();
     form.append("tarball", tarball, `${appName}.tar.gz`);
     if (opts.description) form.append("description", opts.description);
-    const res = await this.fetchImpl(
+    if (opts.hostId) form.append("hostId", opts.hostId);
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/dotfiles/${encodeURIComponent(appName)}`,
       {
         method: "POST",
@@ -202,7 +301,7 @@ export class LamaSyncApiClient {
     return (await res.json()) as DotfileVersion;
   }
   async downloadDotfile(appName: string, version: string): Promise<Blob> {
-    const res = await this.fetchImpl(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
       { headers: { Authorization: `Bearer ${this.apiKey}` } },
     );
@@ -241,7 +340,7 @@ export class LamaSyncApiClient {
 
   // Lock coordination
   async acquireLock(folderId: string, hostId: string): Promise<{ lockId: string; ttl: number; acquired: boolean } | { error: string; lockedBy: string; remainingSec: number }> {
-    const res = await this.fetchImpl(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/operations/acquire`,
       {
         method: "POST",
@@ -252,13 +351,13 @@ export class LamaSyncApiClient {
         body: JSON.stringify({ folderId, hostId }),
       },
     );
-    const body = await res.json();
-    if (!res.ok) throw new LamaSyncApiError(res.status, JSON.stringify(body));
-    return body;
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new LamaSyncApiError(res.status, text);
+    return JSON.parse(text);
   }
 
   async heartbeatLock(folderId: string, hostId: string, lockId?: string): Promise<{ ok: boolean; renewedAt: number }> {
-    const res = await this.fetchImpl(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/operations/heartbeat`,
       {
         method: "POST",
@@ -269,13 +368,13 @@ export class LamaSyncApiClient {
         body: JSON.stringify({ folderId, hostId, ...(lockId !== undefined ? { lockId } : {}) }),
       },
     );
-    const body = await res.json();
-    if (!res.ok) throw new LamaSyncApiError(res.status, JSON.stringify(body));
-    return body;
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new LamaSyncApiError(res.status, text);
+    return JSON.parse(text);
   }
 
   async releaseLock(folderId: string, hostId: string, status: string, summary?: string, lockId?: string): Promise<{ ok: boolean }> {
-    const res = await this.fetchImpl(
+    const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/operations/release`,
       {
         method: "POST",
@@ -286,9 +385,9 @@ export class LamaSyncApiClient {
         body: JSON.stringify({ folderId, hostId, status, ...(summary !== undefined ? { summary } : {}), ...(lockId !== undefined ? { lockId } : {}) }),
       },
     );
-    const body = await res.json();
-    if (!res.ok) throw new LamaSyncApiError(res.status, JSON.stringify(body));
-    return body;
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new LamaSyncApiError(res.status, text);
+    return JSON.parse(text);
   }
 
 
@@ -335,11 +434,17 @@ export class LamaSyncApiClient {
     );
   }
 
-  requestResticRestore(snapshotId: string, folderId: string, targetHostId: string, targetPath: string): Promise<ResticRestoreJob> {
+  requestResticRestore(
+    snapshotId: string,
+    folderId: string,
+    targetHostId: string,
+    targetPath: string,
+    include?: string[],
+  ): Promise<ResticRestoreJob> {
     return this.request<ResticRestoreJob>(
       "POST",
       "/api/v1/restic/restore",
-      JSON.stringify({ snapshotId, folderId, targetHostId, targetPath }),
+      JSON.stringify({ snapshotId, folderId, targetHostId, targetPath, include }),
       "application/json",
     );
   }

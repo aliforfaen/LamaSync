@@ -1,7 +1,7 @@
 // Tests for the rclone argv builder. Pure function — no subprocess, no DB.
 
 import { describe, expect, test } from "bun:test";
-import { buildRcloneCommand } from "./executor.ts";
+import { buildRcloneCommand, pickConflictAction } from "./executor.ts";
 
 describe("buildRcloneCommand", () => {
   test("sync emits bisync with resilient flags and workdir", () => {
@@ -137,5 +137,37 @@ describe("buildRcloneCommand", () => {
         excludeFilePath: null,
       }),
     ).toThrow(/unsupported folder type/);
+  });
+});
+
+describe("pickConflictAction", () => {
+  test("newer_wins picks local when local is newer", () => {
+    expect(pickConflictAction("newer_wins", 200, 100, "both")).toEqual({ kind: "local_wins" });
+  });
+
+  test("newer_wins picks remote when remote is newer", () => {
+    expect(pickConflictAction("newer_wins", 100, 200, "both")).toEqual({ kind: "remote_wins" });
+  });
+
+  test("newer_wins falls back to keep_both on equal mtimes", () => {
+    expect(pickConflictAction("newer_wins", 100, 100, "both")).toEqual({ kind: "keep_both" });
+  });
+
+  test("newer_wins falls back to keep_both when mtimes are missing", () => {
+    expect(pickConflictAction("newer_wins", undefined, undefined, "both")).toEqual({ kind: "keep_both" });
+  });
+
+  test("source_wins uses local for source and both roles", () => {
+    expect(pickConflictAction("source_wins", 100, 200, "source")).toEqual({ kind: "local_wins" });
+    expect(pickConflictAction("source_wins", 100, 200, "both")).toEqual({ kind: "local_wins" });
+  });
+
+  test("source_wins uses remote for target role", () => {
+    expect(pickConflictAction("source_wins", 200, 100, "target")).toEqual({ kind: "remote_wins" });
+  });
+
+  test("keep_both always keeps both", () => {
+    expect(pickConflictAction("keep_both", 200, 100, "source")).toEqual({ kind: "keep_both" });
+    expect(pickConflictAction("keep_both", 100, 200, "target")).toEqual({ kind: "keep_both" });
   });
 });

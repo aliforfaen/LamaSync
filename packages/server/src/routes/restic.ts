@@ -27,6 +27,7 @@ interface RestoreRow {
   folder_id: string;
   target_host_id: string;
   target_path: string;
+  include: string | null;
   status: string;
   created_at: number;
   resolved_at: number | null;
@@ -53,6 +54,7 @@ function rowToRestoreJob(r: RestoreRow): ResticRestoreJob {
     folderId: r.folder_id,
     targetHostId: r.target_host_id,
     targetPath: r.target_path,
+    include: parseJson(r.include, []),
     status: r.status as ResticRestoreJob["status"],
     createdAt: r.created_at,
     resolvedAt: r.resolved_at,
@@ -199,7 +201,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
         args.push(status);
       }
       const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-      const sql = `SELECT id, snapshot_id, folder_id, target_host_id, target_path, status, created_at, resolved_at, error
+      const sql = `SELECT id, snapshot_id, folder_id, target_host_id, target_path, include, status, created_at, resolved_at, error
                    FROM restic_restore_jobs
                    ${whereSql}
                    ORDER BY created_at DESC`;
@@ -224,23 +226,24 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/restic/restore",
     ({ body, set }) => {
-      const { snapshotId, folderId, targetHostId, targetPath } = body as {
+      const { snapshotId, folderId, targetHostId, targetPath, include } = body as {
         snapshotId: string;
         folderId: string;
         targetHostId: string;
         targetPath: string;
+        include?: string[];
       };
       const id = crypto.randomUUID();
       const now = Date.now();
       activeDb.run(
         `INSERT INTO restic_restore_jobs
-           (id, snapshot_id, folder_id, target_host_id, target_path, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, snapshotId, folderId, targetHostId, targetPath, "pending", now],
+           (id, snapshot_id, folder_id, target_host_id, target_path, include, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, snapshotId, folderId, targetHostId, targetPath, JSON.stringify(include ?? []), "pending", now],
       );
       const row = activeDb
         .query<RestoreRow, [string]>(
-          "SELECT id, snapshot_id, folder_id, target_host_id, target_path, status, created_at, resolved_at, error FROM restic_restore_jobs WHERE id = ?",
+          "SELECT id, snapshot_id, folder_id, target_host_id, target_path, include, status, created_at, resolved_at, error FROM restic_restore_jobs WHERE id = ?",
         )
         .get(id);
       if (!row) {
@@ -259,6 +262,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
         folderId: t.String(),
         targetHostId: t.String(),
         targetPath: t.String(),
+        include: t.Optional(t.Array(t.String())),
       }),
       detail: {
         summary: "Create a restic restore job for a target host",
@@ -279,7 +283,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
       };
       const existing = activeDb
         .query<RestoreRow, [string]>(
-          "SELECT id, snapshot_id, folder_id, target_host_id, target_path, status, created_at, resolved_at, error FROM restic_restore_jobs WHERE id = ?",
+          "SELECT id, snapshot_id, folder_id, target_host_id, target_path, include, status, created_at, resolved_at, error FROM restic_restore_jobs WHERE id = ?",
         )
         .get(params.id);
       if (!existing) {
@@ -293,7 +297,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
       );
       const row = activeDb
         .query<RestoreRow, [string]>(
-          "SELECT id, snapshot_id, folder_id, target_host_id, target_path, status, created_at, resolved_at, error FROM restic_restore_jobs WHERE id = ?",
+          "SELECT id, snapshot_id, folder_id, target_host_id, target_path, include, status, created_at, resolved_at, error FROM restic_restore_jobs WHERE id = ?",
         )
         .get(params.id);
       const job = rowToRestoreJob(row!);

@@ -22,6 +22,11 @@ export type ConflictStatus = "pending" | "resolved";
 
 export type ConflictResolution = "local" | "remote" | "both";
 
+// Structured error envelope returned by API routes.
+export interface ErrorResponse {
+  error: string;
+}
+
 // rclone VFS cache profiles for mount type
 export type CacheProfile = "normal" | "media" | "minimal";
 
@@ -98,6 +103,7 @@ export interface DotfileManifest {
   appName: string;
   paths: string[];
   schedule?: string | null;
+  instructions?: string | null;
 }
 
 export interface DotfileVersion {
@@ -140,6 +146,7 @@ export interface ResticRestoreJob {
   folderId: string;
   targetHostId: string;
   targetPath: string;
+  include?: string[] | null;
   status: "pending" | "running" | "done" | "failed";
   createdAt: number;
   resolvedAt?: number | null;

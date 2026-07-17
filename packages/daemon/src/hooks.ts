@@ -6,6 +6,7 @@ export interface HookResult {
   stdout: string;
   stderr: string;
   durationMs: number;
+  timedOut: boolean;
 }
 
 export interface HookContext {
@@ -13,6 +14,8 @@ export interface HookContext {
   localPath: string;
   op: "pre" | "post";
 }
+
+const DEFAULT_HOOK_TIMEOUT_MS = 300_000;
 
 /**
  * Run a user-supplied shell command and capture its output. Empty/null commands
@@ -22,9 +25,10 @@ export interface HookContext {
 export async function runHook(
   cmd: string | null | undefined,
   ctx: HookContext,
+  timeoutMs: number = DEFAULT_HOOK_TIMEOUT_MS,
 ): Promise<HookResult> {
   if (!cmd || cmd.trim().length === 0) {
-    return { exitCode: 0, stdout: "", stderr: "", durationMs: 0 };
+    return { exitCode: 0, stdout: "", stderr: "", durationMs: 0, timedOut: false };
   }
   const start = Date.now();
   const proc = Bun.spawn(["sh", "-c", cmd], {
@@ -38,15 +42,26 @@ export async function runHook(
       LAMASYNC_HOOK_PHASE: ctx.op,
     },
   });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      proc.kill();
+    } catch {
+      // ignore
+    }
+  }, timeoutMs);
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
+  clearTimeout(timer);
   return {
     exitCode,
     stdout,
     stderr,
     durationMs: Date.now() - start,
+    timedOut,
   };
 }

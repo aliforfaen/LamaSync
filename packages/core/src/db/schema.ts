@@ -47,11 +47,12 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
 );
 
 CREATE TABLE IF NOT EXISTS dotfile_manifests (
-    id          TEXT PRIMARY KEY,
-    host_id     TEXT NOT NULL REFERENCES hosts(id),
-    app_name    TEXT NOT NULL,
-    paths       TEXT NOT NULL,
-    schedule    TEXT,
+    id            TEXT PRIMARY KEY,
+    host_id       TEXT NOT NULL REFERENCES hosts(id),
+    app_name      TEXT NOT NULL,
+    paths         TEXT NOT NULL,
+    schedule      TEXT,
+    instructions  TEXT,
     UNIQUE(host_id, app_name)
 );
 
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS restic_restore_jobs (
     folder_id     TEXT NOT NULL REFERENCES folders(id),
     target_host_id TEXT NOT NULL,
     target_path   TEXT NOT NULL,
+    include       TEXT, -- JSON array
     status        TEXT NOT NULL DEFAULT 'pending',
     created_at    INTEGER NOT NULL,
     resolved_at   INTEGER,
@@ -166,6 +168,8 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE hosts ADD COLUMN lan_ip TEXT",
   "ALTER TABLE folder_assignments ADD COLUMN restic_repository TEXT",
   "ALTER TABLE folder_assignments ADD COLUMN restic_password TEXT",
+  "ALTER TABLE dotfile_manifests ADD COLUMN instructions TEXT",
+  "ALTER TABLE restic_restore_jobs ADD COLUMN include TEXT",
   "CREATE INDEX IF NOT EXISTS idx_conflicts_host_folder ON conflicts(host_id, folder_id, status)",
   "ALTER TABLE folders ADD COLUMN git_provider TEXT",
   "ALTER TABLE folders ADD COLUMN git_remote TEXT",

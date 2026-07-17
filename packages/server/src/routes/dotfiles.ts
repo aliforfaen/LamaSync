@@ -1,10 +1,17 @@
 import { Elysia, t } from "elysia";
 import { mkdirSync, statSync, unlinkSync, existsSync } from "fs";
 import { join } from "path";
-import { db } from "../db.ts";
-import type { DotfileVersion } from "@lamasync/core";
+import { db as defaultDb } from "../db.ts";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
+import type { DotfileManifest, DotfileVersion } from "@lamasync/core";
 
 const BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR || "/backups";
+const GLOBAL_HOST_ID = "_global";
+
+let activeDb: Database = defaultDb;
+export function __setDb(next: Database): void {
+  activeDb = next;
+}
 
 interface VersionRow {
   id: string;
@@ -14,6 +21,15 @@ interface VersionRow {
   size_bytes: number | null;
   checksum: string | null;
   description: string | null;
+}
+
+interface ManifestRow {
+  id: string;
+  host_id: string;
+  app_name: string;
+  paths: string;
+  schedule: string | null;
+  instructions: string | null;
 }
 
 function rowToVersion(r: VersionRow): DotfileVersion {
@@ -28,12 +44,40 @@ function rowToVersion(r: VersionRow): DotfileVersion {
   };
 }
 
-/** Find a manifest for this (host, appName) or create one with no paths. */
-function ensureManifest(appName: string): string | null {
-  // We need a host_id. We support a default host id "_global" for app-scoped versions
-  // that aren't tied to a specific host. Real per-host manifests are inserted elsewhere.
-  const hostId = "_global";
-  const existing = db
+function rowToManifest(r: ManifestRow): DotfileManifest {
+  let paths: string[] = [];
+  try {
+    paths = JSON.parse(r.paths);
+  } catch {
+    paths = [];
+  }
+  return {
+    id: r.id,
+    hostId: r.host_id,
+    appName: r.app_name,
+    paths,
+    schedule: r.schedule,
+    instructions: r.instructions,
+  };
+}
+
+function parsePaths(input: unknown): string[] {
+  if (Array.isArray(input)) return input.filter((p): p is string => typeof p === "string");
+  if (typeof input === "string" && input.length > 0) return [input];
+  return [];
+}
+
+async function sha256Hex(blob: Blob): Promise<string> {
+  const buf = await blob.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Find a manifest for this (host, appName) or create one with empty paths. */
+function ensureManifest(appName: string, hostId: string): string | null {
+  const existing = activeDb
     .query<{ id: string }, [string, string]>(
       "SELECT id FROM dotfile_manifests WHERE host_id = ? AND app_name = ?",
     )
@@ -41,7 +85,7 @@ function ensureManifest(appName: string): string | null {
   if (existing) return existing.id;
   const id = crypto.randomUUID();
   try {
-    db.run(
+    activeDb.run(
       "INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES (?, ?, ?, ?)",
       [id, hostId, appName, JSON.stringify([])],
     );
@@ -53,13 +97,181 @@ function ensureManifest(appName: string): string | null {
 
 export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
+    "/dotfiles/manifests",
+    ({ query }) => {
+      const hostId = (query as { hostId?: string }).hostId;
+      const globalRows = activeDb
+        .query<ManifestRow, [string]>(
+          "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE host_id = ?",
+        )
+        .all(GLOBAL_HOST_ID);
+      const byApp = new Map(globalRows.map((r) => [r.app_name, r]));
+      if (hostId && hostId !== GLOBAL_HOST_ID) {
+        const hostRows = activeDb
+          .query<ManifestRow, [string]>(
+            "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE host_id = ?",
+          )
+          .all(hostId);
+        for (const r of hostRows) {
+          byApp.set(r.app_name, r);
+        }
+      }
+      return Array.from(byApp.values()).map(rowToManifest);
+    },
+    {
+      query: t.Object({
+        hostId: t.Optional(t.String()),
+      }),
+      detail: {
+        summary: "List effective dotfile manifests for a host (global + overrides)",
+        tags: ["Dotfiles"],
+        responses: {
+          200: { description: "Manifest list" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/dotfiles/manifests",
+    ({ body, set }) => {
+      const hostId = body.hostId ?? GLOBAL_HOST_ID;
+      const id = crypto.randomUUID();
+      const paths = parsePaths(body.paths);
+      try {
+        activeDb.run(
+          "INSERT INTO dotfile_manifests (id, host_id, app_name, paths, schedule, instructions) VALUES (?, ?, ?, ?, ?, ?)",
+          [id, hostId, body.appName, JSON.stringify(paths), body.schedule ?? null, body.instructions ?? null],
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set.status = 409;
+        return { error: `Failed to create manifest: ${message}` };
+      }
+      const row = activeDb
+        .query<ManifestRow, [string]>(
+          "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE id = ?",
+        )
+        .get(id);
+      set.status = 201;
+      return rowToManifest(row!);
+    },
+    {
+      body: t.Object({
+        appName: t.String(),
+        paths: t.Union([t.Array(t.String()), t.String()]),
+        schedule: t.Optional(t.Union([t.String(), t.Null()])),
+        instructions: t.Optional(t.Union([t.String(), t.Null()])),
+        hostId: t.Optional(t.String()),
+      }),
+      detail: {
+        summary: "Create a dotfile manifest",
+        tags: ["Dotfiles"],
+        responses: {
+          201: { description: "Manifest created" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .put(
+    "/dotfiles/manifests/:id",
+    ({ params, body, set }) => {
+      const existing = activeDb
+        .query<{ id: string }, [string]>("SELECT id FROM dotfile_manifests WHERE id = ?")
+        .get(params.id);
+      if (!existing) {
+        set.status = 404;
+        return { error: "Manifest not found" };
+      }
+      const updates: string[] = [];
+      const values: SQLQueryBindings[] = [];
+      if (body.appName !== undefined) {
+        updates.push("app_name = ?");
+        values.push(body.appName);
+      }
+      if (body.paths !== undefined) {
+        updates.push("paths = ?");
+        values.push(JSON.stringify(parsePaths(body.paths)));
+      }
+      if ("schedule" in body) {
+        updates.push("schedule = ?");
+        values.push(body.schedule ?? null);
+      }
+      if ("instructions" in body) {
+        updates.push("instructions = ?");
+        values.push(body.instructions ?? null);
+      }
+      if (updates.length === 0) {
+        set.status = 400;
+        return { error: "No fields to update" };
+      }
+      activeDb.run(
+        `UPDATE dotfile_manifests SET ${updates.join(", ")} WHERE id = ?`,
+        [...values, params.id],
+      );
+      const row = activeDb
+        .query<ManifestRow, [string]>(
+          "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE id = ?",
+        )
+        .get(params.id);
+      return rowToManifest(row!);
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({
+        appName: t.Optional(t.String()),
+        paths: t.Optional(t.Union([t.Array(t.String()), t.String()])),
+        schedule: t.Optional(t.Union([t.String(), t.Null()])),
+        instructions: t.Optional(t.Union([t.String(), t.Null()])),
+      }),
+      detail: {
+        summary: "Update a dotfile manifest",
+        tags: ["Dotfiles"],
+        responses: {
+          200: { description: "Manifest updated" },
+          404: { description: "Not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .delete(
+    "/dotfiles/manifests/:id",
+    ({ params, set }) => {
+      const existing = activeDb
+        .query<{ id: string }, [string]>("SELECT id FROM dotfile_manifests WHERE id = ?")
+        .get(params.id);
+      if (!existing) {
+        set.status = 404;
+        return { error: "Manifest not found" };
+      }
+      activeDb.run("DELETE FROM dotfile_versions WHERE manifest_id = ?", [params.id]);
+      activeDb.run("DELETE FROM dotfile_manifests WHERE id = ?", [params.id]);
+      set.status = 204;
+      return null;
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      detail: {
+        summary: "Delete a dotfile manifest and its versions",
+        tags: ["Dotfiles"],
+        responses: {
+          204: { description: "Manifest removed" },
+          404: { description: "Not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .get(
     "/dotfiles",
     ({ query }) => {
       const hostId = (query as { hostId?: string }).hostId;
       if (!hostId) {
         return [];
       }
-      const rows = db
+      const rows = activeDb
         .query<VersionRow, [string]>(
           `SELECT v.id, v.manifest_id, v.timestamp, v.tarball_path, v.size_bytes, v.checksum, v.description
            FROM dotfile_versions v
@@ -86,7 +298,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/dotfiles/:appName",
     ({ params }) => {
-      const rows = db
+      const rows = activeDb
         .query<VersionRow, [string]>(
           `SELECT v.id, v.manifest_id, v.timestamp, v.tarball_path, v.size_bytes, v.checksum, v.description
            FROM dotfile_versions v
@@ -112,12 +324,15 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/dotfiles/:appName",
     async ({ params, request, set }) => {
-      const manifestId = ensureManifest(params.appName);
+      const form = await request.formData();
+      const hostIdRaw = form.get("hostId");
+      const hostId =
+        typeof hostIdRaw === "string" && hostIdRaw.length > 0 ? hostIdRaw : GLOBAL_HOST_ID;
+      const manifestId = ensureManifest(params.appName, hostId);
       if (!manifestId) {
         set.status = 500;
         return { error: "Failed to ensure manifest" };
       }
-      const form = await request.formData();
       const file = form.get("tarball");
       if (!(file instanceof File)) {
         set.status = 400;
@@ -140,16 +355,17 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
 
       const buf = Buffer.from(await file.arrayBuffer());
       await Bun.write(fullPath, buf);
+      const checksum = await sha256Hex(file);
 
       const id = crypto.randomUUID();
-      db.run(
+      activeDb.run(
         `INSERT INTO dotfile_versions
-           (id, manifest_id, timestamp, tarball_path, size_bytes, description)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [id, manifestId, timestamp, relPath, buf.length, description],
+           (id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, manifestId, timestamp, relPath, buf.length, checksum, description],
       );
 
-      const row = db
+      const row = activeDb
         .query<VersionRow, [string]>(
           "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description FROM dotfile_versions WHERE id = ?",
         )
@@ -174,7 +390,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/dotfiles/:appName/:version",
     ({ params, set }) => {
-      const row = db
+      const row = activeDb
         .query<VersionRow, [string]>(
           "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description FROM dotfile_versions WHERE id = ?",
         )
@@ -210,7 +426,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .delete(
     "/dotfiles/:appName/:version",
     ({ params, set }) => {
-      const row = db
+      const row = activeDb
         .query<VersionRow, [string]>(
           "SELECT id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description FROM dotfile_versions WHERE id = ?",
         )
@@ -219,7 +435,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Version not found" };
       }
-      db.run("DELETE FROM dotfile_versions WHERE id = ?", [params.version]);
+      activeDb.run("DELETE FROM dotfile_versions WHERE id = ?", [params.version]);
       const fullPath = join(BACKUP_DIR, row.tarball_path);
       if (existsSync(fullPath)) {
         try {

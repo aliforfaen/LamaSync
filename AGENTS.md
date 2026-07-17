@@ -45,7 +45,7 @@ lamasync/                     # Bun workspace root
           hosts.ts            # POST /register, POST /report/health
           config.ts           # GET /config/:hostId (assignments + rclone + peers)
           folders.ts          # CRUD + assign/unassign + templates
-          dotfiles.ts         # upload (multipart), list, download, delete
+          dotfiles.ts         # manifest CRUD, upload (multipart), list, download, delete
           operations.ts       # GET /operations (filterable, newest-first)
           report.ts           # POST /report (log + schedule_state update)
           shares.ts           # GET /api/v1/shares (NFS shares)
@@ -65,10 +65,11 @@ lamasync/                     # Bun workspace root
         mounts.ts             # mount lifecycle: start/stop/health/backoff
         rclone.ts             # rclone config generation helpers
         ignore.ts             # .lamasyncignore / .lamasyncmountignore parsing
-        hooks.ts              # pre/post sync shell hooks
+        hooks.ts              # pre/post sync shell hooks (with timeout)
         lan-peer.ts           # LAN IP detection + peer SFTP discovery
-        lock.ts               # per-folder operation locking
+        lock.ts               # server-side lock coordination (contention vs unreachable, same-host overlap guard, abort on lock loss)
         config-cache.ts       # cached server config for offline operation
+        report-queue.ts       # disk-backed queue for failed operation reports
         self-update.ts        # GitHub release check + binary replacement
         self-update.test.ts   # self-update unit tests
         systemd.ts            # systemd unit generation helpers
@@ -118,7 +119,7 @@ lamasync/                     # Bun workspace root
 | Agent skill (`lamasync-server.md`) | done (+ installed) |
 | Docker: `Dockerfile.server`, `docker-compose.yml` | done |
 | `bun run build` → standalone binaries | working |
-| Unit tests (core + server + daemon + self-update + TUI + executor + offset) | **67 passing** (11 files) |
+| Unit tests (core + server + daemon + self-update + TUI + executor + offset) | **101 passing** (17 files) |
 | End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI) | done |
 
 ### Implemented features (LAMA-114..132)
@@ -132,7 +133,9 @@ lamasync/                     # Bun workspace root
 | LAMA-118 | WebSocket auth via subprotocol | `server/src/ws.ts`, `server/src/auth.ts`, `tui/src/views/fleet.ts` |
 | LAMA-119 | Dry-run mode | `daemon/src/executor.ts` |
 | LAMA-120 | `"git"` folder type | `daemon/src/executor.ts` |
-| LAMA-121 | Dotfile template packs | `server/src/routes/folders.ts`, `core/src/types.ts` |
+| LAMA-104 | Error handling (core hardening) | `server/src/routes/report.ts`, `core/src/api-client.ts`, `server/src/index.ts`, `daemon/src/lock.ts`, `daemon/src/report-queue.ts`, `daemon/src/hooks.ts` |
+| LAMA-162 | Automatic conflict strategies (`newer_wins`, `source_wins`, `keep_both`) | `core/src/types.ts`, `daemon/src/executor.ts` |
+| LAMA-109 | App-specific "backup" dotfile system | `core/src/types.ts`, `core/src/db/schema.ts`, `server/src/routes/dotfiles.ts`, `server/src/routes/config.ts`, `daemon/src/executor.ts`, `tui/src/views/dotfiles.ts` |
 | LAMA-123 | LAN peer sync | `daemon/src/lan-peer.ts`, `server/src/routes/config.ts` |
 | LAMA-124 | Encryption-at-rest | `server/src/routes/folders.ts`, `server/src/routes/config.ts` |
 | LAMA-125 | `ARCHITECTURE.md` rewrite | `ARCHITECTURE.md` |

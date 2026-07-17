@@ -56,12 +56,14 @@ Missing or wrong key → `401 Unauthorized`.
 | DELETE | `/api/v1/folders/:id`                             | Delete folder + cascade its assignments          |
 | POST   | `/api/v1/folders/:id/assign`                      | Assign folder to a host                          |
 | DELETE | `/api/v1/folders/:id/assign/:hostId`              | Unassign                                         |
+| GET    | `/api/v1/dotfiles/manifests`                      | List effective manifests (global + host override)|
+| POST   | `/api/v1/dotfiles/manifests`                      | Create a dotfile manifest                        |
+| PUT    | `/api/v1/dotfiles/manifests/:id`                  | Update a manifest                                |
+| DELETE | `/api/v1/dotfiles/manifests/:id`                  | Delete a manifest and its versions               |
 | GET    | `/api/v1/dotfiles/:appName`                       | List versions of a dotfile app                   |
 | POST   | `/api/v1/dotfiles/:appName`                       | Upload a new version (multipart `tarball` field) |
 | GET    | `/api/v1/dotfiles/:appName/:version`              | Download a tarball                               |
 | DELETE | `/api/v1/dotfiles/:appName/:version`              | Delete a version (DB row + file)                 |
-| GET    | `/api/v1/templates`                               | List dotfile template packs                      |
-| POST   | `/api/v1/folders/from-template`                   | Create a folder from a template pack             |
 | GET    | `/api/v1/shares`                                  | List configured NFS/SMB shares                   |
 | POST   | `/api/v1/admin/prune`                             | Manually trim operation_log by age               |
 | GET    | `/api/v1/operations`                              | Query the operation log                          |
@@ -82,7 +84,7 @@ Missing or wrong key → `401 Unauthorized`.
 | Param   | Type   | Default | Notes                                          |
 |---------|--------|---------|------------------------------------------------|
 | `hostId`| string | -       | Filter to a single host                        |
-| `status`| string | -       | One of `started`, `success`, `failed`, `conflict` |
+| `status`| string | -       | One of `started`, `success`, `failed`, `conflict`, `retry`, `recovery` |
 | `limit` | int    | 50      | Max 500                                        |
 
 Results are ordered by `timestamp DESC` (newest first).
@@ -153,22 +155,35 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
 
 `type` must be one of: `sync`, `mount`, `backup`, `dotfile`, `git`.
 
-### Upload / list / download a dotfile version
+### Define, upload, and restore app-specific dotfiles
 
 ```bash
-# Upload (multipart, field name = "tarball")
+# 1. Define the app (global definition, visible to all hosts)
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
-  -F "tarball=@/path/to/nvim-2026-07-12.tar.gz" \
-  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/nvim
+  -H "Content-Type: application/json" \
+  -d '{"appName":"opencode","paths":["~/.config/opencode"],"instructions":"Restart OpenCode after restore."}' \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/manifests
 
-# List versions
+# 2. Override a single host to back up only a subdirectory
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
-  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/nvim
+  -H "Content-Type: application/json" \
+  -d '{"appName":"opencode","hostId":"alpha","paths":["~/.config/opencode/agents"]}' \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/manifests
 
-# Download a specific version (the {version} is the version id, e.g. UUID)
+# 3. Upload a new version (multipart, field name = "tarball")
+# Optional: "hostId" field to target a host-specific manifest (default is global).
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
-  -o nvim.tar.gz \
-  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/nvim/<version-id>
+  -F "tarball=@/path/to/opencode-2026-07-12.tar.gz" \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/opencode
+
+# 4. List versions
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/opencode
+
+# 5. Download a specific version (the {version} is the version id, e.g. UUID)
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  -o opencode.tar.gz \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/opencode/<version-id>
 ```
 
 ### Open the WebSocket fleet stream
@@ -195,10 +210,11 @@ issuing a write. The high-level shapes are:
 - `Host { id, hostname, tailnetIp?, lastSeen?, status }`
 - `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword? }`
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
-- `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }`
+- `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }` (`status` includes `retry`, `recovery`)
+- `DotfileManifest { id, hostId, appName, paths[], schedule?, instructions? }`
 - `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum?, description? }`
 - `ResticSnapshot { id, folderId, hostId, snapshotId, timestamp, paths[], sizeBytes?, tags? }`
-- `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, status, createdAt, resolvedAt?, error? }`
+- `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
 
 All `?` fields are nullable. Timestamps are milliseconds since epoch

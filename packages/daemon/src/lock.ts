@@ -1,4 +1,4 @@
-import type { LamaSyncApiClient } from "@lamasync/core";
+import { LamaSyncApiClient, LamaSyncApiError } from "@lamasync/core";
 
 export interface LockHandle {
   folderId: string;
@@ -7,7 +7,19 @@ export interface LockHandle {
   acquiredAt: number;
 }
 
+export type LockAcquireResult =
+  | { ok: true; handle: LockHandle }
+  | { ok: false; reason: "contended"; lockedBy: string; remainingSec: number }
+  | { ok: false; reason: "unreachable" };
+
+export type LockHeartbeatResult = "ok" | "lost" | "unknown";
+
 const activeLocks = new Map<string, LockHandle>();
+
+/** Test seam: clear in-process lock state between tests. */
+export function __clearActiveLocks(): void {
+  activeLocks.clear();
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -15,54 +27,57 @@ function errorMessage(error: unknown): string {
 
 function conflictDetails(error: unknown): {
   lockedBy: string;
-  remainingSec: number | string;
+  remainingSec: number;
 } | null {
-  if (
-    typeof error !== "object" ||
-    error === null ||
-    !("status" in error) ||
-    error.status !== 409
-  ) {
+  if (!(error instanceof LamaSyncApiError) || error.status !== 409) {
     return null;
   }
-
-  let body: unknown = "body" in error ? error.body : undefined;
-  if (typeof body === "string") {
-    try {
-      body = JSON.parse(body);
-    } catch {
-      body = undefined;
+  try {
+    const body = JSON.parse(error.body) as unknown;
+    if (typeof body === "object" && body !== null) {
+      const lockedBy =
+        "lockedBy" in body && typeof body.lockedBy === "string"
+          ? body.lockedBy
+          : "unknown";
+      const remainingSec =
+        "remainingSec" in body && typeof body.remainingSec === "number"
+          ? body.remainingSec
+          : 0;
+      return { lockedBy, remainingSec };
     }
+  } catch {
+    // ignore parse errors
   }
-
-  if (typeof body !== "object" || body === null) {
-    return { lockedBy: "unknown", remainingSec: "unknown" };
-  }
-
-  const lockedBy =
-    "lockedBy" in body && typeof body.lockedBy === "string"
-      ? body.lockedBy
-      : "unknown";
-  const remainingSec =
-    "remainingSec" in body && typeof body.remainingSec === "number"
-      ? body.remainingSec
-      : "unknown";
-
-  return { lockedBy, remainingSec };
+  return null;
 }
 
 export async function acquireLock(
   client: LamaSyncApiClient,
   folderId: string,
   hostId: string,
-): Promise<LockHandle | null> {
+): Promise<LockAcquireResult> {
+  // Guard against overlapping sync attempts on the same daemon. The server
+  // lock also prevents cross-host overlap, but the same host re-acquires
+  // silently, so we need an in-process guard too.
+  if (activeLocks.has(folderId)) {
+    return {
+      ok: false,
+      reason: "contended",
+      lockedBy: hostId,
+      remainingSec: 0,
+    };
+  }
+
   try {
     const result = await client.acquireLock(folderId, hostId);
     if (!("lockId" in result)) {
-      console.warn(
-        `[lock] folder=${folderId} locked by ${result.lockedBy}; remaining=${result.remainingSec}s`,
-      );
-      return null;
+      // Should not happen for 200 responses, but handle defensively.
+      return {
+        ok: false,
+        reason: "contended",
+        lockedBy: "unknown",
+        remainingSec: 0,
+      };
     }
 
     const handle: LockHandle = {
@@ -72,20 +87,19 @@ export async function acquireLock(
       acquiredAt: Date.now(),
     };
     activeLocks.set(folderId, handle);
-    return handle;
+    return { ok: true, handle };
   } catch (error) {
     const conflict = conflictDetails(error);
     if (conflict) {
-      console.warn(
-        `[lock] folder=${folderId} locked by ${conflict.lockedBy}; remaining=${conflict.remainingSec}s`,
-      );
-      return null;
+      return {
+        ok: false,
+        reason: "contended",
+        lockedBy: conflict.lockedBy,
+        remainingSec: conflict.remainingSec,
+      };
     }
 
-    console.error(
-      `[lock] failed to acquire folder=${folderId}: ${errorMessage(error)}`,
-    );
-    return null;
+    return { ok: false, reason: "unreachable" };
   }
 }
 
@@ -94,15 +108,17 @@ export async function heartbeatLock(
   folderId: string,
   hostId: string,
   handle?: LockHandle,
-): Promise<boolean> {
+): Promise<LockHeartbeatResult> {
   try {
     const result = await client.heartbeatLock(folderId, hostId, handle?.lockId);
-    return result.ok;
+    return result.ok ? "ok" : "unknown";
   } catch (error) {
-    console.error(
-      `[lock] heartbeat failed folder=${folderId}: ${errorMessage(error)}`,
-    );
-    return false;
+    if (error instanceof LamaSyncApiError && (error.status === 404 || error.status === 409)) {
+      // no_active_lock, lock_expired, lock_held_by_other, or lock_id_mismatch
+      // all mean our lock is gone and we must stop writing.
+      return "lost";
+    }
+    return "unknown";
   }
 }
 
@@ -124,6 +140,7 @@ export async function releaseLock(
     activeLocks.delete(folderId);
   }
 }
+
 export async function releaseStaleLocks(
   client: LamaSyncApiClient,
   hostId: string,

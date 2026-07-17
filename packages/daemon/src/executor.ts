@@ -1,7 +1,7 @@
 import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
-import type { Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
+import type { ConflictStrategy, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
@@ -15,13 +15,15 @@ export interface ExecuteOptions {
   hostId: string;
   configPath: string;
   dryRun?: boolean;
+  signal?: AbortSignal;
 }
 
 interface TransferStats {
   files: number; bytes: number; errors: number; checks: number; transfers: number;
 }
 interface CommandResult {
-  exitCode: number; timedOut: boolean; stats: TransferStats;
+  exitCode: number; timedOut: boolean; aborted: boolean; abortReason?: string;
+  stats: TransferStats;
   stdoutTail: string; stderrTail: string; durationMs: number;
   wouldCopy: string[]; wouldDelete: string[]; wouldMkdir: string[];
 }
@@ -151,7 +153,7 @@ function parseResticSnapshotId(stdout: string): string | undefined {
 
 export async function executeResticRestore(
   assignment: FolderAssignment,
-  job: { snapshotId: string; targetPath: string },
+  job: { snapshotId: string; targetPath: string; include?: string[] | null },
   timeoutSec = DEFAULT_TIMEOUT_SEC,
 ): Promise<{ ok: boolean; error?: string; durationMs: number }> {
   const repo = assignment.resticRepository;
@@ -165,7 +167,7 @@ export async function executeResticRestore(
     if (!init.ok) {
       return { ok: false, error: `restic init failed: ${init.error}`, durationMs: 0 };
     }
-    return await runResticRestore(repo, passwordFile.path, job.snapshotId, job.targetPath, timeoutSec);
+    return await runResticRestore(repo, passwordFile.path, job.snapshotId, job.targetPath, job.include ?? undefined, timeoutSec);
   } finally {
     passwordFile.cleanup();
   }
@@ -176,14 +178,18 @@ async function runResticRestore(
   passwordFile: string,
   snapshotId: string,
   target: string,
+  include: string[] | undefined,
   timeoutSec: number,
 ): Promise<{ ok: boolean; error?: string; durationMs: number }> {
   const t0 = Date.now();
   mkdirSync(target, { recursive: true });
-  const proc = Bun.spawn(
-    ["restic", "restore", snapshotId, "--repo", repo, "--password-file", passwordFile, "--target", target, "--verify"],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const args = ["restic", "restore", snapshotId, "--repo", repo, "--password-file", passwordFile, "--target", target, "--verify"];
+  if (include && include.length > 0) {
+    for (const pattern of include) {
+      args.push("--include", pattern);
+    }
+  }
+  const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, timeoutSec * 1000);
   const stderr = await new Response(proc.stderr).text();
@@ -284,6 +290,80 @@ async function applyResolvedConflicts(
     }
   }
   return { applied, errors };
+}
+
+async function rcloneCopyto(src: string, dst: string, configPath: string): Promise<void> {
+  const proc = Bun.spawn(["rclone", "copyto", src, dst, "--config", configPath, "-v"], { stdout: "pipe", stderr: "pipe" });
+  const stderr = await new Response(proc.stderr).text();
+  const exit = await proc.exited;
+  if (exit !== 0) throw new Error(stderr.slice(-500));
+}
+
+export type ConflictAction =
+  | { kind: "local_wins" }
+  | { kind: "remote_wins" }
+  | { kind: "keep_both" };
+
+export function pickConflictAction(
+  strategy: ConflictStrategy,
+  localMtime: number | undefined,
+  remoteMtime: number | undefined,
+  role: string,
+): ConflictAction {
+  if (strategy === "source_wins") {
+    // "target" means the remote side is the designated source of truth;
+    // otherwise the local side is treated as source ("source" or "both").
+    return role === "target" ? { kind: "remote_wins" } : { kind: "local_wins" };
+  }
+  if (strategy === "keep_both") {
+    return { kind: "keep_both" };
+  }
+  if (strategy === "newer_wins") {
+    if (localMtime !== undefined && remoteMtime !== undefined) {
+      if (localMtime > remoteMtime) return { kind: "local_wins" };
+      if (remoteMtime > localMtime) return { kind: "remote_wins" };
+    }
+    // No clear winner (equal or missing mtimes): keep both to avoid data loss.
+    return { kind: "keep_both" };
+  }
+  return { kind: "keep_both" };
+}
+
+async function applyAutomaticConflicts(
+  conflicts: ParsedConflict[],
+  strategy: ConflictStrategy,
+  localPath: string,
+  remotePath: string,
+  role: string,
+  configPath: string,
+): Promise<{ resolved: number; errors: string[]; unresolved: ParsedConflict[] }> {
+  const errors: string[] = [];
+  const unresolved: ParsedConflict[] = [];
+  let resolved = 0;
+  for (const c of conflicts) {
+    const localFile = join(localPath, c.path);
+    const remoteFile = `${remotePath}/${c.path}`;
+    try {
+      const action = pickConflictAction(strategy, c.localMtime, c.remoteMtime, role);
+      if (action.kind === "local_wins") {
+        await rcloneCopyto(localFile, remoteFile, configPath);
+      } else if (action.kind === "remote_wins") {
+        await rcloneCopyto(remoteFile, localFile, configPath);
+      } else if (action.kind === "keep_both") {
+        if (existsSync(localFile)) {
+          const suffix = `.conflict-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+          renameSync(localFile, `${localFile}${suffix}`);
+        }
+        await rcloneCopyto(remoteFile, localFile, configPath);
+      }
+      resolved += 1;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${c.path}: ${msg}`);
+      unresolved.push(c);
+    }
+  }
+  return { resolved, errors, unresolved };
 }
 
 // ---------------------------------------------------------------------------
@@ -432,18 +512,18 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         }
       }
       try {
-        runResult = await runCommand(command, timeoutSec);
+        runResult = await runCommand(command, timeoutSec, opts.signal);
       } catch (err) {
         return report(hostId, folder.id, folder.type, "failed", start, { summary: `executor error: ${err instanceof Error ? err.message : String(err)}`, details: { attempt, error: String(err) } });
       }
-      if (folder.type === "sync" && hasBisyncCorruption(runResult.stderrTail)) {
+      if (folder.type === "sync" && !runResult.aborted && hasBisyncCorruption(runResult.stderrTail)) {
         const sd = join(homedir(), ".local", "share", "lamasync", "bisync", folder.id);
         try {
           const corrupted = archiveBisyncState(sd);
           console.warn(`[executor] folder=${folder.id} bisync state corrupted; archived=${corrupted}; retrying with --resync`);
           mkdirSync(sd, { recursive: true });
           if (!command.includes("--resync")) command.push("--resync");
-          runResult = await runCommand(command, timeoutSec);
+          runResult = await runCommand(command, timeoutSec, opts.signal);
           isRecovery = true;
         } catch (err) {
           return report(hostId, folder.id, folder.type, "failed", start, { summary: `bisync recovery failed: ${err instanceof Error ? err.message : String(err)}`, details: { attempt, phase: "recovery", error: String(err) } });
@@ -456,8 +536,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           return report(hostId, folder.id, folder.type, "failed", start, { summary: `post-hook failed (exit ${h.exitCode})`, details: { phase: "post-hook", attempt, exitCode: h.exitCode, stderr: h.stderr, stdout: h.stdout, durationMs: h.durationMs, rclone: runResult.stats } });
         }
       }
-      if (runResult.exitCode === 0 && !runResult.timedOut) break;
-      const retryable = runResult.exitCode === 9 || (runResult.exitCode === 2 && runResult.timedOut);
+      if (runResult.exitCode === 0 && !runResult.timedOut && !runResult.aborted) break;
+      const retryable = !runResult.aborted && (runResult.exitCode === 9 || (runResult.exitCode === 2 && runResult.timedOut));
       if (!retryable || attempt === maxAttempts) break;
       const delayMs = 30_000 * 2 ** (attempt - 1);
       console.warn(`[executor] folder=${folder.id} transient failure attempt=${attempt}/${maxAttempts}; retry in ${delayMs / 1000}s`);
@@ -474,35 +554,79 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
     return report(hostId, folder.id, folder.type, "failed", start, { summary: "executor did not run rclone", details: { attempts } });
   }
 
-  // LAMA-122: manual conflict queue. If bisync reported conflicts and the
-  // assignment uses the manual strategy, queue them on the server instead of
-  // failing outright. The TUI will let the user resolve each path.
-  if (folder.type === "sync" && assignment.conflictStrategy === "manual" && !dry) {
+  // LAMA-122 / LAMA-162: conflict handling. If bisync reported conflicts,
+  // either queue them for manual resolution or apply the folder's automatic
+  // strategy (newer_wins, source_wins, keep_both). Unresolvable automatic
+  // cases are still queued so the TUI can handle them.
+  if (folder.type === "sync" && !dry) {
     const conflicts = parseBisyncConflicts(runResult.stdoutTail, runResult.stderrTail);
     if (conflicts.length > 0) {
-      try {
-        await client.createConflicts(
-          conflicts.map((c) => ({
-            hostId,
-            folderId: folder.id,
-            path: c.path,
-            localMtime: c.localMtime,
-            remoteMtime: c.remoteMtime,
-          })),
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[executor] failed to queue conflicts: ${msg}`);
+      const strategy = assignment.conflictStrategy ?? "manual";
+      if (strategy === "manual") {
+        try {
+          await client.createConflicts(
+            conflicts.map((c) => ({
+              hostId,
+              folderId: folder.id,
+              path: c.path,
+              localMtime: c.localMtime,
+              remoteMtime: c.remoteMtime,
+            })),
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[executor] failed to queue conflicts: ${msg}`);
+        }
+        const paths = conflicts.map((c) => c.path).join(", ");
+        return report(hostId, folder.id, folder.type, "conflict", start, {
+          summary: `${conflicts.length} conflict(s) need manual resolution`,
+          details: { conflicts, paths },
+        });
       }
-      const paths = conflicts.map((c) => c.path).join(", ");
-      return report(hostId, folder.id, folder.type, "conflict", start, {
-        summary: `${conflicts.length} conflict(s) need manual resolution`,
-        details: { conflicts, paths },
+
+      const auto = await applyAutomaticConflicts(
+        conflicts,
+        strategy,
+        assignment.localPath,
+        remotePath,
+        assignment.role,
+        opts.configPath,
+      );
+      if (auto.errors.length > 0) {
+        console.warn(`[executor] folder=${folder.id} auto-conflict errors: ${auto.errors.join("; ")}`);
+      }
+      if (auto.unresolved.length > 0) {
+        try {
+          await client.createConflicts(
+            auto.unresolved.map((c) => ({
+              hostId,
+              folderId: folder.id,
+              path: c.path,
+              localMtime: c.localMtime,
+              remoteMtime: c.remoteMtime,
+            })),
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[executor] failed to queue unresolved conflicts: ${msg}`);
+        }
+        const paths = auto.unresolved.map((c) => c.path).join(", ");
+        return report(hostId, folder.id, folder.type, "conflict", start, {
+          summary: `${auto.unresolved.length} unresolved conflict(s) after ${strategy}`,
+          details: { resolved: auto.resolved, errors: auto.errors, unresolved: auto.unresolved, paths },
+        });
+      }
+      const ok = !runResult.timedOut && !runResult.aborted;
+      const status: OperationStatus = ok ? (isRecovery ? "recovery" : "success") : "failed";
+      const summary = `${conflicts.length} conflict(s) auto-resolved (${strategy})`;
+      return report(hostId, folder.id, folder.type, status, start, {
+        summary,
+        details: { conflicts, strategy, rclone: runResult.stats, exitCode: runResult.exitCode, timedOut: runResult.timedOut, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, lanPeer: lanPeer.detail },
       });
     }
   }
 
-  const ok = !runResult.timedOut && runResult.exitCode === 0;
+  const ok = !runResult.timedOut && !runResult.aborted && runResult.exitCode === 0;
   const status: OperationStatus = ok ? (isRecovery ? "recovery" : "success") : "failed";
   const summary = buildSummary(folder.type, runResult, start, postHookMs, dry);
   return report(hostId, folder.id, folder.type, status, start, { summary, details: { rclone: runResult.stats, exitCode: runResult.exitCode, timedOut: runResult.timedOut, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, wouldCopy: runResult.wouldCopy, wouldDelete: runResult.wouldDelete, wouldMkdir: runResult.wouldMkdir, lanPeer: lanPeer.detail } });
@@ -582,11 +706,26 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
   return command;
 }
 
- async function runCommand(command: string[], timeoutSec: number): Promise<CommandResult> {
+ async function runCommand(command: string[], timeoutSec: number, signal?: AbortSignal): Promise<CommandResult> {
   const t0 = Date.now();
   const proc = Bun.spawn(["rclone", ...command], { stdout: "pipe", stderr: "pipe" });
   let timedOut = false;
+  let aborted = false;
+  let abortReason: string | undefined;
   const timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, timeoutSec * 1000);
+  const onAbort = (): void => {
+    aborted = true;
+    abortReason = typeof signal?.reason === "string" ? signal.reason : "aborted";
+    timedOut = true;
+    try { proc.kill(); } catch {}
+  };
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  }
   const stats: TransferStats = { files: 0, bytes: 0, errors: 0, checks: 0, transfers: 0 };
   const wouldCopy: string[] = [], wouldDelete: string[] = [], wouldMkdir: string[] = [];
   const parse = (line: string): void => {
@@ -612,7 +751,10 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
   const stdoutText = await rdr;
   const exitCode = await proc.exited;
   clearTimeout(timer);
-  return { exitCode, timedOut, stats, stdoutTail: tail(stdoutText, 2000), stderrTail: tail(stderrText, 2000), durationMs: Date.now() - t0, wouldCopy, wouldDelete, wouldMkdir };
+  if (signal) {
+    signal.removeEventListener("abort", onAbort);
+  }
+  return { exitCode, timedOut, aborted, abortReason, stats, stdoutTail: tail(stdoutText, 2000), stderrTail: tail(stderrText, 2000), durationMs: Date.now() - t0, wouldCopy, wouldDelete, wouldMkdir };
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +774,7 @@ function archiveBisyncState(stateDir: string): string {
 function buildSummary(type: FolderType, r: CommandResult, t0: number, postMs: number, dry?: boolean): string {
   const total = Date.now() - t0;
   if (dry) { const p: string[] = []; if (r.wouldCopy.length) p.push(`${r.wouldCopy.length} would-copy`); if (r.wouldDelete.length) p.push(`${r.wouldDelete.length} would-delete`); if (r.wouldMkdir.length) p.push(`${r.wouldMkdir.length} would-mkdir`); return `dry-run: ${p.length ? p.join(", ") : "0 changes"}`; }
+  if (r.aborted) return `${type} aborted: ${r.abortReason ?? "lock lost"}`;
   if (r.timedOut) return `${type} timed out after ${Math.round(r.durationMs / 1000)}s`;
   if (r.exitCode !== 0) return `${type} failed (exit ${r.exitCode}) in ${Math.round(total / 1000)}s`;
   return `${type} ok: ${r.stats.transfers} transfers, ${formatBytes(r.stats.bytes)} in ${Math.round(total / 1000)}s${postMs ? `, post-hook ${postMs}ms` : ""}`;
@@ -645,7 +788,7 @@ function report(hostId: string, folderId: string, operation: FolderType, status:
 // Dotfile upload
 // ---------------------------------------------------------------------------
 async function runDotfileUpload(opts: ExecuteOptions, hostConfig: HostConfig, start: number): Promise<OperationReport> {
-  const { assignment, folder, hostId, configPath } = opts;
+  const { assignment, folder, hostId, client } = opts;
   const manifest = hostConfig.manifests.find((m) => m.appName === folder.name);
   if (!manifest || manifest.paths.length === 0) return report(hostId, folder.id, folder.type, "failed", start, { summary: "no dotfile manifest", details: { folderName: folder.name } });
   const tmpDir = join(tmpdir(), `lamasync-dotfile-${process.pid}-${start}`);
@@ -662,12 +805,18 @@ async function runDotfileUpload(opts: ExecuteOptions, hostConfig: HostConfig, st
   const tarStderr = await new Response(tar.stderr).text();
   if (await tar.exited !== 0) return report(hostId, folder.id, folder.type, "failed", start, { summary: `tar failed (exit ${await tar.exited})`, details: { tarStderr: tail(tarStderr, 1000) } });
   const size = existsSync(tarball) ? statSync(tarball).size : 0;
-  const remote = `${getRemoteName(assignment.remoteName, folder.id)}:${folder.name}/${start}.tar.gz`;
-  const rclone = Bun.spawn(["rclone", "copyto", tarball, remote, "--config", configPath, "--use-json-log", "-v"], { stdout: "pipe", stderr: "pipe" });
-  const rcloneStderr = await new Response(rclone.stderr).text();
-  const rcloneExit = await rclone.exited;
-  const status: OperationStatus = rcloneExit === 0 ? "success" : "failed";
-  return report(hostId, folder.id, folder.type, status, start, { summary: rcloneExit === 0 ? `dotfile ok: ${manifest.paths.length} paths, ${formatBytes(size)} uploaded` : `dotfile upload failed (exit ${rcloneExit})`, details: { tarball, sizeBytes: size, paths: manifest.paths, rcloneExit, stderrTail: tail(rcloneStderr, 1000) } });
+  try {
+    const version = await client.uploadDotfile(folder.name, Bun.file(tarball), {
+      description: `scheduled backup from ${hostId}`,
+      hostId: manifest.hostId,
+    });
+    return report(hostId, folder.id, folder.type, "success", start, { summary: `dotfile ok: ${manifest.paths.length} paths, ${formatBytes(size)} uploaded`, details: { versionId: version.id, tarball, sizeBytes: size, paths: manifest.paths } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return report(hostId, folder.id, folder.type, "failed", start, { summary: `dotfile upload failed: ${msg}`, details: { tarball, sizeBytes: size, paths: manifest.paths, error: msg } });
+  } finally {
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,13 @@
 import { Elysia, t } from "elysia";
-import { db } from "../db.ts";
+import type { Database } from "bun:sqlite";
+import { db as defaultDb } from "../db.ts";
 import type { OperationStatus, WSEvent, OperationLog } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
+
+let activeDb: Database = defaultDb;
+export function __setDb(next: Database): void {
+  activeDb = next;
+}
 
 export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
   "/report",
@@ -27,7 +33,7 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
     };
     const ts = typeof timestamp === "number" ? timestamp : Date.now();
 
-    const result = db.run(
+    const result = activeDb.run(
       `INSERT INTO operation_log (timestamp, host_id, folder_id, operation, status, summary, details, duration_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [ts, hostId, folderId ?? null, operation, status, summary ?? null, details ?? null, durationMs ?? null],
@@ -35,13 +41,13 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
     const opId = Number(result.lastInsertRowid);
 
     if (folderId) {
-      const assignment = db
+      const assignment = activeDb
         .query<{ id: string }, [string, string]>(
           "SELECT id FROM folder_assignments WHERE folder_id = ? AND host_id = ?",
         )
         .get(folderId, hostId);
       if (assignment) {
-        db.run(
+        activeDb.run(
           `INSERT INTO schedule_state (folder_assignment_id, last_run, last_status)
            VALUES (?, ?, ?)
            ON CONFLICT(folder_assignment_id) DO UPDATE SET
@@ -80,6 +86,8 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
         t.Literal("success"),
         t.Literal("failed"),
         t.Literal("conflict"),
+        t.Literal("retry"),
+        t.Literal("recovery"),
       ]),
       summary: t.Optional(t.Union([t.String(), t.Null()])),
       details: t.Optional(t.Union([t.String(), t.Null()])),

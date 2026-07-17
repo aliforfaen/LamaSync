@@ -38,7 +38,15 @@ function makeCtx(
   return {
     acquireLock: async (folderId) => {
       captured.acquireLock.push({ folderId });
-      return { lockId: "test-lock", folderId };
+      return {
+        ok: true,
+        handle: {
+          lockId: "test-lock",
+          folderId,
+          ttl: 1200,
+          acquiredAt: Date.now(),
+        },
+      };
     },
     releaseLock: async (folderId, status, summary) => {
       captured.releaseLock.push({ folderId, status, summary });

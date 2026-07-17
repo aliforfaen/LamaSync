@@ -21,7 +21,14 @@ import {
   type SocketState,
 } from "./socket.ts";
 import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
-import { acquireLock, heartbeatLock, releaseLock, releaseStaleLocks } from "./lock.ts";
+import {
+  acquireLock,
+  heartbeatLock,
+  releaseLock,
+  releaseStaleLocks,
+  type LockAcquireResult,
+} from "./lock.ts";
+import { createReportQueue, type ReportQueue } from "./report-queue.ts";
 import {
   adoptMount,
   getInternalMount,
@@ -66,7 +73,7 @@ export function getLocalLanIp(): string | null {
 }
 
 export interface SwitchContext {
-  acquireLock: (folderId: string) => Promise<unknown>;
+  acquireLock: (folderId: string) => Promise<LockAcquireResult>;
   releaseLock: (folderId: string, status: string, summary?: string) => Promise<void>;
   getHostConfig: () => HostConfig | null;
   runOnce: (assignment: FolderAssignment) => Promise<void>;
@@ -214,9 +221,13 @@ export async function switchToMount(folderId: string): Promise<SwitchResult> {
     return { ok: false, error: `folder=${folderId} type=${folder.type}; expected sync` };
   }
 
-  const lock = await ctx.acquireLock(folderId);
-  if (!lock) {
-    return { ok: false, error: `folder=${folderId} is locked by another host` };
+  const lockResult = await ctx.acquireLock(folderId);
+  if (!lockResult.ok) {
+    const reason =
+      lockResult.reason === "contended"
+        ? `locked by ${lockResult.lockedBy === assignment.hostId ? "this host" : lockResult.lockedBy}`
+        : "server unreachable, lock not acquired";
+    return { ok: false, error: `folder=${folderId} ${reason}` };
   }
 
   const trashDir = trashDirFor(folderId);
@@ -284,9 +295,13 @@ export async function switchToSync(folderId: string): Promise<SwitchResult> {
     return { ok: false, error: `folder=${folderId} type=${folder.type}; expected mount` };
   }
 
-  const lock = await ctx.acquireLock(folderId);
-  if (!lock) {
-    return { ok: false, error: `folder=${folderId} is locked by another host` };
+  const lockResult = await ctx.acquireLock(folderId);
+  if (!lockResult.ok) {
+    const reason =
+      lockResult.reason === "contended"
+        ? `locked by ${lockResult.lockedBy === assignment.hostId ? "this host" : lockResult.lockedBy}`
+        : "server unreachable, lock not acquired";
+    return { ok: false, error: `folder=${folderId} ${reason}` };
   }
 
   try {
@@ -431,6 +446,7 @@ async function main(): Promise<void> {
   );
 
   const client = new LamaSyncApiClient(clientConfig.serverUrl, clientConfig.apiKey);
+  const reportQueue = createReportQueue(clientConfig.dataDir, client);
 
   let hostConfig: HostConfig | null = loadCache();
   const operations: OperationLog[] = [];
@@ -479,7 +495,8 @@ async function main(): Promise<void> {
       await client.reportOperation(report);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[report] failed to send to server: ${msg} (kept locally)`);
+      console.error(`[report] failed to send to server: ${msg} (queued for retry)`);
+      reportQueue.enqueue(report);
     }
   };
 
@@ -497,22 +514,34 @@ async function main(): Promise<void> {
       return;
     }
 
-    const lock = await acquireLock(client, assignment.folderId, hostId);
-    if (!lock) {
-      console.warn(`[run] folder=${folder.name} skipped: lock held by another host`);
+    const lockResult = await acquireLock(client, assignment.folderId, hostId);
+    if (!lockResult.ok) {
+      const summary =
+        lockResult.reason === "contended"
+          ? `skipped: folder locked by ${lockResult.lockedBy === hostId ? "this host" : lockResult.lockedBy} (${lockResult.remainingSec}s remaining)`
+          : "skipped: server unreachable, lock not acquired";
+      console.warn(`[run] folder=${folder.name} ${summary}`);
       await reportOperation({
         hostId,
         folderId: folder.id,
         operation: folder.type,
         status: "failed",
-        summary: "skipped: folder locked by another host",
+        summary,
         durationMs: 0,
       });
       return;
     }
+    const lock = lockResult.handle;
 
+    const abortController = new AbortController();
     const heartbeatTimer = setInterval(() => {
-      void heartbeatLock(client, assignment.folderId, hostId, lock);
+      void (async () => {
+        const hb = await heartbeatLock(client, assignment.folderId, hostId, lock);
+        if (hb === "lost") {
+          console.warn(`[run] folder=${folder.name} lock lost; aborting sync`);
+          abortController.abort("lock lost");
+        }
+      })();
     }, 30_000);
 
     const { configPath, cleanup } = writeRcloneConfig(hostConfig.rcloneConfig);
@@ -524,6 +553,7 @@ async function main(): Promise<void> {
         client,
         hostId,
         configPath,
+        signal: abortController.signal,
       });
       console.log(
         `[run] folder=${folder.name} type=${folder.type} status=${report.status} summary=${report.summary ?? ""}`,
@@ -585,6 +615,7 @@ async function main(): Promise<void> {
       lanIp,
     });
     lastHeartbeatAt = Date.now();
+    await reportQueue.flush();
     console.log(`[boot] registered and reported online host=${hostId} lanIp=${lanIp ?? "(none)"}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -622,6 +653,7 @@ async function main(): Promise<void> {
           lanIp: getLocalLanIp(),
         });
         lastHeartbeatAt = now;
+        await reportQueue.flush();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[heartbeat] failed: ${msg}`);

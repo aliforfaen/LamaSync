@@ -67,6 +67,7 @@ interface ManifestRow {
   app_name: string;
   paths: string;
   schedule: string | null;
+  instructions: string | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
@@ -117,6 +118,7 @@ function rowToManifest(r: ManifestRow): DotfileManifest {
     appName: r.app_name,
     paths,
     schedule: r.schedule,
+    instructions: r.instructions,
   };
 }
 
@@ -326,12 +328,21 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
           .all(...folderIds)
       : [];
 
-    const manifestRows = activeDb
+    const globalManifestRows = activeDb
+      .query<ManifestRow, []>(
+        `SELECT id, host_id, app_name, paths, schedule, instructions
+         FROM dotfile_manifests WHERE host_id = '_global'`,
+      )
+      .all();
+    const hostManifestRows = activeDb
       .query<ManifestRow, [string]>(
-        `SELECT id, host_id, app_name, paths, schedule
+        `SELECT id, host_id, app_name, paths, schedule, instructions
          FROM dotfile_manifests WHERE host_id = ?`,
       )
       .all(hostId);
+    const manifestRowsByApp = new Map<string, ManifestRow>();
+    for (const r of globalManifestRows) manifestRowsByApp.set(r.app_name, r);
+    for (const r of hostManifestRows) manifestRowsByApp.set(r.app_name, r);
 
     const allHostRows = activeDb
       .query<HostRow, []>(
@@ -341,7 +352,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
 
     const assignments = assignmentRows.map(rowToAssignment);
     const folders = folderRows.map(rowToFolder);
-    const manifests = manifestRows.map(rowToManifest);
+    const manifests = Array.from(manifestRowsByApp.values()).map(rowToManifest);
 
     const serverTailnetIp = process.env.LAMASYNC_TAILNET_IP ?? null;
     const backupDir = process.env.LAMASYNC_BACKUP_DIR ?? "/backups";

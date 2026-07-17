@@ -13,7 +13,7 @@ import { resticRoutes } from "./routes/restic.ts";
 import { conflictsRoutes } from "./routes/conflicts.ts";
 import { operationsRoutes } from "./routes/operations.ts";
 import { releaseRoutes } from "./routes/release.ts";
-import { VERSION } from "@lamasync/core";
+import { VERSION, type ErrorResponse } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
 
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -84,7 +84,20 @@ const app = new Elysia()
   .use(conflictsRoutes)
   .use(operationsRoutes)
   .use(releaseRoutes)
-   .listen({ port, hostname: "0.0.0.0" });
+  .onError(({ code, error, set }): ErrorResponse => {
+    if (code === "VALIDATION") {
+      set.status = 422;
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+    if (code === "NOT_FOUND") {
+      set.status = 404;
+      return { error: "not_found" };
+    }
+    console.error("[server] unhandled error:", error);
+    set.status = 500;
+    return { error: "internal_server_error" };
+  })
+  .listen({ port, hostname: "0.0.0.0" });
 
 export type App = typeof app;
 
