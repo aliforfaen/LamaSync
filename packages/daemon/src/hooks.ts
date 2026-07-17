@@ -35,6 +35,7 @@ export async function runHook(
     cwd: ctx.localPath,
     stdout: "pipe",
     stderr: "pipe",
+    detached: true,
     env: {
       ...process.env,
       LAMASYNC_FOLDER_ID: ctx.folderId,
@@ -46,9 +47,15 @@ export async function runHook(
   const timer = setTimeout(() => {
     timedOut = true;
     try {
-      proc.kill();
+      // Kill the whole process group so child processes (e.g. spawned by the
+      // user's shell command) cannot outlive the shell and keep pipes open.
+      process.kill(-proc.pid, "SIGKILL");
     } catch {
-      // ignore
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
     }
   }, timeoutMs);
   const [stdout, stderr, exitCode] = await Promise.all([
