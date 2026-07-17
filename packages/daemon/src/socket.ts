@@ -35,8 +35,8 @@ export interface SocketState {
 export interface StartSocketOptions {
   socketPath: string;
   getState: () => SocketState;
-  onSyncRequest?: (folderId: string) => void;
-  onSyncAllRequest?: () => void;
+  onSyncRequest?: (folderId: string) => void | Promise<void>;
+  onSyncAllRequest?: () => void | Promise<void>;
 }
 
 type Command =

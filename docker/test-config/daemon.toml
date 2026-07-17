@@ -1,0 +1,4 @@
+serverUrl = "http://lamasync-server:8080"
+apiKey = "8b976f31169a3ac7f5ecd27e30c69ce71a715aae070a5e9ca64c96a71592a63b"
+hostname = "lamasync-daemon-test"
+dataDir = "/root/.local/share/lamasync"

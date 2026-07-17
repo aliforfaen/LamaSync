@@ -185,12 +185,15 @@ Server endpoints are documented via Swagger at `/swagger` and the
 
 ### rclone config
 
-The server generates one rclone remote per folder assignment. For sync/mount/
-backup folders, it's an SFTP remote pointing at the server's tailnet IP
-(`LAMASYNC_TAILNET_IP`). For dotfile folders, it's a `local`-type remote
-pointing at the server's backup directory. The daemon assembles these into a
-temp rclone config file per operation, invokes rclone with `--config <path>`,
-and cleans up afterwards.
+The server generates one rclone remote per folder assignment. Backends are
+pluggable per folder:
+
+- **SFTP** (default) — points at the server's tailnet IP (`LAMASYNC_TAILNET_IP`)
+- **S3** — uses the folder's `s3Endpoint`, `s3Bucket`, and credentials
+- **local** — for dotfile storage on the server backup directory
+
+The daemon assembles these into a temp rclone config file per operation,
+invokes rclone with `--config <path>`, and cleans up afterwards.
 
 ## Development
 
@@ -206,6 +209,14 @@ bun test
 
 # Build all binaries
 bun run build
+
+# Run the full Docker dogfood test (server + MinIO + daemon + TUI CLI fallback)
+# 1. Build the test base image (one-time, needs outbound network):
+./docker/build-test-base.sh
+# 2. Run the full stack test:
+./docker/test-stack.sh
+# 3. Clean up when done:
+# docker compose -f docker/docker-compose.test.yml --env-file docker/.env.test down -v
 
 # Run individual services in dev mode
 bun run dev:server     # Elysia with --watch

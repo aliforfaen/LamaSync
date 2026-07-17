@@ -1,0 +1,114 @@
+services:
+  lamasync-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server.local
+    image: lamasync/lamasync-server:0.2.0
+    container_name: lamasync-server-test
+    networks:
+      - lamasync-test
+    env_file:
+      - .env.test
+    environment:
+      LAMASYNC_DATA_DIR: /data
+      LAMASYNC_BACKUP_DIR: /backups
+      LAMASYNC_LOG_RETENTION_DAYS: "1"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - lamasync-data:/data
+      - lamasync-backups:/backups
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-H", "Authorization: Bearer ${LAMASYNC_API_KEY}", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  minio:
+    image: minio/minio:latest
+    container_name: lamasync-minio-test
+    networks:
+      - lamasync-test
+    command: server /data --console-address ":9001"
+    env_file:
+      - .env.test
+    environment:
+      MINIO_ROOT_USER: ${LAMASYNC_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${LAMASYNC_MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  lamasync-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.daemon.local
+    image: lamasync/lamasyncd:0.2.0
+    container_name: lamasync-daemon-test
+    networks:
+      - lamasync-test
+    depends_on:
+      lamasync-server:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    env_file:
+      - .env.test
+    environment:
+      LAMASYNC_SERVER_URL: http://lamasync-server:8080
+      LAMASYNC_API_KEY: ${LAMASYNC_API_KEY}
+      LAMASYNC_HOSTNAME: lamasync-daemon-test
+      LAMASYNC_DATA_DIR: /root/.local/share/lamasync
+      LAMASYNC_SOCKET_PATH: /run/lamasync.sock
+    volumes:
+      - ./test-config/daemon.toml:/root/.config/lamasync/client.toml:ro
+      - daemon-test-data:/root/.local/share/lamasync
+      - daemon-run:/run
+      - daemon-test-src:/test-src
+    command: ["/usr/local/bin/lamasyncd"]
+
+  lamasync-test-runner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.test-runner.local
+    image: lamasync/lamasync-test-runner:0.2.0
+    container_name: lamasync-test-runner
+    networks:
+      - lamasync-test
+    depends_on:
+      lamasync-server:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      lamasync-daemon:
+        condition: service_started
+    env_file:
+      - .env.test
+    environment:
+      LAMASYNC_SERVER_URL: http://lamasync-server:8080
+      LAMASYNC_API_KEY: ${LAMASYNC_API_KEY}
+      LAMASYNC_HOSTNAME: lamasync-daemon-test
+    volumes:
+      - daemon-run:/run
+      - daemon-test-src:/test-src
+
+volumes:
+  lamasync-data:
+  lamasync-backups:
+  minio-data:
+  daemon-test-data:
+  daemon-run:
+  daemon-test-src:
+
+networks:
+  lamasync-test:
+    driver: bridge

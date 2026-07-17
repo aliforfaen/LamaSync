@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1.7
+# Local-test variant: assumes `bun run build` has already produced
+# packages/server/dist/lamasync-server, and uses the pre-built test base.
+
+FROM lamasync/test-base:bookworm-slim
+
+COPY packages/server/dist/lamasync-server /usr/local/bin/lamasync-server
+
+RUN mkdir -p /data /backups
+VOLUME ["/data", "/backups"]
+
+ENV LAMASYNC_DATA_DIR=/data
+ENV LAMASYNC_BACKUP_DIR=/backups
+ENV PORT=8080
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS -H "Authorization: Bearer ${LAMASYNC_API_KEY}" \
+      http://127.0.0.1:8080/api/v1/health || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/lamasync-server"]

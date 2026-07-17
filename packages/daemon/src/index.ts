@@ -681,18 +681,30 @@ async function main(): Promise<void> {
   const socketServer = startSocketServer({
     socketPath,
     getState: socketState,
-    onSyncRequest: (folderId) => {
-      const assignment = hostConfig?.assignments.find(
+    onSyncRequest: async (folderId) => {
+      let assignment = hostConfig?.assignments.find(
         (a) => a.folderId === folderId,
       );
       if (!assignment) {
-        console.warn(`[socket] sync requested for unknown folder=${folderId}`);
-        return;
+        console.log(`[socket] sync requested for unknown folder=${folderId}; refreshing config`);
+        await refreshConfig();
+        assignment = hostConfig?.assignments.find(
+          (a) => a.folderId === folderId,
+        );
+        if (!assignment) {
+          console.warn(`[socket] sync requested for unknown folder=${folderId} after refresh`);
+          return;
+        }
       }
       void runOnce(assignment);
     },
-    onSyncAllRequest: () => {
-      const assignments = hostConfig?.assignments ?? [];
+    onSyncAllRequest: async () => {
+      let assignments = hostConfig?.assignments ?? [];
+      if (assignments.length === 0) {
+        console.log("[socket] sync-all requested with no cached assignments; refreshing config");
+        await refreshConfig();
+        assignments = hostConfig?.assignments ?? [];
+      }
       console.log(`[socket] sync-all requested; queueing ${assignments.length} assignment(s)`);
       for (const assignment of assignments) {
         void runOnce(assignment);

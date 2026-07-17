@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1.7
+# Local-test variant: assumes `bun run build` has already produced
+# packages/tui/dist/lamasync-tui.
+
+FROM debian:bookworm-slim AS runtime
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY packages/tui/dist/lamasync-tui /usr/local/bin/lamasync-tui
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/lamasync-tui"]

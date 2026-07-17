@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1.7
+# Test runner image: TUI binary + curl + socat + jq + minio client (mc).
+# Assumes `bun run build` has already produced packages/tui/dist/lamasync-tui
+# and uses the pre-built test base.
+
+FROM lamasync/test-base:bookworm-slim
+
+COPY packages/tui/dist/lamasync-tui /usr/local/bin/lamasync-tui
+COPY docker/test-stack-setup.sh /test-stack-setup.sh
+RUN chmod +x /test-stack-setup.sh
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/test-stack-setup.sh"]

@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1.7
+# Local-test variant: assumes `bun run build` has already produced
+# packages/daemon/dist/lamasyncd, and uses the pre-built test base.
+
+FROM lamasync/test-base:bookworm-slim
+
+COPY packages/daemon/dist/lamasyncd /usr/local/bin/lamasyncd
+
+RUN mkdir -p /root/.config/lamasync /root/.local/share/lamasync /data
+
+ENV LAMASYNC_DATA_DIR=/root/.local/share/lamasync
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/lamasyncd"]
