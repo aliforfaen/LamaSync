@@ -13,6 +13,7 @@ import { resticRoutes } from "./routes/restic.ts";
 import { conflictsRoutes } from "./routes/conflicts.ts";
 import { operationsRoutes } from "./routes/operations.ts";
 import { releaseRoutes } from "./routes/release.ts";
+import { webUiRoutes } from "./routes/web-ui.ts";
 import { VERSION, type ErrorResponse } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
 
@@ -70,6 +71,7 @@ const app = new Elysia()
       },
     }),
   )
+  .use(webUiRoutes)
   .use(wsRoutes)
   .use(getAuthPlugin())
   .use(healthRoutes)

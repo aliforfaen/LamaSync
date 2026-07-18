@@ -7,6 +7,21 @@ lightweight daemon on each client, and a terminal UI for local & fleet views.
 It wraps **rclone** for file transfers and uses a **pre-shared API key** for auth.
 Everything is written in **TypeScript** running on **Bun**.
 
+## What's implemented (v0.2.0)
+
+| Component | Status |
+|-----------|--------|
+| `@lamasync/core` — shared types, DB schema, TOML config, API client | done |
+| `@lamasync/server` — REST + WebSocket + Swagger + auth | done |
+| `@lamasync/daemon` — heartbeat, rclone execution, mounts, scheduler, socket server | done |
+| `@lamasync/tui` — OpenTUI + CLI fallback, local/fleet/dotfiles/logs views | done |
+| `@lamasync/web-ui` — React SPA embedded in the server binary (Dashboard, Folders, Dotfiles, Conflicts, Admin) | done |
+| Agent skill (`lamasync-server.md`) | done (+ installed) |
+| Docker: `Dockerfile.server`, `docker-compose.yml` | done |
+| `bun run build` → standalone binaries | working |
+| Unit tests (core + server + daemon + self-update + TUI + executor + offset + web-ui) | **118 passing** (19 files) |
+| End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI, web UI) | done |
+
 ## Repository layout
 
 ```
@@ -91,13 +106,32 @@ lamasync/                     # Bun workspace root
     agent-skill/              # @lamasync/agent-skill — OMP managed skill
       lamasync-server.md      # skill body: endpoint table, auth, example workflows
       README.md               # install instructions for OMP managed-skills dir
+    web-ui/                   # @lamasync/web-ui — embedded React SPA (Vite build)
+      index.html              # Vite entry HTML
+      vite.config.ts          # single-file inlined build (see scripts/inline-web-ui.ts)
+      tsconfig.json           # extends root, adds jsx support
+      src/
+        main.tsx              # React 18 root + StrictMode
+        App.tsx               # HashRouter + auth gate
+        api.ts                # browser fetch client (sessionStorage bearer)
+        index.css             # hand-rolled dashboard styles
+        components/
+          Login.tsx           # API-key sign-in form
+          Nav.tsx             # top navigation bar (Dashboard, Folders, Dotfiles, Conflicts, Admin)
+        hooks/
+          useWebSocket.ts     # /api/v1/ws client with exponential-backoff reconnect
+        pages/
+          Dashboard.tsx       # summary cards, hosts table, recent operations
+          Folders.tsx         # list + create + delete (admin)
+          Dotfiles.tsx        # manifest list + create + delete (admin)
+          Conflicts.tsx       # pending conflicts + resolve (local/remote/both)
+          Admin.tsx           # operation-log prune (days)
   docker/
     Dockerfile.server         # multi-stage: bun compile → debian-slim + rclone
     docker-compose.yml        # volumes for /data, /backups; tailnet-bound port
-    .env.example
   scripts/
     gen-version.ts            # writes packages/core/src/version.ts from root package.json
-  packaging/
+    inline-web-ui.ts          # post-vite inliner: embeds JS/CSS into dist/index.html (single-file SPA)
     install/                  # curl | bash installer
       install.sh              # install lamasyncd (+ optional TUI) and systemd unit
       update.sh               # standalone self-update script
@@ -108,21 +142,8 @@ lamasync/                     # Bun workspace root
       ci.yml                  # type-check, test, build, release, docker push
 ```
 
-## What's implemented (v0.2.0)
 
-| Component | Status |
-|-----------|--------|
-| `@lamasync/core` — shared types, DB schema, TOML config, API client | done |
-| `@lamasync/server` — REST + WebSocket + Swagger + auth | done |
-| `@lamasync/daemon` — heartbeat, rclone execution, mounts, scheduler, socket server | done |
-| `@lamasync/tui` — OpenTUI + CLI fallback, local/fleet/dotfiles/logs views | done |
-| Agent skill (`lamasync-server.md`) | done (+ installed) |
-| Docker: `Dockerfile.server`, `docker-compose.yml` | done |
-| `bun run build` → standalone binaries | working |
-| Unit tests (core + server + daemon + self-update + TUI + executor + offset) | **101 passing** (17 files) |
-| End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI) | done |
-
-### Implemented features (LAMA-114..132)
+### Implemented features (LAMA-104..162)
 
 | Issue | Feature | Location |
 |-------|---------|----------|
@@ -139,15 +160,8 @@ lamasync/                     # Bun workspace root
 | LAMA-123 | LAN peer sync | `daemon/src/lan-peer.ts`, `server/src/routes/config.ts` |
 | LAMA-124 | Encryption-at-rest | `server/src/routes/folders.ts`, `server/src/routes/config.ts` |
 | LAMA-125 | `ARCHITECTURE.md` rewrite | `ARCHITECTURE.md` |
-| LAMA-130 | Cache profile validation | `server/src/routes/folders.ts` |
-| LAMA-131 | Switch-to-mount / sync, trash quarantine | `daemon/src/index.ts`, `daemon/src/mounts.ts`, `tui/src/views/local.ts` |
-| LAMA-132 | NFS shares endpoint + TUI `n` hotkey | `server/src/routes/shares.ts`, `tui/src/views/fleet.ts` |
-| LAMA-133 | Restic integration for `backup` and `dotfile` types | `core/src/types.ts`, `core/src/db/schema.ts`, `server/src/routes/restic.ts`, `daemon/src/executor.ts`, `daemon/src/index.ts` |
-| LAMA-103 | `systemd --user` service management (polished) | `packaging/systemd/lamasyncd.service`, `packaging/install/install.sh`, `packaging/install/update.sh` |
-| LAMA-150 | CI/CD Pipeline | `.github/workflows/ci.yml` |
 | LAMA-151 | Self-update (daemon + server release proxy) | `daemon/src/self-update.ts`, `server/src/routes/release.ts`, `packaging/install/update.sh` |
-
-## What's deferred (not yet implemented)
+| LAMA-147 | Management Web UI (dashboard + admin CRUD) | `packages/web-ui/`, `packages/server/src/routes/web-ui.ts`, `scripts/inline-web-ui.ts` |
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
@@ -292,16 +306,17 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 
 - **Version source of truth**: root `package.json` `version` field (currently `0.2.0`).
 - **Generated constant**: `scripts/gen-version.ts` writes `packages/core/src/version.ts`, which is re-exported from `@lamasync/core`.
-- **All three binaries** support `--version` and `-V`.
+- **All four binaries** support `--version` and `-V`.
+  (`lamasync-server`, `lamasyncd`, `lamasync-tui`, plus the bundled web UI at `GET /`)
 - **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.
 - **Self-update**: daemon checks GitHub Releases on startup and supports `lamasyncd --check-update` / `lamasyncd --update`. The server proxies release info at `GET /api/v1/release/latest`. A standalone `curl | bash` updater lives in `packaging/install/update.sh`.
 
-## Current status (as of 2026-07-16)
+## Current status (as of 2026-07-18)
 
 - Project version: **0.2.0**
-- Tests: **67 passing** across 11 files, 0 failures
-- Open Multica issues: **5** (down from 7)
-- Recently closed: LAMA-108 (agent skill refresh), LAMA-161 (completionist test prep), plus the v0.2.0 systemd/CI/self-update batch
+- Tests: **118 passing** across 19 files, 0 failures (10 new web-UI tests)
+- Open Multica issues: **4** (LAMA-110 closed via LAMA-147 implementation)
+- Recently closed: LAMA-110 / LAMA-147 (Management Web UI), LAMA-105 (S3 backend), LAMA-150 (CI), LAMA-151 (self-update)
 
 ## Next session options
 
@@ -315,11 +330,7 @@ Ready-to-pick work, ordered by likely value/urgency:
 
 3. **LAMA-104 — Error handling** (backlog, high)
    - Harden error propagation, structured error responses, and retry/circuit-breaker behavior across the daemon and server.
-
-4. **LAMA-147 — Management Web UI** (backlog, none)
-   - Browser-based dashboard for folder/assignment management. Big surface; pairs with LAMA-110.
-
-5. **LAMA-109 — App-specific backup dotfiles** (backlog, none)
+4. **LAMA-109 — App-specific backup dotfiles** (backlog, none)
    - Expand dotfile support to per-app backup bundles with richer restore semantics.
 
 6. **Polish / tech debt**

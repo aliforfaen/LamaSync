@@ -19,6 +19,7 @@ describe("local view folder description", () => {
     expect(describeFolder(baseFolder)).toBe("sync — unknown");
   });
 
+
   test("mount folder shows cache profile and size when set", () => {
     const folder: LocalFolder = {
       ...baseFolder,
@@ -67,5 +68,35 @@ describe("local view folder description", () => {
       lastStatus: "failed",
     };
     expect(describeFolder(folder)).toBe("backup — failed");
+  });
+
+  test("s3 backend tag appears for non-SFTP folders (LAMA-105)", () => {
+    const folder: LocalFolder = {
+      ...baseFolder,
+      type: "sync",
+      lastStatus: "success",
+      backend: "s3",
+    };
+    expect(describeFolder(folder)).toBe("sync [s3] — success");
+  });
+
+  test("local backend tag appears for non-SFTP folders (LAMA-105)", () => {
+    const folder: LocalFolder = {
+      ...baseFolder,
+      type: "mount",
+      lastStatus: "success",
+      backend: "local",
+    };
+    expect(describeFolder(folder)).toBe("mount [local] — success");
+  });
+
+  test("sftp backend does not add a tag (LAMA-105)", () => {
+    const folder: LocalFolder = {
+      ...baseFolder,
+      type: "sync",
+      lastStatus: "success",
+      backend: "sftp",
+    };
+    expect(describeFolder(folder)).toBe("sync — success");
   });
 });

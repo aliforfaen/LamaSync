@@ -17,6 +17,8 @@ export type LocalAction =
 
 export type LocalFolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
+export type LocalFolderBackend = "sftp" | "s3" | "local";
+
 export type GitProvider = "git" | "gh";
 export type CacheProfileKind = "normal" | "media" | "minimal";
 
@@ -31,6 +33,7 @@ export interface LocalFolder {
   cacheMaxSize?: string | null;
   gitProvider?: GitProvider | null;
   gitRemote?: string | null;
+  backend?: LocalFolderBackend | null;
 }
 export interface LocalState {
   folders: LocalFolder[];
@@ -64,7 +67,6 @@ const HOTKEYS: Array<{ key: string; label: string; action: LocalAction }> = [
   { key: "g", label: "github repos", action: "gh" },
   { key: "q", label: "quit", action: "quit" },
 ];
-
 export function describeFolder(folder: LocalFolder): string {
   const status = folder.lastStatus ?? "unknown";
   const type = folder.type ?? "sync";
@@ -77,7 +79,8 @@ export function describeFolder(folder: LocalFolder): string {
     type === "mount" && folder.cacheProfile
       ? ` (cache: ${folder.cacheProfile}${folder.cacheMaxSize ? `/${folder.cacheMaxSize}` : ""})`
       : "";
-  return `${displayType}${cache} — ${status}`;
+  const backend = folder.backend && folder.backend !== "sftp" ? ` [${folder.backend}]` : "";
+  return `${displayType}${cache}${backend} — ${status}`;
 }
 
 function toRows(folders: LocalFolder[]): FolderRow[] {

@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
 import { db } from "../db.ts";
+import { broadcast } from "../ws.ts";
 import type { Host, HostStatus } from "@lamasync/core";
 
 interface HostRow {
@@ -51,8 +52,10 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to load host after insert" };
       }
+      const host = rowToHost(row);
+      broadcast({ kind: "host", host });
       set.status = 201;
-      return rowToHost(row);
+      return host;
     },
     {
       body: t.Object({
@@ -134,6 +137,12 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: `Host '${hostId}' not registered` };
       }
+      const row = db
+        .query<HostRow, [string]>(
+          "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip FROM hosts WHERE id = ?",
+        )
+        .get(hostId);
+      if (row) broadcast({ kind: "host", host: rowToHost(row) });
       set.status = 204;
       return null;
     },

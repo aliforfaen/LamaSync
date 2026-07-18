@@ -210,6 +210,12 @@ export class LamaSyncApiClient {
     return this.request<void>("DELETE", `/api/v1/folders/${encodeURIComponent(id)}`);
   }
 
+  listFolderAssignments(folderId: string): Promise<FolderAssignment[]> {
+    return this.request<FolderAssignment[]>(
+      "GET",
+      `/api/v1/folders/${encodeURIComponent(folderId)}/assignments`,
+    );
+  }
   assignFolder(
     id: string,
     body: Omit<FolderAssignment, "id">,

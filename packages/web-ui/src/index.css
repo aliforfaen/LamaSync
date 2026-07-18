@@ -1,0 +1,364 @@
+/* Minimal dashboard styles — kept hand-rolled; no CSS framework dependency. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: #0f1115;
+  color: #e6e8ec;
+}
+
+body {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a {
+  color: #7cb6ff;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.nav {
+  display: flex;
+  gap: 1.5rem;
+  padding: 0.75rem 1.25rem;
+  background: #161a22;
+  border-bottom: 1px solid #232838;
+  align-items: center;
+}
+
+.nav .brand {
+  font-weight: 600;
+  margin-right: auto;
+}
+
+.nav a {
+  color: #c0c5cf;
+}
+
+.nav a.active {
+  color: #fff;
+  font-weight: 500;
+}
+
+.page {
+  padding: 1.25rem;
+  flex: 1;
+}
+
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.login-card {
+  background: #161a22;
+  border: 1px solid #232838;
+  border-radius: 8px;
+  padding: 2rem;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.login-card h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.login-card input {
+  background: #0f1115;
+  border: 1px solid #2a3041;
+  color: #e6e8ec;
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.875rem;
+}
+
+.login-card input:focus {
+  outline: 2px solid #4f7cff;
+  outline-offset: 1px;
+}
+
+.login-card button {
+  background: #4f7cff;
+  color: #fff;
+  border: 0;
+  padding: 0.55rem 0.85rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.login-card button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  color: #ff8585;
+  font-size: 0.85rem;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.summary-card {
+  background: #161a22;
+  border: 1px solid #232838;
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.summary-card .label {
+  color: #8c92a1;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.summary-card .value {
+  font-size: 1.6rem;
+  font-weight: 600;
+}
+
+.section {
+  margin-bottom: 1.75rem;
+}
+
+.section h2 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #c0c5cf;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  background: #161a22;
+  border: 1px solid #232838;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+table.data th,
+table.data td {
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid #232838;
+}
+
+table.data th {
+  background: #1c2030;
+  color: #c0c5cf;
+  font-weight: 500;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+table.data tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.empty-row td {
+  text-align: center;
+  color: #8c92a1;
+  padding: 1rem;
+  font-style: italic;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge-online {
+  background: rgba(46, 160, 67, 0.2);
+  color: #6fcf97;
+}
+
+.badge-offline {
+  background: rgba(207, 102, 121, 0.18);
+  color: #ff8a9c;
+}
+
+.badge-degraded {
+  background: rgba(255, 183, 0, 0.2);
+  color: #ffc869;
+}
+
+.badge-unknown {
+  background: rgba(140, 146, 161, 0.18);
+  color: #c0c5cf;
+}
+
+.badge-success {
+  background: rgba(46, 160, 67, 0.2);
+  color: #6fcf97;
+}
+
+.badge-failed {
+  background: rgba(207, 102, 121, 0.18);
+  color: #ff8a9c;
+}
+
+.badge-started {
+  background: rgba(79, 124, 255, 0.2);
+  color: #7cb6ff;
+}
+
+.badge-conflict {
+  background: rgba(255, 183, 0, 0.2);
+  color: #ffc869;
+}
+
+.badge-recovery,
+.badge-retry {
+  background: rgba(140, 146, 161, 0.18);
+  color: #c0c5cf;
+}
+
+.muted {
+  color: #8c92a1;
+}
+
+button.action {
+  background: #232838;
+  color: #e6e8ec;
+  border: 1px solid #2a3041;
+  padding: 0.4rem 0.7rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+button.action:hover {
+  background: #2a3041;
+}
+
+button.action.primary {
+  background: #4f7cff;
+  border-color: #4f7cff;
+  color: #fff;
+}
+
+button.action.danger {
+  background: rgba(207, 102, 121, 0.18);
+  border-color: rgba(207, 102, 121, 0.4);
+  color: #ff8a9c;
+}
+
+button.action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form {
+  background: #161a22;
+  border: 1px solid #232838;
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: #c0c5cf;
+}
+
+.form input,
+.form select,
+.form textarea {
+  background: #0f1115;
+  border: 1px solid #2a3041;
+  color: #e6e8ec;
+  padding: 0.45rem 0.6rem;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.form .actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.assignment-list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assignment-list li {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.assignment-list span {
+  color: #8c92a1;
+  font-size: 0.75rem;
+}
+
+.table-actions {
+  text-align: right;
+}
+
+.table-actions-nowrap {
+  white-space: nowrap;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.toolbar h1 {
+  margin: 0;
+  font-size: 1.1rem;
+}

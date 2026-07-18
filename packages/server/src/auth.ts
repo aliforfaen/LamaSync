@@ -8,9 +8,14 @@ export function getAuthPlugin() {
   }
   return new Elysia({ name: "lamasync-auth" }).onRequest(
     ({ request, set }) => {
-      // WebSocket upgrades authenticate via Sec-WebSocket-Protocol inside the
-      // ws route's `open` handler; skip the bearer-token check for upgrades so
-      // the protocol header is the sole source of truth for the WS path.
+      // Only enforce the Bearer token on the versioned API surface. WebSocket
+      // upgrades authenticate via Sec-WebSocket-Protocol inside the ws route's
+      // `open` handler; skip both the bearer check and any pre-flight for
+      // the WebSocket upgrade header.
+      const url = new URL(request.url);
+      if (!url.pathname.startsWith("/api/")) {
+        return;
+      }
       const upgrade = request.headers.get("upgrade") ?? "";
       if (upgrade.toLowerCase() === "websocket") {
         return;

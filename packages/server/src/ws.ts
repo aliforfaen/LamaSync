@@ -50,8 +50,10 @@ function readStringField(value: unknown, key: string): string | null {
 /**
  * Extract the API key from the upgrade's `Sec-WebSocket-Protocol` header.
  * Elysia exposes the upgrade context on `ws.data`. The header value is the
- * subprotocol list joined by ", " (RFC 6455) and the expected layout is
- * `lamasync-auth, <base64(apiKey)>`.
+ * subprotocol list joined by ", " (RFC 6455). The expected layout is
+ * `lamasync-auth, <key>` where `<key>` may be either the raw API key or a
+ * base64/base64url encoding. Browsers use unpadded base64url because RFC 6455
+ * subprotocol tokens cannot contain the `=` padding used by standard base64.
  */
 function extractApiKeyFromProtocol(ws: ElysiaWS): string | null {
   const data = ws.data;
@@ -82,9 +84,13 @@ function extractApiKeyFromProtocol(ws: ElysiaWS): string | null {
   if (parts.length !== 2 || parts[0] !== "lamasync-auth" || !parts[1]) {
     return null;
   }
+  const provided = parts[1];
+  if (isApiKeyValid(provided)) return provided;
   try {
-    const decoded = Buffer.from(parts[1], "base64").toString("utf8");
-    return decoded.length > 0 ? decoded : null;
+    const normalized = provided.replaceAll("-", "+").replaceAll("_", "/");
+    const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(normalized + padding, "base64").toString("utf8");
+    return isApiKeyValid(decoded) ? decoded : null;
   } catch {
     return null;
   }

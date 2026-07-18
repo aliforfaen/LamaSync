@@ -37,6 +37,12 @@ interface FolderRow {
   created_at: number | null;
   encrypted: number | null;
   crypt_password: string | null;
+  backend: string | null;
+  s3_endpoint: string | null;
+  s3_bucket: string | null;
+  s3_access_key_id: string | null;
+  s3_secret_access_key: string | null;
+  s3_region: string | null;
 }
 
 interface AssignmentRow {
@@ -71,6 +77,9 @@ interface ManifestRow {
 }
 
 function rowToFolder(r: FolderRow): Folder {
+  const backend = r.backend;
+  const normalizedBackend: Folder["backend"] =
+    backend === "s3" || backend === "local" ? backend : "sftp";
   return {
     id: r.id,
     name: r.name,
@@ -78,6 +87,12 @@ function rowToFolder(r: FolderRow): Folder {
     createdAt: r.created_at ?? undefined,
     encrypted: (r.encrypted ?? 0) === 1,
     cryptPassword: r.crypt_password,
+    backend: normalizedBackend,
+    s3Endpoint: r.s3_endpoint,
+    s3Bucket: r.s3_bucket,
+    s3AccessKeyId: r.s3_access_key_id,
+    s3SecretAccessKey: r.s3_secret_access_key,
+    s3Region: r.s3_region,
   };
 }
 
@@ -92,7 +107,6 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     syncExpr: r.sync_expr,
     enabled: r.enabled === 1,
     conflictStrategy: (r.conflict_strategy as FolderAssignment["conflictStrategy"]) ?? null,
-    preSyncCmd: r.pre_sync_cmd,
     postSyncCmd: r.post_sync_cmd,
     ignorePath: r.ignore_path,
     mountIgnorePath: r.mount_ignore_path,
@@ -227,10 +241,30 @@ export function generateRcloneConfig(
       folder.cryptPassword !== undefined &&
       folder.cryptPassword !== "" &&
       folder.type !== "dotfile";
+    const backendKind = folder.backend ?? "sftp";
+    const useS3 = backendKind === "s3";
     if (isEncrypted) {
       const backendName = `lamasync-${folder.id}-backend`;
       lines.push(`[${backendName}]`);
-      if (serverTailnetIp) {
+      if (useS3) {
+        const endpoint = (folder.s3Endpoint ?? "").trim();
+        const bucket = (folder.s3Bucket ?? "").trim();
+        const accessKey = (folder.s3AccessKeyId ?? "").trim();
+        const secretKey = (folder.s3SecretAccessKey ?? "").trim();
+        const region = (folder.s3Region ?? "").trim();
+        lines.push("type = s3");
+        lines.push("provider = Other");
+        lines.push("env_auth = false");
+        lines.push(`access_key_id = ${accessKey}`);
+        lines.push(`secret_access_key = ${secretKey}`);
+        lines.push(`endpoint = ${endpoint}`);
+        if (region !== "") {
+          lines.push(`region = ${region}`);
+        }
+        lines.push(`description = "${folder.name} (${folder.type}) — encrypted S3 backend"`);
+        lines.push(`# bucket: ${bucket}`);
+        lines.push(`# local path on client: ${a.localPath}`);
+      } else if (serverTailnetIp) {
         lines.push("type = sftp");
         lines.push(`host = ${serverTailnetIp}`);
         lines.push("user = lamasync");
@@ -244,7 +278,7 @@ export function generateRcloneConfig(
       lines.push("");
       lines.push(`[${cryptName}]`);
       lines.push("type = crypt");
-      lines.push(`remote = ${backendName}:${folder.name}`);
+      lines.push(`remote = ${backendName}:${useS3 ? (folder.s3Bucket ?? "").trim() : folder.name}`);
       lines.push(`password = ${folder.cryptPassword}`);
       lines.push(`password2 = ${folder.cryptPassword}`);
       lines.push(`description = "${folder.name} (encrypted ${folder.type})"`);
@@ -256,6 +290,32 @@ export function generateRcloneConfig(
         lines.push(`description = "${folder.name} (dotfile backup)"`);
         lines.push(`# local path on client: ${a.localPath}`);
         lines.push(`# server path: ${backupDir}/dotfiles/${folder.name}/`);
+      } else if (useS3) {
+        const endpoint = (folder.s3Endpoint ?? "").trim();
+        const bucket = (folder.s3Bucket ?? "").trim();
+        const accessKey = (folder.s3AccessKeyId ?? "").trim();
+        const secretKey = (folder.s3SecretAccessKey ?? "").trim();
+        const region = (folder.s3Region ?? "").trim();
+        const backendName = `lamasync-${folder.id}-backend`;
+        lines.push(`[${backendName}]`);
+        lines.push("type = s3");
+        lines.push("provider = Other");
+        lines.push("env_auth = false");
+        lines.push(`access_key_id = ${accessKey}`);
+        lines.push(`secret_access_key = ${secretKey}`);
+        lines.push(`endpoint = ${endpoint}`);
+        if (region !== "") {
+          lines.push(`region = ${region}`);
+        }
+        lines.push(`description = "${folder.name} (${folder.type}) — S3 backend"`);
+        lines.push(`# bucket: ${bucket}`);
+        lines.push(`# local path on client: ${a.localPath}`);
+        lines.push("");
+        lines.push(`[${remoteName}]`);
+        lines.push("type = alias");
+        lines.push(`remote = ${backendName}:${bucket}`);
+        lines.push(`description = "${folder.name} (${folder.type}) — S3 alias"`);
+        lines.push(`# local path on client: ${a.localPath}`);
       } else if (serverTailnetIp) {
         lines.push("type = sftp");
         lines.push(`host = ${serverTailnetIp}`);
@@ -321,7 +381,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const folderRows = folderIds.length
       ? activeDb
           .query<FolderRow, string[]>(
-            `SELECT id, name, type, created_at, encrypted, crypt_password FROM folders WHERE id IN (${folderIds
+            `SELECT id, name, type, created_at, encrypted, crypt_password, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE id IN (${folderIds
               .map(() => "?")
               .join(",")})`,
           )

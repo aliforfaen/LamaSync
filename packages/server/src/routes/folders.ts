@@ -1,9 +1,36 @@
 import { Elysia, t } from "elysia";
 import { randomBytes } from "crypto";
-import { db } from "../db.ts";
-import type { Folder, FolderAssignment, FolderType } from "@lamasync/core";
+import { Database } from "bun:sqlite";
+import { db as defaultDb } from "../db.ts";
+import type { Folder, FolderAssignment, FolderBackend, FolderType } from "@lamasync/core";
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
+const FOLDER_BACKENDS: FolderBackend[] = ["sftp", "s3", "local"];
+
+let db: Database = defaultDb;
+export function __setDb(next: Database): void {
+  db = next;
+}
+
+function normalizeBackend(value: unknown): FolderBackend {
+  if (typeof value === "string") {
+    const lower = value.toLowerCase();
+    if (lower === "sftp" || lower === "s3" || lower === "local") return lower;
+  }
+  return "sftp";
+}
+
+function requireS3Credentials(
+  body: { s3Endpoint?: unknown; s3Bucket?: unknown; s3AccessKeyId?: unknown; s3SecretAccessKey?: unknown },
+): string | null {
+  const missing: string[] = [];
+  if (typeof body.s3Endpoint !== "string" || body.s3Endpoint.trim() === "") missing.push("s3Endpoint");
+  if (typeof body.s3Bucket !== "string" || body.s3Bucket.trim() === "") missing.push("s3Bucket");
+  if (typeof body.s3AccessKeyId !== "string" || body.s3AccessKeyId.trim() === "") missing.push("s3AccessKeyId");
+  if (typeof body.s3SecretAccessKey !== "string" || body.s3SecretAccessKey.trim() === "") missing.push("s3SecretAccessKey");
+  if (missing.length === 0) return null;
+  return `Missing required S3 fields: ${missing.join(", ")}`;
+}
 
 interface FolderRow {
   id: string;
@@ -14,6 +41,12 @@ interface FolderRow {
   crypt_password: string | null;
   git_provider: string | null;
   git_remote: string | null;
+  backend: string | null;
+  s3_endpoint: string | null;
+  s3_bucket: string | null;
+  s3_access_key_id: string | null;
+  s3_secret_access_key: string | null;
+  s3_region: string | null;
 }
 
 interface AssignmentRow {
@@ -44,6 +77,9 @@ function rowToFolder(r: FolderRow): Folder {
   const provider = r.git_provider;
   const gitProvider: Folder["gitProvider"] =
     provider === "git" || provider === "gh" ? provider : null;
+  const backend = r.backend;
+  const normalizedBackend: Folder["backend"] =
+    backend === "s3" || backend === "local" ? backend : "sftp";
   return {
     id: r.id,
     name: r.name,
@@ -53,6 +89,12 @@ function rowToFolder(r: FolderRow): Folder {
     cryptPassword: r.crypt_password,
     gitProvider,
     gitRemote: r.git_remote,
+    backend: normalizedBackend,
+    s3Endpoint: r.s3_endpoint,
+    s3Bucket: r.s3_bucket,
+    s3AccessKeyId: r.s3_access_key_id,
+    s3SecretAccessKey: r.s3_secret_access_key,
+    s3Region: r.s3_region,
   };
 }
 
@@ -88,7 +130,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     () => {
       const rows = db
         .query<FolderRow, []>(
-          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote FROM folders ORDER BY created_at DESC",
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders ORDER BY created_at DESC",
         )
         .all();
       return rows.map(rowToFolder);
@@ -107,39 +149,59 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/folders",
     ({ body, set }) => {
-      const { name, type, encrypted, cryptPassword, gitProvider, gitRemote } = body as {
+      const b = body as {
         name: string;
         type: FolderType;
         encrypted?: boolean;
         cryptPassword?: string | null;
         gitProvider?: "git" | "gh" | null;
         gitRemote?: string | null;
+        backend?: string | null;
+        s3Endpoint?: string | null;
+        s3Bucket?: string | null;
+        s3AccessKeyId?: string | null;
+        s3SecretAccessKey?: string | null;
+        s3Region?: string | null;
       };
+      const { name, type } = b;
       if (!FOLDER_TYPES.includes(type)) {
         set.status = 400;
         return { error: `Invalid folder type: ${type}` };
       }
-      const isEncrypted = encrypted === true;
+      const backend = normalizeBackend(b.backend);
+      if (backend === "s3") {
+        const s3Error = requireS3Credentials(b);
+        if (s3Error) {
+          set.status = 400;
+          return { error: s3Error };
+        }
+      }
+      const isEncrypted = b.encrypted === true;
       const password =
-        isEncrypted && (cryptPassword === null || cryptPassword === undefined || cryptPassword === "")
+        isEncrypted && (b.cryptPassword === null || b.cryptPassword === undefined || b.cryptPassword === "")
           ? randomBytes(32).toString("base64")
-          : (cryptPassword ?? null);
+          : (b.cryptPassword ?? null);
       if (isEncrypted && (password === null || password === "")) {
         set.status = 500;
         return { error: "Failed to generate crypt password" };
       }
-      if (gitProvider === "gh" && (typeof gitRemote !== "string" || gitRemote.trim() === "")) {
+      if (b.gitProvider === "gh" && (typeof b.gitRemote !== "string" || b.gitRemote.trim() === "")) {
         set.status = 400;
         return { error: "gitRemote is required when gitProvider is \"gh\"" };
       }
       const normalizedGitRemote =
-        gitProvider === "gh" && typeof gitRemote === "string" ? gitRemote.trim() : (gitRemote ?? null);
-      const normalizedGitProvider = gitProvider ?? null;
+        b.gitProvider === "gh" && typeof b.gitRemote === "string" ? b.gitRemote.trim() : (b.gitRemote ?? null);
+      const normalizedGitProvider = b.gitProvider ?? null;
       const id = crypto.randomUUID();
       const now = Date.now();
+      const s3Endpoint = backend === "s3" ? (b.s3Endpoint ?? "").trim() : null;
+      const s3Bucket = backend === "s3" ? (b.s3Bucket ?? "").trim() : null;
+      const s3AccessKeyId = backend === "s3" ? (b.s3AccessKeyId ?? "").trim() : null;
+      const s3SecretAccessKey = backend === "s3" ? (b.s3SecretAccessKey ?? "").trim() : null;
+      const s3Region = backend === "s3" ? (b.s3Region?.trim() || null) ?? null : null;
       db.run(
-        "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [id, name, type, now, isEncrypted ? 1 : 0, password, normalizedGitProvider, normalizedGitRemote],
+        "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, name, type, now, isEncrypted ? 1 : 0, password, normalizedGitProvider, normalizedGitRemote, backend, s3Endpoint, s3Bucket, s3AccessKeyId, s3SecretAccessKey, s3Region],
       );
       set.status = 201;
       return {
@@ -151,6 +213,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         cryptPassword: password,
         gitProvider: normalizedGitProvider,
         gitRemote: normalizedGitRemote,
+        backend,
+        s3Endpoint,
+        s3Bucket,
+        s3AccessKeyId,
+        s3SecretAccessKey,
+        s3Region,
       };
     },
     {
@@ -169,6 +237,14 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           t.Union([t.Literal("git"), t.Literal("gh"), t.Null()]),
         ),
         gitRemote: t.Optional(t.Union([t.String(), t.Null()])),
+        backend: t.Optional(
+          t.Union([t.String(), t.Null()]),
+        ),
+        s3Endpoint: t.Optional(t.Union([t.String(), t.Null()])),
+        s3Bucket: t.Optional(t.Union([t.String(), t.Null()])),
+        s3AccessKeyId: t.Optional(t.Union([t.String(), t.Null()])),
+        s3SecretAccessKey: t.Optional(t.Union([t.String(), t.Null()])),
+        s3Region: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Create a folder definition",
@@ -186,7 +262,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
     ({ params, set }) => {
       const row = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!row) {
@@ -208,12 +284,46 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       },
     },
   )
+  .get(
+    "/folders/:id/assignments",
+    ({ params, set }) => {
+      const folder = db
+        .query<{ id: string }, [string]>("SELECT id FROM folders WHERE id = ?")
+        .get(params.id);
+      if (!folder) {
+        set.status = 404;
+        return { error: "Folder not found" };
+      }
+      const rows = db
+        .query<AssignmentRow, [string]>(
+          `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                  timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
+                  cache_profile, cache_max_size, restic_repository, restic_password
+           FROM folder_assignments WHERE folder_id = ?`,
+        )
+        .all(params.id);
+      return rows.map(rowToAssignment);
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      detail: {
+        summary: "List assignments for a folder",
+        tags: ["Folders"],
+        responses: {
+          200: { description: "Assignment list" },
+          404: { description: "Folder not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
   .put(
     "/folders/:id",
     ({ params, body, set }) => {
       const existing = db
         .query<FolderRow, [string]>(
-          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote FROM folders WHERE id = ?",
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE id = ?",
         )
         .get(params.id);
       if (!existing) {
@@ -227,6 +337,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         cryptPassword?: string | null;
         gitProvider?: "git" | "gh" | null;
         gitRemote?: string | null;
+        backend?: string | null;
+        s3Endpoint?: string | null;
+        s3Bucket?: string | null;
+        s3AccessKeyId?: string | null;
+        s3SecretAccessKey?: string | null;
+        s3Region?: string | null;
       };
       if (patch.type && !FOLDER_TYPES.includes(patch.type)) {
         set.status = 400;
@@ -261,9 +377,32 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: "gitRemote is required when gitProvider is \"gh\"" };
       }
+      const existingBackend = existing.backend === "s3" || existing.backend === "local" ? existing.backend : "sftp";
+      const effectiveBackend = patch.backend === undefined || patch.backend === null
+        ? existingBackend
+        : normalizeBackend(patch.backend);
+      const s3Inputs = {
+        s3Endpoint: patch.s3Endpoint ?? (existing.s3_endpoint ?? ""),
+        s3Bucket: patch.s3Bucket ?? (existing.s3_bucket ?? ""),
+        s3AccessKeyId: patch.s3AccessKeyId ?? (existing.s3_access_key_id ?? ""),
+        s3SecretAccessKey: patch.s3SecretAccessKey ?? (existing.s3_secret_access_key ?? ""),
+      };
+      if (effectiveBackend === "s3") {
+        const s3Error = requireS3Credentials(s3Inputs);
+        if (s3Error) {
+          set.status = 400;
+          return { error: s3Error };
+        }
+      }
+      const trimOrNull = (v: unknown): string | null => (typeof v === "string" ? v.trim() || null : null);
+      const nextS3Endpoint = effectiveBackend === "s3" ? (typeof s3Inputs.s3Endpoint === "string" ? s3Inputs.s3Endpoint.trim() : "") : null;
+      const nextS3Bucket = effectiveBackend === "s3" ? (typeof s3Inputs.s3Bucket === "string" ? s3Inputs.s3Bucket.trim() : "") : null;
+      const nextS3AccessKeyId = effectiveBackend === "s3" ? (typeof s3Inputs.s3AccessKeyId === "string" ? s3Inputs.s3AccessKeyId.trim() : "") : null;
+      const nextS3SecretAccessKey = effectiveBackend === "s3" ? (typeof s3Inputs.s3SecretAccessKey === "string" ? s3Inputs.s3SecretAccessKey.trim() : "") : null;
+      const nextS3Region = effectiveBackend === "s3" ? trimOrNull(patch.s3Region ?? existing.s3_region) : null;
       db.run(
-        "UPDATE folders SET name = ?, type = ?, encrypted = ?, crypt_password = ?, git_provider = ?, git_remote = ? WHERE id = ?",
-        [newName, newType, newEncrypted ? 1 : 0, newPassword ?? null, effectiveGitProvider, effectiveGitRemote, params.id],
+        "UPDATE folders SET name = ?, type = ?, encrypted = ?, crypt_password = ?, git_provider = ?, git_remote = ?, backend = ?, s3_endpoint = ?, s3_bucket = ?, s3_access_key_id = ?, s3_secret_access_key = ?, s3_region = ? WHERE id = ?",
+        [newName, newType, newEncrypted ? 1 : 0, newPassword ?? null, effectiveGitProvider, effectiveGitRemote, effectiveBackend, nextS3Endpoint, nextS3Bucket, nextS3AccessKeyId, nextS3SecretAccessKey, nextS3Region, params.id],
       );
       return rowToFolder({
         ...existing,
@@ -273,6 +412,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         crypt_password: newPassword ?? null,
         git_provider: effectiveGitProvider,
         git_remote: effectiveGitRemote,
+        backend: effectiveBackend,
+        s3_endpoint: nextS3Endpoint,
+        s3_bucket: nextS3Bucket,
+        s3_access_key_id: nextS3AccessKeyId,
+        s3_secret_access_key: nextS3SecretAccessKey,
+        s3_region: nextS3Region,
       });
      },
      {
@@ -294,9 +439,17 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           t.Union([t.Literal("git"), t.Literal("gh"), t.Null()]),
         ),
         gitRemote: t.Optional(t.Union([t.String(), t.Null()])),
+        backend: t.Optional(
+          t.Union([t.String(), t.Null()]),
+        ),
+        s3Endpoint: t.Optional(t.Union([t.String(), t.Null()])),
+        s3Bucket: t.Optional(t.Union([t.String(), t.Null()])),
+        s3AccessKeyId: t.Optional(t.Union([t.String(), t.Null()])),
+        s3SecretAccessKey: t.Optional(t.Union([t.String(), t.Null()])),
+        s3Region: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
-        summary: "Update folder name or type",
+        summary: "Update folder name, type, or backend",
         tags: ["Folders"],
         responses: {
           200: { description: "Updated folder" },

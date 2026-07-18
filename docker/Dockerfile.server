@@ -8,17 +8,20 @@ FROM oven/bun:${BUN_VERSION} AS build
 WORKDIR /src
 
 # Cache deps separately for faster incremental builds.
-COPY package.json bun.lock ./
+COPY package.json bun.lock bunfig.toml ./
 COPY packages/core/package.json packages/core/
 COPY packages/server/package.json packages/server/
 COPY packages/daemon/package.json packages/daemon/
 COPY packages/tui/package.json packages/tui/
+COPY packages/web-ui/package.json packages/web-ui/
 COPY packages/agent-skill/package.json packages/agent-skill/
 RUN bun install --frozen-lockfile
 
 # Copy sources and build the server binary.
 COPY packages ./packages
-RUN bun build --compile --target=bun \
+# Build the SPA so the server can embed it as a single string.
+RUN bun run --filter @lamasync/web-ui build
+RUN bun build --compile --target=bun --loader .html:text \
       --outfile /out/lamasync-server \
       packages/server/src/index.ts
 
@@ -39,8 +42,6 @@ RUN apt-get update \
 COPY --from=build /out/lamasync-server /usr/local/bin/lamasync-server
 
 RUN mkdir -p /data /backups
-VOLUME ["/data", "/backups"]
-
 ENV LAMASYNC_DATA_DIR=/data
 ENV LAMASYNC_BACKUP_DIR=/backups
 ENV PORT=8080

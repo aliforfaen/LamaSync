@@ -228,6 +228,143 @@ describe("generateRcloneConfig — encryption at rest (LAMA-124)", () => {
   });
 });
 
+describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
+  test("non-encrypted S3 folder emits backend + alias remote", () => {
+    const folder = makeFolder({
+      id: "s3-1",
+      name: "exoscale-vault",
+      type: "sync",
+      backend: "s3",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "lamasync-vault",
+      s3AccessKeyId: "EXO_KEY",
+      s3SecretAccessKey: "EXO_SECRET",
+      s3Region: "vie-1",
+    });
+    const assignment = makeAssignment({ folderId: "s3-1" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toContain("[lamasync-s3-1-backend]");
+    expect(cfg).toMatch(/\[lamasync-s3-1-backend\][\s\S]*type = s3/);
+    expect(cfg).toMatch(/\[lamasync-s3-1-backend\][\s\S]*provider = Other/);
+    expect(cfg).toMatch(/\[lamasync-s3-1-backend\][\s\S]*endpoint = sos-at-vie-1\.exo\.io/);
+    expect(cfg).toMatch(/\[lamasync-s3-1-backend\][\s\S]*access_key_id = EXO_KEY/);
+    expect(cfg).toMatch(/\[lamasync-s3-1-backend\][\s\S]*secret_access_key = EXO_SECRET/);
+    expect(cfg).toMatch(/\[lamasync-s3-1-backend\][\s\S]*region = vie-1/);
+    // Alias section points at the bucket.
+    expect(cfg).toMatch(/\[lamasync-s3-1\][\s\S]*type = alias[\s\S]*remote = lamasync-s3-1-backend:lamasync-vault/);
+    // No sftp section for this folder.
+    expect(cfg).not.toMatch(/\[lamasync-s3-1\][\s\S]*type = sftp/);
+  });
+
+  test("encrypted S3 folder emits S3 backend + crypt remote pointing at bucket", () => {
+    const folder = makeFolder({
+      id: "s3-2",
+      name: "exoscale-vault-enc",
+      type: "sync",
+      encrypted: true,
+      cryptPassword: "cGFzc3dvcmQ=",
+      backend: "s3",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "lamasync-vault-enc",
+      s3AccessKeyId: "EXO_KEY2",
+      s3SecretAccessKey: "EXO_SECRET2",
+    });
+    const assignment = makeAssignment({ folderId: "s3-2" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toContain("[lamasync-s3-2-backend]");
+    expect(cfg).toMatch(/\[lamasync-s3-2-backend\][\s\S]*type = s3/);
+    expect(cfg).toMatch(/\[lamasync-s3-2\][\s\S]*type = crypt/);
+    expect(cfg).toMatch(
+      /\[lamasync-s3-2\][\s\S]*remote = lamasync-s3-2-backend:lamasync-vault-enc/,
+    );
+    expect(cfg).not.toMatch(/\[lamasync-s3-2\][\s\S]*type = sftp/);
+    expect(cfg).not.toMatch(/\[lamasync-s3-2\][\s\S]*type = alias/);
+  });
+
+  test("S3 folder honours assignment.remoteName on the alias section", () => {
+    const folder = makeFolder({
+      id: "s3-3",
+      name: "exoscale-vault-named",
+      type: "sync",
+      backend: "s3",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "named-bucket",
+      s3AccessKeyId: "KEY",
+      s3SecretAccessKey: "SECRET",
+    });
+    const assignment = makeAssignment({ folderId: "s3-3", remoteName: "my-vault" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toContain("[my-vault]");
+    expect(cfg).toMatch(/\[my-vault\][\s\S]*type = alias[\s\S]*remote = lamasync-s3-3-backend:named-bucket/);
+    expect(cfg).not.toContain("[lamasync-s3-3]");
+  });
+
+  test("S3 folder without region omits the region key", () => {
+    const folder = makeFolder({
+      id: "s3-4",
+      name: "no-region",
+      type: "backup",
+      backend: "s3",
+      s3Endpoint: "s3.amazonaws.com",
+      s3Bucket: "no-region-bucket",
+      s3AccessKeyId: "KEY",
+      s3SecretAccessKey: "SECRET",
+    });
+    const assignment = makeAssignment({ folderId: "s3-4" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toMatch(/\[lamasync-s3-4-backend\][\s\S]*type = s3/);
+    expect(cfg).not.toMatch(/\[lamasync-s3-4-backend\][\s\S]*region =/);
+  });
+
+  test("plain SFTP folder (no backend) keeps existing sftp behavior", () => {
+    const folder = makeFolder({
+      id: "sftp-1",
+      name: "legacy",
+      type: "sync",
+    });
+    const assignment = makeAssignment({ folderId: "sftp-1" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toContain("[lamasync-sftp-1]");
+    expect(cfg).toMatch(/\[lamasync-sftp-1\][\s\S]*type = sftp/);
+    expect(cfg).not.toContain("[lamasync-sftp-1-backend]");
+  });
+});
+
 // --- helpers --------------------------------------------------------------
 function setConfigDb(next: Database): void {
   const mod = require("./config.ts") as { __setDb?: (db: Database) => void };

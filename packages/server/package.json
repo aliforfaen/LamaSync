@@ -9,10 +9,11 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "build": "bun build --compile --outfile dist/lamasync-server src/index.ts"
+    "build": "bun build --compile --loader .html:text --outfile dist/lamasync-server src/index.ts"
   },
   "dependencies": {
     "@lamasync/core": "workspace:*",
+    "@lamasync/web-ui": "workspace:*",
     "elysia": "^1.1.0",
     "@elysiajs/swagger": "^1.1.0"
   }

@@ -3,6 +3,7 @@
 export type HostStatus = "online" | "offline" | "degraded" | "unknown";
 
 export type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
+export type FolderBackend = "sftp" | "s3" | "local";
 
 export type OperationStatus =
   | "started"
@@ -71,6 +72,12 @@ export interface Folder {
   cryptPassword?: string | null;
   gitProvider?: "git" | "gh" | null;
   gitRemote?: string | null;
+  backend?: FolderBackend | null;
+  s3Endpoint?: string | null;
+  s3Bucket?: string | null;
+  s3AccessKeyId?: string | null;
+  s3SecretAccessKey?: string | null;
+  s3Region?: string | null;
 }
 
 export interface FolderAssignment {

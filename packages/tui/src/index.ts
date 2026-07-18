@@ -505,6 +505,7 @@ async function refreshLocalFolders(state: AppState): Promise<void> {
         cacheMaxSize: a?.cacheMaxSize ?? null,
         gitProvider: f.gitProvider ?? null,
         gitRemote: f.gitRemote ?? null,
+        backend: f.backend ?? null,
       };
     });
   } catch {

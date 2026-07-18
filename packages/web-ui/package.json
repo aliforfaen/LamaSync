@@ -1,0 +1,27 @@
+{
+  "name": "@lamasync/web-ui",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./src/main.tsx",
+  "exports": {
+    "./dist/index.html": "./dist/index.html"
+  },
+  "scripts": {
+    "build": "vite build && bun ../../scripts/inline-web-ui.ts",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@lamasync/core": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.6"
+  }
+}

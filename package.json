@@ -9,7 +9,9 @@
     "dev:server": "bun run --watch packages/server/src/index.ts",
     "dev:daemon": "bun run packages/daemon/src/index.ts",
     "dev:tui": "bun run packages/tui/src/index.ts",
-    "build": "bun scripts/gen-version.ts && bun run --filter='*' build",
+    "dev:web-ui": "bun run --filter @lamasync/web-ui dev",
+    "build:web-ui": "bun run --filter @lamasync/web-ui build",
+    "build": "bun scripts/gen-version.ts && bun run --filter @lamasync/web-ui build && bun run --filter '!@lamasync/web-ui' build",
     "test": "bun test"
   },
   "devDependencies": {

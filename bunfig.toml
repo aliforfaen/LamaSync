@@ -1,0 +1,5 @@
+# bunfig.toml — Bun loads this at the project root and applies it across
+# every package in the workspace.
+
+[loader]
+".html" = "text"

@@ -11,14 +11,20 @@ CREATE TABLE IF NOT EXISTS hosts (
 );
 
 CREATE TABLE IF NOT EXISTS folders (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    type            TEXT NOT NULL,
-    created_at      INTEGER,
-    encrypted       BOOLEAN DEFAULT 0,
-    crypt_password  TEXT,
-    git_provider    TEXT,
-    git_remote      TEXT
+    id                    TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL,
+    type                  TEXT NOT NULL,
+    created_at            INTEGER,
+    encrypted             BOOLEAN DEFAULT 0,
+    crypt_password        TEXT,
+    git_provider          TEXT,
+    git_remote            TEXT,
+    backend               TEXT DEFAULT 'sftp',
+    s3_endpoint           TEXT,
+    s3_bucket             TEXT,
+    s3_access_key_id      TEXT,
+    s3_secret_access_key  TEXT,
+    s3_region             TEXT
 );
 
 CREATE TABLE IF NOT EXISTS folder_assignments (
@@ -176,4 +182,10 @@ export const MIGRATIONS: string[] = [
   "CREATE TABLE IF NOT EXISTS folder_locks (folder_id TEXT PRIMARY KEY, locked_by TEXT, locked_at INTEGER, lock_ttl INTEGER DEFAULT 1200, lock_id TEXT)",
   "INSERT OR REPLACE INTO folder_locks (folder_id, locked_by, locked_at, lock_ttl) SELECT fa.folder_id, ss.locked_by, ss.locked_at, ss.lock_ttl FROM folder_assignments fa JOIN schedule_state ss ON ss.folder_assignment_id = fa.id WHERE ss.locked_by IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS idx_folder_locks_locked_by ON folder_locks(locked_by)",
+  "ALTER TABLE folders ADD COLUMN backend TEXT DEFAULT 'sftp'",
+  "ALTER TABLE folders ADD COLUMN s3_endpoint TEXT",
+  "ALTER TABLE folders ADD COLUMN s3_bucket TEXT",
+  "ALTER TABLE folders ADD COLUMN s3_access_key_id TEXT",
+  "ALTER TABLE folders ADD COLUMN s3_secret_access_key TEXT",
+  "ALTER TABLE folders ADD COLUMN s3_region TEXT",
 ];

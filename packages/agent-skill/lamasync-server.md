@@ -14,6 +14,10 @@ an append-only `operation_log`. The server is typically deployed on TrueNAS
 behind a tailnet, but it is self-contained: the binary, a data dir, and a
 backup dir are the only runtime requirements.
 
+The server also embeds a self-contained React Management UI at `GET /`. Auth
+is the same pre-shared API key; the UI stores it in `sessionStorage` and
+re-uses it for every `/api/v1/*` request.
+
 Use this skill when an agent needs to:
 
 - check whether any host in the fleet is online, degraded, or offline
@@ -21,6 +25,8 @@ Use this skill when an agent needs to:
 - create a new folder definition and assign it to a host
 - upload a new dotfile tarball version, or list the ones on disk
 - register a host, or update its heartbeat
+- manage folders / dotfiles / conflicts / operation-log retention through a
+  browser without typing any curl
 
 ## Base URL and auth
 
@@ -52,10 +58,11 @@ Missing or wrong key → `401 Unauthorized`.
 | GET    | `/api/v1/folders`                                 | List all folder definitions                      |
 | POST   | `/api/v1/folders`                                 | Create a folder definition                       |
 | GET    | `/api/v1/folders/:id`                             | Read a single folder                             |
-| PUT    | `/api/v1/folders/:id`                             | Update folder name/type                          |
+| PUT    | `/api/v1/folders/:id`                             | Update folder name/type/backend/S3 credentials   |
 | DELETE | `/api/v1/folders/:id`                             | Delete folder + cascade its assignments          |
 | POST   | `/api/v1/folders/:id/assign`                      | Assign folder to a host                          |
 | DELETE | `/api/v1/folders/:id/assign/:hostId`              | Unassign                                         |
+| GET    | `/api/v1/folders/:id/assignments`                 | List a folder's host assignments                 |
 | GET    | `/api/v1/dotfiles/manifests`                      | List effective manifests (global + host override)|
 | POST   | `/api/v1/dotfiles/manifests`                      | Create a dotfile manifest                        |
 | PUT    | `/api/v1/dotfiles/manifests/:id`                  | Update a manifest                                |
@@ -78,7 +85,9 @@ Missing or wrong key → `401 Unauthorized`.
 | POST   | `/api/v1/conflicts/:id/resolve`                   | Resolve a conflict (local/remote/both)           |
 | GET    | `/api/v1/ws` (WebSocket)                          | Fleet event stream (subprotocol auth)            |
 | GET    | `/swagger/json`                                   | Live OpenAPI 3 spec (use to resolve schemas)     |
+| GET    | `/`                                                | Management Web UI (single-page React SPA)        |
 | GET    | `/swagger`                                        | Swagger UI                                       |
+
 ### `GET /api/v1/operations` query params
 
 | Param   | Type   | Default | Notes                                          |
@@ -155,6 +164,25 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
 
 `type` must be one of: `sync`, `mount`, `backup`, `dotfile`, `git`.
 
+`backend` is optional and defaults to `sftp`. Set `backend: "s3"` to back the
+folder with an S3-compatible object store (Exoscale SOS, MinIO, AWS, etc.).
+When `backend: "s3"` is set, `s3Endpoint`, `s3Bucket`, `s3AccessKeyId`, and
+`s3SecretAccessKey` are required; `s3Region` is optional. Example S3 payload:
+
+```bash
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"exoscale-vault","type":"sync","backend":"s3","s3Endpoint":"sos-at-vie-1.exo.io","s3Bucket":"lamasync-vault","s3AccessKeyId":"EXO_KEY","s3SecretAccessKey":"EXO_SECRET","s3Region":"vie-1"}' \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/folders
+```
+
+List every assignment for a folder (used by the Web UI's Folders page):
+
+```bash
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/folders/<id>/assignments
+```
+
 ### Define, upload, and restore app-specific dotfiles
 
 ```bash
@@ -189,17 +217,37 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
 ### Open the WebSocket fleet stream
 
 The WebSocket endpoint uses the `Sec-WebSocket-Protocol` header for auth. The
-server expects the second subprotocol value to be the base64 encoding of the
-API key (no padding):
+server accepts three encodings of the API key in the second subprotocol slot:
+the raw key, base64, or unpadded base64url (RFC 6455 forbids `=` padding). The
+browser UI ships this helper:
 
 ```js
-const token = btoa(LAMASYNC_API_KEY).replace(/=+$/, "");
+const token = btoa(LAMASYNC_API_KEY)
+  .replace(/\+/g, "-")
+  .replace(/\//g, "_")
+  .replace(/=+$/, "");
 const ws = new WebSocket(
   "ws://<lamasync-server-tailnet-ip>:8080/api/v1/ws",
   ["lamasync-auth", token],
 );
 ws.onmessage = (e) => console.log(JSON.parse(e.data));
 ```
+
+### Open the Management Web UI
+
+```bash
+# The web UI is bundled into the server binary; no extra setup is required.
+# 1. Open the site
+xdg-open http://<lamasync-server-tailnet-ip>:8080/   # or paste the URL into your browser
+
+# 2. Paste the same $LAMASYNC_API_KEY value at the login screen.
+# The session is scoped to the browser tab (sessionStorage); sign out to clear it.
+```
+
+The UI mirrors the JSON API. It covers the same flows as the `curl`s above —
+register/dashboard, folder CRUD + assignment view, dotfile manifest CRUD,
+pending-conflict resolution, and operation-log pruning — without typing
+endpoints by hand.
 
 ## Schemas
 
@@ -208,11 +256,10 @@ you need exact request/response field names or want to verify a schema before
 issuing a write. The high-level shapes are:
 
 - `Host { id, hostname, tailnetIp?, lastSeen?, status }`
-- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword? }`
+- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }`
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }` (`status` includes `retry`, `recovery`)
 - `DotfileManifest { id, hostId, appName, paths[], schedule?, instructions? }`
-- `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum?, description? }`
 - `ResticSnapshot { id, folderId, hostId, snapshotId, timestamp, paths[], sizeBytes?, tags? }`
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
@@ -231,6 +278,9 @@ All `?` fields are nullable. Timestamps are milliseconds since epoch
   with `POST /api/v1/admin/prune?olderThanMs=<ms>`.
 - `schedule_state` is updated automatically when a `POST /report` includes a
   `folderId` that matches an existing assignment.
+- The WebSocket protocol now broadcasts a `host` event from `POST /register`
+  and `POST /report/health` so the Management UI updates live without
+  re-fetching.
 
 ## See also
 

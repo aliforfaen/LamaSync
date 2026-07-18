@@ -3,6 +3,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "jsx": "react-jsx",
     "types": ["bun"],
     "strict": true,
     "noImplicitAny": true,
@@ -27,6 +28,6 @@
       "@lamasync/tui": ["./packages/tui/src/index.ts"]
     }
   },
-  "include": ["packages/**/src/**/*.ts"],
+  "include": ["packages/**/src/**/*.ts", "packages/**/src/**/*.tsx"],
   "exclude": ["node_modules", "dist"]
 }
