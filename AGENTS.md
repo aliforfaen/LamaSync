@@ -324,9 +324,10 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 
 - Project version: **0.2.0**
 - Tests: **118 passing** across 19 files, 0 failures (10 new web-UI tests)
-- Open Multica issues: **4** (LAMA-110 closed via LAMA-147 implementation)
-- Recently closed: LAMA-110 / LAMA-147 (Management Web UI), LAMA-105 (S3 backend), LAMA-150 (CI), LAMA-151 (self-update)
+- Open Multica issues: see project board. Notable: **LAMA-164** (CI/CD Docker image) is now done; **LAMA-105** (Backend storage) remains in progress.
+- Recently closed: LAMA-110 / LAMA-147 (Management Web UI), LAMA-105 (S3 backend), LAMA-150 (CI), LAMA-151 (self-update), LAMA-164 (server Docker image)
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
+- **Next session**: LAMA-105 — Exoscale S3 backend + basic end-to-end tests.
 
 ## Next session options
 
