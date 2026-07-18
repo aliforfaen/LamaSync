@@ -67,6 +67,118 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" http://100.64.0.1:8080/api/v1/
 The Swagger UI is at `http://100.64.0.1:8080/swagger` and the machine-readable
 spec at `http://100.64.0.1:8080/swagger/json`.
 
+### 1b. Production server on an LXC container
+
+A dedicated Docker-enabled LXC container can run the same server image. The
+example below matches the current fleet container:
+
+| Setting | Value |
+|---|---|
+| Host | `lamasync` |
+| Tailscale IP | `100.113.52.108` |
+| SSH user | `messhias` |
+| SSH key | `~/.ssh/lamasync_key` |
+| Docker image | `ghcr.io/aliforfaen/lamasync-server:latest` |
+| Deploy dir | `/home/messhias/lamasync` |
+| Exposed port | `0.0.0.0:8080` (so Tailscale can reach it) |
+| Auto-update | daily at 04:00 via cron |
+
+On the container:
+
+```bash
+mkdir -p /home/messhias/lamasync
+cd /home/messhias/lamasync
+
+# .env holds the pre-shared API key and tailnet IP
+cat > .env <<EOF
+LAMASYNC_API_KEY=$(openssl rand -hex 32)
+LAMASYNC_TAILNET_IP=100.113.52.108
+LAMASYNC_HOST_IP=0.0.0.0
+LAMASYNC_IMAGE=ghcr.io/aliforfaen/lamasync-server:latest
+EOF
+
+# docker-compose.yml — image from GHCR with local build fallback
+cat > docker-compose.yml <<'EOF'
+services:
+  lamasync-server:
+    image: ${LAMASYNC_IMAGE:-ghcr.io/aliforfaen/lamasync-server:latest}
+    build:
+      context: ./src
+      dockerfile: docker/Dockerfile.server
+    container_name: lamasync-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LAMASYNC_DATA_DIR: /data
+      LAMASYNC_BACKUP_DIR: /backups
+    ports:
+      - "${LAMASYNC_HOST_IP:-0.0.0.0}:8080:8080"
+    volumes:
+      - lamasync-data:/data
+      - lamasync-backups:/backups
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-H", "Authorization: Bearer ${LAMASYNC_API_KEY}", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  lamasync-data:
+  lamasync-backups:
+EOF
+
+# Initial start. For the first deploy, the image may not be on GHCR yet,
+# so build from the local source copy first.
+rsync -avz --delete \
+  --exclude='.git' --exclude='node_modules' --exclude='dist' \
+  --exclude='.env' --exclude='.env.*' --exclude='*.log' \
+  ./ /home/messhias/lamasync/src/
+
+docker compose build lamasync-server
+docker compose up -d lamasync-server
+```
+
+Auto-update script (`/home/messhias/lamasync/update.sh`):
+
+```bash
+#!/bin/bash
+set -euo pipefail
+DEPLOY_DIR="/home/messhias/lamasync"
+LOG_FILE="$DEPLOY_DIR/update.log"
+cd "$DEPLOY_DIR"
+exec >> "$LOG_FILE" 2>&1
+
+echo "=== $(date -Iseconds) Update check started ==="
+if docker compose pull lamasync-server; then
+  echo "Image pulled. Restarting if changed..."
+  docker compose up -d lamasync-server
+  echo "=== $(date -Iseconds) Update check completed (pulled image) ==="
+else
+  echo "GHCR pull failed; falling back to local build..."
+  docker compose build lamasync-server
+  docker compose up -d lamasync-server
+  echo "=== $(date -Iseconds) Update check completed (local build) ==="
+fi
+```
+
+```bash
+chmod +x /home/messhias/lamasync/update.sh
+# Add daily auto-update cron job
+(crontab -l 2>/dev/null || true; echo "0 4 * * * /home/messhias/lamasync/update.sh") | crontab -
+```
+
+Verify:
+
+```bash
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" http://100.113.52.108:8080/api/v1/health
+# → {"status":"ok",...}
+```
+
+A persistent tmux session `lamasync` was created on the container during setup
+for live monitoring.
+
 ### 2. Install the daemon on a client
 
 The daemon is a single static binary. Build once on the server, copy to clients,

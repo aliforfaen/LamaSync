@@ -326,16 +326,20 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - Tests: **118 passing** across 19 files, 0 failures (10 new web-UI tests)
 - Open Multica issues: **4** (LAMA-110 closed via LAMA-147 implementation)
 - Recently closed: LAMA-110 / LAMA-147 (Management Web UI), LAMA-105 (S3 backend), LAMA-150 (CI), LAMA-151 (self-update)
+- **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
 
 ## Next session options
 
 Ready-to-pick work, ordered by likely value/urgency:
 
-1. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
-   - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
+1. **LAMA-105 — Backend storage: Exoscale S3 backend + basic tests** (in_progress, urgent)
+   - Wire up the Exoscale S3-compatible backend as a folder target.
+   - Add validation for `s3Endpoint`, `s3Bucket`, `s3AccessKeyId`, `s3SecretAccessKey`.
+   - Run basic end-to-end tests: create folder, assign, daemon sync, verify object listing in bucket.
+   - Revisit rclone config generation for S3 in `server/src/routes/config.ts` and folder validation in `server/src/routes/folders.ts`.
 
-2. **LAMA-105 — Backend storage** (backlog, urgent)
-   - Support S3 / WebDAV / local backends beyond the current SFTP assumption. Touches rclone config generation and folder validation.
+2. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
+   - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
 
 3. **LAMA-104 — Error handling** (backlog, high)
    - Harden error propagation, structured error responses, and retry/circuit-breaker behavior across the daemon and server.
