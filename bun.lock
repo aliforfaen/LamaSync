@@ -34,6 +34,7 @@
       "dependencies": {
         "@elysiajs/swagger": "^1.1.0",
         "@lamasync/core": "workspace:*",
+        "@lamasync/web-ui": "workspace:*",
         "elysia": "^1.1.0",
       },
     },

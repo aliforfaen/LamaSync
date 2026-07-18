@@ -14,3 +14,5 @@ dist/
 tmp/
 coverage/
 .cache/
+.tmp-*.ts
+*.tmp-*.ts

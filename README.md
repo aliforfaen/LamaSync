@@ -103,10 +103,30 @@ systemctl --user status lamasyncd
 journalctl --user -u lamasyncd -f
 ```
 
-### 3. Register a folder assignment
+### 3. Open the Management Web UI (optional but recommended)
 
-The daemon registers the host on first start. To create a folder and assign
-it, use the API (the TUI will support this in a future release):
+The server embeds a React management UI at `/`. After starting the server:
+
+```bash
+xdg-open http://100.64.0.1:8080/   # or open the URL in any browser
+```
+
+Log in with the same `$LAMASYNC_API_KEY`. The UI lets you:
+
+- Browse the dashboard (hosts, recent operations, counts)
+- Create, edit, and delete folders
+- View folder assignments per folder
+- Create and delete dotfile manifests
+- Resolve pending sync conflicts
+- Prune the operation log by age
+
+The UI stores the API key in `sessionStorage` and talks to the same
+`/api/v1/*` endpoints as the curl examples below.
+
+### 4. Register a folder assignment
+
+You can create folders and assignments through the Web UI, the TUI's GitHub
+repo selector, or directly via the API:
 
 ```bash
 # Create a folder
@@ -131,7 +151,7 @@ Within 5 minutes (the daemon's config refresh interval), the daemon will pick
 up the new assignment, write a temp rclone config, and start syncing on the
 schedule.
 
-### 4. Open the TUI
+### 5. Open the TUI
 
 ```bash
 # Build the TUI binary (or copy from server)
@@ -153,7 +173,7 @@ LAMASYNC_NO_TUI=1 LAMASYNC_SERVER_URL=http://100.64.0.1:8080 LAMASYNC_API_KEY="$
 The TUI has five views: **Local**, **Fleet**, **Dotfiles**, **Logs**, **Quit**.
 Hotkeys per view are shown in the bottom row.
 
-### 5. Restore a dotfile version
+### 6. Restore a dotfile version
 
 1. Open the TUI, choose **Dotfiles**.
 2. Pick an app (e.g. `nvim`) → pick a version → see the file list preview.
@@ -164,7 +184,7 @@ Hotkeys per view are shown in the bottom row.
 
 | Component | Purpose |
 |-----------|---------|
-| `lamasync-server` | REST API + WebSocket + SQLite. Generates rclone config fragments per host. |
+| `lamasync-server` | REST API + WebSocket + SQLite + embedded React Management Web UI. Generates rclone config fragments per host. |
 | `lamasyncd` | Per-host systemd user daemon. Manages rclone processes, schedules, ignore patterns, hooks, and exposes a Unix socket for the TUI. |
 | `lamasync-tui` | OpenTUI terminal UI. Connects to local daemon over Unix socket, or directly to the server. |
 
@@ -204,6 +224,9 @@ bun install
 # Type check (always green before commit)
 bun x tsc --noEmit
 
+# Build the web UI before tests (the server test imports dist/index.html)
+bun run build:web-ui
+
 # Unit tests
 bun test
 
@@ -222,9 +245,25 @@ bun run build
 bun run dev:server     # Elysia with --watch
 bun run dev:daemon     # uses ~/.config/lamasync/client.toml
 bun run dev:tui        # OpenTUI
+bun run dev:web-ui     # Vite dev server with API proxy to :8080
 ```
 
-Environment variables: see `AGENTS.md`.
+### End-to-end test harness
+
+Run a fully isolated server + daemon on a random free port, with the Web UI,
+Swagger, and TUI ready to use:
+
+```bash
+# Use existing binaries (or build first with bun run build)
+./scripts/e2e-harness.sh
+
+# Force a rebuild before starting
+./scripts/e2e-harness.sh --rebuild
+```
+
+The harness prints the URL, API key, socket path, and example commands. Press
+Ctrl+C to stop the server and daemon. Logs and temp data are left in
+`./tmp/e2e/` for inspection.
 
 ## License
 

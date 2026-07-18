@@ -62,6 +62,7 @@ interface AppState {
   hostname: string;
   client: TuiClient;
   localFolders: LocalFolder[];
+  selectedFolderId: string | null;
   fleetHosts: FleetHost[];
   fleetError: string | null;
   fleetLoading: boolean;
@@ -116,6 +117,7 @@ async function runTui(): Promise<void> {
     hostname: tuiClient.fromConfigFile ? hostname : localHostname,
     client: tuiClient,
     localFolders: [],
+    selectedFolderId: null,
     fleetHosts: [],
     fleetError: null,
     fleetLoading: false,
@@ -125,7 +127,7 @@ async function runTui(): Promise<void> {
     gh: null,
     fleetSubscription: null,
     apiBaseUrl: serverBaseUrl(),
-    apiKey: process.env.LAMASYNC_API_KEY ?? "dev-key",
+    apiKey: client.apiKey,
     status: null,
     statusKind: "info",
    };
@@ -383,6 +385,7 @@ function navigate(
     state.fleetSubscription = openFleetSubscription(
       state.apiBaseUrl,
       state.apiKey,
+      () => state.fleetHosts,
       (hosts: FleetHost[]) => {
         state.fleetHosts = hosts;
         redraw(state);
@@ -450,11 +453,17 @@ function renderCurrent(state: AppState) {
         state: {
           folders: state.localFolders,
           hostname: state.hostname,
+          selectedFolderId: state.selectedFolderId,
           status: state.status,
           statusKind: state.statusKind,
         },
         onAction: (a: LocalAction) => applyLocalAction(a, state),
+        onSelectFolder: (folderId: string) => {
+          state.selectedFolderId = folderId;
+          redraw(state);
+        },
       });
+    case "fleet":
       return renderFleet({
         state: { hosts: state.fleetHosts },
         serverUrl: state.apiBaseUrl,
@@ -513,6 +522,10 @@ async function refreshLocalFolders(state: AppState): Promise<void> {
   }
 }
 function selectedLocalFolder(state: AppState): LocalFolder | null {
+  if (state.selectedFolderId) {
+    const found = state.localFolders.find((f) => f.id === state.selectedFolderId);
+    if (found) return found;
+  }
   return state.localFolders[0] ?? null;
 }
 

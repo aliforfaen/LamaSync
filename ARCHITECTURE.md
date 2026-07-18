@@ -35,6 +35,10 @@ Three binaries per machine:
   server, exposes a Unix socket for the local TUI.
 - **`lamasync-tui`** — OpenTUI frontend, talks to the local daemon over a
   Unix socket for the local view and to the server REST/WS for the fleet view.
+- **Management Web UI** — React SPA embedded in `lamasync-server` at `GET /`.
+  Built with Vite and inlined into a single `dist/index.html` by
+  `scripts/inline-web-ui.ts`; auth uses the same pre-shared API key via
+  `sessionStorage` and REST/WebSocket calls.
 
 The agent skill at `packages/agent-skill/lamasync-server.md` lets external
 agents register, manage folders, and report on operations against the same API.
@@ -291,12 +295,15 @@ script is a standalone `curl | bash` updater for clients.
 
 **Local mode** (default, connects to Unix socket):
 - Folder list with hotkeys `1`–`6`: sync-all, sync-one, refresh, fleet, logs,
-  dotfiles; `p` dry-run preview, `s` switch type, `c` cache profile (mount),
-  `n` network shares, `q` quit.
+  dotfiles; `c` conflicts, `p` cache profile (mount), `s` switch type,
+  `n` network shares, `g` GitHub repos, `q` quit.
+- Selecting a folder in the list updates the active folder used by sync-one,
+  cache-profile, and switch-type.
 
 **Fleet mode** (connects to server REST + WS):
 - Host list with hotkeys `r/l/d/b/q`: refresh, logs, dotfiles, local, quit.
-- The fleet view subscribes to the WS event stream for live updates.
+- The fleet view subscribes to `/api/v1/ws` and merges incoming `host` events
+  into the displayed host list.
 
 ---
 
@@ -575,10 +582,8 @@ lamasync/
 4. **Mobile** — out of scope. This is a Linux-to-Linux tool.
 5. **Windows/WSL** — paths are hardcoded to Unix conventions. rclone works
    on Windows but the daemon does not.
-6. **v0.2.0 completionist verification** — the test-platform checklist
-   (server via Docker, daemon + TUI from compiled binaries, end-to-end
-   exercise of all 12 surface areas) landed 67 unit tests across 11 files
-   and is captured in Multica LAMA-161. Two steps (mount lifecycle and
-   sync↔mount switch safety) require a real SFTP/NFS target to fully
-   verify end-to-end; the code paths are exercised and return the
-   expected error states.
+6. **v0.2.0 completionist verification** — the suite now stands at 118 unit
+   tests across 19 files, including the Management Web UI and embedded-web-ui
+   route. End-to-end verification of mount lifecycle and sync↔mount switch
+   safety still requires a real SFTP/NFS target; the code paths are exercised
+   and return the expected error states in unit tests.

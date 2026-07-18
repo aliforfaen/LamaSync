@@ -169,7 +169,7 @@ lamasync/                     # Bun workspace root
 - **Operation log retention beyond daily pruning** — retention is configurable; long-term archival is not.
 
 ### TUI
-- **OpenTUI component audit** — the TUI already uses OpenTUI's factory components (`Box`, `Text`, `Select`, `Input`, `MarkdownRenderable`) via VNode proxies. The remaining gap is richer navigation (e.g. `TabSelect` for view switching, scrollable lists) and replacing hotkey-driven stubs with real interactive widgets where it improves UX. *(Local-view status line, sync-all, sync-one, cache-profile, switch-type, and network-shares now dispatch real socket/API calls; remaining stubs are only the cosmetic ones.)*
+- **OpenTUI component audit** — the TUI uses OpenTUI's factory components (`Box`, `Text`, `Select`, `Input`, `MarkdownRenderable`) via VNode proxies. Local-view actions (sync-all, sync-one, cache-profile, switch-type, network-shares) now dispatch real socket/API calls and sync-one respects the selected folder. Fleet view renders correctly and consumes live `host` events from `/api/v1/ws`. Remaining gaps are richer navigation (e.g. `TabSelect` for view switching, scrollable lists) and a dotfile diff preview against current disk files before extraction.
 - **Dotfile diff preview** — restore does not yet show a diff against current disk files before extraction.
 
 ### Infrastructure
@@ -199,7 +199,7 @@ bun install
 # Type check (always green before committing)
 bun x tsc --noEmit
 
-# Run tests
+# Run tests (web UI dist must exist first; see build:web-ui below)
 bun test
 
 # Build all distributable binaries
@@ -207,6 +207,9 @@ bun run build
 # → packages/server/dist/lamasync-server
 # → packages/daemon/dist/lamasyncd
 # → packages/tui/dist/lamasync-tui
+
+# Or, just build the web UI so server tests pass:
+# bun run build:web-ui
 
 # Start the server for local dev
 LAMASYNC_API_KEY=dev-key \
@@ -257,6 +260,12 @@ LAMASYNC_NO_TUI=1 \
 ### Writing tests
 
 Tests use `bun:test` (`describe`, `test`, `expect`). Place them alongside the source files as `*.test.ts`. Run with `bun test` from the repo root.
+
+For a quick end-to-end smoke that starts a real server + daemon and exercises the TUI and web UI routes, run:
+
+```bash
+./scripts/e2e-harness.sh
+```
 
 Current coverage:
 - `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
@@ -333,6 +342,6 @@ Ready-to-pick work, ordered by likely value/urgency:
 4. **LAMA-109 — App-specific backup dotfiles** (backlog, none)
    - Expand dotfile support to per-app backup bundles with richer restore semantics.
 
-6. **Polish / tech debt**
+5. **Polish / tech debt**
    - TUI component audit (scrollable lists, real widgets), dotfile diff preview, OpenTUI native-renderer quirks.
    - ntfy notifications, multi-user auth scoping, operation-log archival.

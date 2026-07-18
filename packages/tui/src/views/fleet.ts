@@ -1,5 +1,6 @@
 import { Box, Select, Text } from "@opentui/core";
 import type { VNode } from "@opentui/core";
+import type { Host } from "@lamasync/core";
 
 export type FleetAction = "refresh" | "logs" | "dotfiles" | "local" | "quit";
 
@@ -108,6 +109,7 @@ function hotkeyFooter(): VNode {
 export function openFleetSubscription(
   serverUrl: string,
   apiKey: string,
+  getHosts: () => FleetHost[],
   onHosts: (hosts: FleetHost[]) => void,
 ): FleetSubscription | null {
   const WS = resolveWebSocket();
@@ -116,13 +118,15 @@ export function openFleetSubscription(
   const base = serverUrl.replace(/^http/, "ws");
   const url = `${base}/api/v1/ws`;
   // Bun's WebSocket constructor only accepts RFC 6455 token characters in
-  // subprotocol names; base64 uses `+`/`/`/`=`, so the API key MUST be
-  // transported as a base64 token with padding stripped. The server reads
+  // subprotocol names; base64url avoids the `+`/`/`/`=` characters that
+  // standard base64 produces. The server reads
   // `sec-websocket-protocol: lamasync-auth, <token>` and decodes it.
   const token = (typeof btoa === "function"
     ? btoa(apiKey)
     : Buffer.from(apiKey).toString("base64")
-  ).replace(/=+$/, "");
+  ).replace(/=+$/, "")
+    .replaceAll("+", "-")
+    .replaceAll("/", "_");
   const protocols = ["lamasync-auth", token];
   let socket: WebSocket | null = null;
   let closed = false;
@@ -136,8 +140,11 @@ export function openFleetSubscription(
   socket.addEventListener("message", (event: MessageEvent) => {
     const data = parseMessageData(event.data);
     if (data === null) return;
-    if (Array.isArray(data.hosts)) {
-      onHosts(data.hosts as FleetHost[]);
+    if (data.kind === "host" && isHost(data.host)) {
+      const host = toFleetHost(data.host);
+      const hosts = new Map(getHosts().map((h) => [h.id, h]));
+      hosts.set(host.id, host);
+      onHosts([...hosts.values()]);
     }
   });
 
@@ -151,12 +158,33 @@ export function openFleetSubscription(
   };
 }
 
+function isHost(value: unknown): value is Host {
+  if (value === null || typeof value !== "object") return false;
+  const h = value as Record<string, unknown>;
+  return (
+    typeof h.id === "string" &&
+    typeof h.hostname === "string" &&
+    typeof h.status === "string"
+  );
+}
+
+function toFleetHost(host: Host): FleetHost {
+  return {
+    id: host.id,
+    hostname: host.hostname,
+    status: host.status,
+    lastSeen: host.lastSeen ?? null,
+    tailnetIp: host.tailnetIp ?? undefined,
+  };
+}
+
 export interface FleetSubscription {
   close(): void;
 }
 
 interface MessageShape {
-  hosts?: unknown;
+  kind?: unknown;
+  host?: unknown;
 }
 
 function parseMessageData(data: unknown): MessageShape | null {

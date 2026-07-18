@@ -38,6 +38,7 @@ export interface LocalFolder {
 export interface LocalState {
   folders: LocalFolder[];
   hostname: string;
+  selectedFolderId: string | null;
   status: string | null;
   statusKind: "info" | "error" | "success";
 }
@@ -45,6 +46,7 @@ export interface LocalState {
 export interface RenderLocalOpts {
   state: LocalState;
   onAction: (action: LocalAction) => void;
+  onSelectFolder: (folderId: string) => void;
 }
 
 interface FolderRow {
@@ -100,7 +102,7 @@ export function renderLocal(opts: RenderLocalOpts): VNode {
 
   const select = Select({ options: rows, flexGrow: 1 });
   select.on("itemSelected", (_index: number, option: FolderRow) => {
-    if (option.value) opts.onAction("sync-one");
+    if (option.value) opts.onSelectFolder(option.value);
   });
 
   return Box(

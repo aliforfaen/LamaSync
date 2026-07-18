@@ -18,7 +18,9 @@ COPY packages/agent-skill/package.json packages/agent-skill/
 RUN bun install --frozen-lockfile
 
 # Copy sources and build the server binary.
+COPY tsconfig.json ./
 COPY packages ./packages
+COPY scripts ./scripts
 # Build the SPA so the server can embed it as a single string.
 RUN bun run --filter @lamasync/web-ui build
 RUN bun build --compile --target=bun --loader .html:text \
