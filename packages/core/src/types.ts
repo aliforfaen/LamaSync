@@ -4,6 +4,7 @@ export type HostStatus = "online" | "offline" | "degraded" | "unknown";
 
 export type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 export type FolderBackend = "sftp" | "s3" | "local";
+export type S3Provider = "exoscale" | "aws" | "other";
 
 export type OperationStatus =
   | "started"
@@ -73,6 +74,7 @@ export interface Folder {
   gitProvider?: "git" | "gh" | null;
   gitRemote?: string | null;
   backend?: FolderBackend | null;
+  s3Provider?: S3Provider | null;
   s3Endpoint?: string | null;
   s3Bucket?: string | null;
   s3AccessKeyId?: string | null;

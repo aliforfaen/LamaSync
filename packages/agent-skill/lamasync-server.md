@@ -165,14 +165,26 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
 `type` must be one of: `sync`, `mount`, `backup`, `dotfile`, `git`.
 
 `backend` is optional and defaults to `sftp`. Set `backend: "s3"` to back the
-folder with an S3-compatible object store (Exoscale SOS, MinIO, AWS, etc.).
+folder with an S3-compatible object store (Exoscale SOS, AWS, MinIO, etc.).
 When `backend: "s3"` is set, `s3Endpoint`, `s3Bucket`, `s3AccessKeyId`, and
-`s3SecretAccessKey` are required; `s3Region` is optional. Example S3 payload:
+`s3SecretAccessKey` are required. `s3Provider` is optional and defaults to
+`other`; set it to `exoscale` to use the correct rclone AWS provider +
+`other-v2-signature` region defaults. `s3Region` is optional and is auto-set
+to `other-v2-signature` for Exoscale. Example Exoscale SOS payload:
 
 ```bash
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name":"exoscale-vault","type":"sync","backend":"s3","s3Endpoint":"sos-at-vie-1.exo.io","s3Bucket":"lamasync-vault","s3AccessKeyId":"EXO_KEY","s3SecretAccessKey":"EXO_SECRET","s3Region":"vie-1"}' \
+  -d '{"name":"exoscale-vault","type":"sync","backend":"s3","s3Provider":"exoscale","s3Endpoint":"sos-at-vie-1.exo.io","s3Bucket":"lamasync-vault","s3AccessKeyId":"EXO_KEY","s3SecretAccessKey":"EXO_SECRET"}' \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/folders
+```
+
+Generic S3 example:
+
+```bash
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"generic-s3","type":"backup","backend":"s3","s3Provider":"other","s3Endpoint":"s3.example.com","s3Bucket":"bucket","s3AccessKeyId":"KEY","s3SecretAccessKey":"SECRET","s3Region":"us-east-1"}' \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/folders
 ```
 
@@ -256,7 +268,7 @@ you need exact request/response field names or want to verify a schema before
 issuing a write. The high-level shapes are:
 
 - `Host { id, hostname, tailnetIp?, lastSeen?, status }`
-- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }`
+- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Provider?: 'exoscale'|'aws'|'other', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }`
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }` (`status` includes `retry`, `recovery`)
 - `DotfileManifest { id, hostId, appName, paths[], schedule?, instructions? }`

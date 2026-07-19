@@ -38,6 +38,7 @@ interface FolderRow {
   encrypted: number | null;
   crypt_password: string | null;
   backend: string | null;
+  s3_provider: string | null;
   s3_endpoint: string | null;
   s3_bucket: string | null;
   s3_access_key_id: string | null;
@@ -80,6 +81,11 @@ function rowToFolder(r: FolderRow): Folder {
   const backend = r.backend;
   const normalizedBackend: Folder["backend"] =
     backend === "s3" || backend === "local" ? backend : "sftp";
+  const s3Provider = r.s3_provider;
+  const normalizedProvider: Folder["s3Provider"] =
+    s3Provider === "exoscale" || s3Provider === "aws" || s3Provider === "other"
+      ? s3Provider
+      : "other";
   return {
     id: r.id,
     name: r.name,
@@ -88,6 +94,7 @@ function rowToFolder(r: FolderRow): Folder {
     encrypted: (r.encrypted ?? 0) === 1,
     cryptPassword: r.crypt_password,
     backend: normalizedBackend,
+    s3Provider: normalizedProvider,
     s3Endpoint: r.s3_endpoint,
     s3Bucket: r.s3_bucket,
     s3AccessKeyId: r.s3_access_key_id,
@@ -226,6 +233,28 @@ export function generateRcloneConfig(
     }
   }
 
+  function writeS3Backend(name: string, folder: Folder, description: string, localPath: string): void {
+    const endpoint = (folder.s3Endpoint ?? "").trim();
+    const bucket = (folder.s3Bucket ?? "").trim();
+    const accessKey = (folder.s3AccessKeyId ?? "").trim();
+    const secretKey = (folder.s3SecretAccessKey ?? "").trim();
+    const region = (folder.s3Region ?? "").trim();
+    const provider = folder.s3Provider === "exoscale" ? "AWS" : "Other";
+    lines.push(`[${name}]`);
+    lines.push("type = s3");
+    lines.push(`provider = ${provider}`);
+    lines.push("env_auth = false");
+    lines.push(`access_key_id = ${accessKey}`);
+    lines.push(`secret_access_key = ${secretKey}`);
+    lines.push(`endpoint = ${endpoint}`);
+    if (region !== "") {
+      lines.push(`region = ${region}`);
+    }
+    lines.push(`description = "${description}"`);
+    lines.push(`# bucket: ${bucket}`);
+    lines.push(`# local path on client: ${localPath}`);
+  }
+
   for (const a of assignments) {
     const folder = folders.find((f) => f.id === a.folderId);
     if (!folder) continue;
@@ -247,23 +276,8 @@ export function generateRcloneConfig(
       const backendName = `lamasync-${folder.id}-backend`;
       lines.push(`[${backendName}]`);
       if (useS3) {
-        const endpoint = (folder.s3Endpoint ?? "").trim();
-        const bucket = (folder.s3Bucket ?? "").trim();
-        const accessKey = (folder.s3AccessKeyId ?? "").trim();
-        const secretKey = (folder.s3SecretAccessKey ?? "").trim();
-        const region = (folder.s3Region ?? "").trim();
-        lines.push("type = s3");
-        lines.push("provider = Other");
-        lines.push("env_auth = false");
-        lines.push(`access_key_id = ${accessKey}`);
-        lines.push(`secret_access_key = ${secretKey}`);
-        lines.push(`endpoint = ${endpoint}`);
-        if (region !== "") {
-          lines.push(`region = ${region}`);
-        }
-        lines.push(`description = "${folder.name} (${folder.type}) — encrypted S3 backend"`);
-        lines.push(`# bucket: ${bucket}`);
-        lines.push(`# local path on client: ${a.localPath}`);
+        const backendName = `lamasync-${folder.id}-backend`;
+        writeS3Backend(backendName, folder, `${folder.name} (${folder.type}) — encrypted S3 backend`, a.localPath);
       } else if (serverTailnetIp) {
         lines.push("type = sftp");
         lines.push(`host = ${serverTailnetIp}`);
@@ -291,29 +305,12 @@ export function generateRcloneConfig(
         lines.push(`# local path on client: ${a.localPath}`);
         lines.push(`# server path: ${backupDir}/dotfiles/${folder.name}/`);
       } else if (useS3) {
-        const endpoint = (folder.s3Endpoint ?? "").trim();
-        const bucket = (folder.s3Bucket ?? "").trim();
-        const accessKey = (folder.s3AccessKeyId ?? "").trim();
-        const secretKey = (folder.s3SecretAccessKey ?? "").trim();
-        const region = (folder.s3Region ?? "").trim();
         const backendName = `lamasync-${folder.id}-backend`;
-        lines.push(`[${backendName}]`);
-        lines.push("type = s3");
-        lines.push("provider = Other");
-        lines.push("env_auth = false");
-        lines.push(`access_key_id = ${accessKey}`);
-        lines.push(`secret_access_key = ${secretKey}`);
-        lines.push(`endpoint = ${endpoint}`);
-        if (region !== "") {
-          lines.push(`region = ${region}`);
-        }
-        lines.push(`description = "${folder.name} (${folder.type}) — S3 backend"`);
-        lines.push(`# bucket: ${bucket}`);
-        lines.push(`# local path on client: ${a.localPath}`);
+        writeS3Backend(backendName, folder, `${folder.name} (${folder.type}) — S3 backend`, a.localPath);
         lines.push("");
         lines.push(`[${remoteName}]`);
         lines.push("type = alias");
-        lines.push(`remote = ${backendName}:${bucket}`);
+        lines.push(`remote = ${backendName}:${(folder.s3Bucket ?? "").trim()}`);
         lines.push(`description = "${folder.name} (${folder.type}) — S3 alias"`);
         lines.push(`# local path on client: ${a.localPath}`);
       } else if (serverTailnetIp) {
@@ -381,7 +378,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const folderRows = folderIds.length
       ? activeDb
           .query<FolderRow, string[]>(
-            `SELECT id, name, type, created_at, encrypted, crypt_password, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE id IN (${folderIds
+            `SELECT id, name, type, created_at, encrypted, crypt_password, backend, s3_provider, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE id IN (${folderIds
               .map(() => "?")
               .join(",")})`,
           )

@@ -363,6 +363,61 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
     expect(cfg).toMatch(/\[lamasync-sftp-1\][\s\S]*type = sftp/);
     expect(cfg).not.toContain("[lamasync-sftp-1-backend]");
   });
+  test("Exoscale S3 folder emits provider = AWS and region = other-v2-signature", () => {
+    const folder = makeFolder({
+      id: "s3-exo",
+      name: "exoscale-vault",
+      type: "sync",
+      backend: "s3",
+      s3Provider: "exoscale",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "lamasync-vault",
+      s3AccessKeyId: "EXO_KEY",
+      s3SecretAccessKey: "EXO_SECRET",
+      s3Region: "other-v2-signature",
+    });
+    const assignment = makeAssignment({ folderId: "s3-exo" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toContain("[lamasync-s3-exo-backend]");
+    expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*type = s3/);
+    expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*provider = AWS/);
+    expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*endpoint = sos-at-vie-1\.exo\.io/);
+    expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*region = other-v2-signature/);
+    expect(cfg).toMatch(/\[lamasync-s3-exo\][\s\S]*type = alias[\s\S]*remote = lamasync-s3-exo-backend:lamasync-vault/);
+  });
+
+  test("generic S3 folder keeps provider = Other", () => {
+    const folder = makeFolder({
+      id: "s3-generic",
+      name: "generic-vault",
+      type: "sync",
+      backend: "s3",
+      s3Provider: "other",
+      s3Endpoint: "s3.example.com",
+      s3Bucket: "bucket",
+      s3AccessKeyId: "KEY",
+      s3SecretAccessKey: "SECRET",
+      s3Region: "us-east-1",
+    });
+    const assignment = makeAssignment({ folderId: "s3-generic" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toMatch(/\[lamasync-s3-generic-backend\][\s\S]*provider = Other/);
+    expect(cfg).toMatch(/\[lamasync-s3-generic-backend\][\s\S]*region = us-east-1/);
+  });
 });
 
 // --- helpers --------------------------------------------------------------

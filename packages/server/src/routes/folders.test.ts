@@ -74,19 +74,21 @@ describe("POST /api/v1/folders — backend validation (LAMA-105)", () => {
       name: "exoscale-vault",
       type: "sync",
       backend: "s3",
+      s3Provider: "exoscale",
       s3Endpoint: "sos-at-vie-1.exo.io",
       s3Bucket: "lamasync-vault",
       s3AccessKeyId: "EXO_KEY",
       s3SecretAccessKey: "EXO_SECRET",
-      s3Region: "vie-1",
     });
     const body = (await res.json()) as Record<string, unknown>;
     expect(res.status).toBe(201);
+    expect(body.backend).toBe("s3");
+    expect(body.s3Provider).toBe("exoscale");
     expect(body.s3Endpoint).toBe("sos-at-vie-1.exo.io");
     expect(body.s3Bucket).toBe("lamasync-vault");
     expect(body.s3AccessKeyId).toBe("EXO_KEY");
     expect(body.s3SecretAccessKey).toBe("EXO_SECRET");
-    expect(body.s3Region).toBe("vie-1");
+    expect(body.s3Region).toBe("other-v2-signature");
   });
 
   test("default backend is sftp when not provided", async () => {
@@ -97,6 +99,39 @@ describe("POST /api/v1/folders — backend validation (LAMA-105)", () => {
     expect(res.status).toBe(201);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.backend).toBe("sftp");
+  });
+
+  test("rejects an Exoscale endpoint that does not match sos-ZONE.exo.io", async () => {
+    const res = await postJson("/api/v1/folders", {
+      name: "bad-exoscale",
+      type: "sync",
+      backend: "s3",
+      s3Provider: "exoscale",
+      s3Endpoint: "s3.example.com",
+      s3Bucket: "bucket",
+      s3AccessKeyId: "KEY",
+      s3SecretAccessKey: "SECRET",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("sos-ZONE.exo.io");
+  });
+
+  test("defaults s3Provider to other when not specified", async () => {
+    const res = await postJson("/api/v1/folders", {
+      name: "generic-s3",
+      type: "backup",
+      backend: "s3",
+      s3Endpoint: "s3.example.com",
+      s3Bucket: "bucket",
+      s3AccessKeyId: "KEY",
+      s3SecretAccessKey: "SECRET",
+      s3Region: "us-east-1",
+    });
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(res.status).toBe(201);
+    expect(body.s3Provider).toBe("other");
+    expect(body.s3Region).toBe("us-east-1");
   });
 
   test("normalizes uppercase backend string to lowercase", async () => {
