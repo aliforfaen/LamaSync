@@ -258,9 +258,7 @@ function handleMenuKey(
     applyMenuPick(item, state, renderer);
     return;
   }
-  if (name === "return" || name === "enter") {
-    applyMenuPick("quit", state, renderer);
-  }
+  // Enter is handled by the Select widget's itemSelected event — do nothing here.
 }
 
 function applyMenuPick(
@@ -467,6 +465,24 @@ function redraw(state: AppState): void {
     root.remove(child.id);
   }
   root.add(renderCurrent(state));
+
+  // Auto-focus the first focusable widget after the layout pass so arrow
+  // keys work immediately.  autoFocus on the renderer only covers startup.
+  process.nextTick(() => {
+    focusFirstSelect(root);
+  });
+}
+
+function focusFirstSelect(parent: any): boolean {
+  if (typeof parent.getChildren !== "function") return false;
+  for (const child of parent.getChildren()) {
+    if (child.focusable && typeof child.focus === "function") {
+      child.focus();
+      return true;
+    }
+    if (focusFirstSelect(child)) return true;
+  }
+  return false;
 }
 
 function renderCurrent(state: AppState) {
