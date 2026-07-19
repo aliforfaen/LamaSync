@@ -108,7 +108,7 @@ export async function main(): Promise<void> {
 async function runTui(): Promise<void> {
   const tuiClient = buildClient();
   const { client, hostname, error: configError } = tuiClient;
-  const renderer = await createCliRenderer({ exitOnCtrlC: true });
+  const renderer = await createCliRenderer({ exitOnCtrlC: true, autoFocus: true });
   const localHostname = osHostname();
 
   const state: AppState = {
@@ -158,11 +158,50 @@ function renderConfigError(renderer: CliRenderer, message: string): void {
 }
 
 function installKeyHandler(renderer: CliRenderer, state: AppState): void {
-  const root = renderer.root;
-  root.onKeyDown = (e: KeyEvent) => {
+  // Use the renderer's global keyInput emitter so keys arrive regardless of
+  // which widget is focused.  root.onKeyDown only fires when no focusable
+  // widget is active or when a focused widget lets the event bubble up.
+  renderer.keyInput.on("keypress", (e: KeyEvent) => {
     const name = (e.name ?? "").toLowerCase();
     const raw = typeof e.raw === "string" ? e.raw : "";
     const char = raw.length === 1 ? raw.toLowerCase() : "";
+
+    // ESC or q: navigate back to menu (or quit from menu).
+    // Dotfiles and gh views have internal sub-steps; let them handle ESC first.
+    if (name === "escape" || char === "q") {
+      if (state.view === "dotfiles") {
+        // At app-select step, ESC/q exits to menu.  Deeper steps are handled
+        // by dotfiles' internal handleKey below.
+        if (state.dotfiles && state.dotfiles.state.step !== "app") {
+          state.dotfiles.handleKey(e);
+          redraw(state);
+          return;
+        }
+        navigate(state, "menu", renderer);
+        return;
+      }
+      if (state.view === "gh") {
+        if (state.gh && state.gh.handleKey(e)) {
+          redraw(state);
+          return;
+        }
+        navigate(state, "menu", renderer);
+        return;
+      }
+      if (state.view === "conflicts") {
+        state.conflicts?.handleKey(e);
+        redraw(state);
+        return;
+      }
+      if (state.view === "menu") {
+        // q from menu exits the app.
+        destroyRenderer(renderer);
+        return;
+      }
+      // Local, fleet, logs: ESC or q goes back to menu.
+      navigate(state, "menu", renderer);
+      return;
+    }
 
     if (state.view === "menu") {
       handleMenuKey(e, name, char, state, renderer);
@@ -186,23 +225,18 @@ function installKeyHandler(renderer: CliRenderer, state: AppState): void {
       return;
     }
     if (state.view === "gh") {
+      // gh internal keys (r = refresh) not handled by ESC/q block above
       if (state.gh?.handleKey(e)) {
         redraw(state);
       }
       return;
     }
     if (state.view === "dotfiles") {
-      if (name === "escape" || char === "q") {
-        if (state.dotfiles && state.dotfiles.state.step === "app") {
-          navigate(state, "menu", renderer);
-        }
-        return;
-      }
       state.dotfiles?.handleKey(e);
       redraw(state);
       return;
     }
-  };
+  });
 }
 
 function handleMenuKey(
