@@ -58,8 +58,12 @@ CREATE TABLE IF NOT EXISTS dotfile_manifests (
     host_id       TEXT NOT NULL REFERENCES hosts(id),
     app_name      TEXT NOT NULL,
     paths         TEXT NOT NULL,
+    excludes      TEXT,
     schedule      TEXT,
     instructions  TEXT,
+    last_sync_at  INTEGER,
+    last_sync_direction TEXT,
+    original_uploader_host_id TEXT,
     UNIQUE(host_id, app_name)
 );
 
@@ -190,4 +194,8 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE folders ADD COLUMN s3_access_key_id TEXT",
   "ALTER TABLE folders ADD COLUMN s3_secret_access_key TEXT",
   "ALTER TABLE folders ADD COLUMN s3_region TEXT",
+  "ALTER TABLE dotfile_manifests ADD COLUMN excludes TEXT",
+  "ALTER TABLE dotfile_manifests ADD COLUMN last_sync_at INTEGER",
+  "ALTER TABLE dotfile_manifests ADD COLUMN last_sync_direction TEXT",
+  "ALTER TABLE dotfile_manifests ADD COLUMN original_uploader_host_id TEXT",
 ];

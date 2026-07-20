@@ -204,16 +204,18 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   -d '{"appName":"opencode","paths":["~/.config/opencode"],"instructions":"Restart OpenCode after restore."}' \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/manifests
 
-# 2. Override a single host to back up only a subdirectory
+# 2. Override a single host to back up only a subdirectory, with excludes
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"appName":"opencode","hostId":"alpha","paths":["~/.config/opencode/agents"]}' \
+  -d '{"appName":"opencode","hostId":"alpha","paths":["~/.config/opencode"],"excludes":["*.log","cache/"]}' \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/manifests
 
 # 3. Upload a new version (multipart, field name = "tarball")
 # Optional: "hostId" field to target a host-specific manifest (default is global).
+# Optional: "uploaderHostId" field to record the host that produced the backup.
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   -F "tarball=@/path/to/opencode-2026-07-12.tar.gz" \
+  -F "uploaderHostId=alpha" \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/opencode
 
 # 4. List versions
@@ -271,7 +273,7 @@ issuing a write. The high-level shapes are:
 - `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Provider?: 'exoscale'|'aws'|'other', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }`
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }` (`status` includes `retry`, `recovery`)
-- `DotfileManifest { id, hostId, appName, paths[], schedule?, instructions? }`
+- `DotfileManifest { id, hostId, appName, paths[], excludes[]?, schedule?, instructions?, lastSyncAt?, lastSyncDirection?, originalUploaderHostId? }`
 - `ResticSnapshot { id, folderId, hostId, snapshotId, timestamp, paths[], sizeBytes?, tags? }`
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`

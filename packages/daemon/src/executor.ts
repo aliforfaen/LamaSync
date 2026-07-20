@@ -801,7 +801,8 @@ async function runDotfileUpload(opts: ExecuteOptions, hostConfig: HostConfig, st
   }
   for (const p of manifest.paths) { if (!existsSync(p)) return report(hostId, folder.id, folder.type, "failed", start, { summary: `dotfile path missing: ${p}`, details: { missing: p } }); }
   const inputs = Array.from(byParent, ([pp, bn]) => ["-C", pp, ...bn]).flat();
-  const tar = Bun.spawn(["tar", "czf", tarball, ...inputs], { stdout: "pipe", stderr: "pipe" });
+  const excludeArgs = (manifest.excludes ?? []).flatMap((e) => ["--exclude", e]);
+  const tar = Bun.spawn(["tar", "czf", tarball, ...excludeArgs, ...inputs], { stdout: "pipe", stderr: "pipe" });
   const tarStderr = await new Response(tar.stderr).text();
   if (await tar.exited !== 0) return report(hostId, folder.id, folder.type, "failed", start, { summary: `tar failed (exit ${await tar.exited})`, details: { tarStderr: tail(tarStderr, 1000) } });
   const size = existsSync(tarball) ? statSync(tarball).size : 0;
@@ -809,6 +810,7 @@ async function runDotfileUpload(opts: ExecuteOptions, hostConfig: HostConfig, st
     const version = await client.uploadDotfile(folder.name, Bun.file(tarball), {
       description: `scheduled backup from ${hostId}`,
       hostId: manifest.hostId,
+      uploaderHostId: hostId,
     });
     return report(hostId, folder.id, folder.type, "success", start, { summary: `dotfile ok: ${manifest.paths.length} paths, ${formatBytes(size)} uploaded`, details: { versionId: version.id, tarball, sizeBytes: size, paths: manifest.paths } });
   } catch (err) {
@@ -912,7 +914,8 @@ async function runResticDotfileUpload(opts: ExecuteOptions, start: number): Prom
 
     const timeoutSec = assignment.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
     const tags = ["lamasync", `folder:${folder.id}`, `host:${hostId}`, "dotfile"];
-    const result = await runResticBackup(repo, passwordFile.path, ["--files-from", filesFrom.path], tags, timeoutSec);
+    const excludeArgs = (manifest.excludes ?? []).flatMap((e) => ["--exclude", e]);
+    const result = await runResticBackup(repo, passwordFile.path, [...excludeArgs, "--files-from", filesFrom.path], tags, timeoutSec);
 
     if (!result.ok) {
       return report(hostId, folder.id, folder.type, "failed", start, { summary: `restic dotfile backup failed: ${result.error}`, details: { reason: "restic-backup", durationMs: result.durationMs } });

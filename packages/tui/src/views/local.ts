@@ -1,19 +1,49 @@
+// Local view: lists assigned folders, drives sync/cache/switch/share actions
+// over the daemon socket, and opens the backup-setup wizard on `w`. Implements
+// the foundation `View` contract: a `pageShell` with a folder Select, a hotkey
+// footer, and a status Block — all built once in the constructor; refreshes
+// mutate the inner body Box (cheap), never the outer container.
+
 import { Box, Select, Text } from "@opentui/core";
-import type { VNode } from "@opentui/core";
+import type {
+  ProxiedVNode,
+  Renderable,
+  VNode,
+} from "@opentui/core";
+import type { BoxRenderable, SelectRenderable, TextRenderable } from "@opentui/core";
+
+import {
+  errorBox,
+  hotkeyFooter,
+  pageShell,
+  statusBox,
+} from "../app/widgets.ts";
+import type { Hotkey } from "../app/keymap.ts";
+import type {
+  View,
+  ViewContext,
+  ViewId,
+} from "../app/view-manager.ts";
+import type { Wizard } from "../app/wizard.ts";
+import {
+  requestSwitchMount,
+  requestSwitchSync,
+  requestSyncAll,
+  requestSyncOne,
+} from "../socket-client.ts";
+
+// -----------------------------------------------------------------------------
+// Public types — kept stable for the existing `describeFolder` tests and any
+// callers that still use the View-state shape.
+// -----------------------------------------------------------------------------
 
 export type LocalAction =
   | "sync-all"
   | "sync-one"
   | "refresh"
-  | "fleet"
-  | "logs"
-  | "dotfiles"
-  | "conflicts"
   | "cache-profile"
   | "switch-type"
-  | "network-shares"
-  | "gh"
-  | "quit";
+  | "network-shares";
 
 export type LocalFolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
@@ -35,6 +65,7 @@ export interface LocalFolder {
   gitRemote?: string | null;
   backend?: LocalFolderBackend | null;
 }
+
 export interface LocalState {
   folders: LocalFolder[];
   hostname: string;
@@ -49,26 +80,25 @@ export interface RenderLocalOpts {
   onSelectFolder: (folderId: string) => void;
 }
 
-interface FolderRow {
-  name: string;
-  description: string;
-  value: string;
+export interface FstabShareInput {
+  id: string;
+  server: string;
+  path: string;
+  type: "nfs" | "smb";
+  options: string;
 }
 
-const HOTKEYS: Array<{ key: string; label: string; action: LocalAction }> = [
-  { key: "1", label: "sync-all", action: "sync-all" },
-  { key: "2", label: "sync-one", action: "sync-one" },
-  { key: "3", label: "refresh", action: "refresh" },
-  { key: "4", label: "fleet", action: "fleet" },
-  { key: "5", label: "logs", action: "logs" },
-  { key: "6", label: "dotfiles", action: "dotfiles" },
-  { key: "c", label: "conflicts", action: "conflicts" },
-  { key: "p", label: "cache-profile", action: "cache-profile" },
-  { key: "s", label: "switch-type", action: "switch-type" },
-  { key: "n", label: "network-shares", action: "network-shares" },
-  { key: "g", label: "github repos", action: "gh" },
-  { key: "q", label: "quit", action: "quit" },
+export const CACHE_PROFILE_ORDER: readonly CacheProfileKind[] = [
+  "normal",
+  "media",
+  "minimal",
 ];
+
+// -----------------------------------------------------------------------------
+// Pure helpers — unchanged behavior, kept under their original names so the
+// existing `describeFolder` tests and `nextCacheProfile` consumers keep working.
+// -----------------------------------------------------------------------------
+
 export function describeFolder(folder: LocalFolder): string {
   const status = folder.lastStatus ?? "unknown";
   const type = folder.type ?? "sync";
@@ -81,110 +111,419 @@ export function describeFolder(folder: LocalFolder): string {
     type === "mount" && folder.cacheProfile
       ? ` (cache: ${folder.cacheProfile}${folder.cacheMaxSize ? `/${folder.cacheMaxSize}` : ""})`
       : "";
-  const backend = folder.backend && folder.backend !== "sftp" ? ` [${folder.backend}]` : "";
+  const backend =
+    folder.backend && folder.backend !== "sftp" ? ` [${folder.backend}]` : "";
   return `${displayType}${cache}${backend} — ${status}`;
 }
-
-function toRows(folders: LocalFolder[]): FolderRow[] {
-  return folders.map((folder) => ({
-    name: folder.name,
-    description: describeFolder(folder),
-    value: folder.id,
-  }));
-}
-
-/**
- * Builds the Local view: a folder list with hotkey-driven sync actions.
- * `onAction` is called when the user picks a folder or presses a hotkey.
- */
-export function renderLocal(opts: RenderLocalOpts): VNode {
-  const rows = toRows(opts.state.folders);
-
-  const select = Select({ options: rows, flexGrow: 1 });
-  select.on("itemSelected", (_index: number, option: FolderRow) => {
-    if (option.value) opts.onSelectFolder(option.value);
-  });
-
-  return Box(
-    { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
-    Text({ content: `Local — ${opts.state.hostname}` }),
-    Text({ content: "" }),
-    foldersBody(opts.state, select),
-    Text({ content: "" }),
-    statusLine(opts.state),
-    hotkeyFooter(),
-  );
-}
-
-function foldersBody(state: LocalState, select: VNode): VNode {
-  if (state.folders.length === 0) {
-    return Box(
-      { flexDirection: "column" },
-      Text({ content: "(no folders configured)" }),
-      Text({ content: "Press 3 to refresh, 4 to view the fleet, q to quit." }),
-    );
-  }
-  return Box(
-    { flexDirection: "column", flexGrow: 1 },
-    select,
-  );
-}
-
-function statusLine(state: LocalState): VNode | null {
-  if (!state.status) return null;
-  const prefix =
-    state.statusKind === "error" ? "[!] " : state.statusKind === "success" ? "[ok] " : "[i] ";
-  return Text({ content: prefix + state.status });
-}
-
-function hotkeyFooter(): VNode {
-  const cells: VNode[] = [];
-  for (const hk of HOTKEYS) {
-    cells.push(Text({ content: `[${hk.key}] ${hk.label}` }));
-  }
-  return Box({ flexDirection: "row", gap: 1 }, ...cells);
-}
-
-/**
- * Cycle through cache profiles in the order the daemon applies them. The TUI
- * does not persist this selection; the daemon's mount flow is the source of
- * truth. The view fires `cache-profile` and the index layer is responsible
- * for sending the updated assignment to the server.
- */
-export const CACHE_PROFILE_ORDER: readonly CacheProfileKind[] = [
-  "normal",
-  "media",
-  "minimal",
-];
 
 export function nextCacheProfile(
   current: CacheProfileKind | null | undefined,
 ): CacheProfileKind {
   const idx = CACHE_PROFILE_ORDER.indexOf(current ?? "normal");
   const safeIdx = idx === -1 ? 0 : idx;
-  const next = CACHE_PROFILE_ORDER[(safeIdx + 1) % CACHE_PROFILE_ORDER.length];
-  // Safe: index is within the readonly tuple.
-  return next as CacheProfileKind;
+  const next = CACHE_PROFILE_ORDER[(safeIdx + 1) % CACHE_PROFILE_ORDER.length]!;
+  return next;
 }
 
-export interface FstabShareInput {
-  id: string;
-  server: string;
-  path: string;
-  type: "nfs" | "smb";
-  options: string;
-}
-
-/**
- * Build the `/etc/fstab` line for a network share. The TUI only displays
- * the line — it never writes to /etc/fstab itself. Root operations belong
- * to the operator or to a privileged helper.
- */
 export function buildFstabLine(
   share: FstabShareInput,
   mountPoint: string,
 ): string {
   const fsType = share.type === "nfs" ? "nfs" : "cifs";
-  const options = share.options && share.options.length > 0 ? share.options : "defaults";
+  const options =
+    share.options && share.options.length > 0 ? share.options : "defaults";
   return `${share.server}:${share.path} ${mountPoint} ${fsType} ${options} 0 0 # lamasync:${share.id}`;
+}
+
+// -----------------------------------------------------------------------------
+// View
+// -----------------------------------------------------------------------------
+
+interface FolderRow {
+  name: string;
+  description: string;
+  value: string;
+}
+
+export class LocalView implements View {
+  static readonly id: ViewId = "local";
+  static readonly title = "Local";
+
+  readonly id: ViewId = LocalView.id;
+  readonly title: string = LocalView.title;
+
+  private readonly bodyBox: ProxiedVNode<typeof BoxRenderable>;
+  private readonly statusBlock: ProxiedVNode<typeof BoxRenderable>;
+  private readonly selectRef: ProxiedVNode<typeof SelectRenderable>;
+  private readonly selectContainer: ProxiedVNode<typeof BoxRenderable>;
+
+  private folders: LocalFolder[] = [];
+  private hostname = "";
+  private selectedFolderId: string | null = null;
+  private statusText: string | null = null;
+  private statusKind: "info" | "error" | "success" = "info";
+  private ctx: ViewContext | null = null;
+  private loadId = 0;
+
+  // Single narrow cast at the field boundary — same pattern foundation's
+  // shell.ts uses to expose a VNode proxy as a Renderable.
+  readonly container: Renderable;
+
+  constructor() {
+    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
+    this.statusBlock = Box({ flexDirection: "column" });
+    this.selectRef = Select({ options: [], flexGrow: 1 });
+    this.selectRef.on("itemSelected", (_index: number, option: FolderRow) => {
+      if (option.value) {
+        this.selectedFolderId = option.value;
+      }
+    });
+    this.selectContainer = Box(
+      { flexDirection: "column", flexGrow: 1 },
+      this.selectRef,
+    );
+    this.container = pageShell(
+      "Local",
+      Box(
+        { flexDirection: "column", flexGrow: 1 },
+        this.bodyBox,
+        this.statusBlock,
+      ),
+    ) as unknown as Renderable;
+
+    this.renderBody();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hotkeys — single declaration drives both the footer render and dispatch.
+  // ---------------------------------------------------------------------------
+
+  hotkeys(): ReadonlyArray<Hotkey> {
+    return [
+      { key: "1", label: "sync all", run: () => this.runSyncAll() },
+      { key: "2", label: "sync one", run: () => this.runSyncOne() },
+      { key: "3", label: "refresh", run: () => this.refresh() },
+      { key: "p", label: "cache profile", run: () => this.cycleCacheProfile() },
+      { key: "s", label: "switch type", run: () => this.switchType() },
+      { key: "n", label: "network shares", run: () => this.showNetworkShares() },
+      { key: "w", label: "new backup…", run: () => this.openBackupSetupWizard() },
+    ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
+  onShow(ctx: ViewContext): void {
+    this.ctx = ctx;
+    this.hostname = ctx.hostname;
+    void this.refresh();
+  }
+
+  onHide(): void {
+    // Cancel any in-flight refresh so its setStatus doesn't bleed into the
+    // next view after the user has already tabbed away.
+    this.loadId++;
+    this.ctx = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Body rendering — mutates the inner Box only; the outer container is
+  // untouched so re-renders are cheap.
+  // ---------------------------------------------------------------------------
+
+  private renderBody(): void {
+    const titleText: VNode = Text({ content: `Local — ${this.hostname || "—"}` });
+    const listContent: VNode =
+      this.folders.length === 0
+        ? Box(
+            { flexDirection: "column" },
+            Text({ content: "(no folders configured)" }),
+            Text({ content: "Press 3 to refresh, w to create a new backup." }),
+          )
+        : this.selectContainer;
+
+    const footerItems = this.hotkeys().map((h) => ({ key: h.key, label: h.label }));
+    const footer: VNode = hotkeyFooter(footerItems);
+
+    const bodyChildren: VNode[] = [
+      titleText,
+      Text({ content: "" }),
+      listContent,
+      Text({ content: "" }),
+      footer,
+    ];
+    // Clear current children then re-add. The VNode proxy wraps
+    // `getChildren()` with the proxy's type signature (not the underlying
+    // Renderable[] return type), so we cast through `unknown` once at the
+    // boundary the same way logs.ts:320 does.
+    const existingBody = this.bodyBox.getChildren() as unknown as ReadonlyArray<Renderable>;
+    for (const child of existingBody) {
+      this.bodyBox.remove(child.id);
+    }
+    for (const child of bodyChildren) {
+      this.bodyBox.add(child);
+    }
+    this.refreshSelectOptions();
+    this.renderStatus();
+  }
+
+  private refreshSelectOptions(): void {
+    const rows: FolderRow[] = this.folders.map((folder) => ({
+      name: folder.name,
+      description: describeFolder(folder),
+      value: folder.id,
+    }));
+    this.selectRef.options = rows;
+  }
+
+  private renderStatus(): void {
+    const block = statusBox(this.statusText, this.statusKind);
+    const existingStatus = this.statusBlock.getChildren() as unknown as ReadonlyArray<Renderable>;
+    for (const child of existingStatus) {
+      this.statusBlock.remove(child.id);
+    }
+    if (block !== null) {
+      this.statusBlock.add(block);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  private setStatus(
+    msg: string | null,
+    kind: "info" | "error" | "success" = "info",
+  ): void {
+    this.statusText = msg;
+    this.statusKind = kind;
+    this.renderStatus();
+    if (this.ctx) {
+      this.ctx.setStatus(msg ?? "", kind);
+    }
+  }
+  private selectedFolder(): LocalFolder | null {
+    if (this.selectedFolderId) {
+      const found = this.folders.find((f) => f.id === this.selectedFolderId);
+      if (found) return found;
+    }
+    return this.folders[0] ?? null;
+  }
+
+  private async refresh(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const loadId = ++this.loadId;
+    try {
+      const [folders, config] = await Promise.all([
+        ctx.api.listFolders(),
+        ctx.api.getConfig(ctx.hostname).catch(() => null),
+      ]);
+      if (loadId !== this.loadId) return;
+      const byId = new Map(
+        (config?.assignments ?? []).map((a) => [a.folderId, a]),
+      );
+      this.folders = folders.map((f) => {
+        const a = byId.get(f.id);
+        return {
+          id: f.id,
+          hostId: a?.hostId ?? ctx.hostname,
+          name: f.name,
+          type: f.type,
+          lastStatus: undefined,
+          lastRun: null,
+          cacheProfile: a?.cacheProfile ?? null,
+          cacheMaxSize: a?.cacheMaxSize ?? null,
+          gitProvider: f.gitProvider ?? null,
+          gitRemote: f.gitRemote ?? null,
+          backend: f.backend ?? null,
+        };
+      });
+      this.setStatus(`Loaded ${this.folders.length} folder(s).`, "success");
+      this.renderBody();
+    } catch (err) {
+      if (loadId !== this.loadId) return;
+      this.folders = [];
+      this.renderBody();
+      this.setStatus(
+        `refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hotkey actions
+  // ---------------------------------------------------------------------------
+
+  private async runSyncAll(): Promise<void> {
+    this.setStatus("Queueing sync for every assigned folder…", "info");
+    try {
+      const res = (await requestSyncAll(this.ctx?.socketPath)) as { started: boolean; all: boolean };
+      this.setStatus(
+        res?.started
+          ? "Sync queued for all assigned folders."
+          : "Daemon accepted sync-all but returned no started flag.",
+        "success",
+      );
+    } catch (err) {
+      this.setStatus(
+        `sync-all failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  }
+
+  private async runSyncOne(): Promise<void> {
+    const folder = this.selectedFolder();
+    if (!folder) {
+      this.setStatus("sync-one: no folder selected.", "error");
+      return;
+    }
+    this.setStatus(`Queueing sync for ${folder.name}…`, "info");
+    try {
+      const res = (await requestSyncOne(folder.id, this.ctx?.socketPath)) as {
+        started: boolean;
+        folderId: string;
+      };
+      this.setStatus(
+        res?.started
+          ? `Sync queued for ${folder.name}.`
+          : `Daemon accepted sync but returned no started flag for ${folder.name}.`,
+        "success",
+      );
+    } catch (err) {
+      this.setStatus(
+        `sync-one failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  }
+
+  private async cycleCacheProfile(): Promise<void> {
+    const ctx = this.ctx;
+    const folder = this.selectedFolder();
+    if (!folder) {
+      this.setStatus("cache-profile: no folder selected.", "error");
+      return;
+    }
+    if (folder.type !== "mount") {
+      this.setStatus(
+        `cache-profile only applies to mount folders; ${folder.name} is ${folder.type ?? "sync"}.`,
+        "error",
+      );
+      return;
+    }
+    const next = nextCacheProfile(folder.cacheProfile);
+    this.setStatus(
+      `cache-profile: ${folder.name} ${folder.cacheProfile ?? "normal"} -> ${next} (writing through server…)`,
+      "info",
+    );
+    try {
+      if (ctx) {
+        await ctx.api.updateAssignment(folder.id, folder.hostId, {
+          cacheProfile: next,
+        });
+      }
+      this.setStatus(
+        `cache-profile updated: ${folder.name} -> ${next}.`,
+        "success",
+      );
+      await this.refresh();
+    } catch (err) {
+      this.setStatus(
+        `cache-profile failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  }
+
+  private async switchType(): Promise<void> {
+    const folder = this.selectedFolder();
+    if (!folder) {
+      this.setStatus("switch-type: no folder selected.", "error");
+      return;
+    }
+    const folderType = folder.type ?? "sync";
+    const target: "sync" | "mount" = folderType === "mount" ? "sync" : "mount";
+    this.setStatus(
+      `switch-type: ${folder.name} ${folderType} -> ${target}; awaiting daemon…`,
+      "info",
+    );
+    try {
+      const data =
+        target === "mount"
+          ? await requestSwitchMount(folder.id)
+          : await requestSwitchSync(folder.id);
+      this.setStatus(
+        `switch-type ok: ${folder.name} -> ${target} (${JSON.stringify(data)})`,
+        "success",
+      );
+    } catch (err) {
+      this.setStatus(
+        `switch-type failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  }
+
+  private async showNetworkShares(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) {
+      this.setStatus("network-shares: no context.", "error");
+      return;
+    }
+    try {
+      const shares = await ctx.api.listShares();
+      if (shares.length === 0) {
+        this.setStatus(
+          "network-shares: no shares configured (set LAMASYNC_SHARES or shares.json).",
+          "error",
+        );
+        return;
+      }
+      const lines: string[] = [];
+      for (const share of shares) {
+        const mountPoint = `/mnt/lamasync/${share.id}`;
+        lines.push(buildFstabLine(share, mountPoint));
+      }
+      this.setStatus(
+        `network-shares: copy these lines into /etc/fstab, then run \`sudo mount -a\`:\n  ${lines.join("\n  ")}`,
+        "info",
+      );
+    } catch (err) {
+      this.setStatus(
+        `network-shares failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  }
+
+  private openBackupSetupWizard(): void {
+    const ctx = this.ctx;
+    if (!ctx) {
+      this.setStatus("wizard unavailable: no view context.", "error");
+      return;
+    }
+    // The wizard container is built lazily by slice I (flows/backup-setup.ts).
+    // Until that slice lands we surface a status error rather than crash — the
+    // `w` key is reserved for the wizard gesture and must not no-op silently.
+    const wizard: Wizard = {
+      id: "backup-setup",
+      title: "New backup",
+      container: errorBox(
+        "Backup wizard not yet wired",
+        "The backup-setup flow ships in a later slice. Until then, use the API or web UI to create folders.",
+      ) as unknown as Renderable,
+      onCancel: () => {
+        // Shell removes the wizard from its registry when escape fires.
+      },
+    };
+    try {
+      ctx.openWizard(wizard);
+    } catch {
+      this.setStatus("wizard unavailable", "error");
+    }
+  }
 }

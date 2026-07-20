@@ -286,12 +286,13 @@ export class LamaSyncApiClient {
   async uploadDotfile(
     appName: string,
     tarball: Blob,
-    opts: { description?: string; hostId?: string } = {},
+    opts: { description?: string; hostId?: string; uploaderHostId?: string } = {},
   ): Promise<DotfileVersion> {
     const form = new FormData();
     form.append("tarball", tarball, `${appName}.tar.gz`);
     if (opts.description) form.append("description", opts.description);
     if (opts.hostId) form.append("hostId", opts.hostId);
+    if (opts.uploaderHostId) form.append("uploaderHostId", opts.uploaderHostId);
     const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/dotfiles/${encodeURIComponent(appName)}`,
       {

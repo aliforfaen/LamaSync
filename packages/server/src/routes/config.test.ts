@@ -3,7 +3,7 @@
 process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-test-data";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import type {
@@ -417,6 +417,87 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
     const cfg = out.rcloneConfig;
     expect(cfg).toMatch(/\[lamasync-s3-generic-backend\][\s\S]*provider = Other/);
     expect(cfg).toMatch(/\[lamasync-s3-generic-backend\][\s\S]*region = us-east-1/);
+  });
+
+  test("Exoscale S3 config can be parsed by rclone when available", async () => {
+    const folder = makeFolder({
+      id: "s3-exo-live",
+      name: "exoscale-vault",
+      type: "sync",
+      backend: "s3",
+      s3Provider: "exoscale",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "lamasync-vault",
+      s3AccessKeyId: "EXO_KEY",
+      s3SecretAccessKey: "EXO_SECRET",
+      s3Region: "other-v2-signature",
+    });
+    const assignment = makeAssignment({ folderId: "s3-exo-live" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+
+    const dir = mkdtempSync(join(tmpdir(), "lamasync-rclone-test-"));
+    const configPath = join(dir, "rclone.conf");
+    writeFileSync(configPath, cfg);
+
+    let rcloneAvailable = false;
+    try {
+      const version = Bun.spawn(["rclone", "version"]);
+      await version.exited;
+      rcloneAvailable = version.exitCode === 0;
+    } catch {
+      rcloneAvailable = false;
+    }
+
+    if (rcloneAvailable) {
+      const show = Bun.spawn(["rclone", "config", "show", "--config", configPath]);
+      await show.exited;
+      const stdout = await new Response(show.stdout).text();
+      const stderr = await new Response(show.stderr).text();
+      expect(show.exitCode).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toContain("[lamasync-s3-exo-live-backend]");
+      expect(stdout).toContain("type = s3");
+      expect(stdout).toContain("provider = AWS");
+    }
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("generated rclone config is valid INI with no duplicate sections", () => {
+    const folder = makeFolder({
+      id: "s3-exo-ini",
+      name: "exoscale-vault",
+      type: "sync",
+      backend: "s3",
+      s3Provider: "exoscale",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "lamasync-vault",
+      s3AccessKeyId: "EXO_KEY",
+      s3SecretAccessKey: "EXO_SECRET",
+    });
+    const assignment = makeAssignment({ folderId: "s3-exo-ini" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const sections = out.rcloneConfig.match(/^\[.+\]$/gm) ?? [];
+    const seen = new Set<string>();
+    for (const section of sections) {
+      expect(seen.has(section)).toBe(false);
+      seen.add(section);
+    }
+    expect(seen.has("[lamasync-s3-exo-ini-backend]")).toBe(true);
+    expect(seen.has("[lamasync-s3-exo-ini]")).toBe(true);
   });
 });
 

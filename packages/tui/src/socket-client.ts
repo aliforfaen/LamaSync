@@ -110,8 +110,9 @@ function sendRequest(
  */
 export async function requestSwitchMount(
   folderId: string,
+  socketPath?: string,
 ): Promise<unknown> {
-  const client = await connectSocket();
+  const client = await connectSocket(socketPath);
   try {
     const res = await client.cmd({ cmd: "switch-to-mount", folderId });
     if (!res.ok) {
@@ -123,8 +124,8 @@ export async function requestSwitchMount(
   }
 }
 
-export async function requestSyncOne(folderId: string): Promise<unknown> {
-  const client = await connectSocket();
+export async function requestSyncOne(folderId: string, socketPath?: string): Promise<unknown> {
+  const client = await connectSocket(socketPath);
   try {
     const res = await client.cmd({ cmd: "sync", folderId });
     if (!res.ok) {
@@ -136,8 +137,8 @@ export async function requestSyncOne(folderId: string): Promise<unknown> {
   }
 }
 
-export async function requestSyncAll(): Promise<unknown> {
-  const client = await connectSocket();
+export async function requestSyncAll(socketPath?: string): Promise<unknown> {
+  const client = await connectSocket(socketPath);
   try {
     const res = await client.cmd({ cmd: "sync-all" });
     if (!res.ok) {
@@ -151,8 +152,9 @@ export async function requestSyncAll(): Promise<unknown> {
 
 export async function requestSwitchSync(
   folderId: string,
+  socketPath?: string,
 ): Promise<unknown> {
-  const client = await connectSocket();
+  const client = await connectSocket(socketPath);
   try {
     const res = await client.cmd({ cmd: "switch-to-sync", folderId });
     if (!res.ok) {

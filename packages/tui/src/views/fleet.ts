@@ -1,28 +1,46 @@
+// Fleet view: renders the live fleet roster from a `FleetService` owned by
+// the app layer (slice B foundation). The service is passed in via
+// constructor opts — the view itself owns NO subscription. onShow refreshes
+// hosts via `ctx.api.getHealth()` (always) and starts a 30s polling timer
+// cleared in onHide. Hotkeys: `r` refresh, `w` open the backup-setup wizard.
+
 import { Box, Select, Text } from "@opentui/core";
-import type { VNode } from "@opentui/core";
-import type { Host } from "@lamasync/core";
+import type {
+  ProxiedVNode,
+  Renderable,
+  VNode,
+} from "@opentui/core";
+import type { BoxRenderable, SelectRenderable } from "@opentui/core";
 
-export type FleetAction = "refresh" | "logs" | "dotfiles" | "local" | "quit";
+import { errorBox, hotkeyFooter, statusBox } from "../app/widgets.ts";
+import type { Hotkey } from "../app/keymap.ts";
+import type {
+  View,
+  ViewContext,
+  ViewId,
+} from "../app/view-manager.ts";
+import type { Wizard } from "../app/wizard.ts";
+import {
+  createFleetService,
+  type FleetHost,
+  type FleetService,
+} from "../app/fleet-service.ts";
 
-export interface FleetHost {
-  id: string;
-  hostname: string;
-  status: string;
-  lastSeen?: number | null;
-  tailnetIp?: string;
-}
+// -----------------------------------------------------------------------------
+// Public types — keep stable surface for callers and tests.
+// -----------------------------------------------------------------------------
+
+// Tab navigation now lives in the shell (1..5 / [ / ]). Fleet itself only
+// exposes refresh + the wizard shortcut; everything else is the shell's job.
+export type FleetAction = "refresh" | "back";
 
 export interface FleetState {
   hosts: FleetHost[];
 }
 
-export interface RenderFleetOpts {
-  state: FleetState;
-  serverUrl: string;
-  apiKey: string;
-  onAction: (action: FleetAction) => void;
-  onHosts: (hosts: FleetHost[]) => void;
-}
+// Re-export the canonical FleetHost from the app-level service so callers
+// can keep importing it from `views/fleet.ts`.
+export type { FleetHost };
 
 interface HostRow {
   name: string;
@@ -30,13 +48,38 @@ interface HostRow {
   value: string;
 }
 
-const HOTKEYS: Array<{ key: string; label: string; action: FleetAction }> = [
-  { key: "r", label: "refresh", action: "refresh" },
-  { key: "l", label: "logs", action: "logs" },
-  { key: "d", label: "dotfiles", action: "dotfiles" },
-  { key: "b", label: "local", action: "local" },
-  { key: "q", label: "quit", action: "quit" },
-];
+// -----------------------------------------------------------------------------
+// Pure helpers — preserved from the previous fleet.ts so any downstream
+// consumer of `isHost` / `toFleetHost` keeps working. The shape they operate
+// on matches `@lamasync/core`'s `Host`; the local row materializer stays
+// private to the view.
+// -----------------------------------------------------------------------------
+
+function isHostLike(value: unknown): value is { id: string; hostname: string; status: string; lastSeen?: number | null; tailnetIp?: string | null } {
+  if (value === null || typeof value !== "object") return false;
+  const h = value as Record<string, unknown>;
+  return (
+    typeof h.id === "string" &&
+    typeof h.hostname === "string" &&
+    typeof h.status === "string"
+  );
+}
+
+function toFleetHostLike(host: {
+  id: string;
+  hostname: string;
+  status: string;
+  lastSeen?: number | null;
+  tailnetIp?: string | null;
+}): FleetHost {
+  return {
+    id: host.id,
+    hostname: host.hostname,
+    status: host.status,
+    lastSeen: host.lastSeen ?? null,
+    tailnetIp: host.tailnetIp ?? undefined,
+  };
+}
 
 function describeHost(host: FleetHost, now: number): string {
   const status = host.status || "unknown";
@@ -54,7 +97,7 @@ function formatLastSeen(ts: number, now: number): string {
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
-function toRows(hosts: FleetHost[], now: number): HostRow[] {
+function toRows(hosts: ReadonlyArray<FleetHost>, now: number): HostRow[] {
   return hosts.map((host) => ({
     name: host.hostname,
     description: describeHost(host, now),
@@ -62,147 +105,240 @@ function toRows(hosts: FleetHost[], now: number): HostRow[] {
   }));
 }
 
-/**
- * Builds the Fleet view: a host list plus an optional WebSocket subscription
- * that pushes live updates back via `onHosts`.
- */
-export function renderFleet(opts: RenderFleetOpts): VNode {
-  const now = Date.now();
-  const rows = toRows(opts.state.hosts, now);
+// -----------------------------------------------------------------------------
+// View
+// -----------------------------------------------------------------------------
 
-  const select = Select({ options: rows, flexGrow: 1 });
-
-  return Box(
-    { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
-    Text({ content: "Fleet" }),
-    Text({ content: `${opts.state.hosts.length} host(s) known` }),
-    Text({ content: "" }),
-    hostsBody(opts.state.hosts, select),
-    Text({ content: "" }),
-    hotkeyFooter(),
-  );
+export interface FleetViewOpts {
+  readonly service: FleetService;
+  readonly serverUrl: string;
+  readonly apiKey: string;
 }
 
-function hostsBody(hosts: FleetHost[], select: VNode): VNode {
-  if (hosts.length === 0) {
-    return Box(
-      { flexDirection: "column" },
-      Text({ content: "(no hosts registered yet — press r to refresh)" }),
+export class FleetView implements View {
+  static readonly id: ViewId = "fleet";
+  static readonly title = "Fleet";
+
+  readonly id: ViewId = FleetView.id;
+  readonly title: string = FleetView.title;
+
+  private readonly service: FleetService;
+  private readonly serverUrl: string;
+  private readonly apiKey: string;
+
+  private readonly bodyBox: ProxiedVNode<typeof BoxRenderable>;
+  private readonly statusBlock: ProxiedVNode<typeof BoxRenderable>;
+  private readonly selectRef: ProxiedVNode<typeof SelectRenderable>;
+  private readonly selectContainer: ProxiedVNode<typeof BoxRenderable>;
+
+  private ctx: ViewContext | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private loadId = 0;
+  private statusText: string | null = null;
+  private statusKind: "info" | "error" | "success" = "info";
+  private refreshing = false;
+
+  // Single narrow cast at the field boundary — matches the pattern in
+  // foundation's shell.ts and views/logs.ts.
+  readonly container: Renderable;
+
+  constructor(opts: FleetViewOpts) {
+    this.service = opts.service;
+    this.serverUrl = opts.serverUrl;
+    this.apiKey = opts.apiKey;
+
+    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
+    this.statusBlock = Box({ flexDirection: "column" });
+    this.selectRef = Select({ options: [], flexGrow: 1 });
+    this.selectContainer = Box(
+      { flexDirection: "column", flexGrow: 1 },
+      this.selectRef,
     );
-  }
-  return Box({ flexDirection: "column", flexGrow: 1 }, select);
-}
+    this.container = Box(
+      { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
+      this.bodyBox,
+      this.statusBlock,
+    ) as unknown as Renderable;
 
-function hotkeyFooter(): VNode {
-  const cells: VNode[] = [];
-  for (const hk of HOTKEYS) {
-    cells.push(Text({ content: `[${hk.key}] ${hk.label}` }));
-  }
-  return Box({ flexDirection: "row", gap: 1 }, ...cells);
-}
-
-/**
- * Attempts to open a live WebSocket subscription against the configured
- * server. Returns a handle that the caller can use to stop receiving
- * updates; if WebSockets are unavailable, returns null.
- */
-export function openFleetSubscription(
-  serverUrl: string,
-  apiKey: string,
-  getHosts: () => FleetHost[],
-  onHosts: (hosts: FleetHost[]) => void,
-): FleetSubscription | null {
-  const WS = resolveWebSocket();
-  if (WS === null) return null;
-
-  const base = serverUrl.replace(/^http/, "ws");
-  const url = `${base}/api/v1/ws`;
-  // Bun's WebSocket constructor only accepts RFC 6455 token characters in
-  // subprotocol names; base64url avoids the `+`/`/`/`=` characters that
-  // standard base64 produces. The server reads
-  // `sec-websocket-protocol: lamasync-auth, <token>` and decodes it.
-  const token = (typeof btoa === "function"
-    ? btoa(apiKey)
-    : Buffer.from(apiKey).toString("base64")
-  ).replace(/=+$/, "")
-    .replaceAll("+", "-")
-    .replaceAll("/", "_");
-  const protocols = ["lamasync-auth", token];
-  let socket: WebSocket | null = null;
-  let closed = false;
-
-  try {
-    socket = new WS(url, protocols) as WebSocket;
-  } catch {
-    return null;
+    this.renderBody();
   }
 
-  socket.addEventListener("message", (event: MessageEvent) => {
-    const data = parseMessageData(event.data);
-    if (data === null) return;
-    if (data.kind === "host" && isHost(data.host)) {
-      const host = toFleetHost(data.host);
-      const hosts = new Map(getHosts().map((h) => [h.id, h]));
-      hosts.set(host.id, host);
-      onHosts([...hosts.values()]);
+  // ---------------------------------------------------------------------------
+  // Hotkeys — single declaration drives the footer render and dispatch.
+  hotkeys(): ReadonlyArray<Hotkey> {
+    return [
+      { key: "r", label: "refresh", run: () => void this.refresh() },
+      { key: "w", label: "new backup…", run: () => this.openBackupSetupWizard() },
+    ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
+  onShow(ctx: ViewContext): void {
+    this.ctx = ctx;
+    void this.refresh();
+    if (this.pollTimer === null) {
+      this.pollTimer = setInterval(() => {
+        void this.refresh();
+      }, 30_000);
     }
-  });
+  }
 
-  return {
-    close(): void {
-      if (closed) return;
-      closed = true;
-      socket?.close();
-      socket = null;
-    },
-  };
-}
-
-function isHost(value: unknown): value is Host {
-  if (value === null || typeof value !== "object") return false;
-  const h = value as Record<string, unknown>;
-  return (
-    typeof h.id === "string" &&
-    typeof h.hostname === "string" &&
-    typeof h.status === "string"
-  );
-}
-
-function toFleetHost(host: Host): FleetHost {
-  return {
-    id: host.id,
-    hostname: host.hostname,
-    status: host.status,
-    lastSeen: host.lastSeen ?? null,
-    tailnetIp: host.tailnetIp ?? undefined,
-  };
-}
-
-export interface FleetSubscription {
-  close(): void;
-}
-
-interface MessageShape {
-  kind?: unknown;
-  host?: unknown;
-}
-
-function parseMessageData(data: unknown): MessageShape | null {
-  if (typeof data !== "string") return null;
-  try {
-    const parsed = JSON.parse(data) as unknown;
-    if (parsed && typeof parsed === "object") {
-      return parsed as MessageShape;
+  onHide(): void {
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
     }
-    return null;
-  } catch {
-    return null;
+    // Cancel any in-flight refresh so its setStatus doesn't bleed into the
+    // next view after the user has already tabbed away.
+    this.loadId++;
+    this.ctx = null;
+  }
+
+  destroy(): void {
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Body rendering — mutates the inner Box only; the outer container stays
+  // mounted across refreshes.
+  // ---------------------------------------------------------------------------
+
+  private renderBody(): void {
+    const hosts = this.service.hosts;
+    const status = this.service.status;
+    const now = Date.now();
+
+    const titleText: VNode = Text({ content: `Fleet — ${status === "live" ? "live" : "polling"}` });
+    const countText: VNode = Text({
+      content: `${hosts.length} host(s) known`,
+    });
+
+    const rows = toRows(hosts, now);
+    this.selectRef.options = rows;
+
+    const listContent: VNode =
+      hosts.length === 0
+        ? Box(
+            { flexDirection: "column" },
+            Text({ content: "(no hosts registered yet — press r to refresh)" }),
+          )
+        : this.selectContainer;
+
+    const footerItems = this.hotkeys().map((h) => ({ key: h.key, label: h.label }));
+    const footer: VNode = hotkeyFooter(footerItems);
+
+    const bodyChildren: VNode[] = [
+      titleText,
+      countText,
+      Text({ content: "" }),
+      listContent,
+      Text({ content: "" }),
+      footer,
+    ];
+
+    const existingBody = this.bodyBox.getChildren() as unknown as ReadonlyArray<Renderable>;
+    for (const child of existingBody) {
+      this.bodyBox.remove(child.id);
+    }
+    for (const child of bodyChildren) {
+      this.bodyBox.add(child);
+    }
+
+    this.renderStatus();
+  }
+
+  private renderStatus(): void {
+    const block = statusBox(this.statusText, this.statusKind);
+    const existingStatus = this.statusBlock.getChildren() as unknown as ReadonlyArray<Renderable>;
+    for (const child of existingStatus) {
+      this.statusBlock.remove(child.id);
+    }
+    if (block !== null) {
+      this.statusBlock.add(block);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  private setStatus(
+    msg: string | null,
+    kind: "info" | "error" | "success" = "info",
+  ): void {
+    this.statusText = msg;
+    this.statusKind = kind;
+    this.renderStatus();
+    if (this.ctx) {
+      this.ctx.setStatus(msg ?? "", kind);
+    }
+  }
+
+  private async refresh(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (this.refreshing) return;
+    this.refreshing = true;
+    const loadId = ++this.loadId;
+    try {
+      const health = await ctx.api.getHealth();
+      if (loadId !== this.loadId) return;
+      const liveHosts = health.hosts
+        .filter(isHostLike)
+        .map(toFleetHostLike);
+      this.setStatus(`Loaded ${liveHosts.length} host(s).`, "success");
+      this.renderBody();
+    } catch (err) {
+      if (loadId !== this.loadId) return;
+      this.setStatus(
+        `refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    } finally {
+      this.refreshing = false;
+    }
+  }
+
+  private openBackupSetupWizard(): void {
+    const ctx = this.ctx;
+    if (!ctx) {
+      this.setStatus("wizard unavailable: no view context.", "error");
+      return;
+    }
+    // Same wizard gesture as LocalView — slice I (flows/backup-setup.ts) will
+    // replace this placeholder with the real step-wizard container.
+    const wizard: Wizard = {
+      id: "backup-setup",
+      title: "New backup",
+      container: errorBox(
+        "Backup wizard not yet wired",
+        "The backup-setup flow ships in a later slice. Until then, use the API or web UI to create folders.",
+      ) as unknown as Renderable,
+      onCancel: () => {
+        // Shell removes the wizard from its registry when escape fires.
+      },
+    };
+    try {
+      ctx.openWizard(wizard);
+    } catch {
+      this.setStatus("wizard unavailable", "error");
+    }
   }
 }
 
-function resolveWebSocket(): typeof WebSocket | null {
-  if (typeof globalThis.WebSocket === "function") {
-    return globalThis.WebSocket as typeof WebSocket;
-  }
-  return null;
-}
+// -----------------------------------------------------------------------------
+// Public re-exports — keep the back-compat surface for any caller that still
+// imports these names from `views/fleet.ts`. The implementation now lives in
+// `app/fleet-service.ts`; we re-export here so external imports keep working.
+// -----------------------------------------------------------------------------
+
+export { createFleetService };
+export type { FleetService } from "../app/fleet-service.ts";
+export const isHost = isHostLike;
+export const toFleetHost = toFleetHostLike;

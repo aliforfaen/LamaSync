@@ -1,12 +1,32 @@
-import { Box, Text } from "@opentui/core";
-import type { VNode } from "@opentui/core";
+import {
+  Box,
+  BoxRenderable,
+  ScrollBox,
+  ScrollBoxRenderable,
+  Text,
+} from "@opentui/core";
+import type { ProxiedVNode, Renderable, VNode } from "@opentui/core";
 
 import type { LamaSyncApiClient, OperationLog } from "@lamasync/core";
 
+import { matchHotkey, type Hotkey, type KeyEvent } from "../app/keymap.ts";
+import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
+
+/**
+ * Legacy action surface preserved for backward compatibility with the
+ * pre-unification router (`views/logs.ts` previously dispatched these from
+ * `index.ts`). New callers should bind a `LogsView` and use its hotkeys.
+ */
 export type LogsAction = "refresh" | "next" | "prev" | "filter" | "quit";
 
 export type LogsStatus = "all" | "success" | "failed" | "conflict";
 
+/**
+ * Plain-data snapshot of the logs view's filter + pagination state. The
+ * `LogsView` holds a richer instance state internally; this type is the
+ * shape other slices/tests can still construct to call the legacy
+ * `fetchLogPage` helper.
+ */
 export interface LogsState {
   entries: OperationLog[];
   status: LogsStatus;
@@ -39,9 +59,9 @@ function statusLine(entry: OperationLog): string {
 
 /**
  * Builds the operations-log view: a list of recent operations with status,
- * host, operation, and summary columns. Pagination is informational only —
- * the API exposes a `limit` parameter, not an offset, so `next`/`prev` are
- * stubs for now.
+ * host, operation, and summary columns. The body is wrapped in a
+ * `ScrollBox`; pagination is driven by `state.page` and the API supports
+ * offset-based paging, so `next`/`prev` advance/retreat the offset.
  */
 export function renderLogs(opts: RenderLogsOpts): VNode {
   const header = Text({ content: "Operations" });
@@ -75,7 +95,10 @@ function renderEntries(entries: OperationLog[]): VNode {
   const cells: VNode[] = entries.map((entry) =>
     Text({ content: statusLine(entry) }),
   );
-  return Box({ flexDirection: "column", flexGrow: 1 }, ...cells);
+  return ScrollBox(
+    { flexGrow: 1, scrollY: true, viewportCulling: true },
+    Box({ flexDirection: "column", flexGrow: 1 }, ...cells),
+  );
 }
 
 function hotkeyFooter(): VNode {
@@ -88,9 +111,8 @@ function hotkeyFooter(): VNode {
 
 /**
  * Loads the latest operations log entries from the server, applying the
- * current filter and host selection. Server-side `limit` is the page size
- * the UI advertises; the API does not currently support offset-based
- * pagination, so `state.page` is treated as informational.
+ * current filter and host selection. The API supports both `limit` and
+ * `offset`, so `state.page` is a real cursor.
  */
 export async function fetchLogPage(
   api: LamaSyncApiClient,
@@ -111,4 +133,206 @@ export async function fetchLogPage(
 export function nextStatusFilter(current: LogsStatus): LogsStatus {
   const idx = STATUS_CYCLE.indexOf(current);
   return STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
+}
+
+type BoxVNode = ProxiedVNode<typeof BoxRenderable>;
+type ScrollVNode = ProxiedVNode<typeof ScrollBoxRenderable>;
+
+interface LogsInternalState {
+  entries: OperationLog[];
+  status: LogsStatus;
+  hostId: string | null;
+  page: number;
+  loading: boolean;
+  error: string | null;
+  /** Monotonic counter incremented on every load trigger. Async loaders
+   * capture the current value and bail out if a newer load has started,
+   * discarding stale results from previous fetches. */
+  loadId: number;
+  /** Known host ids; refreshed on every onShow via `api.getHealth()`. */
+  hostIds: ReadonlyArray<string>;
+}
+
+/**
+ * Operations log view. Implements the foundation `View` contract. The outer
+ * container is built once in the constructor; data refreshes only mutate the
+ * ScrollBox's inner Box.
+ */
+export class LogsView implements View {
+  static readonly id: ViewId = "logs";
+  static readonly title = "Logs";
+
+  readonly id: ViewId = LogsView.id;
+  readonly title: string = LogsView.title;
+
+  private readonly bodyBox: BoxVNode;
+  private readonly scrollBox: ScrollVNode;
+  private readonly headerBox: BoxVNode;
+
+  private state: LogsInternalState = {
+    entries: [],
+    status: "all",
+    hostId: null,
+    page: 0,
+    loading: false,
+    error: null,
+    loadId: 0,
+    hostIds: [],
+  };
+
+  private ctx: ViewContext | null = null;
+
+  readonly container: Renderable;
+
+  constructor() {
+    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
+    this.scrollBox = ScrollBox(
+      { flexGrow: 1, scrollY: true, viewportCulling: true },
+      this.bodyBox,
+    );
+    this.headerBox = Box(
+      { flexDirection: "column" },
+      Text({ content: "Operations" }),
+      Text({ content: "Filter: all" }),
+      Text({ content: "Host: (any)" }),
+      Text({ content: "Page 1 (0 entries shown)" }),
+      Text({ content: "" }),
+      this.scrollBox,
+      Text({ content: "" }),
+      hotkeyFooter(),
+    );
+    // ProxiedVNode forwards `visible` to the underlying Renderable when the
+    // node is mounted; the ViewManager only flips visibility through this
+    // reference.
+    this.container = this.headerBox as unknown as Renderable;
+    this.renderBody();
+  }
+
+  hotkeys(): ReadonlyArray<Hotkey> {
+    return [
+      { key: "r", label: "refresh", run: () => this.refresh() },
+      { key: "n", label: "next page", run: () => this.advance() },
+      { key: "p", label: "prev page", run: () => this.previous() },
+      { key: "f", label: "filter", run: () => this.cycleFilter() },
+    ];
+  }
+
+  onShow(ctx: ViewContext): void {
+    this.ctx = ctx;
+    void this.refresh();
+    void this.refreshHostList();
+  }
+
+  onHide(): void {
+    this.state.loadId += 1;
+  }
+
+  handleKey(e: KeyEvent): boolean {
+    const name = typeof e.name === "string" ? e.name : "";
+    const raw = typeof e.raw === "string" ? e.raw : "";
+    const char = raw.length === 1 ? raw.toLowerCase() : "";
+    const match = matchHotkey(this.hotkeys(), name, char);
+    if (!match) return false;
+    void Promise.resolve(match.run());
+    return true;
+  }
+
+  destroy(): void {
+    this.state.loadId += 1;
+    this.ctx = null;
+  }
+
+  private async refresh(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    this.state.loadId += 1;
+    const myLoad = this.state.loadId;
+    this.state.loading = true;
+    this.state.error = null;
+    this.renderBody();
+    try {
+      const entries = await fetchLogPage(ctx.api, {
+        entries: this.state.entries,
+        status: this.state.status,
+        hostId: this.state.hostId,
+        page: this.state.page,
+      });
+      if (this.state.loadId !== myLoad) return;
+      this.state.entries = entries;
+      this.state.loading = false;
+    } catch (err) {
+      if (this.state.loadId !== myLoad) return;
+      this.state.loading = false;
+      this.state.error = err instanceof Error ? err.message : String(err);
+      ctx.setStatus(`logs: ${this.state.error}`, "error");
+    }
+    this.renderBody();
+  }
+
+  private async refreshHostList(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    try {
+      const health = await ctx.api.getHealth();
+      this.state.hostIds = health.hosts.map((h) => h.id);
+    } catch {
+      this.state.hostIds = [];
+    }
+  }
+
+  private advance(): void {
+    this.state.page += 1;
+    void this.refresh();
+  }
+
+  private previous(): void {
+    if (this.state.page === 0) return;
+    this.state.page -= 1;
+    void this.refresh();
+  }
+
+  private cycleFilter(): void {
+    this.state.status = nextStatusFilter(this.state.status);
+    this.state.page = 0;
+    void this.refresh();
+  }
+
+  private renderBody(): void {
+    const entries = this.state.entries;
+    if (this.state.loading && entries.length === 0) {
+      this.replaceChildren(this.bodyBox, [Text({ content: "Loading…" })]);
+      return;
+    }
+    if (this.state.error && entries.length === 0) {
+      this.replaceChildren(this.bodyBox, [
+        Text({ content: `[!] ${this.state.error}` }),
+        Text({ content: "Press r to retry." }),
+      ]);
+      return;
+    }
+    if (entries.length === 0) {
+      this.replaceChildren(this.bodyBox, [
+        Text({ content: "(no entries)" }),
+        Text({ content: "Press r to refresh or f to change filter." }),
+      ]);
+      return;
+    }
+    const cells: VNode[] = entries.map((entry) =>
+      Text({ content: statusLine(entry) }),
+    );
+    this.replaceChildren(this.bodyBox, cells);
+  }
+
+  private replaceChildren(
+    parent: BoxVNode,
+    next: ReadonlyArray<VNode>,
+  ): void {
+    const existing = parent.getChildren() as unknown as ReadonlyArray<Renderable>;
+    for (const child of existing) {
+      parent.remove(child.id);
+    }
+    for (const node of next) {
+      parent.add(node);
+    }
+  }
 }

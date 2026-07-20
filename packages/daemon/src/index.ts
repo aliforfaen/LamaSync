@@ -588,6 +588,8 @@ async function main(): Promise<void> {
   const scheduler = new Scheduler({
     onTick: runOnce,
     getAssignments: () => hostConfig?.assignments ?? [],
+    getFolders: () => hostConfig?.folders ?? [],
+    getManifests: () => hostConfig?.manifests ?? [],
   });
 
   setSwitchContext({

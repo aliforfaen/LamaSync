@@ -253,6 +253,16 @@ table.data tbody tr:last-child td {
   color: #c0c5cf;
 }
 
+.badge-upload {
+  background: rgba(46, 160, 67, 0.2);
+  color: #6fcf97;
+}
+
+.badge-download {
+  background: rgba(79, 124, 255, 0.2);
+  color: #7cb6ff;
+}
+
 .muted {
   color: #8c92a1;
 }

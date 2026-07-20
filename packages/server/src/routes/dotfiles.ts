@@ -28,8 +28,12 @@ interface ManifestRow {
   host_id: string;
   app_name: string;
   paths: string;
+  excludes: string | null;
   schedule: string | null;
   instructions: string | null;
+  last_sync_at: number | null;
+  last_sync_direction: string | null;
+  original_uploader_host_id: string | null;
 }
 
 function rowToVersion(r: VersionRow): DotfileVersion {
@@ -46,18 +50,30 @@ function rowToVersion(r: VersionRow): DotfileVersion {
 
 function rowToManifest(r: ManifestRow): DotfileManifest {
   let paths: string[] = [];
+  let excludes: string[] | null = null;
   try {
     paths = JSON.parse(r.paths);
   } catch {
     paths = [];
+  }
+  if (r.excludes) {
+    try {
+      excludes = JSON.parse(r.excludes);
+    } catch {
+      excludes = [];
+    }
   }
   return {
     id: r.id,
     hostId: r.host_id,
     appName: r.app_name,
     paths,
+    excludes,
     schedule: r.schedule,
     instructions: r.instructions,
+    lastSyncAt: r.last_sync_at,
+    lastSyncDirection: (r.last_sync_direction as DotfileManifest["lastSyncDirection"]) ?? null,
+    originalUploaderHostId: r.original_uploader_host_id,
   };
 }
 
@@ -102,14 +118,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       const hostId = (query as { hostId?: string }).hostId;
       const globalRows = activeDb
         .query<ManifestRow, [string]>(
-          "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE host_id = ?",
+          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE host_id = ?",
         )
         .all(GLOBAL_HOST_ID);
       const byApp = new Map(globalRows.map((r) => [r.app_name, r]));
       if (hostId && hostId !== GLOBAL_HOST_ID) {
         const hostRows = activeDb
           .query<ManifestRow, [string]>(
-            "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE host_id = ?",
+            "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE host_id = ?",
           )
           .all(hostId);
         for (const r of hostRows) {
@@ -138,10 +154,11 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       const hostId = body.hostId ?? GLOBAL_HOST_ID;
       const id = crypto.randomUUID();
       const paths = parsePaths(body.paths);
+      const excludes = parsePaths(body.excludes);
       try {
         activeDb.run(
-          "INSERT INTO dotfile_manifests (id, host_id, app_name, paths, schedule, instructions) VALUES (?, ?, ?, ?, ?, ?)",
-          [id, hostId, body.appName, JSON.stringify(paths), body.schedule ?? null, body.instructions ?? null],
+          "INSERT INTO dotfile_manifests (id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [id, hostId, body.appName, JSON.stringify(paths), JSON.stringify(excludes), body.schedule ?? null, body.instructions ?? null, null, null, null],
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -150,7 +167,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const row = activeDb
         .query<ManifestRow, [string]>(
-          "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE id = ?",
+          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE id = ?",
         )
         .get(id);
       set.status = 201;
@@ -160,6 +177,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       body: t.Object({
         appName: t.String(),
         paths: t.Union([t.Array(t.String()), t.String()]),
+        excludes: t.Optional(t.Union([t.Array(t.String()), t.String(), t.Null()])),
         schedule: t.Optional(t.Union([t.String(), t.Null()])),
         instructions: t.Optional(t.Union([t.String(), t.Null()])),
         hostId: t.Optional(t.String()),
@@ -194,6 +212,10 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         updates.push("paths = ?");
         values.push(JSON.stringify(parsePaths(body.paths)));
       }
+      if (body.excludes !== undefined) {
+        updates.push("excludes = ?");
+        values.push(JSON.stringify(parsePaths(body.excludes)));
+      }
       if ("schedule" in body) {
         updates.push("schedule = ?");
         values.push(body.schedule ?? null);
@@ -212,7 +234,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       );
       const row = activeDb
         .query<ManifestRow, [string]>(
-          "SELECT id, host_id, app_name, paths, schedule, instructions FROM dotfile_manifests WHERE id = ?",
+          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE id = ?",
         )
         .get(params.id);
       return rowToManifest(row!);
@@ -222,6 +244,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       body: t.Object({
         appName: t.Optional(t.String()),
         paths: t.Optional(t.Union([t.Array(t.String()), t.String()])),
+        excludes: t.Optional(t.Union([t.Array(t.String()), t.String(), t.Null()])),
         schedule: t.Optional(t.Union([t.String(), t.Null()])),
         instructions: t.Optional(t.Union([t.String(), t.Null()])),
       }),
@@ -328,6 +351,11 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       const hostIdRaw = form.get("hostId");
       const hostId =
         typeof hostIdRaw === "string" && hostIdRaw.length > 0 ? hostIdRaw : GLOBAL_HOST_ID;
+      const uploaderHostIdRaw = form.get("uploaderHostId");
+      const uploaderHostId =
+        typeof uploaderHostIdRaw === "string" && uploaderHostIdRaw.length > 0
+          ? uploaderHostIdRaw
+          : hostId;
       const manifestId = ensureManifest(params.appName, hostId);
       if (!manifestId) {
         set.status = 500;
@@ -363,6 +391,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
            (id, manifest_id, timestamp, tarball_path, size_bytes, checksum, description)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [id, manifestId, timestamp, relPath, buf.length, checksum, description],
+      );
+
+      // Track deployment metadata on the manifest.
+      activeDb.run(
+        `UPDATE dotfile_manifests
+         SET last_sync_at = ?, last_sync_direction = ?, original_uploader_host_id = COALESCE(original_uploader_host_id, ?)
+         WHERE id = ?`,
+        [timestamp, "upload", uploaderHostId, manifestId],
       );
 
       const row = activeDb

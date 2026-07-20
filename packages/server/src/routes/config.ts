@@ -274,17 +274,17 @@ export function generateRcloneConfig(
     const useS3 = backendKind === "s3";
     if (isEncrypted) {
       const backendName = `lamasync-${folder.id}-backend`;
-      lines.push(`[${backendName}]`);
       if (useS3) {
-        const backendName = `lamasync-${folder.id}-backend`;
         writeS3Backend(backendName, folder, `${folder.name} (${folder.type}) — encrypted S3 backend`, a.localPath);
       } else if (serverTailnetIp) {
+        lines.push(`[${backendName}]`);
         lines.push("type = sftp");
         lines.push(`host = ${serverTailnetIp}`);
         lines.push("user = lamasync");
         lines.push(`description = "${folder.name} (${folder.type}) — encrypted backend"`);
         lines.push(`# local path on client: ${a.localPath}`);
       } else {
+        lines.push(`[${backendName}]`);
         lines.push("type = local");
         lines.push(`description = "${folder.name} (${folder.type}) — encrypted backend; server unavailable"`);
         lines.push(`# local path on client: ${a.localPath}`);
@@ -298,8 +298,8 @@ export function generateRcloneConfig(
       lines.push(`description = "${folder.name} (encrypted ${folder.type})"`);
       lines.push("");
     } else {
-      lines.push(`[${remoteName}]`);
       if (folder.type === "dotfile") {
+        lines.push(`[${remoteName}]`);
         lines.push("type = local");
         lines.push(`description = "${folder.name} (dotfile backup)"`);
         lines.push(`# local path on client: ${a.localPath}`);
@@ -314,12 +314,14 @@ export function generateRcloneConfig(
         lines.push(`description = "${folder.name} (${folder.type}) — S3 alias"`);
         lines.push(`# local path on client: ${a.localPath}`);
       } else if (serverTailnetIp) {
+        lines.push(`[${remoteName}]`);
         lines.push("type = sftp");
         lines.push(`host = ${serverTailnetIp}`);
         lines.push("user = lamasync");
         lines.push(`description = "${folder.name} (${folder.type})"`);
         lines.push(`# local path on client: ${a.localPath}`);
       } else {
+        lines.push(`[${remoteName}]`);
         lines.push("type = local");
         lines.push(`description = "${folder.name} (${folder.type}) — server unavailable"`);
         lines.push(`# local path on client: ${a.localPath}`);

@@ -9,18 +9,18 @@ Everything is written in **TypeScript** running on **Bun**.
 
 ## What's implemented (v0.2.0)
 
-| Component | Status |
-|-----------|--------|
-| `@lamasync/core` — shared types, DB schema, TOML config, API client | done |
-| `@lamasync/server` — REST + WebSocket + Swagger + auth | done |
-| `@lamasync/daemon` — heartbeat, rclone execution, mounts, scheduler, socket server | done |
-| `@lamasync/tui` — OpenTUI + CLI fallback, local/fleet/dotfiles/logs views | done |
-| `@lamasync/web-ui` — React SPA embedded in the server binary (Dashboard, Folders, Dotfiles, Conflicts, Admin) | done |
-| Agent skill (`lamasync-server.md`) | done (+ installed) |
-| Docker: `Dockerfile.server`, `docker-compose.yml` | done |
-| `bun run build` → standalone binaries | working |
-| Unit tests (core + server + daemon + self-update + TUI + executor + offset + web-ui) | **118 passing** (19 files) |
-| End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI, web UI) | done |
+|Component|Status|
+|---|---|
+|`@lamasync/core` — shared types, DB schema, TOML config, API client|done|
+|`@lamasync/server` — REST + WebSocket + Swagger + auth|done|
+|`@lamasync/daemon` — heartbeat, rclone execution, mounts, scheduler, socket server|done|
+|`@lamasync/tui` — Single tabbed shell with 6 views + guided wizards + CLI fallback (LAMA-173)|done|
+|`@lamasync/web-ui` — React SPA embedded in the server binary (Dashboard, Folders, Dotfiles, Conflicts, Admin)|done|
+|Agent skill (`lamasync-server.md`)|done (+ installed)|
+|Docker: `Dockerfile.server`, `docker-compose.yml`|done|
+|`bun run build` → standalone binaries|working|
+|Unit tests (core + server + daemon + self-update + TUI + executor + offset + web-ui + wizard)|**179 passing** (23 files)|
+|End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI, web UI)|done|
 
 ## Repository layout
 
@@ -89,20 +89,35 @@ lamasync/                     # Bun workspace root
         self-update.test.ts   # self-update unit tests
         systemd.ts            # systemd unit generation helpers
         systemd.test.ts       # systemd unit template tests
-    tui/                      # @lamasync/tui — OpenTUI frontend
+    tui/                      # @lamasync/tui — OpenTUI frontend, tabbed shell (LAMA-173)
       src/
-        index.ts              # menu, local/fleet views, --version, CLI fallback
+        index.ts              # slim entry: flags, CLI fallback, bootShell()
+        boot.ts               # wires Shell with Local/Fleet/Dotfiles/Conflicts/Logs/Gh views
         api.ts                # client builder (env → config file → defaults)
         socket-client.ts      # Unix socket client for local mode
         cli-fallback.ts       # LAMASYNC_NO_TUI=1 CLI mode
+        app/
+          theme.ts            # status prefixes + title strings
+          widgets.ts          # pageShell, hotkeyFooter, statusBox, loading/error/emptyBox
+          keymap.ts           # Hotkey type + matchHotkey() (char / name dispatch)
+          keymap.test.ts      # keymap dispatch unit tests
+          view-manager.ts     # View interface, ViewSpec, ViewManager (visible-toggle)
+          view-manager.test.ts # view-manager unit tests (fake + gated real renderer)
+          shell.ts            # Shell class — TabSelect bar + global dispatch + status
+          wizard.ts           # WizardRunner + Wizard/WizardStep + registry
+          wizard.test.ts      # wizard state-machine tests (pure)
+          fleet-service.ts    # createFleetService() — WS subscription lifted out
+          schedule-presets.ts # preset table (mirror web-ui/Dotfiles.tsx:27-36)
         views/
-          menu.ts             # main menu
-          local.ts            # local daemon status + commands
-          fleet.ts            # fleet view + WebSocket events
-          dotfiles.ts         # dotfile list/restore
-          conflicts.ts        # conflict resolution UI
-          gh-selector.ts      # GitHub repo selector for GH CLI integration
-          logs.ts             # operation log viewer
+          local.ts            # LocalView (folder list + sync/cache/wizard hotkeys)
+          fleet.ts            # FleetView (uses FleetService for live WS hosts)
+          dotfiles.ts         # DotfilesView (manifest browser + restore state machine)
+          conflicts.ts        # ConflictsView (highlighted-row resolution + confirm)
+          logs.ts             # LogsView (ScrollBox + paginated operations)
+          gh-selector.ts      # GhView (GitHub repo adoption via `gh` CLI)
+        flows/
+          backup-setup.ts     # Wizard factory: create folder + assign host
+          dotfile-manifest.ts # Wizard factory: create dotfile manifest
     agent-skill/              # @lamasync/agent-skill — OMP managed skill
       lamasync-server.md      # skill body: endpoint table, auth, example workflows
       README.md               # install instructions for OMP managed-skills dir
@@ -140,10 +155,11 @@ lamasync/                     # Bun workspace root
   .github/
     workflows/
       ci.yml                  # type-check, test, build, release, docker push
+  docs/
+    plans/                    # execution plans (LAMA-XXX-tui-unification.md, etc.)
 ```
 
-
-### Implemented features (LAMA-104..162)
+### Implemented features (LAMA-104..173)
 
 | Issue | Feature | Location |
 |-------|---------|----------|
@@ -162,6 +178,7 @@ lamasync/                     # Bun workspace root
 | LAMA-125 | `ARCHITECTURE.md` rewrite | `ARCHITECTURE.md` |
 | LAMA-151 | Self-update (daemon + server release proxy) | `daemon/src/self-update.ts`, `server/src/routes/release.ts`, `packaging/install/update.sh` |
 | LAMA-147 | Management Web UI (dashboard + admin CRUD) | `packages/web-ui/`, `packages/server/src/routes/web-ui.ts`, `scripts/inline-web-ui.ts` |
+| LAMA-173 | TUI unification: tabbed shell, 6 views, guided wizards | `packages/tui/src/{boot.ts,index.ts,app/*,views/*,flows/*}` |
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
@@ -169,7 +186,7 @@ lamasync/                     # Bun workspace root
 - **Operation log retention beyond daily pruning** — retention is configurable; long-term archival is not.
 
 ### TUI
-- **OpenTUI component audit** — the TUI uses OpenTUI's factory components (`Box`, `Text`, `Select`, `Input`, `MarkdownRenderable`) via VNode proxies. Local-view actions (sync-all, sync-one, cache-profile, switch-type, network-shares) now dispatch real socket/API calls and sync-one respects the selected folder. Fleet view renders correctly and consumes live `host` events from `/api/v1/ws`. Remaining gaps are richer navigation (e.g. `TabSelect` for view switching, scrollable lists) and a dotfile diff preview against current disk files before extraction.
+LAMA-173 unified the TUI into a single persistent `Shell` with a `TabSelect` bar, six views (Local, Fleet, Dotfiles, Conflicts, Logs, Gh), and two guided wizard flows (backup-setup, dotfile-manifest). Views build their container once; `ViewManager.show()` only toggles `container.visible` — no destroy/rebuild, no `process.nextTick` focus hack. The LAMA-167 Enter-crash fix invariants are codified in `app/shell.ts` and `app/view-manager.ts`. Hotkey tables are declared once per view; the same array drives both the footer and the global dispatcher.
 - **Dotfile diff preview** — restore does not yet show a diff against current disk files before extraction.
 
 ### Infrastructure
@@ -256,6 +273,7 @@ LAMASYNC_NO_TUI=1 \
 - **Swagger details** — every route has a `detail` block with `summary`, `tags`, and `responses`. The `swagger` plugin is the first middleware (before auth) so `/swagger` and `/swagger/json` are browsable without auth for discovery.
 - **No `any` or inline casts** — use `unknown` with `in`/`typeof` narrowing and real type guards.
 - **DB columns go in both `SERVER_SCHEMA` and the `MIGRATIONS` array** — required for existing databases.
+- **TUI state-machine semantics** (LAMA-173): wizard state lives in `WizardRunner`; views mount once and `ViewManager.show()` only flips `container.visible`. Enter is NEVER handled globally in `app/shell.ts` — focused widgets own it.
 
 ### Writing tests
 
@@ -277,6 +295,10 @@ Current coverage:
 - `packages/daemon/src/socket.test.ts` — socket command handling
 - `packages/daemon/src/systemd.test.ts` — systemd unit template generation
 - `packages/daemon/src/self-update.test.ts` — release parsing and version comparison
+- `packages/tui/src/index.test.ts` — `describeFolder` cases (legacy view helpers)
+- `packages/tui/src/app/keymap.test.ts` — hotkey dispatch (`matchHotkey`)
+- `packages/tui/src/app/view-manager.test.ts` — visibility toggling + lifecycle hooks
+- `packages/tui/src/app/wizard.test.ts` — wizard state-machine (next/back/validate/finish/cancel/onKey)
 
 ### Adding a new API endpoint
 
@@ -287,6 +309,14 @@ Current coverage:
 5. Import and `.use()` the plugin in `packages/server/src/index.ts`
 6. Add the endpoint to the `lamasync-server.md` skill table
 7. Run `bun x tsc --noEmit` and `curl`-test the endpoint
+
+### Adding a new TUI view (LAMA-173 contract)
+
+1. Add the id to `ViewId` in `packages/tui/src/app/view-manager.ts` if it's new.
+2. Create a class `XView implements View` in `packages/tui/src/views/x.ts` with `id`, `title`, `container: Renderable` (built once in the constructor), `hotkeys()`, `onShow(ctx)`, optional `onHide()`, `handleKey(e)`, `destroy()`. Use a single `as unknown as Renderable` cast at the container field boundary; live body mutations go through a captured `ProxiedVNode<typeof BoxRenderable>` ref.
+3. Register the view in `packages/tui/src/boot.ts` inside the `views` array. The `Shell` builds `ViewSpec`s automatically.
+4. Add a hotkey dispatch path: only if your view owns internal keys, set `ViewSpec.handleKey = view.handleKey.bind(view)`; otherwise global hotkeys via `view.hotkeys()`.
+5. Add a unit test in `packages/tui/src/views/x.test.ts` if the view has pure logic; gate any renderer-bound test behind `process.env.LAMASYNC_TUI_TEST_VIEWS === "1"`.
 
 ### Docker
 
@@ -310,6 +340,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **Pre-shared API key** — no user management. Tailnet provides transport encryption; the key is a lightweight "you're allowed" check.
 - **No route prefix middleware** — each route file declares its own `prefix: "/api/v1"`. This keeps each file self-contained and Swagger tags scoped.
 - **OpenTUI** — the design calls for OpenTUI native rendering. If OpenTUI can't load (native binary mismatch, missing DYLD/LD path), the TUI falls back to CLI mode via `LAMASYNC_NO_TUI=1`. This is configured in `packages/tui/src/index.ts` `main()`.
+- **TUI unification (LAMA-173)** — single `Shell` owns the global keypress handler and dispatches in this order: active wizard → active view's `handleKey` → active view's `hotkeys()` → global tab/quit/cycle shortcuts. Views build their container once and only mutate a captured body `BoxRenderable`; the TabSelect bar replaces the old menu screen.
 
 ## Version and release
 
@@ -320,14 +351,13 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.
 - **Self-update**: daemon checks GitHub Releases on startup and supports `lamasyncd --check-update` / `lamasyncd --update`. The server proxies release info at `GET /api/v1/release/latest`. A standalone `curl | bash` updater lives in `packaging/install/update.sh`.
 
-## Current status (as of 2026-07-18)
+## Current status (as of 2026-07-19)
 
 - Project version: **0.2.0**
-- Tests: **118 passing** across 19 files, 0 failures (10 new web-UI tests)
-- Open Multica issues: see project board. Notable: **LAMA-164** (CI/CD Docker image) is now done; **LAMA-105** (Backend storage) remains in progress.
-- Recently closed: LAMA-110 / LAMA-147 (Management Web UI), LAMA-105 (S3 backend), LAMA-150 (CI), LAMA-151 (self-update), LAMA-164 (server Docker image)
+- Tests: **179 passing** across 23 files, 1 skip, 0 failures (+39 since LAMA-173 TUI unification: wizard state-machine, keymap dispatch, view-manager tests).
+- **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
+- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-168 (dotfile manifest improvements — host selector, excludes, cron presets, deployment tracking), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
-- **Next session**: LAMA-105 — Exoscale S3 backend + basic end-to-end tests.
 
 ## Next session options
 
@@ -339,14 +369,18 @@ Ready-to-pick work, ordered by likely value/urgency:
    - Run basic end-to-end tests: create folder, assign, daemon sync, verify object listing in bucket.
    - Revisit rclone config generation for S3 in `server/src/routes/config.ts` and folder validation in `server/src/routes/folders.ts`.
 
-2. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
-   - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
+2. **LAMA-168 / LAMA-171 — Dotfile manifest improvements + `@reboot`/`@login` triggers** (in_progress, urgent)
+   - Host selector, excludes, cron presets, deployment tracking; scheduler special-token tests already added.
 
 3. **LAMA-104 — Error handling** (backlog, high)
    - Harden error propagation, structured error responses, and retry/circuit-breaker behavior across the daemon and server.
-4. **LAMA-109 — App-specific backup dotfiles** (backlog, none)
-   - Expand dotfile support to per-app backup bundles with richer restore semantics.
+
+4. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
+   - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
 
 5. **Polish / tech debt**
-   - TUI component audit (scrollable lists, real widgets), dotfile diff preview, OpenTUI native-renderer quirks.
+   - Dotfile diff preview against current disk files before extraction.
+   - `nts` / tabbed-cycle keyboard interactions in OpenTUI native mode.
    - ntfy notifications, multi-user auth scoping, operation-log archival.
+   - Renderer smoke tests behind `LAMASYNC_TUI_TEST_VIEWS` (foundation already wired the gating).
+

@@ -134,19 +134,63 @@ describe("POST /api/v1/folders — backend validation (LAMA-105)", () => {
     expect(body.s3Region).toBe("us-east-1");
   });
 
-  test("normalizes uppercase backend string to lowercase", async () => {
+  test("accepts Exoscale endpoints across all known zones", async () => {
+    const endpoints = [
+      "sos-at-vie-1.exo.io",
+      "sos-de-muc-1.exo.io",
+      "sos-ch-gva-2.exo.io",
+      "sos-bg-sof-1.exo.io",
+      "sos-de-fra-1.exo.io",
+    ];
+    for (const endpoint of endpoints) {
+      const res = await postJson("/api/v1/folders", {
+        name: `exoscale-${endpoint.replace(/\./g, "-")}`,
+        type: "sync",
+        backend: "s3",
+        s3Provider: "exoscale",
+        s3Endpoint: endpoint,
+        s3Bucket: "lamasync-vault",
+        s3AccessKeyId: "EXO_KEY",
+        s3SecretAccessKey: "EXO_SECRET",
+      });
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(res.status).toBe(201);
+      expect(body.s3Endpoint).toBe(endpoint);
+      expect(body.s3Region).toBe("other-v2-signature");
+    }
+  });
+
+  test("AWS S3 provider requires s3Region", async () => {
     const res = await postJson("/api/v1/folders", {
-      name: "upper-s3",
+      name: "aws-vault",
       type: "sync",
-      backend: "S3",
-      s3Endpoint: "s3.example.com",
-      s3Bucket: "bucket",
-      s3AccessKeyId: "K",
-      s3SecretAccessKey: "S",
+      backend: "s3",
+      s3Provider: "aws",
+      s3Endpoint: "s3.amazonaws.com",
+      s3Bucket: "lamasync-vault",
+      s3AccessKeyId: "AWS_KEY",
+      s3SecretAccessKey: "AWS_SECRET",
     });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("s3Region");
+  });
+
+  test("Exoscale provider overrides any supplied region to other-v2-signature", async () => {
+    const res = await postJson("/api/v1/folders", {
+      name: "exoscale-region-override",
+      type: "sync",
+      backend: "s3",
+      s3Provider: "exoscale",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "lamasync-vault",
+      s3AccessKeyId: "EXO_KEY",
+      s3SecretAccessKey: "EXO_SECRET",
+      s3Region: "us-east-1",
+    });
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.backend).toBe("s3");
+    expect(res.status).toBe(201);
+    expect(body.s3Region).toBe("other-v2-signature");
   });
 });
 

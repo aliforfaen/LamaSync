@@ -89,6 +89,66 @@ describe("dotfile manifests", () => {
     expect(manifests[0]?.appName).toBe("opencode");
   });
 
+  test("creates a host-specific manifest with excludes", async () => {
+    const create = await postJson("/api/v1/dotfiles/manifests", {
+      appName: "nvim",
+      hostId: "host-a",
+      paths: ["~/.config/nvim"],
+      excludes: ["~/.config/nvim/undo"],
+      schedule: "0 */6 * * *",
+    });
+    expect(create.status).toBe(201);
+    const created = (await create.json()) as { appName: string; hostId: string; paths: string[]; excludes: string[] };
+    expect(created.hostId).toBe("host-a");
+    expect(created.excludes).toEqual(["~/.config/nvim/undo"]);
+  });
+
+  test("updates excludes on a manifest", async () => {
+    const create = await postJson("/api/v1/dotfiles/manifests", {
+      appName: "nvim",
+      paths: ["~/.config/nvim"],
+    });
+    const { id } = (await create.json()) as { id: string };
+    const update = await putJson(`/api/v1/dotfiles/manifests/${id}`, {
+      excludes: ["*.log", "cache/"],
+    });
+    expect(update.status).toBe(200);
+    const updated = (await update.json()) as { excludes: string[] };
+    expect(updated.excludes).toEqual(["*.log", "cache/"]);
+  });
+
+  test("upload tracks deployment metadata on the manifest", async () => {
+    await postJson("/api/v1/dotfiles/manifests", {
+      appName: "opencode",
+      paths: ["~/.config/opencode"],
+    });
+
+    const form = new FormData();
+    const bytes = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+    form.append("tarball", new Blob([bytes]), "opencode.tar.gz");
+    form.append("uploaderHostId", "host-a");
+    const upload = await app.handle(
+      new Request("http://localhost/api/v1/dotfiles/opencode", {
+        method: "POST",
+        headers: authHeaders(),
+        body: form,
+      }),
+    );
+    expect(upload.status).toBe(201);
+
+    const list = await get("/api/v1/dotfiles/manifests");
+    const manifests = (await list.json()) as Array<{
+      appName: string;
+      lastSyncAt: number | null;
+      lastSyncDirection: string | null;
+      originalUploaderHostId: string | null;
+    }>;
+    expect(manifests).toHaveLength(1);
+    expect(manifests[0]?.lastSyncAt).not.toBeNull();
+    expect(manifests[0]?.lastSyncDirection).toBe("upload");
+    expect(manifests[0]?.originalUploaderHostId).toBe("host-a");
+  });
+
   test("host manifest overrides global manifest for the same app", async () => {
     await postJson("/api/v1/dotfiles/manifests", {
       appName: "opencode",

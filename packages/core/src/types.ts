@@ -111,8 +111,12 @@ export interface DotfileManifest {
   hostId: string;
   appName: string;
   paths: string[];
+  excludes?: string[] | null;
   schedule?: string | null;
   instructions?: string | null;
+  lastSyncAt?: number | null;
+  lastSyncDirection?: "upload" | "download" | null;
+  originalUploaderHostId?: string | null;
 }
 
 export interface DotfileVersion {
