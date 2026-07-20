@@ -363,7 +363,7 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
     expect(cfg).toMatch(/\[lamasync-sftp-1\][\s\S]*type = sftp/);
     expect(cfg).not.toContain("[lamasync-sftp-1-backend]");
   });
-  test("Exoscale S3 folder emits provider = AWS and region = other-v2-signature", () => {
+  test("Exoscale S3 folder emits provider = Other and region = other-v2-signature", () => {
     const folder = makeFolder({
       id: "s3-exo",
       name: "exoscale-vault",
@@ -387,7 +387,7 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
     const cfg = out.rcloneConfig;
     expect(cfg).toContain("[lamasync-s3-exo-backend]");
     expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*type = s3/);
-    expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*provider = AWS/);
+    expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*provider = Other/);
     expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*endpoint = sos-at-vie-1\.exo\.io/);
     expect(cfg).toMatch(/\[lamasync-s3-exo-backend\][\s\S]*region = other-v2-signature/);
     expect(cfg).toMatch(/\[lamasync-s3-exo\][\s\S]*type = alias[\s\S]*remote = lamasync-s3-exo-backend:lamasync-vault/);
@@ -464,7 +464,7 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
       expect(stderr).toBe("");
       expect(stdout).toContain("[lamasync-s3-exo-live-backend]");
       expect(stdout).toContain("type = s3");
-      expect(stdout).toContain("provider = AWS");
+      expect(stdout).toContain("provider = Other");
     }
 
     rmSync(dir, { recursive: true, force: true });

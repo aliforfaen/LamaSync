@@ -239,7 +239,7 @@ export function generateRcloneConfig(
     const accessKey = (folder.s3AccessKeyId ?? "").trim();
     const secretKey = (folder.s3SecretAccessKey ?? "").trim();
     const region = (folder.s3Region ?? "").trim();
-    const provider = folder.s3Provider === "exoscale" ? "AWS" : "Other";
+    const provider = folder.s3Provider === "aws" ? "AWS" : "Other";
     lines.push(`[${name}]`);
     lines.push("type = s3");
     lines.push(`provider = ${provider}`);
