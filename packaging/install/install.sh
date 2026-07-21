@@ -2,7 +2,7 @@
 # install.sh — install lamasyncd on a Linux client.
 #
 # Usage:
-#   curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/install.sh | bash -s -- \
+#   curl -sSL https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh | bash -s -- \
 #     --server-url http://100.64.0.1:8080 \
 #     --api-key <your-key> \
 #     [--hostname myhost] \
@@ -33,6 +33,47 @@ WITH_TUI=0
 CHECK_ONLY=0
 PRINT_VERSION=0
 
+ASSET_DAEMON="lamasyncd"
+ASSET_TUI="lamasync-tui"
+
+# Write a systemd user unit that matches the install location and socket path.
+# Defined inline so the script is self-contained when piped from curl.
+install_systemd_unit() {
+  local binary_path="$1"
+  local socket_path="$2"
+  mkdir -p "$SERVICE_DIR"
+  cat > "${SERVICE_DIR}/lamasyncd.service" <<EOF
+[Unit]
+Description=LamaSync Daemon
+Documentation=https://github.com/aliforfaen/LamaSync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${binary_path}
+ExecStartPre=-${binary_path} --check-update
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lamasyncd
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync ${socket_path}
+Environment=LAMASYNC_SOCKET_PATH=${socket_path}
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=default.target
+EOF
+  chmod 644 "${SERVICE_DIR}/lamasyncd.service"
+}
+
 usage() {
   cat <<EOF
 Usage: $0 --server-url URL --api-key KEY [options]
@@ -46,11 +87,12 @@ Options:
   --with-tui          Also install the lamasync-tui binary to BINARY_DIR
   --binary-dir DIR    Install binaries into DIR (default: ~/.local/bin)
   --check             Only check for updates; never write to disk
-  --version           Print installer version (0.2.0) and exit
+  --version           Print installer version (0.2.1) and exit
   -h, --help          Show this help
 
 Environment:
-  LAMASYNC_SOCKET_PATH  Override the Unix socket path (default: ~/lamasync.sock)
+  LAMASYNC_SOCKET_PATH      Override the Unix socket path (default: ~/lamasync.sock)
+  LAMASYNC_INSTALL_BASE_URL Override the release download base URL (for testing)
 EOF
   exit "${1:-0}"
 }
@@ -70,7 +112,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${PRINT_VERSION}" -eq 1 ]]; then
-  echo "install.sh 0.2.0"
+  echo "install.sh 0.2.1"
   exit 0
 fi
 
@@ -118,19 +160,9 @@ if [[ -z "$SERVER_URL" || -z "$API_KEY" ]]; then
   usage 1
 fi
 
-# Detect arch → asset suffix
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64)  ARCH_SUFFIX="x86_64-unknown-linux-gnu" ;;
-  aarch64) ARCH_SUFFIX="aarch64-unknown-linux-gnu" ;;
-  *)
-    echo "Unsupported architecture: $ARCH" >&2
-    exit 2
-    ;;
-esac
-
-ASSET="lamasyncd-${ARCH_SUFFIX}"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
+INSTALL_BASE_URL="${LAMASYNC_INSTALL_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
+DOWNLOAD_URL="${INSTALL_BASE_URL}/${ASSET_DAEMON}"
+TUI_URL="${INSTALL_BASE_URL}/${ASSET_TUI}"
 
 echo "==> Installing lamasyncd to ${BINARY_DIR}"
 mkdir -p "$BINARY_DIR"
@@ -140,7 +172,7 @@ mkdir -p "$SERVICE_DIR"
 # Download (fall back to local build if release not available)
 if command -v curl >/dev/null 2>&1; then
   if ! curl -fsSL -o "${BINARY_DIR}/lamasyncd" "$DOWNLOAD_URL"; then
-    echo "Warning: release asset not found, falling back to ./packages/daemon/dist/lamasyncd" >&2
+    echo "Warning: release asset ${ASSET_DAEMON} not found, falling back to ./packages/daemon/dist/lamasyncd" >&2
     if [[ -f "./packages/daemon/dist/lamasyncd" ]]; then
       cp "./packages/daemon/dist/lamasyncd" "${BINARY_DIR}/lamasyncd"
     else
@@ -154,13 +186,19 @@ else
 fi
 chmod +x "${BINARY_DIR}/lamasyncd"
 
+# Verify the binary actually runs before we wire up systemd.
+INSTALLED_VERSION="$("${BINARY_DIR}/lamasyncd" --version 2>/dev/null | awk 'NF{print $NF; exit}')"
+if [[ -z "$INSTALLED_VERSION" ]]; then
+  echo "Error: installed binary does not run; architecture mismatch or corrupt download?" >&2
+  exit 7
+fi
+echo "==> Verified lamasyncd ${INSTALLED_VERSION}"
+
 # Optionally install the TUI companion binary.
 if [[ "${WITH_TUI}" -eq 1 ]]; then
-  TUI_ASSET="lamasync-tui-${ARCH_SUFFIX}"
-  TUI_URL="https://github.com/${REPO}/releases/latest/download/${TUI_ASSET}"
   echo "==> Installing lamasync-tui to ${BINARY_DIR}"
   if ! curl -fsSL -o "${BINARY_DIR}/lamasync-tui" "$TUI_URL"; then
-    echo "Warning: ${TUI_ASSET} not found in latest release, falling back to ./packages/tui/dist/lamasync-tui" >&2
+    echo "Warning: ${ASSET_TUI} not found in latest release, falling back to ./packages/tui/dist/lamasync-tui" >&2
     if [[ -f "./packages/tui/dist/lamasync-tui" ]]; then
       cp "./packages/tui/dist/lamasync-tui" "${BINARY_DIR}/lamasync-tui"
     else
@@ -180,8 +218,7 @@ EOF
 chmod 600 "${CONFIG_DIR}/client.toml"
 
 # Install systemd user unit
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cp "${SCRIPT_DIR}/../systemd/lamasyncd.service" "${SERVICE_DIR}/lamasyncd.service"
+install_systemd_unit "${BINARY_DIR}/lamasyncd" "${SOCKET_PATH}"
 
 # Enable lingering so the user service runs without an active session
 if command -v loginctl >/dev/null 2>&1; then
@@ -198,6 +235,10 @@ if command -v systemctl >/dev/null 2>&1; then
   echo "    Logs:   journalctl --user -u lamasyncd -f"
 else
   echo "systemctl not available; start manually: ${BINARY_DIR}/lamasyncd" >&2
+fi
+
+if [[ ":${PATH}:" != *":${BINARY_DIR}:"* ]]; then
+  echo "    (Add ${BINARY_DIR} to your PATH to run lamasyncd/lamasync-tui from anywhere)"
 fi
 
 echo "==> Done."

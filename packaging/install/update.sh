@@ -7,8 +7,8 @@
 # Behavior:
 #   1. If lamasyncd is not installed → prints the install command and exits.
 #   2. If lamasyncd is installed at the latest version → prints "already up to date".
-#   3. Otherwise → downloads lamasyncd, lamasync-tui, and the matching .sha256
-#      manifests, verifies, and replaces the binaries in --binary-dir (default
+#   3. Otherwise → downloads lamasyncd and lamasync-tui from the latest GitHub
+#      release and atomically replaces the binaries in --binary-dir (default
 #      ~/.local/bin).
 #
 # All downloads land in a temp directory; binaries are only moved into place
@@ -20,7 +20,8 @@ set -euo pipefail
 REPO="aliforfaen/LamaSync"
 DEFAULT_BINARY_DIR="${HOME}/.local/bin"
 BINARY_DIR="${DEFAULT_BINARY_DIR}"
-GITHUB_API="https://api.github.com/repos/${REPO}/releases/latest"
+GITHUB_API="${LAMASYNC_GITHUB_API:-https://api.github.com/repos/${REPO}/releases/latest}"
+INSTALL_BASE_URL="${LAMASYNC_INSTALL_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
 
 usage() {
   cat <<EOF
@@ -31,6 +32,10 @@ Options:
                       (default: ~/.local/bin)
   --yes               Skip the "press enter to continue" confirmation
   --help              Show this help
+
+Environment:
+  LAMASYNC_INSTALL_BASE_URL  Override the release download base URL (for testing)
+  LAMASYNC_GITHUB_API       Override the GitHub releases API URL (for testing)
 
 When piped from curl, any flags must follow the dash-dash separator.
 For example:
@@ -77,7 +82,7 @@ EOF
   exit 20
 fi
 
-# Parse current version from "lamasyncd 0.2.0".
+# Parse current version from "lamasyncd 0.2.1".
 INSTALLED_VERSION="$("${LAMASYNCD_BIN}" --version 2>/dev/null \
   | awk 'NF {print $NF; exit}')"
 if [[ -z "${INSTALLED_VERSION}" ]]; then
@@ -109,21 +114,10 @@ if [[ "${INSTALLED_VERSION}" == "${LATEST_VERSION}" ]]; then
   exit 0
 fi
 
-# Detect arch → asset suffix.
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64)  ARCH_SUFFIX="x86_64-unknown-linux-gnu" ;;
-  aarch64) ARCH_SUFFIX="aarch64-unknown-linux-gnu" ;;
-  *)
-    echo "Unsupported architecture: $ARCH" >&2
-    exit 2
-    ;;
-esac
-
-DAEMON_ASSET="lamasyncd-${ARCH_SUFFIX}"
-TUI_ASSET="lamasync-tui-${ARCH_SUFFIX}"
-DAEMON_URL="https://github.com/${REPO}/releases/latest/download/${DAEMON_ASSET}"
-TUI_URL="https://github.com/${REPO}/releases/latest/download/${TUI_ASSET}"
+DAEMON_ASSET="lamasyncd"
+TUI_ASSET="lamasync-tui"
+DAEMON_URL="${INSTALL_BASE_URL}/${DAEMON_ASSET}"
+TUI_URL="${INSTALL_BASE_URL}/${TUI_ASSET}"
 
 echo "==> Update available: ${INSTALLED_VERSION} → ${LATEST_VERSION}"
 echo "    Target directory: ${BINARY_DIR}"
@@ -188,11 +182,6 @@ mkdir -p "${BINARY_DIR}"
 mv -f "${TMP_DIR}/lamasyncd" "${BINARY_DIR}/lamasyncd"
 if [[ "${TUI_DOWNLOADED}" -eq 1 ]]; then
   mv -f "${TMP_DIR}/lamasync-tui" "${BINARY_DIR}/lamasync-tui"
-fi
-# mktemp -d may have left the file mode permissive; tighten to match the
-# existing binary if possible.
-if [[ -x "${BINARY_DIR}/lamasyncd" ]]; then
-  :
 fi
 
 # Verify the new binary still answers --version. A quick sanity check that

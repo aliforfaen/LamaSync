@@ -33,7 +33,7 @@ its local paths and reports results back.
   log viewer
 - **Systemd user service** with hardened sandbox
 - **One-line install** on clients
-- **Self-update** from GitHub Releases (`lamasyncd --update` or `curl | bash update.sh`)
+- **Self-update** from GitHub Releases once a release exists (`lamasyncd --update` or `curl | bash update.sh`)
 - **CI/CD** with GitHub Actions (tests, builds, releases, Docker push)
 
 ![CI](https://github.com/aliforfaen/LamaSync/actions/workflows/ci.yml/badge.svg)
@@ -184,10 +184,15 @@ for live monitoring.
 The daemon is a single static binary. Build once on the server, copy to clients,
 or use the install script.
 
+> **Release requirement:** the curl-to-bash install path downloads binaries from
+> GitHub Releases. If no release exists yet, build from source (see
+> [Development](#development)) and copy the binaries, or run the install script
+> directly from a local clone.
+
 ```bash
 # On the client, with lamasyncd built and the server URL handy:
 # (add --with-tui to also install lamasync-tui)
-curl -sSL https://github.com/aliforfaen/LamaSync/raw/main/packaging/install/install.sh | bash -s -- \
+curl -sSL https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh | bash -s -- \
   --server-url http://100.64.0.1:8080 \
   --api-key "$LAMASYNC_API_KEY" \
   --with-tui
@@ -198,7 +203,7 @@ curl -sSL https://github.com/aliforfaen/LamaSync/raw/main/packaging/install/inst
   --api-key "$LAMASYNC_API_KEY" \
   --with-tui
 
-# Update an existing install:
+# Update an existing install (requires a GitHub Release):
 curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/update.sh | bash
 ```
 
@@ -376,6 +381,21 @@ Swagger, and TUI ready to use:
 The harness prints the URL, API key, socket path, and example commands. Press
 Ctrl+C to stop the server and daemon. Logs and temp data are left in
 `./tmp/e2e/` for inspection.
+
+### Installer / updater smoke tests
+
+Test the `curl | bash` install and update paths in isolated Docker sandboxes:
+
+```bash
+# Test the one-line client install (requires a local build first)
+./scripts/test-install.sh
+
+# Test the standalone updater
+./scripts/test-update.sh
+```
+
+Both scripts spin up a local nginx "release" server and run the scripts in a
+fresh Debian container.
 
 ## License
 

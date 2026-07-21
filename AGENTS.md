@@ -147,11 +147,15 @@ lamasync/                     # Bun workspace root
   scripts/
     gen-version.ts            # writes packages/core/src/version.ts from root package.json
     inline-web-ui.ts          # post-vite inliner: embeds JS/CSS into dist/index.html (single-file SPA)
-    install/                  # curl | bash installer
+    e2e-harness.sh            # isolated server + daemon end-to-end test harness
+    test-install.sh           # Docker smoke test for curl | bash install path
+    test-update.sh            # Docker smoke test for curl | bash update path
+  packaging/                  # curl | bash installer + systemd template
+    install/
       install.sh              # install lamasyncd (+ optional TUI) and systemd unit
       update.sh               # standalone self-update script
-    systemd/                  # lamasyncd.service template
-      lamasyncd.service
+    systemd/
+      lamasyncd.service       # systemd user-unit template
   .github/
     workflows/
       ci.yml                  # type-check, test, build, release, docker push
@@ -285,6 +289,13 @@ For a quick end-to-end smoke that starts a real server + daemon and exercises th
 ./scripts/e2e-harness.sh
 ```
 
+For isolated Docker tests of the `curl | bash` install and update paths:
+
+```bash
+./scripts/test-install.sh
+./scripts/test-update.sh
+```
+
 Current coverage:
 - `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
 - `packages/server/src/routes/config.test.ts` — rclone config generation, encryption, peer detection
@@ -344,19 +355,21 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 
 ## Version and release
 
-- **Version source of truth**: root `package.json` `version` field (currently `0.2.0`).
+- **Version source of truth**: root `package.json` `version` field (currently `0.2.1`).
 - **Generated constant**: `scripts/gen-version.ts` writes `packages/core/src/version.ts`, which is re-exported from `@lamasync/core`.
 - **All four binaries** support `--version` and `-V`.
   (`lamasync-server`, `lamasyncd`, `lamasync-tui`, plus the bundled web UI at `GET /`)
 - **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.
 - **Self-update**: daemon checks GitHub Releases on startup and supports `lamasyncd --check-update` / `lamasyncd --update`. The server proxies release info at `GET /api/v1/release/latest`. A standalone `curl | bash` updater lives in `packaging/install/update.sh`.
 
-## Current status (as of 2026-07-19)
+## Current status (as of 2026-07-21)
 
-- Project version: **0.2.0**
-- Tests: **179 passing** across 23 files, 1 skip, 0 failures (+39 since LAMA-173 TUI unification: wizard state-machine, keymap dispatch, view-manager tests).
+- Project version: **0.2.1**
+- Tests: **187 passing** across 26 files, 1 skip, 0 failures.
+- **Install scripts**: `packaging/install/install.sh` and `packaging/install/update.sh` patched to be self-contained and aligned with the CI-published binary names (`lamasyncd`, `lamasync-tui`). Docker smoke tests (`scripts/test-install.sh`, `scripts/test-update.sh`) both pass.
+- **Release**: v0.2.1 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
-- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-168 (dotfile manifest improvements — host selector, excludes, cron presets, deployment tracking), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
+- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-168 (dotfile manifest improvements), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
 
 ## Next session options
