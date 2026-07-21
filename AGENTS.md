@@ -150,6 +150,11 @@ lamasync/                     # Bun workspace root
     e2e-harness.sh            # isolated server + daemon end-to-end test harness
     test-install.sh           # Docker smoke test for curl | bash install path
     test-update.sh            # Docker smoke test for curl | bash update path
+    e2e-sandbox/              # full client end-to-end sandbox (Docker Compose: server + client)
+      docker-compose.yml      # server (ghcr image) + client (Ubuntu, runs install.sh)
+      client.Dockerfile       # client test image
+      client-test.sh          # install → register → backup → dotfile → log verification
+      socket-send.py          # sends JSON commands to the lamasyncd Unix socket
   packaging/                  # curl | bash installer + systemd template
     install/
       install.sh              # install lamasyncd (+ optional TUI) and systemd unit
@@ -295,6 +300,16 @@ For isolated Docker tests of the `curl | bash` install and update paths:
 ./scripts/test-install.sh
 ./scripts/test-update.sh
 ```
+
+For a full client end-to-end sandbox (install, registration, normal backup,
+dotfile backup, operation-log verification) in Docker Compose:
+
+```bash
+cd scripts/e2e-sandbox && docker compose up --build --abort-on-container-exit
+```
+
+The complete testing handoff (including the realistic Proxmox-over-tailnet
+path and the production-smoke checklist) is in `docs/handoff/client-testing.md`.
 
 Current coverage:
 - `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
