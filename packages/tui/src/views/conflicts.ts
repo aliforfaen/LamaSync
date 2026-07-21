@@ -19,6 +19,8 @@ import type {
 } from "@lamasync/core";
 
 import { matchHotkey, type Hotkey } from "../app/keymap.ts";
+import { createChildTracker, replaceChildren } from "../app/widgets.ts";
+import type { ChildTracker } from "../app/widgets.ts";
 import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
 
 /**
@@ -91,6 +93,7 @@ export class ConflictsView implements View {
   };
 
   private ctx: ViewContext | null = null;
+  private readonly rootTracker: ChildTracker = createChildTracker();
 
   readonly container: Renderable;
 
@@ -300,13 +303,7 @@ export class ConflictsView implements View {
     // renderable ViewManager holds a reference to via `container`. We
     // mutate its children directly to avoid rebuilding the whole tree.
     const outer = this.container as unknown as BoxVNode;
-    const existing = outer.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existing) {
-      outer.remove(child.id);
-    }
-    for (const node of children) {
-      outer.add(node);
-    }
+    replaceChildren(outer, this.rootTracker, children);
   }
 }
 

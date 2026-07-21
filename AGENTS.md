@@ -7,6 +7,11 @@ lightweight daemon on each client, and a terminal UI for local & fleet views.
 It wraps **rclone** for file transfers and uses a **pre-shared API key** for auth.
 Everything is written in **TypeScript** running on **Bun**.
 
+## Testing in Orca worktrees
+- `bun test` — always works, no external deps needed
+- E2E sandbox requires Docker + rclone installed on host
+- Never install rclone inside a worktree — it's a system-level tool
+
 ## What's implemented (v0.2.0)
 
 |Component|Status|

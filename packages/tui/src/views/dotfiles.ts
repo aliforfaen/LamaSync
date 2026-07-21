@@ -33,7 +33,8 @@ import type {
   LamaSyncApiClient,
 } from "@lamasync/core";
 
-import { hotkeyFooter, pageShell } from "../app/widgets.ts";
+import { createChildTracker, hotkeyFooter, pageShell, replaceChildren } from "../app/widgets.ts";
+import type { ChildTracker } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import { matchHotkey } from "../app/keymap.ts";
 import type {
@@ -157,6 +158,7 @@ export class DotfilesView implements View {
   };
 
   private ctx: ViewContext | null = null;
+  private readonly bodyTracker: ChildTracker = createChildTracker();
   private loadId = 0;
   private rootCtx: RenderContext | null = null;
 
@@ -465,13 +467,7 @@ export class DotfilesView implements View {
 
   private renderBody(): void {
     const children: VNode[] = this.renderForStep();
-    const existing = this.bodyBox.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existing) {
-      this.bodyBox.remove(child.id);
-    }
-    for (const node of children) {
-      this.bodyBox.add(node);
-    }
+    replaceChildren(this.bodyBox, this.bodyTracker, children);
   }
 
   private renderForStep(): VNode[] {

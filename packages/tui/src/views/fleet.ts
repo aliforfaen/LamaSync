@@ -12,7 +12,14 @@ import type {
 } from "@opentui/core";
 import type { BoxRenderable, SelectRenderable } from "@opentui/core";
 
-import { errorBox, hotkeyFooter, statusBox } from "../app/widgets.ts";
+import {
+  createChildTracker,
+  errorBox,
+  hotkeyFooter,
+  replaceChildren,
+  statusBox,
+} from "../app/widgets.ts";
+import type { ChildTracker } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import type {
   View,
@@ -137,6 +144,8 @@ export class FleetView implements View {
   private statusText: string | null = null;
   private statusKind: "info" | "error" | "success" = "info";
   private refreshing = false;
+  private readonly bodyTracker: ChildTracker = createChildTracker();
+  private readonly statusTracker: ChildTracker = createChildTracker();
 
   // Single narrow cast at the field boundary — matches the pattern in
   // foundation's shell.ts and views/logs.ts.
@@ -160,7 +169,8 @@ export class FleetView implements View {
       this.statusBlock,
     ) as unknown as Renderable;
 
-    this.renderBody();
+    // First render deferred to onShow(): mutating a non-instantiated VNode
+    // proxy throws "{} is not iterable" (see local.ts / dotfiles.ts).
   }
 
   // ---------------------------------------------------------------------------
@@ -178,6 +188,8 @@ export class FleetView implements View {
 
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
+    // First paint — the proxy is now parented by the Shell.
+    this.renderBody();
     void this.refresh();
     if (this.pollTimer === null) {
       this.pollTimer = setInterval(() => {
@@ -242,26 +254,14 @@ export class FleetView implements View {
       footer,
     ];
 
-    const existingBody = this.bodyBox.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existingBody) {
-      this.bodyBox.remove(child.id);
-    }
-    for (const child of bodyChildren) {
-      this.bodyBox.add(child);
-    }
+    replaceChildren(this.bodyBox, this.bodyTracker, bodyChildren);
 
     this.renderStatus();
   }
 
   private renderStatus(): void {
     const block = statusBox(this.statusText, this.statusKind);
-    const existingStatus = this.statusBlock.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existingStatus) {
-      this.statusBlock.remove(child.id);
-    }
-    if (block !== null) {
-      this.statusBlock.add(block);
-    }
+    replaceChildren(this.statusBlock, this.statusTracker, block === null ? [] : [block]);
   }
 
   // ---------------------------------------------------------------------------

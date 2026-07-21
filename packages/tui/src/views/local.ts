@@ -13,11 +13,14 @@ import type {
 import type { BoxRenderable, SelectRenderable, TextRenderable } from "@opentui/core";
 
 import {
+  createChildTracker,
   errorBox,
   hotkeyFooter,
   pageShell,
+  replaceChildren,
   statusBox,
 } from "../app/widgets.ts";
+import type { ChildTracker } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import type {
   View,
@@ -164,6 +167,8 @@ export class LocalView implements View {
   private statusKind: "info" | "error" | "success" = "info";
   private ctx: ViewContext | null = null;
   private loadId = 0;
+  private readonly bodyTracker: ChildTracker = createChildTracker();
+  private readonly statusTracker: ChildTracker = createChildTracker();
 
   // Single narrow cast at the field boundary — same pattern foundation's
   // shell.ts uses to expose a VNode proxy as a Renderable.
@@ -191,7 +196,10 @@ export class LocalView implements View {
       ),
     ) as unknown as Renderable;
 
-    this.renderBody();
+    // First render is deferred to onShow(): getChildren() on a non-instantiated
+    // VNode proxy returns the pending-call wrapper (not an array), so mutating
+    // the body here would throw "{} is not iterable". Same precedent as
+    // dotfiles.ts / gh-selector.ts.
   }
 
   // ---------------------------------------------------------------------------
@@ -217,6 +225,9 @@ export class LocalView implements View {
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
     this.hostname = ctx.hostname;
+    // First paint — the proxy is now parented by the Shell, so bodyBox
+    // mutations are safe.
+    this.renderBody();
     void this.refresh();
   }
 
@@ -253,17 +264,7 @@ export class LocalView implements View {
       Text({ content: "" }),
       footer,
     ];
-    // Clear current children then re-add. The VNode proxy wraps
-    // `getChildren()` with the proxy's type signature (not the underlying
-    // Renderable[] return type), so we cast through `unknown` once at the
-    // boundary the same way logs.ts:320 does.
-    const existingBody = this.bodyBox.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existingBody) {
-      this.bodyBox.remove(child.id);
-    }
-    for (const child of bodyChildren) {
-      this.bodyBox.add(child);
-    }
+    replaceChildren(this.bodyBox, this.bodyTracker, bodyChildren);
     this.refreshSelectOptions();
     this.renderStatus();
   }
@@ -279,13 +280,7 @@ export class LocalView implements View {
 
   private renderStatus(): void {
     const block = statusBox(this.statusText, this.statusKind);
-    const existingStatus = this.statusBlock.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existingStatus) {
-      this.statusBlock.remove(child.id);
-    }
-    if (block !== null) {
-      this.statusBlock.add(block);
-    }
+    replaceChildren(this.statusBlock, this.statusTracker, block === null ? [] : [block]);
   }
 
   // ---------------------------------------------------------------------------

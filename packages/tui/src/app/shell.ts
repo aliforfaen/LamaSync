@@ -97,9 +97,20 @@ export class Shell {
       if (spec) this.manager.show(spec.id);
     });
 
-    this.manager.show(this.startView);
+    // Attach the layout to the renderer root BEFORE showing the start view.
+    // VNode proxies only instantiate (and `getChildren()` only starts
+    // returning a real array) once the tree reaches the renderer root —
+    // views' onShow() handlers mutate their body boxes on first paint, so
+    // the tree must be live by then (crash: "TypeError: {} is not iterable").
     this.renderer.root.add(this.layout as unknown as Renderable);
+    this.manager.show(this.startView);
     this.renderer.keyInput.on("keypress", (e: KeyEvent) => {
+      if (process.env.LAMASYNC_DEBUG_KEYS === "1") {
+        try {
+          const { writeSync } = require("fs");
+          writeSync(2, `[shell-key] name=${e.name} raw=${JSON.stringify(e.raw)} prevented=${e.defaultPrevented} stopped=${e.propagationStopped}\n`);
+        } catch { /* ignore */ }
+      }
       this.dispatchKey(e);
     });
     this.mounted = true;

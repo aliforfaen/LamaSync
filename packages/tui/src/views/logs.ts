@@ -10,6 +10,8 @@ import type { ProxiedVNode, Renderable, VNode } from "@opentui/core";
 import type { LamaSyncApiClient, OperationLog } from "@lamasync/core";
 
 import { matchHotkey, type Hotkey, type KeyEvent } from "../app/keymap.ts";
+import { createChildTracker, replaceChildren } from "../app/widgets.ts";
+import type { ChildTracker } from "../app/widgets.ts";
 import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
 
 /**
@@ -181,6 +183,7 @@ export class LogsView implements View {
   };
 
   private ctx: ViewContext | null = null;
+  private readonly bodyTracker: ChildTracker = createChildTracker();
 
   readonly container: Renderable;
 
@@ -205,7 +208,8 @@ export class LogsView implements View {
     // node is mounted; the ViewManager only flips visibility through this
     // reference.
     this.container = this.headerBox as unknown as Renderable;
-    this.renderBody();
+    // First render deferred to onShow(): mutating a non-instantiated VNode
+    // proxy throws "{} is not iterable" (see local.ts / dotfiles.ts).
   }
 
   hotkeys(): ReadonlyArray<Hotkey> {
@@ -219,6 +223,8 @@ export class LogsView implements View {
 
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
+    // First paint — the proxy is now parented by the Shell.
+    this.renderBody();
     void this.refresh();
     void this.refreshHostList();
   }
@@ -327,12 +333,6 @@ export class LogsView implements View {
     parent: BoxVNode,
     next: ReadonlyArray<VNode>,
   ): void {
-    const existing = parent.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existing) {
-      parent.remove(child.id);
-    }
-    for (const node of next) {
-      parent.add(node);
-    }
+    replaceChildren(parent, this.bodyTracker, next);
   }
 }

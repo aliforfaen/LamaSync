@@ -79,3 +79,46 @@ export function emptyBox(message: string): VNode {
     Text({ content: message }),
   );
 }
+
+// ---------------------------------------------------------------------------
+// Child replacement tracker
+// ---------------------------------------------------------------------------
+
+import type { ProxiedVNode } from "@opentui/core";
+import type { BoxRenderable } from "@opentui/core";
+
+/**
+ * Caller-owned list of children currently mounted in a box.
+ *
+ * OpenTUI VNode proxies return THEMSELVES (not the child array) from
+ * `getChildren()` until the node is instantiated against a RenderContext,
+ * so iterating `getChildren()` throws `TypeError: {} is not iterable`.
+ * Tracking the added children locally keeps re-renders safe in every
+ * instantiation state (precedent: `wizard.ts` `renderCurrentStep`).
+ */
+export interface ChildTracker {
+  nodes: Array<{ id: string }>;
+}
+
+export function createChildTracker(): ChildTracker {
+  return { nodes: [] };
+}
+
+/**
+ * Replace `box`'s children with `next`, using `tracker` to remember what is
+ * currently mounted. Safe to call before the box is instantiated: `add` /
+ * `remove` calls are queued by the proxy and replayed on instantiation.
+ */
+export function replaceChildren(
+  box: ProxiedVNode<typeof BoxRenderable>,
+  tracker: ChildTracker,
+  next: ReadonlyArray<VNode>,
+): void {
+  for (const child of tracker.nodes) {
+    box.remove(child.id);
+  }
+  tracker.nodes = next.map((n) => n as unknown as { id: string });
+  for (const child of next) {
+    box.add(child);
+  }
+}

@@ -22,7 +22,14 @@ import type {
 import { homedir } from "os";
 import { join } from "path";
 
-import { hotkeyFooter, pageShell, statusBox } from "../app/widgets.ts";
+import {
+  createChildTracker,
+  hotkeyFooter,
+  pageShell,
+  replaceChildren,
+  statusBox,
+} from "../app/widgets.ts";
+import type { ChildTracker } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import { matchHotkey } from "../app/keymap.ts";
 import type {
@@ -109,6 +116,8 @@ export class GhView implements View {
   private busy = false;
 
   private ctx: ViewContext | null = null;
+  private readonly bodyTracker: ChildTracker = createChildTracker();
+  private readonly statusTracker: ChildTracker = createChildTracker();
   private loadId = 0;
 
   readonly container: Renderable;
@@ -222,22 +231,10 @@ export class GhView implements View {
       hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
     ];
 
-    const existing = this.bodyBox.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existing) {
-      this.bodyBox.remove(child.id);
-    }
-    for (const node of children) {
-      this.bodyBox.add(node);
-    }
+    replaceChildren(this.bodyBox, this.bodyTracker, children);
 
     const status = statusBox(this.error, "error");
-    const existingStatus = this.statusBlock.getChildren() as unknown as ReadonlyArray<Renderable>;
-    for (const child of existingStatus) {
-      this.statusBlock.remove(child.id);
-    }
-    if (status !== null) {
-      this.statusBlock.add(status);
-    }
+    replaceChildren(this.statusBlock, this.statusTracker, status === null ? [] : [status]);
   }
 
   // ---------------------------------------------------------------------------
