@@ -204,6 +204,10 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const updates: string[] = [];
       const values: SQLQueryBindings[] = [];
+      if (body.hostId !== undefined) {
+        updates.push("host_id = ?");
+        values.push(body.hostId);
+      }
       if (body.appName !== undefined) {
         updates.push("app_name = ?");
         values.push(body.appName);
@@ -228,10 +232,16 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: "No fields to update" };
       }
-      activeDb.run(
-        `UPDATE dotfile_manifests SET ${updates.join(", ")} WHERE id = ?`,
-        [...values, params.id],
-      );
+      try {
+        activeDb.run(
+          `UPDATE dotfile_manifests SET ${updates.join(", ")} WHERE id = ?`,
+          [...values, params.id],
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set.status = 409;
+        return { error: `Failed to update manifest: ${message}` };
+      }
       const row = activeDb
         .query<ManifestRow, [string]>(
           "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE id = ?",
@@ -242,6 +252,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
     {
       params: t.Object({ id: t.String() }),
       body: t.Object({
+        hostId: t.Optional(t.String()),
         appName: t.Optional(t.String()),
         paths: t.Optional(t.Union([t.Array(t.String()), t.String()])),
         excludes: t.Optional(t.Union([t.Array(t.String()), t.String(), t.Null()])),
@@ -254,6 +265,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         responses: {
           200: { description: "Manifest updated" },
           404: { description: "Not found" },
+          409: { description: "Conflict (host/app already exists)" },
           401: { description: "Unauthorized" },
         },
       },

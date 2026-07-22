@@ -21,6 +21,8 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       details,
       timestamp,
       durationMs,
+      dotfileAppName,
+      dotfileDirection,
     } = body as {
       hostId: string;
       folderId?: string | null;
@@ -30,6 +32,8 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       details?: string | null;
       timestamp?: number;
       durationMs?: number | null;
+      dotfileAppName?: string | null;
+      dotfileDirection?: "upload" | "download" | null;
     };
     const ts = typeof timestamp === "number" ? timestamp : Date.now();
 
@@ -54,6 +58,28 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
              last_run = excluded.last_run,
              last_status = excluded.last_status`,
           [assignment.id, ts, status],
+        );
+      }
+    }
+
+    // Dotfile deployment tracking (LAMA-168): a successful report that names a
+    // manifest updates its last_sync_at/last_sync_direction. The host-specific
+    // manifest wins; fall back to the _global manifest for the app.
+    if (dotfileAppName && status === "success") {
+      const manifest = activeDb
+        .query<{ id: string }, [string, string, string]>(
+          `SELECT id FROM dotfile_manifests
+           WHERE app_name = ? AND host_id IN (?, '_global')
+           ORDER BY CASE WHEN host_id = ? THEN 0 ELSE 1 END
+           LIMIT 1`,
+        )
+        .get(dotfileAppName, hostId, hostId);
+      if (manifest) {
+        activeDb.run(
+          `UPDATE dotfile_manifests
+           SET last_sync_at = ?, last_sync_direction = ?
+           WHERE id = ?`,
+          [ts, dotfileDirection === "download" ? "download" : "upload", manifest.id],
         );
       }
     }
@@ -93,6 +119,10 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       details: t.Optional(t.Union([t.String(), t.Null()])),
       timestamp: t.Optional(t.Number()),
       durationMs: t.Optional(t.Union([t.Number(), t.Null()])),
+      dotfileAppName: t.Optional(t.Union([t.String(), t.Null()])),
+      dotfileDirection: t.Optional(
+        t.Union([t.Literal("upload"), t.Literal("download"), t.Null()]),
+      ),
     }),
     detail: {
       summary: "Report an operation result (sync, backup, etc.)",

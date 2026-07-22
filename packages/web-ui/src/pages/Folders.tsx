@@ -91,7 +91,11 @@ function buildUpdateBody(form: FolderForm): Record<string, unknown> {
     body.s3Endpoint = form.s3Endpoint.trim() || null;
     body.s3Bucket = form.s3Bucket.trim() || null;
     body.s3AccessKeyId = form.s3AccessKeyId.trim() || null;
-    body.s3SecretAccessKey = form.s3SecretAccessKey.trim() || null;
+    // The API redacts the stored secret (LAMA-178), so the edit form always
+    // loads blank. Blank means "keep the existing secret" — only send the
+    // field when the user actually typed a new one.
+    const secret = form.s3SecretAccessKey.trim();
+    if (secret !== "") body.s3SecretAccessKey = secret;
     body.s3Region = form.s3Region.trim() || null;
   } else {
     body.s3Endpoint = null;
@@ -207,7 +211,7 @@ export function Folders() {
     setter(next);
   }
 
-  function renderS3Fields(current: FolderForm, setter: (f: FolderForm) => void) {
+  function renderS3Fields(current: FolderForm, setter: (f: FolderForm) => void, isEditing: boolean) {
     return (
       <>
         <label>
@@ -249,9 +253,10 @@ export function Folders() {
         <label>
           Secret access key
           <input
-            required
+            required={!isEditing}
             type="password"
             value={current.s3SecretAccessKey}
+            placeholder={isEditing ? "(unchanged)" : undefined}
             onChange={(e) => setter({ ...current, s3SecretAccessKey: e.target.value })}
           />
         </label>
@@ -274,6 +279,7 @@ export function Folders() {
     onSubmit: (e: React.FormEvent) => void,
     submitLabel: string,
     onCancel?: () => void,
+    isEditing = false,
   ) {
     return (
       <form className="form" onSubmit={onSubmit}>
@@ -307,7 +313,7 @@ export function Folders() {
             ))}
           </select>
         </label>
-        {current.backend === "s3" && renderS3Fields(current, setter)}
+        {current.backend === "s3" && renderS3Fields(current, setter, isEditing)}
         <div className="actions">
           <button type="submit" className="action primary" disabled={busy}>
             {submitLabel}
@@ -333,7 +339,7 @@ export function Folders() {
       {error && <div className="error">{error}</div>}
       {showForm && renderForm(form, setForm, onCreate, "Create", () => { setShowForm(false); setForm(DEFAULT_FORM); })}
 
-      {editingId && renderForm(editForm, setEditForm, onEdit, "Save", () => setEditingId(null))}
+      {editingId && renderForm(editForm, setEditForm, onEdit, "Save", () => setEditingId(null), true)}
 
       <table className="data">
         <thead>

@@ -193,6 +193,7 @@ lamasync/                     # Bun workspace root
 | LAMA-151 | Self-update (daemon + server release proxy) | `daemon/src/self-update.ts`, `server/src/routes/release.ts`, `packaging/install/update.sh` |
 | LAMA-147 | Management Web UI (dashboard + admin CRUD) | `packages/web-ui/`, `packages/server/src/routes/web-ui.ts`, `scripts/inline-web-ui.ts` |
 | LAMA-173 | TUI unification: tabbed shell, 6 views, guided wizards | `packages/tui/src/{boot.ts,index.ts,app/*,views/*,flows/*}` |
+| LAMA-168 | Dotfile manifest improvements: excludes, host selector, cron presets + `@reboot`/`@login`, deployment tracking (last sync, direction, original uploader) | `core/src/{types.ts,db/schema.ts}`, `server/src/routes/{dotfiles.ts,config.ts,report.ts}`, `daemon/src/{executor.ts,scheduler.ts}`, `web-ui/src/pages/Dotfiles.tsx`, `tui/src/{flows/dotfile-manifest.ts,views/dotfiles.ts,app/schedule-presets.ts}` |
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
@@ -389,7 +390,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **Install scripts**: `packaging/install/install.sh` and `packaging/install/update.sh` patched to be self-contained and aligned with the CI-published binary names (`lamasyncd`, `lamasync-tui`). Docker smoke tests (`scripts/test-install.sh`, `scripts/test-update.sh`) both pass.
 - **Release**: v0.2.2 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
-- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-168 (dotfile manifest improvements), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
+- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
 
 ## Next session options
@@ -402,8 +403,8 @@ Ready-to-pick work, ordered by likely value/urgency:
    - Run basic end-to-end tests: create folder, assign, daemon sync, verify object listing in bucket.
    - Revisit rclone config generation for S3 in `server/src/routes/config.ts` and folder validation in `server/src/routes/folders.ts`.
 
-2. **LAMA-168 / LAMA-171 — Dotfile manifest improvements + `@reboot`/`@login` triggers** (in_progress, urgent)
-   - Host selector, excludes, cron presets, deployment tracking; scheduler special-token tests already added.
+2. **LAMA-171 — `@reboot`/`@login` dotfile schedule triggers** (in_progress, urgent)
+   - Scheduler special-token support + tests done; LAMA-168 (host selector, excludes, cron presets, deployment tracking) is done.
 
 3. **LAMA-104 — Error handling** (backlog, high)
    - Harden error propagation, structured error responses, and retry/circuit-breaker behavior across the daemon and server.

@@ -77,4 +77,82 @@ describe("POST /api/v1/report", () => {
     });
     expect(res.status).toBe(422);
   });
+
+  test("tracks dotfile deployment on successful dotfile report (LAMA-168)", async () => {
+    db.run(
+      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('m1', '_global', 'nvim', '[]')`,
+    );
+
+    const res = await post("/api/v1/report", {
+      hostId: "host-a",
+      operation: "dotfile-restore",
+      status: "success",
+      summary: "restored nvim",
+      dotfileAppName: "nvim",
+      dotfileDirection: "download",
+    });
+    expect(res.status).toBe(204);
+
+    const row = db
+      .query<{ last_sync_at: number | null; last_sync_direction: string | null }, []>(
+        "SELECT last_sync_at, last_sync_direction FROM dotfile_manifests WHERE id = 'm1'",
+      )
+      .get();
+    expect(row?.last_sync_at).not.toBeNull();
+    expect(row?.last_sync_direction).toBe("download");
+  });
+
+  test("prefers the host-specific manifest over the global one", async () => {
+    db.run(
+      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('mg', '_global', 'nvim', '[]')`,
+    );
+    db.run(
+      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('mh', 'host-a', 'nvim', '[]')`,
+    );
+
+    const res = await post("/api/v1/report", {
+      hostId: "host-a",
+      operation: "dotfile-restore",
+      status: "success",
+      dotfileAppName: "nvim",
+      dotfileDirection: "download",
+    });
+    expect(res.status).toBe(204);
+
+    const hostRow = db
+      .query<{ last_sync_direction: string | null }, []>(
+        "SELECT last_sync_direction FROM dotfile_manifests WHERE id = 'mh'",
+      )
+      .get();
+    const globalRow = db
+      .query<{ last_sync_direction: string | null }, []>(
+        "SELECT last_sync_direction FROM dotfile_manifests WHERE id = 'mg'",
+      )
+      .get();
+    expect(hostRow?.last_sync_direction).toBe("download");
+    expect(globalRow?.last_sync_direction).toBeNull();
+  });
+
+  test("ignores failed dotfile reports for deployment tracking", async () => {
+    db.run(
+      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('m1', '_global', 'nvim', '[]')`,
+    );
+
+    const res = await post("/api/v1/report", {
+      hostId: "host-a",
+      operation: "dotfile-restore",
+      status: "failed",
+      dotfileAppName: "nvim",
+      dotfileDirection: "download",
+    });
+    expect(res.status).toBe(204);
+
+    const row = db
+      .query<{ last_sync_at: number | null; last_sync_direction: string | null }, []>(
+        "SELECT last_sync_at, last_sync_direction FROM dotfile_manifests WHERE id = 'm1'",
+      )
+      .get();
+    expect(row?.last_sync_at).toBeNull();
+    expect(row?.last_sync_direction).toBeNull();
+  });
 });

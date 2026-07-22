@@ -104,6 +104,17 @@ const STEP_BACK: Record<Step, Step> = {
 
 const SETUP_KEY = "__setup__";
 
+/** App-list row description: instructions plus deployment info (LAMA-168). */
+function describeManifestRow(manifest: DotfileManifest | undefined): string {
+  if (!manifest) return "dotfile snapshots";
+  const parts: string[] = [manifest.instructions ?? "dotfile snapshots"];
+  if (manifest.lastSyncAt) {
+    const when = new Date(manifest.lastSyncAt).toLocaleString();
+    parts.push(`last ${manifest.lastSyncDirection ?? "sync"}: ${when}`);
+  }
+  return parts.join(" — ");
+}
+
 // -----------------------------------------------------------------------------
 // View
 // -----------------------------------------------------------------------------
@@ -441,6 +452,18 @@ export class DotfilesView implements View {
           subpaths.length ? ` (${subpaths.length} subpath(s))` : ""
         }`;
         if (!opts?.fromRestoreAll) this.state.step = "done";
+        // Best-effort deployment tracking (LAMA-168): record the download on
+        // the manifest so last-sync/direction show up in server UIs.
+        void ctx.api
+          .reportOperation({
+            hostId: ctx.hostname,
+            operation: "dotfile-restore",
+            status: "success",
+            summary: `restored ${appName} (${version.id})`,
+            dotfileAppName: appName,
+            dotfileDirection: "download",
+          })
+          .catch(() => {});
       }
     } catch (err) {
       // Don't mutate state if we've been superseded (loadId advanced).
@@ -514,7 +537,7 @@ export class DotfilesView implements View {
         );
         return {
           name,
-          description: manifest?.instructions ?? "dotfile snapshots",
+          description: describeManifestRow(manifest),
           value: name,
         };
       }),

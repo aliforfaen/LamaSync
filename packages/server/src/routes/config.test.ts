@@ -11,6 +11,7 @@ import type {
   Folder,
   FolderAssignment,
   Host,
+  HostConfig,
 } from "@lamasync/core";
 import { initDb } from "@lamasync/core";
 import { Database } from "bun:sqlite";
@@ -498,6 +499,33 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
     }
     expect(seen.has("[lamasync-s3-exo-ini-backend]")).toBe(true);
     expect(seen.has("[lamasync-s3-exo-ini]")).toBe(true);
+  });
+});
+
+describe("GET /api/v1/config/:hostId — dotfile manifests (LAMA-168)", () => {
+  test("returns manifest excludes and schedule to the daemon", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    db.run(
+      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths, excludes, schedule)
+       VALUES ('m1', '_global', 'nvim', '["~/.config/nvim"]', '["*.log","cache/"]', '@login')`,
+    );
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    const manifest = body.manifests.find((m) => m.appName === "nvim");
+    expect(manifest?.excludes).toEqual(["*.log", "cache/"]);
+    expect(manifest?.schedule).toBe("@login");
   });
 });
 

@@ -73,6 +73,7 @@ interface ManifestRow {
   host_id: string;
   app_name: string;
   paths: string;
+  excludes: string | null;
   schedule: string | null;
   instructions: string | null;
 }
@@ -128,16 +129,25 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
 
 function rowToManifest(r: ManifestRow): DotfileManifest {
   let paths: string[] = [];
+  let excludes: string[] | null = null;
   try {
     paths = JSON.parse(r.paths);
   } catch {
     paths = [];
+  }
+  if (r.excludes) {
+    try {
+      excludes = JSON.parse(r.excludes);
+    } catch {
+      excludes = [];
+    }
   }
   return {
     id: r.id,
     hostId: r.host_id,
     appName: r.app_name,
     paths,
+    excludes,
     schedule: r.schedule,
     instructions: r.instructions,
   };
@@ -389,13 +399,13 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
 
     const globalManifestRows = activeDb
       .query<ManifestRow, []>(
-        `SELECT id, host_id, app_name, paths, schedule, instructions
+        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions
          FROM dotfile_manifests WHERE host_id = '_global'`,
       )
       .all();
     const hostManifestRows = activeDb
       .query<ManifestRow, [string]>(
-        `SELECT id, host_id, app_name, paths, schedule, instructions
+        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions
          FROM dotfile_manifests WHERE host_id = ?`,
       )
       .all(hostId);

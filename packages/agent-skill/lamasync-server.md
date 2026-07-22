@@ -228,6 +228,18 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/dotfiles/opencode/<version-id>
 ```
 
+Manifest updates: `PUT /api/v1/dotfiles/manifests/:id` accepts any subset of
+`hostId`, `appName`, `paths`, `excludes`, `schedule`, `instructions`. Changing
+`hostId` that collides with an existing `(host, app)` pair returns 409.
+`schedule` accepts a cron expression or the special tokens `@reboot` / `@login`.
+
+Deployment tracking: uploads set the manifest's `lastSyncAt`,
+`lastSyncDirection: "upload"`, and (once) `originalUploaderHostId`. Restores
+report through `POST /api/v1/report` with `dotfileAppName` and
+`dotfileDirection: "download"` — on `status: "success"` the matching manifest
+(host-specific row preferred, `_global` fallback) is stamped with the
+download's timestamp and direction.
+
 ### Open the WebSocket fleet stream
 
 The WebSocket endpoint uses the `Sec-WebSocket-Protocol` header for auth. The
@@ -270,7 +282,7 @@ you need exact request/response field names or want to verify a schema before
 issuing a write. The high-level shapes are:
 
 - `Host { id, hostname, tailnetIp?, lastSeen?, status }`
-- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Provider?: 'exoscale'|'aws'|'other', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }`
+- `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Provider?: 'exoscale'|'aws'|'other', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }` — `s3SecretAccessKey` is write-only: accepted on create/update, but folder CRUD responses always return it as `null` (LAMA-178). The plaintext value is only exposed to daemons via `GET /config/:hostId`. Omit it (or send `null`) on update to keep the stored secret.
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }` (`status` includes `retry`, `recovery`)
 - `DotfileManifest { id, hostId, appName, paths[], excludes[]?, schedule?, instructions?, lastSyncAt?, lastSyncDirection?, originalUploaderHostId? }`
@@ -291,7 +303,9 @@ All `?` fields are nullable. Timestamps are milliseconds since epoch
   pruned on startup and then once every 24 hours. You can also force a prune
   with `POST /api/v1/admin/prune?olderThanMs=<ms>`.
 - `schedule_state` is updated automatically when a `POST /report` includes a
-  `folderId` that matches an existing assignment.
+  `folderId` that matches an existing assignment. A `POST /report` that also
+  includes `dotfileAppName` (and optional `dotfileDirection`) stamps the
+  matching dotfile manifest's `lastSyncAt`/`lastSyncDirection` on success.
 - The WebSocket protocol now broadcasts a `host` event from `POST /register`
   and `POST /report/health` so the Management UI updates live without
   re-fetching.

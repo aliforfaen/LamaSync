@@ -140,7 +140,10 @@ function rowToFolder(r: FolderRow): Folder {
     s3Endpoint: r.s3_endpoint,
     s3Bucket: r.s3_bucket,
     s3AccessKeyId: r.s3_access_key_id,
-    s3SecretAccessKey: r.s3_secret_access_key,
+    // LAMA-178: the S3 secret is write-only. Folder CRUD responses always
+    // redact it to null; only the daemon config endpoint (config.ts) reads
+    // the stored value to build the rclone config.
+    s3SecretAccessKey: null,
     s3Region: r.s3_region,
   };
 }
@@ -274,7 +277,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         s3Endpoint,
         s3Bucket,
         s3AccessKeyId,
-        s3SecretAccessKey,
+        // Redacted in API responses (LAMA-178); the value is stored server-side only.
+        s3SecretAccessKey: null,
         s3Region,
       };
     },

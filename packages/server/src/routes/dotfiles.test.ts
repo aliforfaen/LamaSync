@@ -183,6 +183,37 @@ describe("dotfile manifests", () => {
     expect(updated.instructions).toBe("new instructions");
   });
 
+  test("updates hostId on a manifest (LAMA-168)", async () => {
+    const create = await postJson("/api/v1/dotfiles/manifests", {
+      appName: "opencode",
+      paths: ["~/.config/opencode"],
+    });
+    const { id } = (await create.json()) as { id: string };
+    const update = await putJson(`/api/v1/dotfiles/manifests/${id}`, {
+      hostId: "host-a",
+    });
+    expect(update.status).toBe(200);
+    const updated = (await update.json()) as { hostId: string };
+    expect(updated.hostId).toBe("host-a");
+  });
+
+  test("returns 409 when hostId update collides with an existing manifest", async () => {
+    await postJson("/api/v1/dotfiles/manifests", {
+      appName: "opencode",
+      hostId: "host-a",
+      paths: ["~/.config/opencode"],
+    });
+    const create = await postJson("/api/v1/dotfiles/manifests", {
+      appName: "opencode",
+      paths: ["~/.config/opencode/global"],
+    });
+    const { id } = (await create.json()) as { id: string };
+    const update = await putJson(`/api/v1/dotfiles/manifests/${id}`, {
+      hostId: "host-a",
+    });
+    expect(update.status).toBe(409);
+  });
+
   test("deletes a manifest and its versions", async () => {
     const create = await postJson("/api/v1/dotfiles/manifests", {
       appName: "opencode",

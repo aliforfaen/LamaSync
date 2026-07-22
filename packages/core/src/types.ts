@@ -78,6 +78,9 @@ export interface Folder {
   s3Endpoint?: string | null;
   s3Bucket?: string | null;
   s3AccessKeyId?: string | null;
+  // Write-only credential (LAMA-178): accepted on create/update, but folder
+  // CRUD responses always return null here. The plaintext value is only
+  // exposed to daemons via the /config/:hostId rclone config endpoint.
   s3SecretAccessKey?: string | null;
   s3Region?: string | null;
 }
@@ -230,6 +233,10 @@ export interface OperationReport {
   details?: string | null;
   timestamp?: number;
   durationMs?: number | null;
+  // Dotfile deployment tracking (LAMA-168): when set, the report also updates
+  // the matching dotfile manifest's lastSyncAt/lastSyncDirection.
+  dotfileAppName?: string | null;
+  dotfileDirection?: "upload" | "download" | null;
 }
 
 // WebSocket event payload broadcast on /api/v1/ws
