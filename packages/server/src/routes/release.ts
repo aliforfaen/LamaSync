@@ -6,7 +6,7 @@ import { Elysia } from "elysia";
 import { VERSION } from "@lamasync/core";
 
 const GITHUB_API =
-  "https://api.github.com/repos/alifraen/LamaSync/releases/latest";
+  "https://api.github.com/repos/aliforfaen/LamaSync/releases/latest";
 
 interface GithubAsset {
   name: string;
