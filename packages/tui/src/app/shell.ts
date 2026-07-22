@@ -34,13 +34,15 @@ export const SHELL_LAYOUT_ID = "__lamasync_shell_layout__";
  * the active view.
  *
  * Dispatch order for the global keypress handler (see `dispatchKey`):
- *   1. Numeric `1`..`N` shortcuts — switch to the view at that index.
- *   2. `leftbracket` / `rightbracket` — cycle to the previous / next view.
- *   3. `escape` — close the active wizard if one is mounted (skeleton: pass
+ *   1. `[` / `]` — cycle to the previous / next view.
+ *   2. `escape` — close the active wizard if one is mounted (skeleton: pass
  *      through; slice I wires the cancel hook).
- *   4. `q` (when no Input/Textarea has focus) — call `destroy()`.
- *   5. Active view's `handleKey`, falling back to `matchHotkey(activeHotkeys,
+ *   3. `q` (when no Input/Textarea has focus) — call `destroy()`.
+ *   4. Active view's `handleKey`, falling back to `matchHotkey(activeHotkeys,
  *      name, char)`.
+ *   5. Numeric `1`..`N` shortcuts — switch to the view at that index. Runs
+ *      LAST so a view's own digit hotkeys (e.g. Local's `1`/`2`/`3`) win over
+ *      tab switching while that view is active.
  *
  * `Enter` is intentionally NEVER handled globally — focused renderables
  * (Select, Input, Textarea) own it.
@@ -157,27 +159,18 @@ export class Shell {
     const char = (e as { sequence?: string }).sequence ?? "";
     const name = e.name;
 
-    // Step 1: numeric shortcuts.
-    if (char.length === 1 && char >= "1" && char <= "9") {
-      const index = Number.parseInt(char, 10) - 1;
-      const specs = this.manager.all();
-      if (index >= 0 && index < specs.length) {
-        this.cycleTo(index);
-        return true;
-      }
-    }
-
-    // Step 2: cycle keys.
-    if (name === "leftbracket") {
+    // Step 1: cycle keys. OpenTUI does not emit "leftbracket"/"rightbracket"
+    // key names — brackets arrive as printable chars — so match both.
+    if (name === "leftbracket" || char === "[") {
       this.cycleBy(-1);
       return true;
     }
-    if (name === "rightbracket") {
+    if (name === "rightbracket" || char === "]") {
       this.cycleBy(1);
       return true;
     }
 
-    // Step 3: active wizard owns input. When a wizard is mounted, the runner
+    // Step 2: active wizard owns input. When a wizard is mounted, the runner
     // receives the key first via Wizard.handleKey — Enter, ESC, q, and any
     // step-level onKey handlers run there. ESC cancels through onCancel as a
     // fallback when the runner's handleKey declines the event.
@@ -190,13 +183,13 @@ export class Shell {
       }
     }
 
-    // Step 4: quit.
+    // Step 3: quit.
     if ((char === "q" || char === "Q") && !this.hasInputFocus()) {
       this.destroy();
       return true;
     }
 
-    // Step 5: view-local dispatch.
+    // Step 4: view-local dispatch.
     const active = this.manager.active();
     if (active.handleKey?.(e) === true) return true;
     const matched: Hotkey | undefined = matchHotkey(
@@ -210,6 +203,17 @@ export class Shell {
         this.setStatus(msg, "error");
       });
       return true;
+    }
+
+    // Step 5: numeric tab shortcuts. Runs after view-local dispatch so a
+    // view's own digit hotkeys (Local's 1/2/3) take precedence while active.
+    if (char.length === 1 && char >= "1" && char <= "9") {
+      const index = Number.parseInt(char, 10) - 1;
+      const specs = this.manager.all();
+      if (index >= 0 && index < specs.length) {
+        this.cycleTo(index);
+        return true;
+      }
     }
 
     return false;
