@@ -6,21 +6,20 @@
 
 import { Box, Select, Text } from "@opentui/core";
 import type {
-  ProxiedVNode,
+  CliRenderer,
   Renderable,
   VNode,
 } from "@opentui/core";
-import type { BoxRenderable, SelectRenderable, TextRenderable } from "@opentui/core";
+import type { BoxRenderable, SelectRenderable } from "@opentui/core";
 
 import {
-  createChildTracker,
   errorBox,
   hotkeyFooter,
   pageShell,
-  replaceChildren,
+  realize,
   statusBox,
+  swapChildren,
 } from "../app/widgets.ts";
-import type { ChildTracker } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import type {
   View,
@@ -155,10 +154,10 @@ export class LocalView implements View {
   readonly id: ViewId = LocalView.id;
   readonly title: string = LocalView.title;
 
-  private readonly bodyBox: ProxiedVNode<typeof BoxRenderable>;
-  private readonly statusBlock: ProxiedVNode<typeof BoxRenderable>;
-  private readonly selectRef: ProxiedVNode<typeof SelectRenderable>;
-  private readonly selectContainer: ProxiedVNode<typeof BoxRenderable>;
+  private readonly bodyBox: BoxRenderable;
+  private readonly statusBlock: BoxRenderable;
+  private readonly selectRef: SelectRenderable;
+  private readonly selectContainer: BoxRenderable;
 
   private folders: LocalFolder[] = [];
   private hostname = "";
@@ -167,39 +166,48 @@ export class LocalView implements View {
   private statusKind: "info" | "error" | "success" = "info";
   private ctx: ViewContext | null = null;
   private loadId = 0;
-  private readonly bodyTracker: ChildTracker = createChildTracker();
-  private readonly statusTracker: ChildTracker = createChildTracker();
 
-  // Single narrow cast at the field boundary — same pattern foundation's
-  // shell.ts uses to expose a VNode proxy as a Renderable.
+  // Real renderable instantiated against the renderer (LAMA-181); the
+  // ViewManager flips `visible` on it when switching tabs.
   readonly container: Renderable;
 
-  constructor() {
-    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
-    this.statusBlock = Box({ flexDirection: "column" });
-    this.selectRef = Select({ options: [], flexGrow: 1 });
+  constructor(opts?: { renderer?: CliRenderer | null }) {
+    const renderer = opts?.renderer ?? null;
+    this.bodyBox = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
+    );
+    this.statusBlock = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column" }),
+    );
+    this.selectRef = realize<SelectRenderable>(
+      renderer,
+      Select({ options: [], flexGrow: 1 }),
+    );
     this.selectRef.on("itemSelected", (_index: number, option: FolderRow) => {
       if (option.value) {
         this.selectedFolderId = option.value;
       }
     });
-    this.selectContainer = Box(
-      { flexDirection: "column", flexGrow: 1 },
-      this.selectRef,
+    this.selectContainer = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }, this.selectRef),
     );
-    this.container = pageShell(
-      "Local",
-      Box(
-        { flexDirection: "column", flexGrow: 1 },
-        this.bodyBox,
-        this.statusBlock,
+    this.container = realize<Renderable>(
+      renderer,
+      pageShell(
+        "Local",
+        Box(
+          { flexDirection: "column", flexGrow: 1 },
+          this.bodyBox,
+          this.statusBlock,
+        ),
       ),
-    ) as unknown as Renderable;
+    );
 
-    // First render is deferred to onShow(): getChildren() on a non-instantiated
-    // VNode proxy returns the pending-call wrapper (not an array), so mutating
-    // the body here would throw "{} is not iterable". Same precedent as
-    // dotfiles.ts / gh-selector.ts.
+    // First render is deferred to onShow(): the hostname comes from the
+    // ViewContext, so there is nothing meaningful to paint before then.
   }
 
   // ---------------------------------------------------------------------------
@@ -225,8 +233,7 @@ export class LocalView implements View {
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
     this.hostname = ctx.hostname;
-    // First paint — the proxy is now parented by the Shell, so bodyBox
-    // mutations are safe.
+    // First paint — bodyBox is a real renderable, so mutations render live.
     this.renderBody();
     void this.refresh();
   }
@@ -245,7 +252,7 @@ export class LocalView implements View {
 
   private renderBody(): void {
     const titleText: VNode = Text({ content: `Local — ${this.hostname || "—"}` });
-    const listContent: VNode =
+    const listContent: VNode | Renderable =
       this.folders.length === 0
         ? Box(
             { flexDirection: "column" },
@@ -257,14 +264,14 @@ export class LocalView implements View {
     const footerItems = this.hotkeys().map((h) => ({ key: h.key, label: h.label }));
     const footer: VNode = hotkeyFooter(footerItems);
 
-    const bodyChildren: VNode[] = [
+    const bodyChildren: Array<VNode | Renderable> = [
       titleText,
       Text({ content: "" }),
       listContent,
       Text({ content: "" }),
       footer,
     ];
-    replaceChildren(this.bodyBox, this.bodyTracker, bodyChildren);
+    swapChildren(this.bodyBox, bodyChildren);
     this.refreshSelectOptions();
     this.renderStatus();
   }
@@ -280,7 +287,7 @@ export class LocalView implements View {
 
   private renderStatus(): void {
     const block = statusBox(this.statusText, this.statusKind);
-    replaceChildren(this.statusBlock, this.statusTracker, block === null ? [] : [block]);
+    swapChildren(this.statusBlock, block === null ? [] : [block]);
   }
 
   // ---------------------------------------------------------------------------

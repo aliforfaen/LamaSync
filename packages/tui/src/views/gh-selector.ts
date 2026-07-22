@@ -23,13 +23,12 @@ import { homedir } from "os";
 import { join } from "path";
 
 import {
-  createChildTracker,
   hotkeyFooter,
   pageShell,
-  replaceChildren,
+  realize,
   statusBox,
+  swapChildren,
 } from "../app/widgets.ts";
-import type { ChildTracker } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import { matchHotkey } from "../app/keymap.ts";
 import type {
@@ -66,8 +65,6 @@ interface RepoRow {
   value: string;
 }
 
-type BoxVNode = ProxiedVNode<typeof BoxRenderable>;
-
 function toRows(repos: ReadonlyArray<GhRepo>): RepoRow[] {
   return repos.map((repo) => ({
     name: repo.name,
@@ -102,12 +99,12 @@ export class GhView implements View {
   readonly id: ViewId = GhView.id;
   readonly title: string = GhView.title;
 
-  private readonly bodyBox: BoxVNode;
-  private readonly statusBlock: BoxVNode;
+  private readonly bodyBox: BoxRenderable;
+  private readonly statusBlock: BoxRenderable;
   // Per-render Select: built fresh on every renderBody() so the live
-  // SelectRenderable instance is created alongside the bodyBox mount, not
-  // held as an unparented proxy across re-renders. The itemSelected event
-  // is wired via a closure that closes over this view instance.
+  // SelectRenderable instance is created when the fresh Box is added to the
+  // real bodyBox. The itemSelected event is wired via a closure that closes
+  // over this view instance.
   private currentSelect: ProxiedVNode<typeof SelectRenderable> | null = null;
 
   private repos: GhRepo[] = [];
@@ -116,24 +113,32 @@ export class GhView implements View {
   private busy = false;
 
   private ctx: ViewContext | null = null;
-  private readonly bodyTracker: ChildTracker = createChildTracker();
-  private readonly statusTracker: ChildTracker = createChildTracker();
   private loadId = 0;
 
   readonly container: Renderable;
 
   constructor(opts: { ctx: ViewContext }) {
-    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
-    this.statusBlock = Box({ flexDirection: "column" });
-    this.container = pageShell(
-      "GitHub",
-      Box(
-        { flexDirection: "column", flexGrow: 1 },
-        this.bodyBox,
-        this.statusBlock,
+    const renderer = opts.ctx.renderer;
+    this.bodyBox = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
+    );
+    this.statusBlock = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column" }),
+    );
+    this.container = realize<Renderable>(
+      renderer,
+      pageShell(
+        "GitHub",
+        Box(
+          { flexDirection: "column", flexGrow: 1 },
+          this.bodyBox,
+          this.statusBlock,
+        ),
       ),
-    ) as unknown as Renderable;
-    // First render deferred to onShow — bodyBox proxy is unparented here.
+    );
+    // First render deferred to onShow — the repo list comes from `gh`.
   }
 
   // ---------------------------------------------------------------------------
@@ -153,7 +158,7 @@ export class GhView implements View {
 
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
-    // First paint — bodyBox is now parented by the Shell.
+    // First paint — bodyBox is a real renderable, so mutations render live.
     this.renderBody();
     void this.refresh();
   }
@@ -231,10 +236,10 @@ export class GhView implements View {
       hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
     ];
 
-    replaceChildren(this.bodyBox, this.bodyTracker, children);
+    swapChildren(this.bodyBox, children);
 
     const status = statusBox(this.error, "error");
-    replaceChildren(this.statusBlock, this.statusTracker, status === null ? [] : [status]);
+    swapChildren(this.statusBlock, status === null ? [] : [status]);
   }
 
   // ---------------------------------------------------------------------------

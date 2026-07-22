@@ -34,6 +34,7 @@ function makeCtx(): ViewContext {
     api: {} as ViewContext["api"],
     hostname: "test-host",
     socketPath: "/tmp/lamasync.sock",
+    renderer: null,
     setStatus: () => {},
     openWizard: () => {},
   };

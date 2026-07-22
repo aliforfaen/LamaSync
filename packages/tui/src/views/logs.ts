@@ -5,13 +5,12 @@ import {
   ScrollBoxRenderable,
   Text,
 } from "@opentui/core";
-import type { ProxiedVNode, Renderable, VNode } from "@opentui/core";
+import type { CliRenderer, Renderable, VNode } from "@opentui/core";
 
 import type { LamaSyncApiClient, OperationLog } from "@lamasync/core";
 
 import { matchHotkey, type Hotkey, type KeyEvent } from "../app/keymap.ts";
-import { createChildTracker, replaceChildren } from "../app/widgets.ts";
-import type { ChildTracker } from "../app/widgets.ts";
+import { realize, swapChildren } from "../app/widgets.ts";
 import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
 
 /**
@@ -137,9 +136,6 @@ export function nextStatusFilter(current: LogsStatus): LogsStatus {
   return STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
 }
 
-type BoxVNode = ProxiedVNode<typeof BoxRenderable>;
-type ScrollVNode = ProxiedVNode<typeof ScrollBoxRenderable>;
-
 interface LogsInternalState {
   entries: OperationLog[];
   status: LogsStatus;
@@ -167,9 +163,9 @@ export class LogsView implements View {
   readonly id: ViewId = LogsView.id;
   readonly title: string = LogsView.title;
 
-  private readonly bodyBox: BoxVNode;
-  private readonly scrollBox: ScrollVNode;
-  private readonly headerBox: BoxVNode;
+  private readonly bodyBox: BoxRenderable;
+  private readonly scrollBox: ScrollBoxRenderable;
+  private readonly headerBox: BoxRenderable;
 
   private state: LogsInternalState = {
     entries: [],
@@ -183,33 +179,41 @@ export class LogsView implements View {
   };
 
   private ctx: ViewContext | null = null;
-  private readonly bodyTracker: ChildTracker = createChildTracker();
 
   readonly container: Renderable;
 
-  constructor() {
-    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
-    this.scrollBox = ScrollBox(
-      { flexGrow: 1, scrollY: true, viewportCulling: true },
-      this.bodyBox,
+  constructor(opts?: { renderer?: CliRenderer | null }) {
+    const renderer = opts?.renderer ?? null;
+    this.bodyBox = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
     );
-    this.headerBox = Box(
-      { flexDirection: "column" },
-      Text({ content: "Operations" }),
-      Text({ content: "Filter: all" }),
-      Text({ content: "Host: (any)" }),
-      Text({ content: "Page 1 (0 entries shown)" }),
-      Text({ content: "" }),
-      this.scrollBox,
-      Text({ content: "" }),
-      hotkeyFooter(),
+    this.scrollBox = realize<ScrollBoxRenderable>(
+      renderer,
+      ScrollBox(
+        { flexGrow: 1, scrollY: true, viewportCulling: true },
+        this.bodyBox,
+      ),
     );
-    // ProxiedVNode forwards `visible` to the underlying Renderable when the
-    // node is mounted; the ViewManager only flips visibility through this
-    // reference.
-    this.container = this.headerBox as unknown as Renderable;
-    // First render deferred to onShow(): mutating a non-instantiated VNode
-    // proxy throws "{} is not iterable" (see local.ts / dotfiles.ts).
+    this.headerBox = realize<BoxRenderable>(
+      renderer,
+      Box(
+        { flexDirection: "column" },
+        Text({ content: "Operations" }),
+        Text({ content: "Filter: all" }),
+        Text({ content: "Host: (any)" }),
+        Text({ content: "Page 1 (0 entries shown)" }),
+        Text({ content: "" }),
+        this.scrollBox,
+        Text({ content: "" }),
+        hotkeyFooter(),
+      ),
+    );
+    // The header Box is a real renderable (LAMA-181); the ViewManager flips
+    // `visible` on it when switching tabs.
+    this.container = this.headerBox;
+    // First render deferred to onShow(): the entries come from the API, so
+    // there is nothing meaningful to paint before then.
   }
 
   hotkeys(): ReadonlyArray<Hotkey> {
@@ -223,7 +227,7 @@ export class LogsView implements View {
 
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
-    // First paint — the proxy is now parented by the Shell.
+    // First paint — bodyBox is a real renderable, so mutations render live.
     this.renderBody();
     void this.refresh();
     void this.refreshHostList();
@@ -306,18 +310,18 @@ export class LogsView implements View {
   private renderBody(): void {
     const entries = this.state.entries;
     if (this.state.loading && entries.length === 0) {
-      this.replaceChildren(this.bodyBox, [Text({ content: "Loading…" })]);
+      swapChildren(this.bodyBox, [Text({ content: "Loading…" })]);
       return;
     }
     if (this.state.error && entries.length === 0) {
-      this.replaceChildren(this.bodyBox, [
+      swapChildren(this.bodyBox, [
         Text({ content: `[!] ${this.state.error}` }),
         Text({ content: "Press r to retry." }),
       ]);
       return;
     }
     if (entries.length === 0) {
-      this.replaceChildren(this.bodyBox, [
+      swapChildren(this.bodyBox, [
         Text({ content: "(no entries)" }),
         Text({ content: "Press r to refresh or f to change filter." }),
       ]);
@@ -326,13 +330,6 @@ export class LogsView implements View {
     const cells: VNode[] = entries.map((entry) =>
       Text({ content: statusLine(entry) }),
     );
-    this.replaceChildren(this.bodyBox, cells);
-  }
-
-  private replaceChildren(
-    parent: BoxVNode,
-    next: ReadonlyArray<VNode>,
-  ): void {
-    replaceChildren(parent, this.bodyTracker, next);
+    swapChildren(this.bodyBox, cells);
   }
 }

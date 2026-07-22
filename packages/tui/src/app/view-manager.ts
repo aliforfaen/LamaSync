@@ -1,4 +1,4 @@
-import type { Renderable } from "@opentui/core";
+import type { CliRenderer, Renderable } from "@opentui/core";
 
 import type { LamaSyncApiClient } from "@lamasync/core";
 
@@ -17,20 +17,20 @@ import type { Wizard } from "./wizard.ts";
 export type ViewId = "local" | "fleet" | "dotfiles" | "conflicts" | "logs" | "gh";
 
 /**
- * API client, the local hostname, the daemon socket path, and a status
- * callback the view can use to surface feedback. `openWizard` lets the view
- * push a wizard onto the Shell's stack.
+ * API client, the local hostname, the daemon socket path, the OpenTUI
+ * renderer, and a status callback the view can use to surface feedback.
+ * `openWizard` lets the view push a wizard onto the Shell's stack.
  *
- * OpenTUI's `RenderContext` is intentionally NOT exposed here: the Shell owns
- * the renderer, and the View's container is a `Renderable` (typically a
- * `ProxiedVNode` returned by `Box(...)`) that the View constructs before
- * registration. Views that need raw access to the renderer can take it via
- * their own constructor — the Shell wiring site in slice J will pass it in.
+ * `renderer` is the live `CliRenderer` (a `RenderContext`): views pass it to
+ * `instantiate()` (via `realize()` in `app/widgets.ts`) so every node they
+ * mutate after mount is a real renderable rather than a dead VNode proxy
+ * (LAMA-181). It is `null` only in renderer-less unit tests.
  */
 export interface ViewContext {
   readonly api: LamaSyncApiClient;
   readonly hostname: string;
   readonly socketPath: string;
+  readonly renderer: CliRenderer | null;
   readonly setStatus: (msg: string, kind?: "info" | "error" | "success") => void;
   readonly openWizard: (wizard: Wizard) => void;
 }
@@ -40,11 +40,10 @@ export interface ViewContext {
  * the ViewManager lifecycle — those concerns live in `ViewSpec`, which the
  * ViewManager constructs from a `View` plus a `ViewContext`.
  *
- * `container` is typed as `Renderable`. OpenTUI's `Box(...)` returns a
- * `ProxiedVNode` that inherits from the underlying Renderable's prototype
- * and forwards property/method calls — including `visible`, `add`, and
- * `remove`. Views may therefore pass the VNode proxy directly; the manager
- * only needs to flip `visible` and the proxy handles the rest.
+ * `container` is typed as `Renderable`. Views instantiate their container
+ * against the renderer (LAMA-181), so flipping `visible` here is a live
+ * mutation on a real renderable — VNode proxies silently dropped the
+ * assignment after mount, which is why tab switching used to no-op.
  */
 export interface View {
   readonly id: ViewId;
@@ -146,9 +145,7 @@ export class ViewManager {
 }
 
 function setContainerVisible(container: Renderable, visible: boolean): void {
-  // The OpenTUI Renderable base class exposes a `visible` setter; assigning
-  // through the typed property is enough for both Renderable instances and
-  // ProxiedVNode proxies (the proxy forwards the assignment to the underlying
-  // Renderable).
-  (container as { visible: boolean }).visible = visible;
+  // Containers are real renderables (instantiated against the renderer in
+  // each view's constructor), so the `visible` setter applies immediately.
+  container.visible = visible;
 }

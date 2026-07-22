@@ -1,5 +1,12 @@
-import { Box, TabSelect, Text } from "@opentui/core";
-import type { CliRenderer, KeyEvent, Renderable, VNode } from "@opentui/core";
+import { Box, TabSelect, Text, instantiate } from "@opentui/core";
+import type {
+  BoxRenderable,
+  CliRenderer,
+  KeyEvent,
+  Renderable,
+  TabSelectRenderable,
+  TextRenderable,
+} from "@opentui/core";
 
 import { matchHotkey, type Hotkey } from "./keymap.ts";
 import type { ViewContext, ViewId, ViewSpec } from "./view-manager.ts";
@@ -44,10 +51,10 @@ export class Shell {
   private readonly viewsFn: () => Iterable<ViewSpec>;
   private readonly startView: ViewId;
   private readonly manager: ViewManager = new ViewManager();
-  private readonly tabBar: ReturnType<typeof TabSelect>;
-  private readonly statusText: VNode;
-  private readonly layout: VNode;
-  private readonly rootContainer: ReturnType<typeof Box>;
+  private readonly tabBar: TabSelectRenderable;
+  private readonly statusText: TextRenderable;
+  private readonly layout: BoxRenderable;
+  private readonly rootContainer: BoxRenderable;
   private mounted = false;
   private destroyed = false;
 
@@ -57,19 +64,33 @@ export class Shell {
     this.viewsFn = deps.views;
     this.startView = deps.startView;
 
-    this.statusText = Text({ content: "" });
-    this.rootContainer = Box({ flexDirection: "column", flexGrow: 1 });
-    this.tabBar = TabSelect({
-      options: [{ name: " ", description: "" }],
-      flexShrink: 0,
-    });
+    // Every node the Shell mutates after mount is instantiated into a real
+    // renderable up front (LAMA-181): the tab bar gets setOptions /
+    // setSelectedIndex calls on every view switch, the status text is
+    // rewritten by setStatus, and the layout receives wizard modals via
+    // getLayout().add(). VNode proxies would silently drop all of those.
+    this.statusText = instantiate(this.renderer, Text({ content: "" })) as TextRenderable;
+    this.rootContainer = instantiate(
+      this.renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
+    ) as BoxRenderable;
+    this.tabBar = instantiate(
+      this.renderer,
+      TabSelect({
+        options: [{ name: " ", description: "" }],
+        flexShrink: 0,
+      }),
+    ) as TabSelectRenderable;
 
-    this.layout = Box(
-      { id: SHELL_LAYOUT_ID, flexDirection: "column", flexGrow: 1 },
-      this.tabBar,
-      this.rootContainer,
-      this.statusText,
-    );
+    this.layout = instantiate(
+      this.renderer,
+      Box(
+        { id: SHELL_LAYOUT_ID, flexDirection: "column", flexGrow: 1 },
+        this.tabBar,
+        this.rootContainer,
+        this.statusText,
+      ),
+    ) as BoxRenderable;
   }
 
   /**
@@ -98,11 +119,10 @@ export class Shell {
     });
 
     // Attach the layout to the renderer root BEFORE showing the start view.
-    // VNode proxies only instantiate (and `getChildren()` only starts
-    // returning a real array) once the tree reaches the renderer root —
-    // views' onShow() handlers mutate their body boxes on first paint, so
-    // the tree must be live by then (crash: "TypeError: {} is not iterable").
-    this.renderer.root.add(this.layout as unknown as Renderable);
+    // The layout and every view container are real renderables, so this is
+    // just a live reparent; the order is kept so first paint happens with
+    // the whole tree already rooted.
+    this.renderer.root.add(this.layout);
     this.manager.show(this.startView);
     this.renderer.keyInput.on("keypress", (e: KeyEvent) => {
       if (process.env.LAMASYNC_DEBUG_KEYS === "1") {
@@ -198,7 +218,7 @@ export class Shell {
   setStatus(text: string, kind: "info" | "error" | "success"): void {
     const prefix =
       kind === "error" ? "[!] " : kind === "success" ? "[ok] " : "[i] ";
-    (this.statusText as unknown as { content: string }).content = `${prefix}${text}`;
+    this.statusText.content = `${prefix}${text}`;
   }
 
   private cycleBy(delta: number): void {
@@ -238,6 +258,6 @@ export class Shell {
 
   /** Access the top-level layout Box so callers can mount overlay UI. */
   getLayout(): Renderable {
-    return this.layout as unknown as Renderable;
+    return this.layout;
   }
 }

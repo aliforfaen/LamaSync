@@ -6,20 +6,19 @@
 
 import { Box, Select, Text } from "@opentui/core";
 import type {
-  ProxiedVNode,
+  CliRenderer,
   Renderable,
   VNode,
 } from "@opentui/core";
 import type { BoxRenderable, SelectRenderable } from "@opentui/core";
 
 import {
-  createChildTracker,
   errorBox,
   hotkeyFooter,
-  replaceChildren,
+  realize,
   statusBox,
+  swapChildren,
 } from "../app/widgets.ts";
-import type { ChildTracker } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import type {
   View,
@@ -120,6 +119,7 @@ export interface FleetViewOpts {
   readonly service: FleetService;
   readonly serverUrl: string;
   readonly apiKey: string;
+  readonly renderer?: CliRenderer | null;
 }
 
 export class FleetView implements View {
@@ -133,10 +133,10 @@ export class FleetView implements View {
   private readonly serverUrl: string;
   private readonly apiKey: string;
 
-  private readonly bodyBox: ProxiedVNode<typeof BoxRenderable>;
-  private readonly statusBlock: ProxiedVNode<typeof BoxRenderable>;
-  private readonly selectRef: ProxiedVNode<typeof SelectRenderable>;
-  private readonly selectContainer: ProxiedVNode<typeof BoxRenderable>;
+  private readonly bodyBox: BoxRenderable;
+  private readonly statusBlock: BoxRenderable;
+  private readonly selectRef: SelectRenderable;
+  private readonly selectContainer: BoxRenderable;
 
   private ctx: ViewContext | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -144,11 +144,9 @@ export class FleetView implements View {
   private statusText: string | null = null;
   private statusKind: "info" | "error" | "success" = "info";
   private refreshing = false;
-  private readonly bodyTracker: ChildTracker = createChildTracker();
-  private readonly statusTracker: ChildTracker = createChildTracker();
 
-  // Single narrow cast at the field boundary — matches the pattern in
-  // foundation's shell.ts and views/logs.ts.
+  // Real renderable instantiated against the renderer (LAMA-181); the
+  // ViewManager flips `visible` on it when switching tabs.
   readonly container: Renderable;
 
   constructor(opts: FleetViewOpts) {
@@ -156,21 +154,34 @@ export class FleetView implements View {
     this.serverUrl = opts.serverUrl;
     this.apiKey = opts.apiKey;
 
-    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
-    this.statusBlock = Box({ flexDirection: "column" });
-    this.selectRef = Select({ options: [], flexGrow: 1 });
-    this.selectContainer = Box(
-      { flexDirection: "column", flexGrow: 1 },
-      this.selectRef,
+    const renderer = opts.renderer ?? null;
+    this.bodyBox = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
     );
-    this.container = Box(
-      { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
-      this.bodyBox,
-      this.statusBlock,
-    ) as unknown as Renderable;
+    this.statusBlock = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column" }),
+    );
+    this.selectRef = realize<SelectRenderable>(
+      renderer,
+      Select({ options: [], flexGrow: 1 }),
+    );
+    this.selectContainer = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }, this.selectRef),
+    );
+    this.container = realize<Renderable>(
+      renderer,
+      Box(
+        { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
+        this.bodyBox,
+        this.statusBlock,
+      ),
+    );
 
-    // First render deferred to onShow(): mutating a non-instantiated VNode
-    // proxy throws "{} is not iterable" (see local.ts / dotfiles.ts).
+    // First render is deferred to onShow(): the host list comes from the
+    // FleetService / API, so there is nothing meaningful to paint before then.
   }
 
   // ---------------------------------------------------------------------------
@@ -188,7 +199,7 @@ export class FleetView implements View {
 
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
-    // First paint — the proxy is now parented by the Shell.
+    // First paint — bodyBox is a real renderable, so mutations render live.
     this.renderBody();
     void this.refresh();
     if (this.pollTimer === null) {
@@ -234,7 +245,7 @@ export class FleetView implements View {
     const rows = toRows(hosts, now);
     this.selectRef.options = rows;
 
-    const listContent: VNode =
+    const listContent: VNode | Renderable =
       hosts.length === 0
         ? Box(
             { flexDirection: "column" },
@@ -245,7 +256,7 @@ export class FleetView implements View {
     const footerItems = this.hotkeys().map((h) => ({ key: h.key, label: h.label }));
     const footer: VNode = hotkeyFooter(footerItems);
 
-    const bodyChildren: VNode[] = [
+    const bodyChildren: Array<VNode | Renderable> = [
       titleText,
       countText,
       Text({ content: "" }),
@@ -254,14 +265,14 @@ export class FleetView implements View {
       footer,
     ];
 
-    replaceChildren(this.bodyBox, this.bodyTracker, bodyChildren);
+    swapChildren(this.bodyBox, bodyChildren);
 
     this.renderStatus();
   }
 
   private renderStatus(): void {
     const block = statusBox(this.statusText, this.statusKind);
-    replaceChildren(this.statusBlock, this.statusTracker, block === null ? [] : [block]);
+    swapChildren(this.statusBlock, block === null ? [] : [block]);
   }
 
   // ---------------------------------------------------------------------------

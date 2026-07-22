@@ -344,7 +344,7 @@ Current coverage:
 ### Adding a new TUI view (LAMA-173 contract)
 
 1. Add the id to `ViewId` in `packages/tui/src/app/view-manager.ts` if it's new.
-2. Create a class `XView implements View` in `packages/tui/src/views/x.ts` with `id`, `title`, `container: Renderable` (built once in the constructor), `hotkeys()`, `onShow(ctx)`, optional `onHide()`, `handleKey(e)`, `destroy()`. Use a single `as unknown as Renderable` cast at the container field boundary; live body mutations go through a captured `ProxiedVNode<typeof BoxRenderable>` ref.
+2. Create a class `XView implements View` in `packages/tui/src/views/x.ts` with `id`, `title`, `container: Renderable` (built once in the constructor), `hotkeys()`, `onShow(ctx)`, optional `onHide()`, `handleKey(e)`, `destroy()`. Every OpenTUI node the view mutates after mount — the container, body boxes, selects — MUST be a real renderable: take the renderer via the constructor (or `ctx.renderer`) and wrap each `Box()`/`Select()`/`Text()` VNode in `realize(renderer, vnode)` from `app/widgets.ts` (LAMA-181; VNode proxies silently drop post-mount mutations). Swap body content with `swapChildren(box, next)`. Renderer-less tests pass `renderer: null` and get the old proxy behavior.
 3. Register the view in `packages/tui/src/boot.ts` inside the `views` array. The `Shell` builds `ViewSpec`s automatically.
 4. Add a hotkey dispatch path: only if your view owns internal keys, set `ViewSpec.handleKey = view.handleKey.bind(view)`; otherwise global hotkeys via `view.hotkeys()`.
 5. Add a unit test in `packages/tui/src/views/x.test.ts` if the view has pure logic; gate any renderer-bound test behind `process.env.LAMASYNC_TUI_TEST_VIEWS === "1"`.
@@ -375,7 +375,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 
 ## Version and release
 
-- **Version source of truth**: root `package.json` `version` field (currently `0.2.1`).
+- **Version source of truth**: root `package.json` `version` field (currently `0.2.2`).
 - **Generated constant**: `scripts/gen-version.ts` writes `packages/core/src/version.ts`, which is re-exported from `@lamasync/core`.
 - **All four binaries** support `--version` and `-V`.
   (`lamasync-server`, `lamasyncd`, `lamasync-tui`, plus the bundled web UI at `GET /`)
@@ -384,10 +384,10 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 
 ## Current status (as of 2026-07-21)
 
-- Project version: **0.2.1**
+- Project version: **0.2.2**
 - Tests: **187 passing** across 26 files, 1 skip, 0 failures.
 - **Install scripts**: `packaging/install/install.sh` and `packaging/install/update.sh` patched to be self-contained and aligned with the CI-published binary names (`lamasyncd`, `lamasync-tui`). Docker smoke tests (`scripts/test-install.sh`, `scripts/test-update.sh`) both pass.
-- **Release**: v0.2.1 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
+- **Release**: v0.2.2 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
 - Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-168 (dotfile manifest improvements), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.

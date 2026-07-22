@@ -18,7 +18,6 @@ import {
 import type {
   BoxRenderable,
   KeyEvent,
-  ProxiedVNode,
   Renderable,
   RenderContext,
   VNode,
@@ -33,8 +32,7 @@ import type {
   LamaSyncApiClient,
 } from "@lamasync/core";
 
-import { createChildTracker, hotkeyFooter, pageShell, replaceChildren } from "../app/widgets.ts";
-import type { ChildTracker } from "../app/widgets.ts";
+import { hotkeyFooter, pageShell, realize, swapChildren } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import { matchHotkey } from "../app/keymap.ts";
 import type {
@@ -122,8 +120,6 @@ interface VersionRow {
   value: string;
 }
 
-type BoxVNode = ProxiedVNode<typeof BoxRenderable>;
-
 /**
  * Dotfiles browser + restore view. Implements the foundation `View` contract.
  * The container is built once in the constructor; per-step refreshes swap the
@@ -137,7 +133,7 @@ export class DotfilesView implements View {
   readonly id: ViewId = DotfilesView.id;
   readonly title: string = DotfilesView.title;
 
-  private readonly bodyBox: BoxVNode;
+  private readonly bodyBox: BoxRenderable;
   private readonly syntaxStyle: SyntaxStyle;
   private readonly markdownCtx: RenderContext | null;
 
@@ -158,7 +154,6 @@ export class DotfilesView implements View {
   };
 
   private ctx: ViewContext | null = null;
-  private readonly bodyTracker: ChildTracker = createChildTracker();
   private loadId = 0;
   private rootCtx: RenderContext | null = null;
 
@@ -166,19 +161,25 @@ export class DotfilesView implements View {
 
 
   constructor(opts: { ctx: ViewContext; rootCtx?: RenderContext }) {
-    this.bodyBox = Box({ flexDirection: "column", flexGrow: 1 });
+    this.bodyBox = realize<BoxRenderable>(
+      opts.ctx.renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
+    );
     this.syntaxStyle = SyntaxStyle.create();
     // MarkdownRenderable needs a real `RenderContext`; the View doesn't own
     // the renderer so callers (boot.ts) may pass one in. When unset the
     // preview step renders the raw text in a Text node instead.
     this.markdownCtx = opts.rootCtx ?? null;
     this.rootCtx = opts.rootCtx ?? null;
-    this.container = pageShell(
-      "Dotfiles",
-      Box({ flexDirection: "column", flexGrow: 1 }, this.bodyBox),
-    ) as unknown as Renderable;
-    // Defer first paint: the bodyBox proxy hasn't been parented yet, so
-    // bodyBox.getChildren() may throw. onShow() triggers the first render.
+    this.container = realize<Renderable>(
+      opts.ctx.renderer,
+      pageShell(
+        "Dotfiles",
+        Box({ flexDirection: "column", flexGrow: 1 }, this.bodyBox),
+      ),
+    );
+    // Defer first paint to onShow(): the manifest list comes from the API,
+    // so there is nothing meaningful to render before then.
   }
 
   // ---------------------------------------------------------------------------
@@ -202,8 +203,7 @@ export class DotfilesView implements View {
 
   onShow(ctx: ViewContext): void {
     this.ctx = ctx;
-    // First paint — the proxy is now parented by the Shell, so bodyBox
-    // mutations are safe.
+    // First paint — bodyBox is a real renderable, so mutations render live.
     this.renderBody();
     void this.refresh();
   }
@@ -467,7 +467,7 @@ export class DotfilesView implements View {
 
   private renderBody(): void {
     const children: VNode[] = this.renderForStep();
-    replaceChildren(this.bodyBox, this.bodyTracker, children);
+    swapChildren(this.bodyBox, children);
   }
 
   private renderForStep(): VNode[] {
@@ -691,6 +691,7 @@ export function renderDotfiles(
     api: opts.api,
     hostname: opts.currentHostId,
     socketPath: process.env.LAMASYNC_SOCKET_PATH ?? "",
+    renderer: null,
     setStatus: () => undefined,
     openWizard: () => undefined,
   };

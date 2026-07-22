@@ -43,6 +43,7 @@ describe("GhView architecture", () => {
         api: {} as never,
         hostname: "test-host",
         socketPath: "/tmp/x.sock",
+        renderer: null,
         setStatus: () => undefined,
         openWizard: () => undefined,
       },

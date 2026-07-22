@@ -6,8 +6,8 @@ import {
   Text,
 } from "@opentui/core";
 import type {
+  CliRenderer,
   KeyEvent,
-  ProxiedVNode,
   Renderable,
   VNode,
 } from "@opentui/core";
@@ -19,8 +19,7 @@ import type {
 } from "@lamasync/core";
 
 import { matchHotkey, type Hotkey } from "../app/keymap.ts";
-import { createChildTracker, replaceChildren } from "../app/widgets.ts";
-import type { ChildTracker } from "../app/widgets.ts";
+import { realize, swapChildren } from "../app/widgets.ts";
 import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
 
 /**
@@ -50,9 +49,6 @@ interface ConflictRow {
   value: string;
 }
 
-type BoxVNode = ProxiedVNode<typeof BoxRenderable>;
-type SelectVNode = ProxiedVNode<typeof SelectRenderable>;
-
 /**
  * Pending-conflicts view. Implements the foundation `View` contract.
  *
@@ -63,8 +59,9 @@ type SelectVNode = ProxiedVNode<typeof SelectRenderable>;
  * - Pressing a resolution key enters an "awaiting confirm" state. A
  *   second press of the same key commits via `api.resolveConflict`;
  *   pressing any other key cancels the confirm.
- * - The Select VNode proxy is held by reference so the view can read
- *   `getSelectedIndex()` / `getSelectedOption()` post-mount.
+ * - The Select is a real `SelectRenderable` (instantiated against the
+ *   renderer, LAMA-181) so `getSelectedIndex()` / `getSelectedOption()` and
+ *   the `options` setter work after mount.
  */
 export class ConflictsView implements View {
   static readonly id: ViewId = "conflicts";
@@ -73,8 +70,8 @@ export class ConflictsView implements View {
   readonly id: ViewId = ConflictsView.id;
   readonly title: string = ConflictsView.title;
 
-  private readonly selectNode: SelectVNode;
-  private readonly contentBox: BoxVNode;
+  private readonly selectNode: SelectRenderable;
+  private readonly contentBox: BoxRenderable;
 
   private state: {
     conflicts: Conflict[];
@@ -93,23 +90,34 @@ export class ConflictsView implements View {
   };
 
   private ctx: ViewContext | null = null;
-  private readonly rootTracker: ChildTracker = createChildTracker();
 
   readonly container: Renderable;
 
-  constructor() {
-    this.selectNode = Select({
-      options: [],
-      flexGrow: 1,
-      showDescription: true,
-    });
-    this.contentBox = Box({ flexDirection: "column", flexGrow: 1 });
-    this.container = Box(
-      { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
-      Text({ content: "Conflicts" }),
-      Text({ content: "Loading pending conflicts…" }),
-      Text({ content: "Press Esc or q to return to menu." }),
-    ) as unknown as Renderable;
+  constructor(opts?: { renderer?: CliRenderer | null }) {
+    const renderer = opts?.renderer ?? null;
+    this.selectNode = realize<SelectRenderable>(
+      renderer,
+      Select({
+        options: [],
+        flexGrow: 1,
+        showDescription: true,
+      }),
+    );
+    this.contentBox = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
+    );
+    // The container is a real renderable: replaceRoot() swaps its children
+    // on every refresh, and the ViewManager flips `visible` on tab switches.
+    this.container = realize<Renderable>(
+      renderer,
+      Box(
+        { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
+        Text({ content: "Conflicts" }),
+        Text({ content: "Loading pending conflicts…" }),
+        Text({ content: "Press Esc or q to return to menu." }),
+      ),
+    );
   }
 
   hotkeys(): ReadonlyArray<Hotkey> {
@@ -242,11 +250,9 @@ export class ConflictsView implements View {
   private selectedConflictId(): string | null {
     const conflicts = this.state.conflicts;
     if (conflicts.length === 0) return null;
-    // The ProxiedVNode wrapper widens these return types to itself;
-    // the underlying Renderable returns number / SelectOption | null.
-    const idx = (this.selectNode.getSelectedIndex() as unknown as number);
+    const idx = this.selectNode.getSelectedIndex();
     if (idx < 0 || idx >= conflicts.length) return null;
-    const opt = this.selectNode.getSelectedOption() as unknown as
+    const opt = this.selectNode.getSelectedOption() as
       | { value?: string }
       | null;
     if (!opt) return null;
@@ -298,12 +304,11 @@ export class ConflictsView implements View {
     ]);
   }
 
-  private replaceRoot(children: ReadonlyArray<VNode>): void {
-    // Replace children of the outer container — the Box is the only
-    // renderable ViewManager holds a reference to via `container`. We
-    // mutate its children directly to avoid rebuilding the whole tree.
-    const outer = this.container as unknown as BoxVNode;
-    replaceChildren(outer, this.rootTracker, children);
+  private replaceRoot(children: ReadonlyArray<VNode | Renderable>): void {
+    // Replace children of the outer container — the Box is the renderable
+    // the ViewManager holds a reference to via `container`. We mutate its
+    // children directly to avoid rebuilding the whole tree.
+    swapChildren(this.container, children);
   }
 }
 
@@ -324,6 +329,7 @@ export function renderConflicts(opts: RenderConflictsOpts): ConflictsController 
     api: opts.api,
     hostname: opts.currentHostId,
     socketPath: "",
+    renderer: null,
     setStatus: () => undefined,
     openWizard: () => undefined,
   });

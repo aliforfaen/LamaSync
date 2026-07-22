@@ -1,5 +1,7 @@
 import { Box, Text } from "@opentui/core";
-import type { KeyEvent, Renderable } from "@opentui/core";
+import type { CliRenderer, KeyEvent, Renderable } from "@opentui/core";
+
+import { realize } from "./widgets.ts";
 
 /**
  * A single step in a wizard flow.
@@ -102,12 +104,13 @@ export function activeWizard(): Wizard | null {
  * Owns the state-machine side of a wizard: the step stack, the transient
  * state record, the error slot text, and the modal container.
  *
- * The runner is intentionally decoupled from OpenTUI's renderer: every
- * renderable is fetched through the active `WizardStep.render` callback,
- * and the modal container is a plain `Box(...)` VNode proxy. The Shell calls
- * `setOverlayHost` once the content pane exists; until then the modal is
- * parked in a hidden scratch Box so pure unit tests can run without a
- * renderer.
+ * When constructed with a `renderer` (the production path — flows forward
+ * `ctx.renderer`), the modal, its text slots, and the body host are
+ * instantiated into real renderables so post-mount mutations (step body
+ * swaps, error text updates) render live (LAMA-181). Without a renderer
+ * (pure state-machine tests) the nodes stay VNode proxies and the runner
+ * only exercises the state machine; the modal is parked in a hidden scratch
+ * Box until the Shell mounts it via `setOverlayHost`.
  */
 export class WizardRunner {
   readonly steps: ReadonlyArray<WizardStep>;
@@ -134,41 +137,56 @@ export class WizardRunner {
     id: string;
     title: string;
     steps: ReadonlyArray<WizardStep>;
+    renderer?: CliRenderer | null;
   }) {
     this.id = opts.id;
     this.title = opts.title;
     this.steps = opts.steps;
 
-    this.scratchHost = Box({ flexDirection: "column", visible: false }) as unknown as Renderable;
+    const renderer = opts.renderer ?? null;
+    this.scratchHost = realize<Renderable>(
+      renderer,
+      Box({ flexDirection: "column", visible: false }),
+    );
 
-    this.headerText = Text({ content: this.headerLabel() }) as unknown as Renderable;
-    this.errorText = Text({ content: "" }) as unknown as Renderable;
-    this.footerText = Text({
-      content: "[Esc back]   [Enter next]   [q cancel]",
-    }) as unknown as Renderable;
-    this.bodyHost = Box({ flexDirection: "column", flexGrow: 1 }) as unknown as Renderable;
+    this.headerText = realize<Renderable>(
+      renderer,
+      Text({ content: this.headerLabel() }),
+    );
+    this.errorText = realize<Renderable>(renderer, Text({ content: "" }));
+    this.footerText = realize<Renderable>(
+      renderer,
+      Text({
+        content: "[Esc back]   [Enter next]   [q cancel]",
+      }),
+    );
+    this.bodyHost = realize<Renderable>(
+      renderer,
+      Box({ flexDirection: "column", flexGrow: 1 }),
+    );
 
-    this.modal = Box(
-      {
-        flexDirection: "column",
-        padding: 1,
-        border: true,
-        position: "absolute",
-        width: 60,
-        height: 16,
-        backgroundColor: "black",
-      },
-      this.headerText,
-      this.bodyHost,
-      this.errorText,
-      this.footerText,
-    ) as unknown as Renderable;
+    this.modal = realize<Renderable>(
+      renderer,
+      Box(
+        {
+          flexDirection: "column",
+          padding: 1,
+          border: true,
+          position: "absolute",
+          width: 60,
+          height: 16,
+          backgroundColor: "black",
+        },
+        this.headerText,
+        this.bodyHost,
+        this.errorText,
+        this.footerText,
+      ),
+    );
     this.scratchHost.add(this.modal);
-    // Defer first render until setOverlayHost is called. OpenTUI's VNode
-    // proxies queue method calls until they are instantiated against a
-    // RenderContext; calling getChildren()/remove() on a non-instantiated
-    // proxy would throw, so the runner only touches the modal after the
-    // shell mounts it.
+    // Defer first render until setOverlayHost is called. The step body child
+    // is tracked locally (`currentBodyChild`), which keeps remove/add safe
+    // both on real renderables and on uninstantiated proxies in tests.
   }
 
   /** Read-only snapshot of the accumulated state. */
@@ -228,8 +246,8 @@ export class WizardRunner {
     }
     this.overlayHost = host;
     this.overlayHost.add(this.modal);
-    // First mount: now that the modal is attached to a real renderer, the
-    // proxies have been instantiated and getChildren/remove are safe.
+    // First mount: the modal is now attached to the live tree; render the
+    // initial step body.
     if (this.currentBodyChild === null && this.steps.length > 0) {
       this.renderCurrentStep();
     }
@@ -380,9 +398,9 @@ export class WizardRunner {
     (this.headerText as unknown as { content: string }).content = this.headerLabel();
 
     // Replace the body child using our own tracker rather than asking the
-    // body host. OpenTUI VNode proxies return themselves (not the actual
-    // children) from getChildren() before instantiation; tracking the
-    // current child locally keeps the runner safe to run without a renderer.
+    // body host. This keeps the runner safe both on real renderables and on
+    // uninstantiated VNode proxies in renderer-less tests, whose
+    // getChildren() does not return a real child array.
     if (this.currentBodyChild) {
       this.bodyHost.remove(this.currentBodyChild.id);
       this.currentBodyChild = null;

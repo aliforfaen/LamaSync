@@ -211,6 +211,7 @@ export function createDotfileManifestWizard(opts: { ctx: ViewContext }): Wizard 
     id: "dotfile-manifest",
     title: "Dotfile manifest",
     steps: [],
+    renderer: ctx.renderer,
   });
 
   // Kick off the host fetch in the background; the host step reads the

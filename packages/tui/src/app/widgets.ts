@@ -1,5 +1,5 @@
-import { Box, Text } from "@opentui/core";
-import type { VNode } from "@opentui/core";
+import { Box, Text, instantiate } from "@opentui/core";
+import type { CliRenderer, Renderable, VNode } from "@opentui/core";
 
 import { statusPrefix, type StatusKind } from "./theme.ts";
 
@@ -81,44 +81,56 @@ export function emptyBox(message: string): VNode {
 }
 
 // ---------------------------------------------------------------------------
-// Child replacement tracker
+// Real renderable helpers (LAMA-181)
 // ---------------------------------------------------------------------------
 
-import type { ProxiedVNode } from "@opentui/core";
-import type { BoxRenderable } from "@opentui/core";
-
 /**
- * Caller-owned list of children currently mounted in a box.
+ * Instantiate a VNode into a real renderable against `renderer`. Views call
+ * this for every node they mutate after mount: OpenTUI's `Box()`/`Text()`/
+ * `Select()` factories return VNode proxies whose post-instantiation
+ * mutations are silently dead, so interactive nodes must be real instances.
  *
- * OpenTUI VNode proxies return THEMSELVES (not the child array) from
- * `getChildren()` until the node is instantiated against a RenderContext,
- * so iterating `getChildren()` throws `TypeError: {} is not iterable`.
- * Tracking the added children locally keeps re-renders safe in every
- * instantiation state (precedent: `wizard.ts` `renderCurrentStep`).
+ * Test harnesses construct views without a renderer; in that case the VNode
+ * proxy is returned as-is (post-mount mutations stay dead, but pure
+ * state-machine tests never render).
  */
-export interface ChildTracker {
-  nodes: Array<{ id: string }>;
-}
-
-export function createChildTracker(): ChildTracker {
-  return { nodes: [] };
+export function realize<T extends Renderable>(
+  renderer: CliRenderer | null | undefined,
+  vnode: VNode,
+): T {
+  const node = renderer ? instantiate(renderer, vnode) : vnode;
+  return node as unknown as T;
 }
 
 /**
- * Replace `box`'s children with `next`, using `tracker` to remember what is
- * currently mounted. Safe to call before the box is instantiated: `add` /
- * `remove` calls are queued by the proxy and replayed on instantiation.
+ * Replace `box`'s children with `next`. Works on real renderables (live
+ * remove + add; `add` instantiates VNode children). On an uninstantiated
+ * VNode proxy (renderer-less test harness) the removal pass is skipped —
+ * proxy `getChildren()` does not return a real child array — and the adds
+ * are queued by the proxy exactly like the pre-LAMA-181 tracker did.
  */
-export function replaceChildren(
-  box: ProxiedVNode<typeof BoxRenderable>,
-  tracker: ChildTracker,
-  next: ReadonlyArray<VNode>,
+export function swapChildren(
+  box: Renderable,
+  next: ReadonlyArray<VNode | Renderable>,
 ): void {
-  for (const child of tracker.nodes) {
+  for (const child of mountedChildren(box)) {
     box.remove(child.id);
   }
-  tracker.nodes = next.map((n) => n as unknown as { id: string });
   for (const child of next) {
     box.add(child);
+  }
+}
+
+/**
+ * Child list of a mounted renderable. Returns `[]` for VNode proxies, whose
+ * `getChildren()` either throws or returns the proxy itself instead of an
+ * array (verified OpenTUI 0.1.107 behavior — do not iterate that result).
+ */
+function mountedChildren(box: Renderable): Renderable[] {
+  try {
+    const children = box.getChildren();
+    return Array.isArray(children) ? children : [];
+  } catch {
+    return [];
   }
 }

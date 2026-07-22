@@ -141,11 +141,13 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
   const { ctx } = opts;
 
   // Construct the runner with empty steps first so the step builders can
-  // close over it. We swap in the real steps below.
+  // close over it. We swap in the real steps below. The renderer makes the
+  // modal a real renderable so step swaps render live (LAMA-181).
   const runner = new WizardRunner({
     id: "backup-setup",
     title: "Backup setup",
     steps: [],
+    renderer: ctx.renderer,
   });
 
   const cronStep: WizardStep = {

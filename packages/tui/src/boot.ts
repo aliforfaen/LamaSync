@@ -74,6 +74,7 @@ export async function bootShell(): Promise<void> {
     api: tui.client,
     hostname: tui.fromConfigFile ? tui.hostname : "localhost",
     socketPath,
+    renderer,
     setStatus: (msg, kind = "info") => {
       pendingStatus = { message: msg, kind };
     },
@@ -91,16 +92,19 @@ export async function bootShell(): Promise<void> {
 
 
   // Override setStatus with the real Shell once we construct it.
+  // Views that mutate OpenTUI nodes after mount receive the renderer so they
+  // can instantiate real renderables instead of dead VNode proxies (LAMA-181).
   const views: ReadonlyArray<View> = [
-    new LocalView(),
+    new LocalView({ renderer }),
     new FleetView({
       service: fleetService,
       serverUrl: apiBaseUrl,
       apiKey,
+      renderer,
     }),
     new DotfilesView({ ctx }),
-    new ConflictsView(),
-    new LogsView(),
+    new ConflictsView({ renderer }),
+    new LogsView({ renderer }),
     new GhView({ ctx }),
   ];
 
