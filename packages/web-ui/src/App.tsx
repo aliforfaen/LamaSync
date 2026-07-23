@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Login } from "./components/Login.tsx";
 import { Nav } from "./components/Nav.tsx";
@@ -7,10 +7,20 @@ import { Folders } from "./pages/Folders.tsx";
 import { Dotfiles } from "./pages/Dotfiles.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
 import { Admin } from "./pages/Admin.tsx";
-import { getApiKey } from "./api.ts";
+import { getApiKey, UNAUTHORIZED_EVENT } from "./api.ts";
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(() => getApiKey() !== null);
+
+  // Drop back to the login screen whenever any API call or the WebSocket
+  // reports the stored key is no longer accepted (e.g. after a server
+  // restart with a rotated key).
+  useEffect(() => {
+    const onUnauthorized = () => setAuthenticated(false);
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, []);
+
   const authed = authenticated;
   return (
     <HashRouter>

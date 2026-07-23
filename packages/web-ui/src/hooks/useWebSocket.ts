@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { WSEvent } from "@lamasync/core";
-import { getApiKey } from "../api.ts";
+import { getApiKey, notifyUnauthorized } from "../api.ts";
 
 export type WsState = "connecting" | "open" | "closed";
 
@@ -30,6 +30,14 @@ function isWSEvent(value: unknown): value is WSEvent {
     return false;
   }
   return typeof value.kind === "string" && EVENT_KINDS.has(value.kind);
+}
+
+/** The server sends `{kind:"error", error:"unauthorized"}` before closing a
+ * connection whose API key it rejects (see server/src/ws.ts). */
+function isUnauthorizedMessage(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (!("kind" in value) || !("error" in value)) return false;
+  return value.kind === "error" && value.error === "unauthorized";
 }
 
 export function useWebSocket(): UseWebSocketResult {
@@ -69,6 +77,12 @@ export function useWebSocket(): UseWebSocketResult {
           const parsed: unknown = JSON.parse(String(e.data));
           if (isWSEvent(parsed)) {
             setEvent(parsed);
+          } else if (isUnauthorizedMessage(parsed)) {
+            // The server rejected our key: stop reconnecting and let the
+            // app drop back to the login screen.
+            cancelledRef.current = true;
+            if (timerRef.current !== null) clearTimeout(timerRef.current);
+            notifyUnauthorized();
           }
         } catch {
           // Ignore malformed frames.

@@ -33,6 +33,19 @@ export function clearApiKey(): void {
   sessionStorage.removeItem(API_KEY_STORAGE);
 }
 
+/** Fired on `window` when the server rejects the stored API key. */
+export const UNAUTHORIZED_EVENT = "lamasync:unauthorized";
+
+/**
+ * Clear the stored key and notify the app that the session is no longer
+ * valid. Called on HTTP 401 responses and on WS auth failures so the UI
+ * drops back to the login screen instead of showing dead errors.
+ */
+export function notifyUnauthorized(): void {
+  clearApiKey();
+  window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+}
+
 class ApiError extends Error {
   status: number;
   body: string;
@@ -49,6 +62,7 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const key = getApiKey();
   if (!key) {
+    notifyUnauthorized();
     throw new ApiError(401, "missing api key");
   }
   const headers = new Headers(init.headers);
@@ -62,6 +76,9 @@ export async function apiFetch<T = unknown>(
   const res = await fetch(url, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    if (res.status === 401) {
+      notifyUnauthorized();
+    }
     throw new ApiError(res.status, text);
   }
   if (res.status === 204) {
