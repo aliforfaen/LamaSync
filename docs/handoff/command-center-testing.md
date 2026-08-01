@@ -73,7 +73,7 @@ and Data Browser breadcrumbs.
 | B2 | Persistence | Reload keeps choice (localStorage `lamasync-theme`) |
 | B3 | System default | `"system"` follows OS `prefers-color-scheme` live; default is `system` |
 | B4 | Both themes, ALL pages | Dashboard, Folders, Dotfiles, Conflicts, Admin, **Hosts, Host detail, Data Browser, Login** render legibly in dark AND light; dark = pre-LAMA-201 look (regression baseline) |
-| B5 | Tokens only | `grep -c "#[0-9a-f]\{6\}" packages/web-ui/src/index.css` → 0 (only var() + rgba() via tokens) |
+| B5 | Tokens only | `grep -c "#[0-9a-f]\{6\}" packages/web-ui/src/index.css` → 0 (only var() + rgba() via tokens). **Errata (2026-08-01 dogfood):** unsatisfiable as written — raw hex is required inside the `:root` token definition blocks themselves. Check consumer CSS only: hex hits outside `:root` blocks should be 0. |
 
 ### C. LAMA-197 — Command Center
 
