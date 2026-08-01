@@ -51,6 +51,26 @@ function formatTimestamp(ts: number | null | undefined): string {
   return ts ? new Date(ts).toLocaleString() : "—";
 }
 
+/**
+ * LAMA-203: the last-visit timestamp used to highlight "what changed since
+ * last visit". `null` means "never visited" — nothing is highlighted on the
+ * first visit. The value is refreshed to `now` on every Command Center mount
+ * (see the effect below), AFTER highlights are computed against the previous
+ * value.
+ */
+const LAST_VISIT_KEY = "lamasync-last-visit";
+
+function readLastVisit(): number | null {
+  if (typeof localStorage === "undefined") return null;
+  const raw = localStorage.getItem(LAST_VISIT_KEY);
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isNewSince(ts: number | undefined, lastVisit: number | null): boolean {
+  return lastVisit !== null && typeof ts === "number" && ts > lastVisit;
+}
+
 interface AttentionItemProps {
   title: string;
   count: number;
@@ -79,6 +99,14 @@ export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { state: wsState, event } = useWebSocket();
+  // LAMA-203: captured once; highlights are computed against the previous
+  // visit, then the stored value is bumped to `now` for the next one.
+  const [lastVisit] = useState<number | null>(readLastVisit);
+
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(LAST_VISIT_KEY, String(Date.now()));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,6 +156,14 @@ export function Dashboard() {
   );
   const updates = (data?.hosts ?? []).filter((h) => h.updateAvailable);
 
+  // LAMA-203: deltas since the previous visit (conflicts + failed ops only;
+  // offline hosts and updates are state, not deltas).
+  const newConflicts = (data?.pendingConflicts ?? []).filter((c) =>
+    isNewSince(c.createdAt, lastVisit),
+  ).length;
+  const newFailed = failed.filter((op) => isNewSince(op.timestamp, lastVisit)).length;
+  const newTotal = newConflicts + newFailed;
+
   const allQuiet =
     data !== null && !counts.conflicts && !failed.length && !offline.length && !updates.length;
 
@@ -140,7 +176,7 @@ export function Dashboard() {
       {error && <div className="error">{error}</div>}
 
       <section className="section">
-        <h2>Needs attention</h2>
+        <h2>Needs attention{newTotal > 0 ? ` · ${newTotal} new` : ""}</h2>
         {allQuiet ? (
           <div className="all-quiet">✓ All quiet — your fleet is healthy</div>
         ) : (
@@ -241,6 +277,9 @@ export function Dashboard() {
                   <td>{op.operation}</td>
                   <td>
                     <span className={`badge badge-${op.status}`}>{op.status}</span>
+                    {isNewSince(op.timestamp, lastVisit) ? (
+                      <span className="chip-new">new</span>
+                    ) : null}
                   </td>
                   <td className="muted">{op.summary ?? "—"}</td>
                 </tr>

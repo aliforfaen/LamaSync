@@ -415,6 +415,20 @@ table.data tbody tr:last-child td {
   color: var(--accent-info);
 }
 
+/* LAMA-203: 'new since last visit' marker on activity feed entries. */
+.chip-new {
+  display: inline-block;
+  margin-left: 0.4em;
+  padding: 0 0.35rem;
+  border-radius: var(--radius-sm);
+  background: var(--accent-info-bg);
+  color: var(--accent-info);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 .muted {
   color: var(--text-muted);
 }
