@@ -198,6 +198,9 @@ lamasync/                     # Bun workspace root
 | LAMA-201 | Theme & design-token pass (dark/light) + inline SVG domain icons | `web-ui/src/{index.css,theme.ts,main.tsx,components/{Nav.tsx,icons.tsx}}` |
 | LAMA-197 | Command Center dashboard v1 (landing page): needs-attention triage, fleet cards, live activity feed, quick actions | `web-ui/src/pages/Dashboard.tsx`, `web-ui/src/index.css` |
 | LAMA-198 | Host list + detail pages; queued-action model (trigger_sync/backup, check_update, refresh_config) + config-revision auto-refresh | `core/src/{types.ts,db/schema.ts,api-client.ts}`, `server/src/{config-revision.ts,routes/{actions.ts,hosts.ts,config.ts,folders.ts,dotfiles.ts}}`, `daemon/src/{index.ts,actions.ts}`, `web-ui/src/pages/{Hosts.tsx,HostDetail.tsx}` |
+| LAMA-200 | Notification foundation: ntfy + LamaDB webhook + durable event log + host-staleness sweep | `server/src/{notifications.ts,routes/notifications.ts}`, `web-ui/src/pages/Admin.tsx` |
+| LAMA-202 | Read-only Data Browser (local dir, SigV4 S3 listing, restic metadata) | `server/src/{browse-paths.ts,s3-list.ts,routes/browse.ts}`, `web-ui/src/pages/DataBrowser.tsx` |
+| LAMA-203 | "Since last visit" highlighting on Command Center | `web-ui/src/pages/Dashboard.tsx` |
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
@@ -399,6 +402,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **LAMA-183 Batch 1 done**: LAMA-199 (version & update visibility) + LAMA-201 (theme & design-token pass) shipped in two commits. Next: LAMA-197 (Command Center dashboard, landing page).
 - **LAMA-183 Batch 2 done**: LAMA-197 (Command Center dashboard v1) shipped (commit 60651d8) — needs-attention triage, fleet cards, live activity feed, quick actions. Deferred piece tracked as LAMA-203 (since-last-visit highlighting). Next: LAMA-198 (host list + detail pages) or LAMA-200 (notifications).
 - **LAMA-183 Batch 3 done**: LAMA-198 shipped (commit 3f4594d) — host list/detail pages + full queued-action model (design agreed on the issue) + config-revision auto-refresh. Remaining pillars: LAMA-200 (notifications), LAMA-202 (data browser).
+- **LAMA-183 complete (2026-08-01)**: LAMA-200 (bfa1a07) notifications — ntfy + LamaDB webhook + host-staleness sweep; LAMA-202 (a449160) read-only Data Browser with hand-rolled SigV4 S3 listing (anchored to the AWS test-suite vector); LAMA-203 (954ecec) since-last-visit highlighting. All seven epic issues done. Full dogfood/testing handoff: `docs/handoff/command-center-testing.md`.
 - Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
 
