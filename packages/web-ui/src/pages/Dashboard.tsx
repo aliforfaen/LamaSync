@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import type { ReactNode } from "react";
 import type {
   Conflict,
   Folder,
@@ -29,29 +31,48 @@ function mergeEvent(prev: DashboardData, event: WSEvent): DashboardData {
       return { ...prev, hosts: [...others, event.host] };
     }
     case "conflict": {
-      const c = event.conflict;
-      const others = prev.pendingConflicts.filter((x) => x.id !== c.id);
+      const others = prev.pendingConflicts.filter((x) => x.id !== event.conflict.id);
       const next =
-        c.status === "pending" ? [c, ...others] : others.filter((x) => x.status === "pending");
+        event.conflict.status === "pending"
+          ? [event.conflict, ...others]
+          : others.filter((x) => x.status === "pending");
       return { ...prev, pendingConflicts: next };
     }
     case "restic_snapshot": {
-      const exists = prev.snapshots.some((s) => s.id === event.snapshot.id);
-      if (exists) return prev;
+      if (prev.snapshots.some((s) => s.id === event.snapshot.id)) return prev;
       return { ...prev, snapshots: [event.snapshot, ...prev.snapshots] };
     }
-    case "restic_restore":
-    case "mount":
-    case "lock":
     default:
       return prev;
   }
 }
 
 function formatTimestamp(ts: number | null | undefined): string {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  return d.toLocaleString();
+  return ts ? new Date(ts).toLocaleString() : "—";
+}
+
+interface AttentionItemProps {
+  title: string;
+  count: number;
+  children?: ReactNode;
+  to?: string;
+}
+
+function AttentionItem({ title, count, children, to }: AttentionItemProps) {
+  return (
+    <div className={`attention-item ${count ? "attention-active" : ""}`}>
+      <div>
+        <strong>{title}</strong>
+        <span className="attention-count">{count}</span>
+      </div>
+      {count ? <div className="attention-detail">{children}</div> : null}
+      {to && count ? (
+        <Link className="attention-link" to={to}>
+          View all →
+        </Link>
+      ) : null}
+    </div>
+  );
 }
 
 export function Dashboard() {
@@ -67,18 +88,11 @@ export function Dashboard() {
       api.listConflicts("pending"),
       api.listShares(),
       api.listResticSnapshots(),
-      api.listOperations(20),
+      api.listOperations(100),
     ])
       .then(([health, folders, pendingConflicts, shares, snapshots, operations]) => {
         if (cancelled) return;
-        setData({
-          hosts: health.hosts ?? [],
-          folders,
-          pendingConflicts,
-          shares,
-          snapshots,
-          operations,
-        });
+        setData({ hosts: health.hosts ?? [], folders, pendingConflicts, shares, snapshots, operations });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -90,102 +104,120 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (!event) return;
-    setData((prev) => (prev ? mergeEvent(prev, event) : prev));
+    if (event) setData((prev) => (prev ? mergeEvent(prev, event) : prev));
   }, [event]);
 
   const counts = useMemo(() => {
-    if (!data) {
-      return {
-        totalHosts: 0,
-        onlineHosts: 0,
-        offlineHosts: 0,
-        folders: 0,
-        pendingConflicts: 0,
-        shares: 0,
-        snapshots: 0,
-      };
-    }
-    const online = data.hosts.filter((h) => h.status === "online").length;
-    const offline = data.hosts.filter(
-      (h) => h.status === "offline" || h.status === "degraded",
-    ).length;
+    const hosts = data?.hosts ?? [];
     return {
-      totalHosts: data.hosts.length,
-      onlineHosts: online,
-      offlineHosts: offline,
-      folders: data.folders.length,
-      pendingConflicts: data.pendingConflicts.length,
-      shares: data.shares.length,
-      snapshots: data.snapshots.length,
+      total: hosts.length,
+      online: hosts.filter((h) => h.status === "online").length,
+      offline: hosts.filter((h) => h.status === "offline" || h.status === "degraded").length,
+      folders: data?.folders.length ?? 0,
+      conflicts: data?.pendingConflicts.length ?? 0,
+      shares: data?.shares.length ?? 0,
+      snapshots: data?.snapshots.length ?? 0,
     };
   }, [data]);
+
+  const failed = (data?.operations ?? []).filter(
+    (op) => op.status === "failed" && op.timestamp >= Date.now() - 24 * 3600 * 1000,
+  );
+  const offline = (data?.hosts ?? []).filter(
+    (h) => h.status === "offline" || h.status === "degraded",
+  );
+  const updates = (data?.hosts ?? []).filter((h) => h.updateAvailable);
+
+  const allQuiet =
+    data !== null && !counts.conflicts && !failed.length && !offline.length && !updates.length;
 
   return (
     <div className="page">
       <div className="toolbar">
-        <h1>Dashboard</h1>
+        <h1>Command Center</h1>
         <span className="muted">WS: {wsState}</span>
       </div>
       {error && <div className="error">{error}</div>}
-      <div className="summary-grid">
-        <SummaryCard label="Hosts" value={counts.totalHosts} />
-        <SummaryCard label="Online" value={counts.onlineHosts} accent="online" />
-        <SummaryCard label="Offline / Degraded" value={counts.offlineHosts} accent="offline" />
-        <SummaryCard label="Folders" value={counts.folders} />
-        <SummaryCard label="Pending Conflicts" value={counts.pendingConflicts} accent="conflict" />
-        <SummaryCard label="Network Shares" value={counts.shares} />
-        <SummaryCard label="Restic Snapshots" value={counts.snapshots} />
-      </div>
 
       <section className="section">
-        <h2>Hosts</h2>
-        <table className="data">
-          <thead>
-            <tr>
-              <th>Hostname</th>
-              <th>Status</th>
-              <th>Last seen</th>
-              <th>Version</th>
-              <th>Tailnet IP</th>
-              <th>LAN IP</th>
-            </tr>
-          </thead>
-          <tbody>
-            {!data || data.hosts.length === 0 ? (
-              <tr className="empty-row">
-                <td colSpan={6}>No hosts registered yet</td>
-              </tr>
-            ) : (
-              data.hosts.map((h) => (
-                <tr key={h.id}>
-                  <td>{h.hostname}</td>
-                  <td>
-                    <span className={`badge badge-${h.status}`}>{h.status}</span>
-                  </td>
-                  <td>{formatTimestamp(h.lastSeen)}</td>
-                  <td>
-                    {h.version ? <code className="muted">v{h.version}</code> : "—"}
-                    {h.updateAvailable ? (
-                      <>
-                        {" "}
-                        <span className="badge badge-update" title="A newer release is available on GitHub">
-                          update
-                        </span>
-                      </>
-                    ) : null}
-                  </td>
-                  <td className="muted">{h.tailnetIp ?? "—"}</td>
-                  <td className="muted">{h.lanIp ?? "—"}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+        <h2>Needs attention</h2>
+        {allQuiet ? (
+          <div className="all-quiet">✓ All quiet — your fleet is healthy</div>
+        ) : (
+          <div className="attention-grid">
+            <AttentionItem title="Pending conflicts" count={counts.conflicts} to="/conflicts">
+              <ul>
+                {data?.pendingConflicts.slice(0, 3).map((c) => (
+                  <li key={c.id}>
+                    {c.folderId} · {formatTimestamp(c.createdAt)}
+                  </li>
+                ))}
+              </ul>
+            </AttentionItem>
+            <AttentionItem title="Failed operations (24h)" count={failed.length}>
+              <ul>
+                {failed.slice(0, 3).map((op) => (
+                  <li key={String(op.id)}>
+                    {op.summary ?? op.operation} · {formatTimestamp(op.timestamp)}
+                  </li>
+                ))}
+              </ul>
+            </AttentionItem>
+            <AttentionItem title="Offline / degraded" count={offline.length}>
+              <div>
+                {offline.map((h) => (
+                  <span className="attention-host" key={h.id}>
+                    {h.hostname}
+                  </span>
+                ))}
+              </div>
+            </AttentionItem>
+            <AttentionItem title="Updates available" count={updates.length}>
+              <div>
+                {updates.map((h) => (
+                  <span className="attention-host" key={h.id}>
+                    {h.hostname} <code>v{h.version ?? "—"}</code>
+                  </span>
+                ))}
+              </div>
+            </AttentionItem>
+          </div>
+        )}
       </section>
 
       <section className="section">
-        <h2>Recent operations</h2>
+        <h2>Fleet</h2>
+        <div className="fleet-grid">
+          {!data || !data.hosts.length ? (
+            <div className="empty-row">No hosts registered yet</div>
+          ) : (
+            data.hosts.map((h) => (
+              <div className="fleet-card" key={h.id}>
+                <div className="fleet-card-head">
+                  <strong>{h.hostname}</strong>
+                  <span className={`badge badge-${h.status}`}>{h.status}</span>
+                </div>
+                <span className="muted">Last seen {formatTimestamp(h.lastSeen)}</span>
+                <span>
+                  v{h.version ?? "—"}{" "}
+                  {h.updateAvailable && <span className="badge badge-update">update</span>}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <div className="summary-grid">
+        <SummaryCard label="Hosts" value={counts.total} />
+        <SummaryCard label="Online" value={counts.online} accent="online" />
+        <SummaryCard label="Folders" value={counts.folders} />
+        <SummaryCard label="Shares" value={counts.shares} />
+        <SummaryCard label="Snapshots" value={counts.snapshots} />
+      </div>
+
+      <section className="section">
+        <h2>Recent activity</h2>
         <table className="data">
           <thead>
             <tr>
@@ -197,7 +229,7 @@ export function Dashboard() {
             </tr>
           </thead>
           <tbody>
-            {!data || data.operations.length === 0 ? (
+            {!data || !data.operations.length ? (
               <tr className="empty-row">
                 <td colSpan={5}>No operations recorded</td>
               </tr>
@@ -217,6 +249,16 @@ export function Dashboard() {
           </tbody>
         </table>
       </section>
+
+      <section className="section quick-actions">
+        <h2>Quick actions</h2>
+        <Link className="action" to="/folders">
+          Manage folders →
+        </Link>
+        <Link className="action" to="/conflicts">
+          Resolve conflicts →
+        </Link>
+      </section>
     </div>
   );
 }
@@ -228,11 +270,10 @@ interface SummaryCardProps {
 }
 
 function SummaryCard({ label, value, accent }: SummaryCardProps) {
-  const cls = accent ? `value badge-${accent}` : "value";
   return (
     <div className="summary-card">
       <span className="label">{label}</span>
-      <span className={cls}>{value}</span>
+      <span className={accent ? `value badge-${accent}` : "value"}>{value}</span>
     </div>
   );
 }
