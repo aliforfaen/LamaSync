@@ -196,6 +196,7 @@ lamasync/                     # Bun workspace root
 | LAMA-168 | Dotfile manifest improvements: excludes, host selector, cron presets + `@reboot`/`@login`, deployment tracking (last sync, direction, original uploader) | `core/src/{types.ts,db/schema.ts}`, `server/src/routes/{dotfiles.ts,config.ts,report.ts}`, `daemon/src/{executor.ts,scheduler.ts}`, `web-ui/src/pages/Dotfiles.tsx`, `tui/src/{flows/dotfile-manifest.ts,views/dotfiles.ts,app/schedule-presets.ts}` |
 | LAMA-199 | Version & update visibility: daemon version in heartbeat, server-side `updateAvailable` vs cached GitHub release | `core/src/{types.ts,db/schema.ts,version-compare.ts}`, `server/src/{release-cache.ts,routes/{hosts.ts,health.ts,release.ts}}`, `daemon/src/index.ts`, `web-ui/src/pages/Dashboard.tsx` |
 | LAMA-201 | Theme & design-token pass (dark/light) + inline SVG domain icons | `web-ui/src/{index.css,theme.ts,main.tsx,components/{Nav.tsx,icons.tsx}}` |
+| LAMA-197 | Command Center dashboard v1 (landing page): needs-attention triage, fleet cards, live activity feed, quick actions | `web-ui/src/pages/Dashboard.tsx`, `web-ui/src/index.css` |
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
@@ -393,6 +394,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **Release**: v0.2.3 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
 - **LAMA-183 Batch 1 done**: LAMA-199 (version & update visibility) + LAMA-201 (theme & design-token pass) shipped in two commits. Next: LAMA-197 (Command Center dashboard, landing page).
+- **LAMA-183 Batch 2 done**: LAMA-197 (Command Center dashboard v1) shipped (commit 60651d8) — needs-attention triage, fleet cards, live activity feed, quick actions. Deferred piece tracked as LAMA-203 (since-last-visit highlighting). Next: LAMA-198 (host list + detail pages) or LAMA-200 (notifications).
 - Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
 
