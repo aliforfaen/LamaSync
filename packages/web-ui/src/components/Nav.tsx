@@ -1,15 +1,63 @@
 import { NavLink } from "react-router-dom";
+import { useState } from "react";
 import { clearApiKey } from "../api.ts";
+import {
+  applyTheme,
+  loadThemeChoice,
+  saveThemeChoice,
+  type ThemeChoice,
+} from "../theme.ts";
+import {
+  IconConflict,
+  IconDotfile,
+  IconFolder,
+  IconHost,
+  IconNotification,
+} from "./icons.tsx";
+
+const ORDER: ThemeChoice[] = ["dark", "light", "system"];
+const LABELS: Record<ThemeChoice, string> = {
+  dark: "Dark",
+  light: "Light",
+  system: "System",
+};
 
 export function Nav() {
+  const [theme, setTheme] = useState<ThemeChoice>(loadThemeChoice());
+
+  function cycleTheme() {
+    const next = ORDER[(ORDER.indexOf(theme) + 1) % ORDER.length];
+    saveThemeChoice(next);
+    applyTheme(next);
+    setTheme(next);
+  }
+
   return (
     <nav className="nav">
       <span className="brand">LamaSync</span>
-      <NavLink to="/" end>Dashboard</NavLink>
-      <NavLink to="/folders">Folders</NavLink>
-      <NavLink to="/dotfiles">Dotfiles</NavLink>
-      <NavLink to="/conflicts">Conflicts</NavLink>
-      <NavLink to="/admin">Admin</NavLink>
+      <NavLink to="/" end>
+        <IconHost /> Dashboard
+      </NavLink>
+      <NavLink to="/folders">
+        <IconFolder /> Folders
+      </NavLink>
+      <NavLink to="/dotfiles">
+        <IconDotfile /> Dotfiles
+      </NavLink>
+      <NavLink to="/conflicts">
+        <IconConflict /> Conflicts
+      </NavLink>
+      <NavLink to="/admin">
+        <IconNotification /> Admin
+      </NavLink>
+      <button
+        type="button"
+        className="action theme-toggle"
+        onClick={cycleTheme}
+        aria-label="Toggle theme"
+      >
+        {LABELS[theme]}
+      </button>
       <button
         type="button"
         className="action"
