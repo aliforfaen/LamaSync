@@ -9,6 +9,7 @@ import { join } from "path";
 import { Elysia } from "elysia";
 import { initDb } from "@lamasync/core";
 import type { Database } from "bun:sqlite";
+import { __resetNotificationStateForTests } from "../notifications.ts";
 import { __setDb, conflictsRoutes } from "./conflicts.ts";
 
 let db: Database;
@@ -17,6 +18,7 @@ let dataDir: string;
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), "lamasync-conflicts-test-"));
   db = initDb(join(dataDir, "test.db"));
+  __resetNotificationStateForTests();
   __setDb(db);
 });
 
@@ -65,6 +67,16 @@ describe("conflictsRoutes", () => {
     expect(pending.status).toBe(200);
     const items = (await pending.json()) as Array<Record<string, unknown>>;
     expect(items).toHaveLength(1);
+
+    const event = db
+      .query<{ type: string; payload: string | null }, []>(
+        "SELECT type, payload FROM notification_events",
+      )
+      .get();
+    expect(event).toEqual({
+      type: "conflict_pending",
+      payload: '{"path":"file.txt"}',
+    });
   });
 
   test("POST /api/v1/conflicts/:id/resolve marks conflict resolved", async () => {
@@ -98,5 +110,28 @@ describe("conflictsRoutes", () => {
     const updated = (await resolve.json()) as Record<string, unknown>;
     expect(updated.status).toBe("resolved");
     expect(updated.resolution).toBe("local");
+
+    const refresh = await app.handle(
+      new Request("http://localhost/api/v1/conflicts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conflicts: [
+            {
+              hostId: "host-1",
+              folderId: "folder-1",
+              path: "file.txt",
+            },
+          ],
+        }),
+      }),
+    );
+    expect(refresh.status).toBe(201);
+    const eventCount = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM notification_events WHERE type = 'conflict_pending'",
+      )
+      .get();
+    expect(eventCount?.count).toBe(1);
   });
 });

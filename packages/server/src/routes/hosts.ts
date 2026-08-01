@@ -5,12 +5,17 @@ import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import { getCachedLatestVersion } from "../release-cache.ts";
 import { bumpConfigRevisionForPeers } from "../config-revision.ts";
+import {
+  __setDb as __setNotificationDb,
+  emitNotification,
+} from "../notifications.ts";
 
 // Test seam: mirrors the pattern used by every other route file in this
 // directory so unit tests can substitute the production DB.
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
   activeDb = next;
+  __setNotificationDb(next);
 }
 
 interface HostRow {
@@ -105,6 +110,11 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         hostname: string;
         tailnetIp?: string | null;
       };
+      const previous = activeDb
+        .query<{ id: string; status: string | null }, [string]>(
+          "SELECT id, status FROM hosts WHERE id = ?",
+        )
+        .get(id);
       const now = Date.now();
       activeDb.run(
         `INSERT INTO hosts (id, hostname, tailnet_ip, last_seen, status)
@@ -126,6 +136,13 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       const latestVersion = await getCachedLatestVersion();
       const host = rowToHost(row, latestVersion);
       broadcast({ kind: "host", host });
+      if (previous?.status === "offline" || previous?.status === "unknown") {
+        emitNotification({
+          type: "host_online",
+          hostId: id,
+          message: `Host ${row.hostname} is online`,
+        });
+      }
       // LAMA-198: register may bring a previously-unknown host into a fleet
       // where peers exist; bump every host's revision so other daemons
       // re-pull their config (LAN-peer discovery lives in /config/:hostId).
@@ -198,6 +215,11 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         lanIp?: string | null;
         version?: string | null;
       };
+      const previous = activeDb
+        .query<{ status: string | null }, [string]>(
+          "SELECT status FROM hosts WHERE id = ?",
+        )
+        .get(hostId);
       // Follow the existing `lanIp` pattern: only overwrite the column when
       // the heartbeat actually carries a truthy value. A heartbeat without
       // `version` (older daemons, transient blanks) preserves whatever the
@@ -227,7 +249,20 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         .get(hostId);
       if (row) {
         const latestVersion = await getCachedLatestVersion();
-        broadcast({ kind: "host", host: rowToHost(row, latestVersion) });
+        const host = rowToHost(row, latestVersion);
+        broadcast({ kind: "host", host });
+        if (
+          status === "online" &&
+          (previous?.status === "offline" ||
+            previous?.status === "unknown" ||
+            previous?.status === null)
+        ) {
+          emitNotification({
+            type: "host_online",
+            hostId,
+            message: `Host ${row.hostname} is online`,
+          });
+        }
       }
       set.status = 204;
       return null;

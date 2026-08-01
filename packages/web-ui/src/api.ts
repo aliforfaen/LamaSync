@@ -10,6 +10,7 @@ import type {
   HealthResponse,
   Host,
   HostConfig,
+  NotificationEvent,
   OperationLog,
   QueuedAction,
   QueuedActionType,
@@ -160,6 +161,10 @@ export const api = {
     apiPost<{ deleted: number; olderThanMs: number }>(
       `/admin/prune?olderThanMs=${olderThanMs}`,
     ),
+  listNotifications: (limit = 20) =>
+    apiGet<NotificationEvent[]>(`/notifications?limit=${limit}`),
+  sendTestNotification: () =>
+    apiPost<NotificationEvent>("/notifications/test"),
   // LAMA-198: queued-action model. The Web UI uses `enqueueAction` to ask
   // a daemon to do work (sync, backup, check-update, refresh-config); the
   // rest of the endpoints exist for the detail page to render recent

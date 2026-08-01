@@ -8,6 +8,7 @@ process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-
 
 const { getAuthPlugin } = await import("../auth.ts");
 const { __setCachedLatestVersionForTests } = (await import("../release-cache.ts")) as typeof import("../release-cache.ts");
+const { __resetNotificationStateForTests } = await import("../notifications.ts");
 const { __setDb, hostsRoutes } = (await import("./hosts.ts")) as typeof import("./hosts.ts");
 const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as typeof import("../config-revision.ts");
 
@@ -29,6 +30,7 @@ beforeEach(() => {
   // hit the real GitHub API. 9.9.9 is newer than any daemon version these
   // tests use, so updateAvailable derivation stays deterministic.
   __setCachedLatestVersionForTests("9.9.9");
+  __resetNotificationStateForTests();
   __setDb(db);
   // config-revision.ts holds its own activeDb; point it at the test DB so
   // bumps issued by the routes land in the same in-memory database.
@@ -216,5 +218,75 @@ describe("GET /api/v1/hosts and /api/v1/hosts/:hostId (LAMA-198)", () => {
       )
       .get("host-b");
     expect(row?.config_revision).toBe(3);
+  });
+
+  test("POST /register emits host_online when an offline host re-registers", async () => {
+    db.run("UPDATE hosts SET status = 'offline' WHERE id = 'host-a'");
+
+    const res = await post("/api/v1/register", {
+      id: "host-a",
+      hostname: "host-a",
+      tailnetIp: null,
+    });
+    expect(res.status).toBe(201);
+
+    const events = db
+      .query<{ type: string; host_id: string | null }, []>(
+        "SELECT type, host_id FROM notification_events",
+      )
+      .all();
+    expect(events).toEqual([{ type: "host_online", host_id: "host-a" }]);
+  });
+
+  test("POST /register does not emit host_online for a brand-new host", async () => {
+    const res = await post("/api/v1/register", {
+      id: "host-new",
+      hostname: "host-new",
+      tailnetIp: null,
+    });
+    expect(res.status).toBe(201);
+
+    const count = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM notification_events WHERE type = 'host_online'",
+      )
+      .get();
+    expect(count?.count).toBe(0);
+  });
+
+  test("POST /register does not emit host_online for an already-online host", async () => {
+    db.run("UPDATE hosts SET status = 'online' WHERE id = 'host-a'");
+
+    const res = await post("/api/v1/register", {
+      id: "host-a",
+      hostname: "host-a",
+      tailnetIp: null,
+    });
+    expect(res.status).toBe(201);
+
+    const count = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM notification_events WHERE type = 'host_online'",
+      )
+      .get();
+    expect(count?.count).toBe(0);
+  });
+
+  test("POST /report/health emits host_online when an offline host heartbeats online", async () => {
+    db.run("UPDATE hosts SET status = 'offline' WHERE id = 'host-a'");
+
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+    });
+    expect(res.status).toBe(204);
+
+    const events = db
+      .query<{ type: string; host_id: string | null }, []>(
+        "SELECT type, host_id FROM notification_events",
+      )
+      .all();
+    expect(events).toEqual([{ type: "host_online", host_id: "host-a" }]);
   });
 });

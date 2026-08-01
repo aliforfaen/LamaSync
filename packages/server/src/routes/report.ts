@@ -3,10 +3,15 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type { OperationStatus, WSEvent, OperationLog } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
+import {
+  __setDb as __setNotificationDb,
+  emitNotification,
+} from "../notifications.ts";
 
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
   activeDb = next;
+  __setNotificationDb(next);
 }
 
 export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
@@ -98,6 +103,23 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
     };
     const event: WSEvent = { kind: "operation", entry };
     broadcast(event);
+
+    if (status === "failed") {
+      emitNotification({
+        type: "operation_failed",
+        hostId,
+        folderId,
+        message: summary || `${operation} failed${folderId ? ` for ${folderId}` : ""}`,
+        payload: { operation },
+      });
+    } else if (status === "success") {
+      emitNotification({
+        type: "operation_success",
+        hostId,
+        folderId,
+        message: summary || `${operation} succeeded${folderId ? ` for ${folderId}` : ""}`,
+      });
+    }
 
     set.status = 204;
     return null;

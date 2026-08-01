@@ -14,7 +14,9 @@ import { conflictsRoutes } from "./routes/conflicts.ts";
 import { operationsRoutes } from "./routes/operations.ts";
 import { releaseRoutes } from "./routes/release.ts";
 import { actionsRoutes } from "./routes/actions.ts";
+import { notificationsRoutes } from "./routes/notifications.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
+import { startNotificationSweep } from "./notifications.ts";
 import { VERSION, type ErrorResponse } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
 
@@ -62,6 +64,10 @@ const app = new Elysia()
             name: "Actions",
             description: "Queued actions (control plane → daemon)",
           },
+          {
+            name: "Notifications",
+            description: "Durable notification history and delivery tests",
+          },
         ],
         components: {
           securitySchemes: {
@@ -92,6 +98,7 @@ const app = new Elysia()
   .use(operationsRoutes)
   .use(releaseRoutes)
   .use(actionsRoutes)
+  .use(notificationsRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;
@@ -112,6 +119,16 @@ export type App = typeof app;
 console.log(`LamaSync server v${VERSION} listening on http://${app.server!.hostname}:${app.server!.port}`);
 console.log(`Swagger UI: http://${app.server!.hostname}:${app.server!.port}/swagger`);
 console.log(`WebSocket:  ws://${app.server!.hostname}:${app.server!.port}/api/v1/ws (subprotocol: lamasync-auth, <base64(apiKey)>)`);
+
+// Unit tests compose route plugins directly rather than importing this entry
+// point. The explicit env gates also keep the background timer out of any
+// integration test that does import the full server.
+if (
+  process.env.LAMASYNC_TEST !== "1" &&
+  process.env.NODE_ENV !== "test"
+) {
+  startNotificationSweep();
+}
 
 // Run one prune on startup, then a daily interval (with unref so the timer
 // never keeps the process alive on its own).

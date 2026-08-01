@@ -215,6 +215,32 @@ export interface OperationLog {
   durationMs?: number | null;
 }
 
+export type NotificationSeverity = "critical" | "default" | "info";
+
+export type NotificationType =
+  | "operation_failed"
+  | "operation_success"
+  | "conflict_pending"
+  | "host_offline"
+  | "host_online"
+  | "update_available"
+  | "restore_failed"
+  | "restore_done"
+  | "test";
+
+export interface NotificationEvent {
+  id: string;
+  type: NotificationType;
+  severity: NotificationSeverity;
+  message: string;
+  hostId?: string | null;
+  folderId?: string | null;
+  payload: Record<string, unknown> | null;
+  createdAt: number;
+  ntfyDelivered: boolean;
+  webhookDelivered: boolean;
+}
+
 // API request/response shapes
 export interface HealthResponse {
   status: "ok";

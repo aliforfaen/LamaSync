@@ -3,11 +3,16 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import type { Conflict, ConflictResolution, WSEvent } from "@lamasync/core";
+import {
+  __setDb as __setNotificationDb,
+  emitNotification,
+} from "../notifications.ts";
 
 // Test seam: allows unit tests to substitute the production DB.
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
   activeDb = next;
+  __setNotificationDb(next);
 }
 
 interface ConflictRow {
@@ -100,6 +105,11 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
       const created: Conflict[] = [];
       const now = Date.now();
       for (const c of conflicts) {
+        const existing = activeDb
+          .query<{ id: string; status: string }, [string, string, string]>(
+            "SELECT id, status FROM conflicts WHERE host_id = ? AND folder_id = ? AND path = ?",
+          )
+          .get(c.hostId, c.folderId, c.path);
         const id = crypto.randomUUID();
         activeDb.run(
           `INSERT INTO conflicts
@@ -122,6 +132,19 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
             now,
           ],
         );
+        // Emit on any transition INTO pending: a brand-new conflict, or a
+        // previously-resolved conflict that recurred (the upsert above flips
+        // it back to pending). Already-pending repeats are deduped by the
+        // notification cooldown.
+        if (!existing || existing.status !== "pending") {
+          emitNotification({
+            type: "conflict_pending",
+            hostId: c.hostId,
+            folderId: c.folderId,
+            message: `Conflict pending for ${c.path}`,
+            payload: { path: c.path },
+          });
+        }
         const row = activeDb
           .query<ConflictRow, [string]>(
             "SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, status, resolution, created_at, resolved_at FROM conflicts WHERE id = ?",

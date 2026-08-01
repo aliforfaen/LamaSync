@@ -81,6 +81,8 @@ Missing or wrong key → `401 Unauthorized`.
 | POST   | `/api/v1/admin/prune`                             | Manually trim operation_log by age               |
 | GET    | `/api/v1/operations`                              | Query the operation log                          |
 | POST   | `/api/v1/report`                                  | Append an operation_log entry                    |
+| GET    | `/api/v1/notifications?limit=…`                   | List durable notification events, newest first   |
+| POST   | `/api/v1/notifications/test`                      | Record and deliver an Admin test notification    |
 | GET    | `/api/v1/restic/snapshots`                        | List restic snapshot metadata                    |
 | POST   | `/api/v1/restic/snapshots`                        | Daemon reports a new snapshot                    |
 | GET    | `/api/v1/restic/restore`                          | List restic restore jobs                         |
@@ -93,6 +95,17 @@ Missing or wrong key → `401 Unauthorized`.
 | GET    | `/swagger/json`                                   | Live OpenAPI 3 spec (use to resolve schemas)     |
 | GET    | `/`                                                | Management Web UI (single-page React SPA)        |
 | GET    | `/swagger`                                        | Swagger UI                                       |
+
+### Notifications
+
+Notification events are always persisted in the server's SQLite history.
+Set `LAMASYNC_NTFY_URL` to an ntfy topic URL to deliver `critical` and
+`default` events; `info` events remain in local history. Set the optional
+`LAMASYNC_LAMADB_WEBHOOK_URL` to POST every severity to LamaDB as a flat JSON
+event. Critical events include stale hosts, failed restores, and repeated backup
+failures; default events include first operation failures, pending conflicts,
+available updates, and Admin tests. Cooldowns and edge state are in memory and
+reset when the server restarts.
 
 ### `GET /api/v1/operations` query params
 

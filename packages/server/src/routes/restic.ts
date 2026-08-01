@@ -3,11 +3,16 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import type { ResticRestoreJob, ResticSnapshot, WSEvent } from "@lamasync/core";
+import {
+  __setDb as __setNotificationDb,
+  emitNotification,
+} from "../notifications.ts";
 
 // Test seam: allows unit tests to substitute the production DB.
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
   activeDb = next;
+  __setNotificationDb(next);
 }
 
 interface SnapshotRow {
@@ -303,6 +308,21 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
       const job = rowToRestoreJob(row!);
       const event: WSEvent = { kind: "restic_restore", job };
       broadcast(event);
+      if (status === "done") {
+        emitNotification({
+          type: "restore_done",
+          hostId: job.targetHostId,
+          folderId: job.folderId,
+          message: `Restore ${job.id} completed`,
+        });
+      } else if (status === "failed") {
+        emitNotification({
+          type: "restore_failed",
+          hostId: job.targetHostId,
+          folderId: job.folderId,
+          message: error || `Restore ${job.id} failed`,
+        });
+      }
       return job;
     },
     {

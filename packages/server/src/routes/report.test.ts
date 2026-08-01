@@ -6,6 +6,7 @@ import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "report-test-key";
 
 const { getAuthPlugin } = await import("../auth.ts");
+const { __resetNotificationStateForTests } = await import("../notifications.ts");
 const { __setDb, reportRoutes } = (await import("./report.ts")) as typeof import("./report.ts");
 
 let db: Database;
@@ -28,6 +29,7 @@ beforeEach(() => {
       VALUES ('a1', 'f1', 'host-a', 'both', '/tmp/f1', 1);
     INSERT INTO schedule_state (folder_assignment_id) VALUES ('a1');
   `);
+  __resetNotificationStateForTests();
   __setDb(db);
   app = new Elysia().use(getAuthPlugin()).use(reportRoutes);
 });
@@ -76,6 +78,35 @@ describe("POST /api/v1/report", () => {
       status: "unknown_status",
     });
     expect(res.status).toBe(422);
+  });
+
+  test("emits failure and success notifications without changing the response", async () => {
+    const failed = await post("/api/v1/report", {
+      hostId: "host-a",
+      folderId: "f1",
+      operation: "sync",
+      status: "failed",
+      summary: "sync failed",
+    });
+    const succeeded = await post("/api/v1/report", {
+      hostId: "host-a",
+      folderId: "f1",
+      operation: "sync",
+      status: "success",
+      summary: "sync recovered",
+    });
+    expect(failed.status).toBe(204);
+    expect(succeeded.status).toBe(204);
+
+    const rows = db
+      .query<{ type: string; severity: string }, []>(
+        "SELECT type, severity FROM notification_events ORDER BY rowid",
+      )
+      .all();
+    expect(rows).toEqual([
+      { type: "operation_failed", severity: "default" },
+      { type: "operation_success", severity: "info" },
+    ]);
   });
 
   test("tracks dotfile deployment on successful dotfile report (LAMA-168)", async () => {
