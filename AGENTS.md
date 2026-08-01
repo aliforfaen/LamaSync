@@ -395,7 +395,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 ## Current status (as of 2026-08-01)
 
 - Project version: **0.2.3**
-- Tests: **212 passing** across 28 files, 1 skip, 0 failures.
+- Tests: **300 passing** across 35 files, 1 skip, 0 failures.
 - **Install scripts**: `packaging/install/install.sh` and `packaging/install/update.sh` patched to be self-contained and aligned with the CI-published binary names (`lamasyncd`, `lamasync-tui`). Docker smoke tests (`scripts/test-install.sh`, `scripts/test-update.sh`) both pass.
 - **Release**: v0.2.3 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
