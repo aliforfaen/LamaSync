@@ -62,6 +62,11 @@ export interface Host {
   lanIp?: string | null;
   lastSeen?: number | null;
   status: HostStatus;
+  // LAMA-199: daemon-reported version stored at last heartbeat. `null` when
+  // the daemon has never reported one. `updateAvailable` is derived server-
+  // side by comparing against the latest GitHub release.
+  version?: string | null;
+  updateAvailable?: boolean;
 }
 
 export interface Folder {
@@ -222,6 +227,10 @@ export interface HealthReport {
   status: HostStatus;
   uptimeSec?: number;
   lanIp?: string | null;
+  // LAMA-199: optional daemon version. Heartbeats without a `version`
+  // preserve whatever the daemon reported last, so transient blank reports
+  // don't downgrade the stored value.
+  version?: string | null;
 }
 
 export interface OperationReport {

@@ -141,9 +141,14 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
 # Heartbeat (clients do this every 30s)
 curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"hostId":"alpha","timestamp":1718200000000,"status":"online"}' \
+  -d '{"hostId":"alpha","timestamp":1718200000000,"status":"online","version":"0.2.3"}' \
   http://<lamasync-server-tailnet-ip>:8080/api/v1/report/health
 ```
+
+The optional `version` field records the daemon's self-reported version; the
+server derives `updateAvailable` per host by comparing it against the cached
+latest GitHub release. Heartbeats without `version` (older daemons, transient
+blanks) preserve whatever version the daemon reported last.
 
 ### Create or assign a folder
 
@@ -281,7 +286,7 @@ The OpenAPI 3 spec is served live at `/swagger/json` — prefer fetching it when
 you need exact request/response field names or want to verify a schema before
 issuing a write. The high-level shapes are:
 
-- `Host { id, hostname, tailnetIp?, lastSeen?, status }`
+- `Host { id, hostname, tailnetIp?, lastSeen?, status, version?, updateAvailable? }`
 - `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Provider?: 'exoscale'|'aws'|'other', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }` — `s3SecretAccessKey` is write-only: accepted on create/update, but folder CRUD responses always return it as `null` (LAMA-178). The plaintext value is only exposed to daemons via `GET /config/:hostId`. Omit it (or send `null`) on update to keep the stored secret.
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }` (`status` includes `retry`, `recovery`)

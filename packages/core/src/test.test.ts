@@ -7,6 +7,7 @@ import {
   parseClientConfig,
   parseServerConfig,
   SERVER_SCHEMA,
+  MIGRATIONS,
 } from "./index.ts";
 
 describe("initDb", () => {
@@ -34,6 +35,32 @@ describe("initDb", () => {
 
   test("schema string is non-empty", () => {
     expect(SERVER_SCHEMA.length).toBeGreaterThan(100);
+  });
+
+  test("hosts table declares the version column (LAMA-199)", () => {
+    // Fresh-schema path: column is in the CREATE TABLE.
+    expect(SERVER_SCHEMA).toMatch(/CREATE TABLE IF NOT EXISTS hosts[\s\S]*version\s+TEXT/);
+    // Migration path: existing databases pick the column up via ALTER TABLE.
+    expect(MIGRATIONS).toContain("ALTER TABLE hosts ADD COLUMN version TEXT");
+  });
+
+  test("initDb applies the new hosts.version column", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "lamasync-core-version-"));
+    try {
+      const db = initDb(join(tmp, "test.db"));
+      // Column is reachable on a freshly inserted row.
+      db.run(
+        `INSERT INTO hosts (id, hostname, status, version) VALUES ('h1', 'h1', 'online', '0.2.3')`,
+      );
+      const row = db
+        .query<{ version: string | null }, [string]>(
+          "SELECT version FROM hosts WHERE id = ?",
+        )
+        .get("h1");
+      expect(row?.version).toBe("0.2.3");
+    } finally {
+      // tmpdir is OS-managed
+    }
   });
 });
 

@@ -615,6 +615,7 @@ async function main(): Promise<void> {
       timestamp: Date.now(),
       status: "online",
       lanIp,
+      version: VERSION,
     });
     lastHeartbeatAt = Date.now();
     await reportQueue.flush();
@@ -653,6 +654,7 @@ async function main(): Promise<void> {
           timestamp: now,
           status: "online",
           lanIp: getLocalLanIp(),
+          version: VERSION,
         });
         lastHeartbeatAt = now;
         await reportQueue.flush();

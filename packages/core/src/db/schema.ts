@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS hosts (
     tailnet_ip  TEXT,
     last_seen   INTEGER,
     status      TEXT DEFAULT 'unknown',
-    lan_ip      TEXT
+    lan_ip      TEXT,
+    version     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -198,4 +199,5 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE dotfile_manifests ADD COLUMN last_sync_at INTEGER",
   "ALTER TABLE dotfile_manifests ADD COLUMN last_sync_direction TEXT",
   "ALTER TABLE dotfile_manifests ADD COLUMN original_uploader_host_id TEXT",
+  "ALTER TABLE hosts ADD COLUMN version TEXT",
 ];

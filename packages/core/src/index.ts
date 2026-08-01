@@ -15,3 +15,4 @@ export {
   type LamaSyncApiClientOptions,
 } from "./api-client.ts";
 export { VERSION } from "./version.ts";
+export { isNewer } from "./version-compare.ts";

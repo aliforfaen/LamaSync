@@ -146,6 +146,7 @@ export function Dashboard() {
               <th>Hostname</th>
               <th>Status</th>
               <th>Last seen</th>
+              <th>Version</th>
               <th>Tailnet IP</th>
               <th>LAN IP</th>
             </tr>
@@ -153,7 +154,7 @@ export function Dashboard() {
           <tbody>
             {!data || data.hosts.length === 0 ? (
               <tr className="empty-row">
-                <td colSpan={5}>No hosts registered yet</td>
+                <td colSpan={6}>No hosts registered yet</td>
               </tr>
             ) : (
               data.hosts.map((h) => (
@@ -163,6 +164,17 @@ export function Dashboard() {
                     <span className={`badge badge-${h.status}`}>{h.status}</span>
                   </td>
                   <td>{formatTimestamp(h.lastSeen)}</td>
+                  <td>
+                    {h.version ? <code className="muted">v{h.version}</code> : "—"}
+                    {h.updateAvailable ? (
+                      <>
+                        {" "}
+                        <span className="badge badge-update" title="A newer release is available on GitHub">
+                          update
+                        </span>
+                      </>
+                    ) : null}
+                  </td>
                   <td className="muted">{h.tailnetIp ?? "—"}</td>
                   <td className="muted">{h.lanIp ?? "—"}</td>
                 </tr>
