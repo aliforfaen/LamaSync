@@ -194,6 +194,8 @@ lamasync/                     # Bun workspace root
 | LAMA-147 | Management Web UI (dashboard + admin CRUD) | `packages/web-ui/`, `packages/server/src/routes/web-ui.ts`, `scripts/inline-web-ui.ts` |
 | LAMA-173 | TUI unification: tabbed shell, 6 views, guided wizards | `packages/tui/src/{boot.ts,index.ts,app/*,views/*,flows/*}` |
 | LAMA-168 | Dotfile manifest improvements: excludes, host selector, cron presets + `@reboot`/`@login`, deployment tracking (last sync, direction, original uploader) | `core/src/{types.ts,db/schema.ts}`, `server/src/routes/{dotfiles.ts,config.ts,report.ts}`, `daemon/src/{executor.ts,scheduler.ts}`, `web-ui/src/pages/Dotfiles.tsx`, `tui/src/{flows/dotfile-manifest.ts,views/dotfiles.ts,app/schedule-presets.ts}` |
+| LAMA-199 | Version & update visibility: daemon version in heartbeat, server-side `updateAvailable` vs cached GitHub release | `core/src/{types.ts,db/schema.ts,version-compare.ts}`, `server/src/{release-cache.ts,routes/{hosts.ts,health.ts,release.ts}}`, `daemon/src/index.ts`, `web-ui/src/pages/Dashboard.tsx` |
+| LAMA-201 | Theme & design-token pass (dark/light) + inline SVG domain icons | `web-ui/src/{index.css,theme.ts,main.tsx,components/{Nav.tsx,icons.tsx}}` |
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
@@ -383,13 +385,14 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.
 - **Self-update**: daemon checks GitHub Releases on startup and supports `lamasyncd --check-update` / `lamasyncd --update`. The server proxies release info at `GET /api/v1/release/latest`. A standalone `curl | bash` updater lives in `packaging/install/update.sh`.
 
-## Current status (as of 2026-07-21)
+## Current status (as of 2026-08-01)
 
 - Project version: **0.2.3**
-- Tests: **187 passing** across 26 files, 1 skip, 0 failures.
+- Tests: **212 passing** across 28 files, 1 skip, 0 failures.
 - **Install scripts**: `packaging/install/install.sh` and `packaging/install/update.sh` patched to be self-contained and aligned with the CI-published binary names (`lamasyncd`, `lamasync-tui`). Docker smoke tests (`scripts/test-install.sh`, `scripts/test-update.sh`) both pass.
 - **Release**: v0.2.3 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
+- **LAMA-183 Batch 1 done**: LAMA-199 (version & update visibility) + LAMA-201 (theme & design-token pass) shipped in two commits. Next: LAMA-197 (Command Center dashboard, landing page).
 - Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
 
