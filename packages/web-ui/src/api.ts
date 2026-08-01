@@ -3,6 +3,7 @@
 // API key and the global fetch API. Imports types only from core.
 
 import type {
+  BrowseResponse,
   Conflict,
   DotfileManifest,
   Folder,
@@ -155,6 +156,17 @@ export const api = {
     apiGet<Conflict[]>(`/conflicts?status=${encodeURIComponent(status)}`),
   resolveConflict: (id: string, resolution: "local" | "remote" | "both") =>
     apiPost<Conflict>(`/conflicts/${encodeURIComponent(id)}/resolve`, { resolution }),
+  // LAMA-202: read-only Data Browser.
+  browseLocal: (path?: string) => {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+    return apiGet<BrowseResponse>(`/browse/local${qs}`);
+  },
+  browseS3: (folderId: string, path?: string) => {
+    const base = `?folderId=${encodeURIComponent(folderId)}`;
+    const qs = path ? `${base}&path=${encodeURIComponent(path)}` : base;
+    return apiGet<BrowseResponse>(`/browse/s3${qs}`);
+  },
+  browseRestic: () => apiGet<ResticSnapshot[]>("/browse/restic"),
   listShares: () => apiGet<Share[]>("/shares"),
   listResticSnapshots: () => apiGet<ResticSnapshot[]>("/restic/snapshots"),
   pruneOperations: (olderThanMs: number) =>

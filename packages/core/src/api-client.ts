@@ -1,4 +1,5 @@
 import type {
+  BrowseResponse,
   Conflict,
   ConflictResolution,
   DotfileManifest,
@@ -524,6 +525,21 @@ export class LamaSyncApiClient {
       JSON.stringify({ status, error: error ?? null }),
       "application/json",
     );
+  }
+
+  // Data Browser (LAMA-202)
+  browseLocal(path?: string): Promise<BrowseResponse> {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+    return this.request<BrowseResponse>("GET", `/api/v1/browse/local${qs}`);
+  }
+
+  browseS3(folderId: string, path?: string): Promise<BrowseResponse> {
+    const qs = path ? `?folderId=${encodeURIComponent(folderId)}&path=${encodeURIComponent(path)}` : `?folderId=${encodeURIComponent(folderId)}`;
+    return this.request<BrowseResponse>("GET", `/api/v1/browse/s3${qs}`);
+  }
+
+  browseRestic(): Promise<ResticSnapshot[]> {
+    return this.request<ResticSnapshot[]>("GET", "/api/v1/browse/restic");
   }
 
   // Conflicts

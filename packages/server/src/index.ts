@@ -15,6 +15,7 @@ import { operationsRoutes } from "./routes/operations.ts";
 import { releaseRoutes } from "./routes/release.ts";
 import { actionsRoutes } from "./routes/actions.ts";
 import { notificationsRoutes } from "./routes/notifications.ts";
+import { browseRoutes } from "./routes/browse.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep } from "./notifications.ts";
 import { VERSION, type ErrorResponse } from "@lamasync/core";
@@ -68,6 +69,10 @@ const app = new Elysia()
             name: "Notifications",
             description: "Durable notification history and delivery tests",
           },
+          {
+            name: "Data Browser",
+            description: "Read-only browsing of local backups, S3 folders, and restic snapshots",
+          },
         ],
         components: {
           securitySchemes: {
@@ -99,6 +104,7 @@ const app = new Elysia()
   .use(releaseRoutes)
   .use(actionsRoutes)
   .use(notificationsRoutes)
+  .use(browseRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;

@@ -632,3 +632,90 @@ button.action:disabled {
   border-color: var(--border-strong);
   text-decoration: none;
 }
+
+/* --- Data Browser (LAMA-202) --- */
+
+.browser-tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.browser-tabs .action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.browser-readonly {
+  font-size: var(--font-size-sm);
+  font-style: italic;
+}
+
+.browser-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.breadcrumb-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.breadcrumb-separator {
+  color: var(--text-muted);
+}
+
+.browser-select {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  min-width: 240px;
+}
+
+.browser-select:focus {
+  outline: 2px solid rgb(var(--accent-info-rgb));
+  outline-offset: 1px;
+}
+
+.browser-dir-name,
+.browser-file-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text);
+}
+
+.browser-dir-name {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--accent-info);
+}
+
+.browser-dir-name:hover {
+  text-decoration: underline;
+}
+
+.browser-parent button {
+  color: var(--text-muted);
+}
+
+.browser-row:hover {
+  background: var(--surface-elevated);
+}
+

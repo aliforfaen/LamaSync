@@ -329,3 +329,19 @@ export interface Share {
   type: "nfs" | "smb";
   options: string;
 }
+
+// LAMA-202: read-only Data Browser entries.
+export interface BrowseEntry {
+  name: string;
+  type: "dir" | "file";
+  size: number;
+  mtime: number;
+  folderId?: string;
+}
+
+export interface BrowseResponse {
+  backend: "local" | "s3";
+  path: string;
+  entries: BrowseEntry[];
+}
+

@@ -83,6 +83,9 @@ Missing or wrong key → `401 Unauthorized`.
 | POST   | `/api/v1/report`                                  | Append an operation_log entry                    |
 | GET    | `/api/v1/notifications?limit=…`                   | List durable notification events, newest first   |
 | POST   | `/api/v1/notifications/test`                      | Record and deliver an Admin test notification    |
+| GET    | `/api/v1/browse/local?path=…`                     | Read-only browse of `LAMASYNC_BACKUP_DIR`        |
+| GET    | `/api/v1/browse/s3?folderId=…&path=…`             | Read-only S3 prefix listing for an S3 folder     |
+| GET    | `/api/v1/browse/restic`                             | Read-only proxy of restic snapshot metadata      |
 | GET    | `/api/v1/restic/snapshots`                        | List restic snapshot metadata                    |
 | POST   | `/api/v1/restic/snapshots`                        | Daemon reports a new snapshot                    |
 | GET    | `/api/v1/restic/restore`                          | List restic restore jobs                         |
@@ -365,6 +368,9 @@ All `?` fields are nullable. Timestamps are milliseconds since epoch
   `folderId` that matches an existing assignment. A `POST /report` that also
   includes `dotfileAppName` (and optional `dotfileDirection`) stamps the
   matching dotfile manifest's `lastSyncAt`/`lastSyncDirection` on success.
+- **Data Browser (LAMA-202) is read-only.** The `/api/v1/browse/*` endpoints
+  list local backups, S3 prefixes, and restic snapshots; they never mutate,
+  copy, move, or delete objects.
 - The WebSocket protocol now broadcasts a `host` event from `POST /register`
   and `POST /report/health` so the Management UI updates live without
   re-fetching.

@@ -9,6 +9,7 @@ import { Folders } from "./pages/Folders.tsx";
 import { Dotfiles } from "./pages/Dotfiles.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
 import { Admin } from "./pages/Admin.tsx";
+import { DataBrowser } from "./pages/DataBrowser.tsx";
 import { getApiKey, UNAUTHORIZED_EVENT } from "./api.ts";
 
 export function App() {
@@ -41,6 +42,7 @@ export function App() {
                   <Route path="/folders" element={<Folders />} />
                   <Route path="/dotfiles" element={<Dotfiles />} />
                   <Route path="/conflicts" element={<Conflicts />} />
+                  <Route path="/data" element={<DataBrowser />} />
                   <Route path="/admin" element={<Admin />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

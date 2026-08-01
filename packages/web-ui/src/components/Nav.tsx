@@ -13,6 +13,7 @@ import {
   IconFolder,
   IconHost,
   IconNotification,
+  IconStorage,
 } from "./icons.tsx";
 
 const ORDER: ThemeChoice[] = ["dark", "light", "system"];
@@ -49,6 +50,9 @@ export function Nav() {
       </NavLink>
       <NavLink to="/conflicts">
         <IconConflict /> Conflicts
+      </NavLink>
+      <NavLink to="/data">
+        <IconStorage /> Data
       </NavLink>
       <NavLink to="/admin">
         <IconNotification /> Admin
