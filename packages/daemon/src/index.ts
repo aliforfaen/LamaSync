@@ -8,9 +8,17 @@ import type {
   HostConfig,
   OperationLog,
   OperationReport,
+  QueuedAction,
+  QueuedActionStatus,
   ResticRestoreJob,
 } from "@lamasync/core";
 import { LamaSyncApiClient, VERSION } from "@lamasync/core";
+import {
+  selectAssignmentsForSyncAction,
+  summarizeConfigRefresh,
+  summarizeReportForAction,
+  summarizeUpdateCheck,
+} from "./actions.ts";
 import { loadConfig } from "./config.ts";
 import { CACHE_PATH, loadCache, saveCache } from "./config-cache.ts";
 import { executeAssignment, executeResticRestore } from "./executor.ts";
@@ -455,7 +463,10 @@ async function main(): Promise<void> {
   const socketState = (): SocketState =>
     buildSocketState(hostId, hostConfig, operations);
 
-  const refreshConfig = async (): Promise<void> => {
+  // Returns true on success, false when the fetch failed (so the
+  // `refresh_config` action can ack `failed` instead of reporting a stale
+  // success). Callers that don't care about the result ignore the return.
+  const refreshConfig = async (): Promise<boolean> => {
     try {
       const cfg = await client.getConfig(hostId);
       hostConfig = cfg;
@@ -465,9 +476,11 @@ async function main(): Promise<void> {
       );
       scheduler.refresh();
       adoptExistingMountUnits(() => cfg.assignments);
+      return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[config] refresh failed: ${msg}`);
+      return false;
     }
   };
 
@@ -500,10 +513,10 @@ async function main(): Promise<void> {
     }
   };
 
-  const runOnce = async (assignment: FolderAssignment): Promise<void> => {
+  const runOnce = async (assignment: FolderAssignment): Promise<OperationReport | null> => {
     if (!hostConfig) {
       console.warn(`[run] no hostConfig cached; skipping folder=${assignment.folderId}`);
-      return;
+      return null;
     }
     const folder: Folder | undefined = hostConfig.folders.find(
       (f) => f.id === assignment.folderId,
@@ -511,7 +524,7 @@ async function main(): Promise<void> {
     if (!folder) {
       console.warn(`[run] folder=${assignment.folderId} not in cache; refreshing`);
       await refreshConfig();
-      return;
+      return null;
     }
 
     const lockResult = await acquireLock(client, assignment.folderId, hostId);
@@ -521,15 +534,16 @@ async function main(): Promise<void> {
           ? `skipped: folder locked by ${lockResult.lockedBy === hostId ? "this host" : lockResult.lockedBy} (${lockResult.remainingSec}s remaining)`
           : "skipped: server unreachable, lock not acquired";
       console.warn(`[run] folder=${folder.name} ${summary}`);
-      await reportOperation({
+      const skipReport: OperationReport = {
         hostId,
         folderId: folder.id,
         operation: folder.type,
         status: "failed",
         summary,
         durationMs: 0,
-      });
-      return;
+      };
+      await reportOperation(skipReport);
+      return skipReport;
     }
     const lock = lockResult.handle;
 
@@ -567,26 +581,202 @@ async function main(): Promise<void> {
         lock,
       );
       await reportOperation(report);
+      return report;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[run] executor threw: ${msg}`);
       await releaseLock(client, folder.id, hostId, "failed", msg, lock);
-      await reportOperation({
+      const errReport: OperationReport = {
         hostId,
         folderId: folder.id,
         operation: folder.type,
         status: "failed",
         summary: `executor threw: ${msg}`,
         durationMs: 0,
-      });
+      };
+      await reportOperation(errReport);
+      return errReport;
     } finally {
       clearInterval(heartbeatTimer);
       cleanup();
     }
   };
 
+  // LAMA-198: config-revision tracking. The server bumps `config_revision`
+  // on every change that could affect a host's effective config (folders,
+  // assignments, dotfile manifests, LAN peers, /register). The daemon
+  // records the revision of the config it most recently cached and compares
+  // it against the server's value on every heartbeat; a higher server value
+  // triggers an out-of-band refresh. The 5-min refresh timer stays as a
+  // backstop for missed heartbeats / silent config-side failures.
+  let lastSeenRevision: number | null = null;
+  const recordRevision = (cfg: HostConfig | null): void => {
+    if (!cfg) return;
+    lastSeenRevision = cfg.host.configRevision ?? 0;
+  };
+
+  // LAMA-198: the daemon's view of an action's final outcome. The
+  // dispatcher delegates to `actions.ts` helpers so the wording and
+  // status-mapping rules are testable without a network/server.
+  const summarizeReport = (
+    report: OperationReport | null,
+    fallback: string,
+  ): { status: "done" | "failed"; result: string } => {
+    if (!report) return { status: "done", result: fallback };
+    return summarizeReportForAction(report.status, report.summary ?? null, fallback);
+  };
+
+  /**
+   * Execute a single queued action and ack it back to the server. Errors
+   * are caught and surfaced via `status: "failed"` so one bad action never
+   * takes down the poll loop.
+   */
+  async function executeAction(action: QueuedAction): Promise<void> {
+    const ack = async (
+      status: QueuedActionStatus,
+      result: string | null,
+    ): Promise<void> => {
+      try {
+        await client.completeAction(action.id, {
+          status: status === "done" ? "done" : "failed",
+          result,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[action] failed to ack ${action.id}: ${msg}`);
+      }
+    };
+
+    const payload = action.payload ?? {};
+    const folderTypes = new Map<string, Folder["type"]>();
+    for (const f of hostConfig?.folders ?? []) {
+      folderTypes.set(f.id, f.type);
+    }
+    try {
+      switch (action.type) {
+        case "trigger_sync": {
+          const assignments = hostConfig?.assignments ?? [];
+          const targets = selectAssignmentsForSyncAction(assignments, payload, {
+            backupOnly: false,
+            folderTypes,
+          });
+          const folderId = typeof payload["folderId"] === "string" ? payload["folderId"] : null;
+          if (folderId && targets.length === 0) {
+            await ack(
+              "failed",
+              `folderId=${folderId} not assigned to host=${hostId}`,
+            );
+            return;
+          }
+          if (targets.length === 0) {
+            await ack("done", "no assignments configured");
+            return;
+          }
+          // One action = one completion: aggregate per-assignment outcomes
+          // (each assignment also writes its own operation_log via runOnce).
+          const outcomes: { status: "done" | "failed"; result: string }[] = [];
+          for (const assignment of targets) {
+            const report = await runOnce(assignment);
+            outcomes.push(
+              summarizeReport(report, `synced folder=${assignment.folderId}`),
+            );
+          }
+          const failedCount = outcomes.filter((o) => o.status === "failed").length;
+          const summary = outcomes.map((o) => o.result).join("; ");
+          await ack(
+            failedCount > 0 ? "failed" : "done",
+            `synced ${targets.length} folder(s): ${summary}`,
+          );
+          return;
+        }
+        case "trigger_backup": {
+          const assignments = hostConfig?.assignments ?? [];
+          const targets = selectAssignmentsForSyncAction(assignments, payload, {
+            backupOnly: true,
+            folderTypes,
+          });
+          const folderId = typeof payload["folderId"] === "string" ? payload["folderId"] : null;
+          if (folderId && targets.length === 0) {
+            await ack(
+              "failed",
+              `folderId=${folderId} not assigned to host=${hostId}`,
+            );
+            return;
+          }
+          if (targets.length === 0) {
+            await ack("done", "no backup assignments configured");
+            return;
+          }
+          const outcomes: { status: "done" | "failed"; result: string }[] = [];
+          for (const assignment of targets) {
+            const report = await runOnce(assignment);
+            outcomes.push(
+              summarizeReport(report, `backed up folder=${assignment.folderId}`),
+            );
+          }
+          const failedCount = outcomes.filter((o) => o.status === "failed").length;
+          const summary = outcomes.map((o) => o.result).join("; ");
+          await ack(
+            failedCount > 0 ? "failed" : "done",
+            `backed up ${targets.length} folder(s): ${summary}`,
+          );
+          return;
+        }
+        case "check_update": {
+          const latest = await fetchLatestRelease();
+          if (!latest) {
+            await ack("failed", "could not reach GitHub Releases");
+            return;
+          }
+          const outcome = summarizeUpdateCheck(VERSION, latest.version);
+          await ack(outcome.status, outcome.result);
+          return;
+        }
+        case "refresh_config": {
+          const ok = await refreshConfig();
+          if (ok) {
+            recordRevision(hostConfig);
+            const count = hostConfig?.assignments.length ?? 0;
+            const outcome = summarizeConfigRefresh(count);
+            await ack(outcome.status, outcome.result);
+          } else {
+            await ack("failed", "refresh failed (server unreachable)");
+          }
+          return;
+        }
+        default: {
+          await ack("failed", `unknown action type: ${String(action.type)}`);
+          return;
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[action] ${action.type} (${action.id}) threw: ${msg}`);
+      await ack("failed", msg);
+    }
+  }
+
+  async function pollActions(): Promise<void> {
+    let pending: QueuedAction[];
+    try {
+      pending = await client.listPendingActions(hostId, 10);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[action] poll failed: ${msg}`);
+      return;
+    }
+    if (pending.length === 0) return;
+    console.log(`[action] claimed ${pending.length} action(s)`);
+    for (const action of pending) {
+      await executeAction(action);
+    }
+  }
+
   const scheduler = new Scheduler({
-    onTick: runOnce,
+    onTick: (assignment) => {
+      // Fire-and-forget the actual sync; the scheduler contract is void.
+      void runOnce(assignment);
+    },
     getAssignments: () => hostConfig?.assignments ?? [],
     getFolders: () => hostConfig?.folders ?? [],
     getManifests: () => hostConfig?.manifests ?? [],
@@ -595,7 +785,10 @@ async function main(): Promise<void> {
   setSwitchContext({
     acquireLock: (folderId) => acquireLock(client, folderId, hostId),
     releaseLock: (folderId, status, summary) => releaseLock(client, folderId, hostId, status, summary),
-    runOnce: (assignment) => runOnce(assignment),
+    runOnce: async (assignment) => {
+      // Switch context doesn't care about the return value either.
+      await runOnce(assignment);
+    },
     getHostConfig: () => hostConfig,
     getRemoteName,
     startMount: systemdAwareStartMount,
@@ -629,7 +822,9 @@ async function main(): Promise<void> {
 
   if (!hostConfig) {
     await refreshConfig();
+    recordRevision(hostConfig);
   } else {
+    recordRevision(hostConfig);
     scheduler.start();
   }
   // One-shot update check on startup. Never throws — just logs.
@@ -658,6 +853,24 @@ async function main(): Promise<void> {
         });
         lastHeartbeatAt = now;
         await reportQueue.flush();
+
+        // LAMA-198: config-revision check on every heartbeat. If the
+        // server's revision has moved past what we last cached, pull a
+        // fresh /config/:hostId without waiting for the 5-min timer.
+        try {
+          const serverHost = await client.getHost(hostId);
+          const serverRev = serverHost.configRevision ?? 0;
+          if (lastSeenRevision === null || serverRev > lastSeenRevision) {
+            console.log(
+              `[config] revision drift (cached=${lastSeenRevision ?? "(none)"} server=${serverRev}); refreshing`,
+            );
+            await refreshConfig();
+            recordRevision(hostConfig);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[config] revision check failed: ${msg}`);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[heartbeat] failed: ${msg}`);
@@ -666,8 +879,16 @@ async function main(): Promise<void> {
   }, HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref?.();
 
+  // LAMA-198: action poller. Aligned with the heartbeat cadence so a single
+  // out-of-band refresh covers both heartbeats and action queue draining.
+  const actionTimer = setInterval(() => {
+    void pollActions();
+  }, HEARTBEAT_INTERVAL_MS);
+  actionTimer.unref?.();
+
   const refreshTimer = setInterval(() => {
     void refreshConfig();
+    recordRevision(hostConfig);
   }, CONFIG_REFRESH_MS);
   refreshTimer.unref?.();
 
@@ -725,6 +946,7 @@ async function main(): Promise<void> {
     socketServer.close();
     void stopAllMounts();
     clearInterval(heartbeatTimer);
+    clearInterval(actionTimer);
     clearInterval(refreshTimer);
     clearInterval(restoreTimer);
     if (existsSync(socketPath)) {

@@ -3,6 +3,8 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Login } from "./components/Login.tsx";
 import { Nav } from "./components/Nav.tsx";
 import { Dashboard } from "./pages/Dashboard.tsx";
+import { Hosts } from "./pages/Hosts.tsx";
+import { HostDetail } from "./pages/HostDetail.tsx";
 import { Folders } from "./pages/Folders.tsx";
 import { Dotfiles } from "./pages/Dotfiles.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
@@ -34,6 +36,8 @@ export function App() {
                 <Nav />
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
+                  <Route path="/hosts" element={<Hosts />} />
+                  <Route path="/hosts/:hostId" element={<HostDetail />} />
                   <Route path="/folders" element={<Folders />} />
                   <Route path="/dotfiles" element={<Dotfiles />} />
                   <Route path="/conflicts" element={<Conflicts />} />

@@ -23,6 +23,7 @@ const EVENT_KINDS = new Set<string>([
   "restic_restore",
   "mount",
   "lock",
+  "action",
 ]);
 
 function isWSEvent(value: unknown): value is WSEvent {

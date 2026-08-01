@@ -67,6 +67,35 @@ export interface Host {
   // side by comparing against the latest GitHub release.
   version?: string | null;
   updateAvailable?: boolean;
+  // LAMA-198: server-side config revision counter. Bumped on any folder,
+  // assignment, or dotfile change so daemons can detect "config drift" and
+  // pull a fresh `/config/:hostId` without waiting for the 5-min refresh.
+  configRevision?: number | null;
+}
+
+// LAMA-198: queued-action model. The control plane (Web UI) enqueues actions
+// for a specific host; the daemon polls `GET /api/v1/actions/pending`,
+// executes each one, and acks via `POST /api/v1/actions/:id/complete`. The
+// completion also inserts an `operation_log` row so the audit trail is
+// uniform with the regular sync/backup reports.
+export type QueuedActionType =
+  | "trigger_sync"
+  | "trigger_backup"
+  | "check_update"
+  | "refresh_config";
+
+export type QueuedActionStatus = "pending" | "taken" | "done" | "failed";
+
+export interface QueuedAction {
+  id: string;
+  hostId: string;
+  type: QueuedActionType;
+  payload: Record<string, unknown> | null;
+  status: QueuedActionStatus;
+  createdAt: number;
+  takenAt?: number | null;
+  completedAt?: number | null;
+  result?: string | null;
 }
 
 export interface Folder {
@@ -256,7 +285,8 @@ export type WSEvent =
   | { kind: "mount"; folderId: string; status: MountEntry["status"]; path: string }
   | { kind: "conflict"; conflict: Conflict }
   | { kind: "restic_snapshot"; snapshot: ResticSnapshot }
-  | { kind: "restic_restore"; job: ResticRestoreJob };
+  | { kind: "restic_restore"; job: ResticRestoreJob }
+  | { kind: "action"; action: QueuedAction };
 
 export interface PruneResult {
   deleted: number;

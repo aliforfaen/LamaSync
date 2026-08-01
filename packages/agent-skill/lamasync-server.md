@@ -52,8 +52,14 @@ Missing or wrong key → `401 Unauthorized`.
 |--------|---------------------------------------------------|--------------------------------------------------|
 | GET    | `/api/v1/health`                                  | Fleet summary: host count, online count, hosts[] |
 | POST   | `/api/v1/register`                                | Register or update a host                        |
+| GET    | `/api/v1/hosts`                                   | List every registered host                       |
+| GET    | `/api/v1/hosts/:hostId`                           | Get a single host by id                          |
 | POST   | `/api/v1/report/health`                           | Host heartbeat (last_seen, status)               |
 | GET    | `/api/v1/config/:hostId`                          | Bundled config (assignments, manifests, rclone)  |
+| POST   | `/api/v1/hosts/:hostId/actions`                   | Enqueue a control-plane action for the host's daemon |
+| GET    | `/api/v1/hosts/:hostId/actions`                   | List queued actions for a host (newest first)    |
+| GET    | `/api/v1/actions/pending?hostId=…&limit=…`        | Daemon poll: atomically claim pending actions    |
+| POST   | `/api/v1/actions/:id/complete`                    | Daemon ack: mark an action done or failed        |
 | GET    | `/api/v1/release/latest`                          | Latest GitHub release info (proxy)               |
 | GET    | `/api/v1/folders`                                 | List all folder definitions                      |
 | POST   | `/api/v1/folders`                                 | Create a folder definition                       |
@@ -128,6 +134,40 @@ curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
 
 This is the primary "what's broken / what just finished" surface — the entry
 point for any cleanup, follow-up, or summary task.
+
+### Trigger work on a host (LAMA-198 queued actions)
+
+```bash
+# Enqueue a sync trigger (all folders assigned to the host)
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"trigger_sync"}' \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/hosts/alpha/actions
+
+# Enqueue a sync trigger for a specific folder
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"trigger_sync","payload":{"folderId":"folder-1"}}' \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/hosts/alpha/actions
+
+# Ask the daemon to refresh its cached config
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"refresh_config"}' \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/hosts/alpha/actions
+
+# List action history for the host
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" \
+  http://<lamasync-server-tailnet-ip>:8080/api/v1/hosts/alpha/actions
+```
+
+The daemon polls `GET /actions/pending?hostId=<id>&limit=10` every 30s (aligned
+with its heartbeat), executes each action, and acks via
+`POST /actions/:id/complete` with `{status, result}`. A "skipped: …" lock-
+contention result is recorded as `done` (the daemon's report already surfaces
+this; the action poller promotes it to a success so the dashboard doesn't flag
+it red). Each completion also writes an `operation_log` row so the existing
+`GET /operations` view reflects the manual trigger.
 
 ### Register a host or report health
 
@@ -286,7 +326,7 @@ The OpenAPI 3 spec is served live at `/swagger/json` — prefer fetching it when
 you need exact request/response field names or want to verify a schema before
 issuing a write. The high-level shapes are:
 
-- `Host { id, hostname, tailnetIp?, lastSeen?, status, version?, updateAvailable? }`
+- `Host { id, hostname, tailnetIp?, lastSeen?, status, version?, updateAvailable?, configRevision? }` (`configRevision` is the server-side counter bumped on any folder / assignment / dotfile / peer change — LAMA-198. The daemon compares it against the cached value on every heartbeat and pulls a fresh `/config/:hostId` when the server's value is higher.)
 - `Folder { id, name, type: 'sync'|'mount'|'backup'|'dotfile'|'git', createdAt?, encrypted?, cryptPassword?, backend?: 'sftp'|'s3'|'local', s3Provider?: 'exoscale'|'aws'|'other', s3Endpoint?, s3Bucket?, s3AccessKeyId?, s3SecretAccessKey?, s3Region? }` — `s3SecretAccessKey` is write-only: accepted on create/update, but folder CRUD responses always return it as `null` (LAMA-178). The plaintext value is only exposed to daemons via `GET /config/:hostId`. Omit it (or send `null`) on update to keep the stored secret.
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details? }` (`status` includes `retry`, `recovery`)
@@ -294,6 +334,7 @@ issuing a write. The high-level shapes are:
 - `ResticSnapshot { id, folderId, hostId, snapshotId, timestamp, paths[], sizeBytes?, tags? }`
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
+- `QueuedAction { id, hostId, type: 'trigger_sync'|'trigger_backup'|'check_update'|'refresh_config', payload?, status: 'pending'|'taken'|'done'|'failed', createdAt, takenAt?, completedAt?, result? }` — LAMA-198. The control plane enqueues via `POST /hosts/:hostId/actions`; the daemon polls `GET /actions/pending` (each call atomically marks returned rows `taken`), then acks via `POST /actions/:id/complete` with `{status, result}`. Completion also inserts an `operation_log` row, so the existing `GET /operations` view reflects manual triggers uniformly with regular sync/backup reports.
 
 All `?` fields are nullable. Timestamps are milliseconds since epoch
 (`Date.now()`).

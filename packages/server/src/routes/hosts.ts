@@ -4,6 +4,7 @@ import { isNewer, type Host, type HostStatus } from "@lamasync/core";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import { getCachedLatestVersion } from "../release-cache.ts";
+import { bumpConfigRevisionForPeers } from "../config-revision.ts";
 
 // Test seam: mirrors the pattern used by every other route file in this
 // directory so unit tests can substitute the production DB.
@@ -20,6 +21,7 @@ interface HostRow {
   status: string | null;
   lan_ip: string | null;
   version: string | null;
+  config_revision: number | null;
 }
 
 /**
@@ -42,12 +44,59 @@ function rowToHost(row: HostRow, latestVersion: string | null): Host {
     status: (row.status ?? "unknown") as HostStatus,
     version,
     updateAvailable,
+    configRevision: row.config_revision ?? 0,
   };
 }
 
-const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version FROM hosts";
+const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision FROM hosts";
 
 export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
+  .get(
+    "/hosts",
+    async () => {
+      const rows = activeDb
+        .query<HostRow, []>(`${HOST_SELECT} ORDER BY hostname ASC`)
+        .all();
+      const latestVersion = await getCachedLatestVersion();
+      return rows.map((row) => rowToHost(row, latestVersion));
+    },
+    {
+      detail: {
+        summary: "List all registered hosts",
+        tags: ["Hosts"],
+        responses: {
+          200: { description: "Host list" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .get(
+    "/hosts/:hostId",
+    async ({ params, set }) => {
+      const row = activeDb
+        .query<HostRow, [string]>(`${HOST_SELECT} WHERE id = ?`)
+        .get(params.hostId);
+      if (!row) {
+        set.status = 404;
+        return { error: "Host not found" };
+      }
+      const latestVersion = await getCachedLatestVersion();
+      return rowToHost(row, latestVersion);
+    },
+    {
+      params: t.Object({ hostId: t.String() }),
+      detail: {
+        summary: "Get a single host by id",
+        tags: ["Hosts"],
+        responses: {
+          200: { description: "Host record" },
+          404: { description: "Not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
   .post(
     "/register",
     async ({ body, set }) => {
@@ -77,6 +126,10 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       const latestVersion = await getCachedLatestVersion();
       const host = rowToHost(row, latestVersion);
       broadcast({ kind: "host", host });
+      // LAMA-198: register may bring a previously-unknown host into a fleet
+      // where peers exist; bump every host's revision so other daemons
+      // re-pull their config (LAN-peer discovery lives in /config/:hostId).
+      bumpConfigRevisionForPeers(id);
       set.status = 201;
       return host;
     },

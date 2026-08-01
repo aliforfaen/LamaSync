@@ -9,7 +9,10 @@ import type {
   FolderAssignment,
   HealthResponse,
   Host,
+  HostConfig,
   OperationLog,
+  QueuedAction,
+  QueuedActionType,
   ResticSnapshot,
   Share,
 } from "@lamasync/core";
@@ -117,6 +120,11 @@ export function apiDelete<T = void>(path: string): Promise<T> {
 
 export const api = {
   health: () => apiGet<HealthResponse>("/health"),
+  listHosts: () => apiGet<Host[]>("/hosts"),
+  getHost: (hostId: string) =>
+    apiGet<Host>(`/hosts/${encodeURIComponent(hostId)}`),
+  getConfig: (hostId: string) =>
+    apiGet<HostConfig>(`/config/${encodeURIComponent(hostId)}`),
   listFolders: () => apiGet<Folder[]>("/folders"),
   listAssignments: (folderId: string) =>
     apiGet<FolderAssignment[]>(`/folders/${encodeURIComponent(folderId)}/assignments`),
@@ -124,7 +132,12 @@ export const api = {
   updateFolder: (id: string, body: Partial<Folder>) =>
     apiPut<Folder>(`/folders/${encodeURIComponent(id)}`, body),
   deleteFolder: (id: string) => apiDelete(`/folders/${encodeURIComponent(id)}`),
-  listManifests: () => apiGet<DotfileManifest[]>("/dotfiles/manifests"),
+  listManifests: (hostId?: string) =>
+    apiGet<DotfileManifest[]>(
+      hostId
+        ? `/dotfiles/manifests?hostId=${encodeURIComponent(hostId)}`
+        : "/dotfiles/manifests",
+    ),
   createManifest: (body: Partial<DotfileManifest>) =>
     apiPost<DotfileManifest>("/dotfiles/manifests", body),
   updateManifest: (id: string, body: Partial<DotfileManifest>) =>
@@ -133,6 +146,10 @@ export const api = {
     apiDelete(`/dotfiles/manifests/${encodeURIComponent(id)}`),
   listOperations: (limit = 20) =>
     apiGet<OperationLog[]>(`/operations?limit=${limit}`),
+  listOperationsForHost: (hostId: string, limit = 50) =>
+    apiGet<OperationLog[]>(
+      `/operations?hostId=${encodeURIComponent(hostId)}&limit=${limit}`,
+    ),
   listConflicts: (status = "pending") =>
     apiGet<Conflict[]>(`/conflicts?status=${encodeURIComponent(status)}`),
   resolveConflict: (id: string, resolution: "local" | "remote" | "both") =>
@@ -142,6 +159,24 @@ export const api = {
   pruneOperations: (olderThanMs: number) =>
     apiPost<{ deleted: number; olderThanMs: number }>(
       `/admin/prune?olderThanMs=${olderThanMs}`,
+    ),
+  // LAMA-198: queued-action model. The Web UI uses `enqueueAction` to ask
+  // a daemon to do work (sync, backup, check-update, refresh-config); the
+  // rest of the endpoints exist for the detail page to render recent
+  // action history.
+  enqueueAction: (
+    hostId: string,
+    body: { type: QueuedActionType; payload?: Record<string, unknown> | null },
+  ): Promise<QueuedAction> =>
+    apiPost<QueuedAction>(
+      `/hosts/${encodeURIComponent(hostId)}/actions`,
+      body,
+    ),
+  listHostActions: (hostId: string, status?: string) =>
+    apiGet<QueuedAction[]>(
+      status
+        ? `/hosts/${encodeURIComponent(hostId)}/actions?status=${encodeURIComponent(status)}`
+        : `/hosts/${encodeURIComponent(hostId)}/actions`,
     ),
 };
 

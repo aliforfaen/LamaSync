@@ -13,6 +13,7 @@ import { resticRoutes } from "./routes/restic.ts";
 import { conflictsRoutes } from "./routes/conflicts.ts";
 import { operationsRoutes } from "./routes/operations.ts";
 import { releaseRoutes } from "./routes/release.ts";
+import { actionsRoutes } from "./routes/actions.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { VERSION, type ErrorResponse } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
@@ -57,6 +58,10 @@ const app = new Elysia()
           { name: "Admin", description: "Destructive admin operations" },
           { name: "Restic", description: "Restic snapshot and restore jobs" },
           { name: "Conflicts", description: "Manual sync conflict queue" },
+          {
+            name: "Actions",
+            description: "Queued actions (control plane → daemon)",
+          },
         ],
         components: {
           securitySchemes: {
@@ -86,6 +91,7 @@ const app = new Elysia()
   .use(conflictsRoutes)
   .use(operationsRoutes)
   .use(releaseRoutes)
+  .use(actionsRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;

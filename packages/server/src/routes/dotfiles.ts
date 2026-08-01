@@ -4,6 +4,7 @@ import { join } from "path";
 import { db as defaultDb } from "../db.ts";
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { DotfileManifest, DotfileVersion } from "@lamasync/core";
+import { bumpConfigRevision } from "../config-revision.ts";
 
 const BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR || "/backups";
 const GLOBAL_HOST_ID = "_global";
@@ -170,6 +171,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
           "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE id = ?",
         )
         .get(id);
+      // LAMA-198: manifest creation changes the host's effective dotfile
+      // list. Bump that host so the daemon re-pulls /config/:hostId. A
+      // global manifest affects every host.
+      if (hostId === GLOBAL_HOST_ID) {
+        bumpConfigRevision();
+      } else {
+        bumpConfigRevision([hostId]);
+      }
       set.status = 201;
       return rowToManifest(row!);
     },
@@ -247,6 +256,15 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
           "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE id = ?",
         )
         .get(params.id);
+      // LAMA-198: manifest update affects only the host this manifest
+      // belongs to. (Global manifests also bump-all via the dispatch below.)
+      if (row) {
+        if (row.host_id === "_global") {
+          bumpConfigRevision();
+        } else {
+          bumpConfigRevision([row.host_id]);
+        }
+      }
       return rowToManifest(row!);
     },
     {
@@ -281,8 +299,22 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Manifest not found" };
       }
+      // LAMA-198: capture host_id before the row is deleted.
+      const existingHostRow = activeDb
+        .query<{ host_id: string }, [string]>(
+          "SELECT host_id FROM dotfile_manifests WHERE id = ?",
+        )
+        .get(params.id);
       activeDb.run("DELETE FROM dotfile_versions WHERE manifest_id = ?", [params.id]);
       activeDb.run("DELETE FROM dotfile_manifests WHERE id = ?", [params.id]);
+      // LAMA-198: a global manifest affects every host; a host-scoped one
+      // affects only that host. The pre-delete row already gave us the
+      // host_id above.
+      if (existingHostRow?.host_id === "_global") {
+        bumpConfigRevision();
+      } else if (existingHostRow) {
+        bumpConfigRevision([existingHostRow.host_id]);
+      }
       set.status = 204;
       return null;
     },

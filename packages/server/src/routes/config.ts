@@ -23,6 +23,7 @@ interface HostRow {
   last_seen: number | null;
   status: string | null;
   lan_ip: string | null;
+  config_revision: number | null;
 }
 
 // SFTP credentials embedded in the generated rclone config so the daemon
@@ -415,7 +416,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
 
     const allHostRows = activeDb
       .query<HostRow, []>(
-        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip FROM hosts",
+        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, config_revision FROM hosts",
       )
       .all();
 
@@ -446,6 +447,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
         lanIp: host.lan_ip,
         lastSeen: host.last_seen,
         status: (host.status ?? "unknown") as HostConfig["host"]["status"],
+        configRevision: host.config_revision ?? 0,
       },
       assignments,
       folders,

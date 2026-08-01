@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS hosts (
     last_seen   INTEGER,
     status      TEXT DEFAULT 'unknown',
     lan_ip      TEXT,
-    version     TEXT
+    version     TEXT,
+    config_revision INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -161,6 +162,21 @@ CREATE TABLE IF NOT EXISTS folder_locks (
 
 CREATE INDEX IF NOT EXISTS idx_folder_locks_locked_by
     ON folder_locks(locked_by);
+
+CREATE TABLE IF NOT EXISTS queued_actions (
+    id            TEXT PRIMARY KEY,
+    host_id       TEXT NOT NULL REFERENCES hosts(id),
+    type          TEXT NOT NULL,
+    payload       TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    taken_at      INTEGER,
+    completed_at  INTEGER,
+    result        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status
+    ON queued_actions(host_id, status);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -200,4 +216,7 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE dotfile_manifests ADD COLUMN last_sync_direction TEXT",
   "ALTER TABLE dotfile_manifests ADD COLUMN original_uploader_host_id TEXT",
   "ALTER TABLE hosts ADD COLUMN version TEXT",
+  "ALTER TABLE hosts ADD COLUMN config_revision INTEGER DEFAULT 0",
+  "CREATE TABLE IF NOT EXISTS queued_actions (id TEXT PRIMARY KEY, host_id TEXT NOT NULL REFERENCES hosts(id), type TEXT NOT NULL, payload TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, taken_at INTEGER, completed_at INTEGER, result TEXT)",
+  "CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status ON queued_actions(host_id, status)",
 ];

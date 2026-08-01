@@ -192,7 +192,7 @@ export function Dashboard() {
             <div className="empty-row">No hosts registered yet</div>
           ) : (
             data.hosts.map((h) => (
-              <div className="fleet-card" key={h.id}>
+              <Link className="fleet-card fleet-card-link" key={h.id} to={`/hosts/${encodeURIComponent(h.id)}`}>
                 <div className="fleet-card-head">
                   <strong>{h.hostname}</strong>
                   <span className={`badge badge-${h.status}`}>{h.status}</span>
@@ -202,7 +202,7 @@ export function Dashboard() {
                   v{h.version ?? "—"}{" "}
                   {h.updateAvailable && <span className="badge badge-update">update</span>}
                 </span>
-              </div>
+              </Link>
             ))
           )}
         </div>

@@ -17,6 +17,9 @@ const { __setDb, foldersRoutes } = (await import("./folders.ts")) as unknown as 
   __setDb: (db: Database) => void;
   foldersRoutes: Elysia;
 };
+const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as unknown as {
+  __setDb: (db: Database) => void;
+};
 
 let db: Database;
 let app: { handle(request: Request): Response | Promise<Response> };
@@ -32,6 +35,9 @@ beforeEach(() => {
     }
   }
   __setDb(db);
+  // config-revision.ts holds its own activeDb; point it at the test DB
+  // so folder create/update/delete bumps land in the same in-memory store.
+  __setConfigRevisionDb(db);
   app = new Elysia().use(getAuthPlugin()).use(foldersRoutes);
 });
 
@@ -323,5 +329,94 @@ describe("GET /api/v1/folders — s3SecretAccessKey redaction (LAMA-178)", () =>
       )
       .get(id);
     expect(stored?.s3_secret_access_key).toBe("TOP_SECRET");
+  });
+});
+
+describe("config_revision bumps (LAMA-198)", () => {
+  function getRev(hostId: string): number {
+    db.run(`INSERT OR IGNORE INTO hosts (id, hostname) VALUES (?, ?)`, [hostId, hostId]);
+    const row = db
+      .query<{ config_revision: number | null }, [string]>(
+        "SELECT config_revision FROM hosts WHERE id = ?",
+      )
+      .get(hostId);
+    return row?.config_revision ?? 0;
+  }
+
+  test("POST /folders bumps every host's revision", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a'), ('b','b')`);
+    const beforeA = getRev("a");
+    const beforeB = getRev("b");
+
+    const res = await postJson("/api/v1/folders", { name: "fresh", type: "sync" });
+    expect(res.status).toBe(201);
+
+    expect(getRev("a")).toBe(beforeA + 1);
+    expect(getRev("b")).toBe(beforeB + 1);
+  });
+
+  test("PUT /folders/:id bumps only assigned hosts", async () => {
+    const created = await postJson("/api/v1/folders", { name: "x", type: "sync" });
+    const folderId = ((await created.json()) as { id: string }).id;
+
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a'), ('b','b'), ('c','c')`);
+    db.run(
+      `INSERT INTO folder_assignments
+         (id, folder_id, host_id, role, local_path, enabled)
+       VALUES ('as-b', ?, 'b', 'both', '/tmp/b', 1)`,
+      [folderId],
+    );
+    const beforeA = getRev("a");
+    const beforeB = getRev("b");
+    const beforeC = getRev("c");
+
+    await putJson(`/api/v1/folders/${folderId}`, { name: "x-renamed" });
+
+    expect(getRev("a")).toBe(beforeA);
+    expect(getRev("b")).toBe(beforeB + 1);
+    expect(getRev("c")).toBe(beforeC);
+  });
+
+  test("assign / unassign / patch bump the affected host", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a'), ('b','b')`);
+    const folder = (await (await postJson("/api/v1/folders", { name: "x", type: "sync" })).json()) as { id: string };
+
+    const beforeA = getRev("a");
+    const beforeB = getRev("b");
+
+    await postJson(`/api/v1/folders/${folder.id}/assign`, {
+      hostId: "a",
+      role: "both",
+      localPath: "/tmp/a",
+    });
+    expect(getRev("a")).toBe(beforeA + 1);
+    expect(getRev("b")).toBe(beforeB);
+
+    const beforeA2 = getRev("a");
+    const beforeB2 = getRev("b");
+    await app.handle(
+      request(`/api/v1/folders/${folder.id}/assign/a`, { method: "DELETE" }),
+    );
+    expect(getRev("a")).toBe(beforeA2 + 1);
+    expect(getRev("b")).toBe(beforeB2);
+
+    // Re-assign to b for the patch test.
+    await postJson(`/api/v1/folders/${folder.id}/assign`, {
+      hostId: "b",
+      role: "both",
+      localPath: "/tmp/b",
+    });
+    const beforeB3 = getRev("b");
+    await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folder.id}/assign/b`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+    expect(getRev("b")).toBe(beforeB3 + 1);
   });
 });

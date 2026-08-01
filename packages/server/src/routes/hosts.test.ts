@@ -9,6 +9,7 @@ process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-
 const { getAuthPlugin } = await import("../auth.ts");
 const { __setCachedLatestVersionForTests } = (await import("../release-cache.ts")) as typeof import("../release-cache.ts");
 const { __setDb, hostsRoutes } = (await import("./hosts.ts")) as typeof import("./hosts.ts");
+const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as typeof import("../config-revision.ts");
 
 let db: Database;
 let app: { handle(request: Request): Response | Promise<Response> };
@@ -29,6 +30,9 @@ beforeEach(() => {
   // tests use, so updateAvailable derivation stays deterministic.
   __setCachedLatestVersionForTests("9.9.9");
   __setDb(db);
+  // config-revision.ts holds its own activeDb; point it at the test DB so
+  // bumps issued by the routes land in the same in-memory database.
+  __setConfigRevisionDb(db);
   app = new Elysia().use(getAuthPlugin()).use(hostsRoutes);
 });
 
@@ -154,5 +158,63 @@ describe("POST /api/v1/report/health — version field (LAMA-199)", () => {
       version: "0.4.0",
     });
     expect(res.status).toBe(422);
+  });
+});
+
+describe("GET /api/v1/hosts and /api/v1/hosts/:hostId (LAMA-198)", () => {
+  async function get(path: string): Promise<Response> {
+    return app.handle(request(path));
+  }
+
+  test("GET /hosts lists every registered host with configRevision exposed", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-b', 'host-b')`);
+    // Bump host-b explicitly so configRevision shows up non-zero.
+    db.run(`UPDATE hosts SET config_revision = 7 WHERE id = 'host-b'`);
+
+    const res = await get("/api/v1/hosts");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<Record<string, unknown>>;
+    expect(body).toHaveLength(2);
+    const a = body.find((h) => h.id === "host-a");
+    const b = body.find((h) => h.id === "host-b");
+    expect(a?.configRevision).toBe(0);
+    expect(b?.configRevision).toBe(7);
+    // Sorted by hostname ASC
+    expect(body[0]?.hostname).toBe("host-a");
+    expect(body[1]?.hostname).toBe("host-b");
+  });
+
+  test("GET /hosts/:hostId returns the single host", async () => {
+    const res = await get("/api/v1/hosts/host-a");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.id).toBe("host-a");
+    expect(body.hostname).toBe("host-a");
+    expect(body.configRevision).toBe(0);
+  });
+
+  test("GET /hosts/:hostId returns 404 for an unknown host", async () => {
+    const res = await get("/api/v1/hosts/ghost");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Host not found");
+  });
+
+  test("POST /register bumps every other host's config_revision", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-b', 'host-b')`);
+    db.run(`UPDATE hosts SET config_revision = 2 WHERE id = 'host-b'`);
+
+    await post("/api/v1/register", {
+      id: "host-c",
+      hostname: "host-c",
+      tailnetIp: null,
+    });
+
+    const row = db
+      .query<{ config_revision: number | null }, [string]>(
+        "SELECT config_revision FROM hosts WHERE id = ?",
+      )
+      .get("host-b");
+    expect(row?.config_revision).toBe(3);
   });
 });

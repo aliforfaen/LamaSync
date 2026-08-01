@@ -11,6 +11,8 @@ import type {
   HostConfig,
   OperationLog,
   OperationReport,
+  QueuedAction,
+  QueuedActionType,
   ResticRestoreJob,
   ResticSnapshot,
   Share,
@@ -159,6 +161,58 @@ export class LamaSyncApiClient {
 
   getConfig(hostId: string): Promise<HostConfig> {
     return this.request<HostConfig>("GET", `/api/v1/config/${encodeURIComponent(hostId)}`);
+  }
+
+  // LAMA-198: host list / detail + queued-action model. The Web UI and
+  // daemon both use these; the daemon's poller is the only consumer of
+  // `listPendingActions` / `completeAction`.
+  listHosts(): Promise<Host[]> {
+    return this.request<Host[]>("GET", "/api/v1/hosts");
+  }
+
+  getHost(hostId: string): Promise<Host> {
+    return this.request<Host>("GET", `/api/v1/hosts/${encodeURIComponent(hostId)}`);
+  }
+
+  listPendingActions(hostId: string, limit = 10): Promise<QueuedAction[]> {
+    return this.request<QueuedAction[]>(
+      "GET",
+      `/api/v1/actions/pending?hostId=${encodeURIComponent(hostId)}&limit=${limit}`,
+    );
+  }
+
+  completeAction(
+    id: string,
+    body: { status: "done" | "failed"; result?: string | null },
+  ): Promise<void> {
+    return this.request<void>(
+      "POST",
+      `/api/v1/actions/${encodeURIComponent(id)}/complete`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  enqueueAction(
+    hostId: string,
+    body: { type: QueuedActionType; payload?: Record<string, unknown> | null },
+  ): Promise<QueuedAction> {
+    return this.request<QueuedAction>(
+      "POST",
+      `/api/v1/hosts/${encodeURIComponent(hostId)}/actions`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  listHostActions(hostId: string, status?: string): Promise<QueuedAction[]> {
+    const qs = status
+      ? `?status=${encodeURIComponent(status)}`
+      : "";
+    return this.request<QueuedAction[]>(
+      "GET",
+      `/api/v1/hosts/${encodeURIComponent(hostId)}/actions${qs}`,
+    );
   }
 
   reportHealth(body: HealthReport): Promise<void> {

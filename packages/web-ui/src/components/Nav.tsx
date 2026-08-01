@@ -38,6 +38,9 @@ export function Nav() {
       <NavLink to="/" end>
         <IconHost /> Dashboard
       </NavLink>
+      <NavLink to="/hosts">
+        <IconHost /> Hosts
+      </NavLink>
       <NavLink to="/folders">
         <IconFolder /> Folders
       </NavLink>

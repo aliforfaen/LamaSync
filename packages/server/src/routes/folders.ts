@@ -3,6 +3,10 @@ import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type { Folder, FolderAssignment, FolderBackend, FolderType, S3Provider } from "@lamasync/core";
+import {
+  bumpConfigRevision,
+  bumpConfigRevisionForFolder,
+} from "../config-revision.ts";
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
 const FOLDER_BACKENDS: FolderBackend[] = ["sftp", "s3", "local"];
@@ -262,6 +266,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, s3_provider, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [id, name, type, now, isEncrypted ? 1 : 0, password, normalizedGitProvider, normalizedGitRemote, backend, s3Provider, s3Endpoint, s3Bucket, s3AccessKeyId, s3SecretAccessKey, s3Region],
       );
+      // LAMA-198: a new folder has no assignments yet, but it does change
+      // the per-host folder list — bump every host so daemons re-pull.
+      bumpConfigRevision();
       set.status = 201;
       return {
         id,
@@ -484,6 +491,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         "UPDATE folders SET name = ?, type = ?, encrypted = ?, crypt_password = ?, git_provider = ?, git_remote = ?, backend = ?, s3_provider = ?, s3_endpoint = ?, s3_bucket = ?, s3_access_key_id = ?, s3_secret_access_key = ?, s3_region = ? WHERE id = ?",
         [newName, newType, newEncrypted ? 1 : 0, newPassword ?? null, effectiveGitProvider, effectiveGitRemote, effectiveBackend, effectiveS3Provider, nextS3Endpoint, nextS3Bucket, nextS3AccessKeyId, nextS3SecretAccessKey, nextS3Region, params.id],
       );
+      // LAMA-198: bump every host that has this folder assigned. The
+      // assignment table is the source of truth for "who needs a refresh".
+      bumpConfigRevisionForFolder(params.id);
       return rowToFolder({
         ...existing,
         name: newName,
@@ -567,6 +577,11 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Folder not found" };
       }
+      // LAMA-198: assignments for this folder were deleted above. Bump
+      // every host (the "who used to have this folder" set was already
+      // cascaded away, but other hosts may now see an empty folder list
+      // for assignment-shape reasons).
+      bumpConfigRevision();
       set.status = 204;
       return null;
     },
@@ -661,6 +676,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to load assignment" };
       }
+      // LAMA-198: only the host that owns this assignment needs to re-pull.
+      bumpConfigRevision([b.hostId]);
       set.status = 201;
       return rowToAssignment(row);
     },
@@ -716,6 +733,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Assignment not found" };
       }
+      // LAMA-198: only the unassigned host needs to drop the folder.
+      bumpConfigRevision([params.hostId]);
       set.status = 204;
       return null;
     },
@@ -815,6 +834,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to load assignment" };
       }
+      // LAMA-198: only the patched host needs to re-pull.
+      bumpConfigRevision([params.hostId]);
       return rowToAssignment(row);
     },
     {

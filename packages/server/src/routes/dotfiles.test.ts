@@ -8,6 +8,7 @@ process.env.LAMASYNC_BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR ?? "/tmp/lamas
 
 const { getAuthPlugin } = await import("../auth.ts");
 const { __setDb, dotfilesRoutes } = (await import("./dotfiles.ts")) as typeof import("./dotfiles.ts");
+const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as typeof import("../config-revision.ts");
 
 let db: Database;
 let app: { handle(request: Request): Response | Promise<Response> };
@@ -24,6 +25,8 @@ beforeEach(() => {
   }
   db.exec(`INSERT INTO hosts (id, hostname) VALUES ('host-a', 'host-a');`);
   __setDb(db);
+  // LAMA-198: dotfiles route bumps config_revision through the helper module.
+  __setConfigRevisionDb(db);
   app = new Elysia().use(getAuthPlugin()).use(dotfilesRoutes);
 });
 
