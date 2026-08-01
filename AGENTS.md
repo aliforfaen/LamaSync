@@ -319,6 +319,8 @@ cd scripts/e2e-sandbox && docker compose up --build --abort-on-container-exit
 
 The complete testing handoff (including the realistic Proxmox-over-tailnet
 path and the production-smoke checklist) is in `docs/handoff/client-testing.md`.
+The Command Center v1 (LAMA-183 batches 1–2) browser dogfood brief lives in
+`docs/handoff/command-center-testing.md` (test matrix + known limitations).
 
 Current coverage:
 - `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
