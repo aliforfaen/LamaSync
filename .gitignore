@@ -1,3 +1,5 @@
 node_modules/
 dist/
 .pi-subagents/
+docker/.env
+docker/.env.api-key
