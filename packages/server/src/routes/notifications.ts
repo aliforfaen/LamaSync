@@ -8,7 +8,12 @@ import type {
 import { db as defaultDb } from "../db.ts";
 import {
   __setDb as __setNotificationDb,
+  applyChannelInput,
+  deliverTestToChannel,
   emitNotificationEvent,
+  getChannel,
+  listChannels,
+  validateChannelInput,
 } from "../notifications.ts";
 
 const DEFAULT_LIMIT = 50;
@@ -140,9 +145,161 @@ export const notificationsRoutes = new Elysia({ prefix: "/api/v1" })
       },
     },
   )
+  .get(
+    "/notifications/channels",
+    () => listChannels(activeDb),
+    {
+      detail: {
+        summary: "List notification channels",
+        tags: ["Notifications"],
+        responses: {
+          200: { description: "Notification channel list" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/notifications/channels",
+    ({ body, set }) => {
+      const validationError = validateChannelInput(body);
+      if (validationError) {
+        set.status = 400;
+        return { error: validationError };
+      }
+      const channel = applyChannelInput(
+        activeDb,
+        crypto.randomUUID(),
+        body,
+        true,
+      );
+      if (!channel) {
+        set.status = 500;
+        return { error: "Failed to create channel" };
+      }
+      set.status = 201;
+      return channel;
+    },
+    {
+      body: t.Object({
+        kind: t.Union([t.Literal("ntfy"), t.Literal("webhook")]),
+        name: t.String(),
+        url: t.String(),
+        enabled: t.Optional(t.Boolean()),
+        severities: t.Array(
+          t.Union([
+            t.Literal("critical"),
+            t.Literal("default"),
+            t.Literal("info"),
+          ]),
+        ),
+      }),
+      detail: {
+        summary: "Create a notification channel",
+        tags: ["Notifications"],
+        responses: {
+          201: { description: "Channel created" },
+          400: { description: "Invalid channel input" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .patch(
+    "/notifications/channels/:channelId",
+    ({ params, body, set }) => {
+      const validationError = validateChannelInput(body);
+      if (validationError) {
+        set.status = 400;
+        return { error: validationError };
+      }
+      const existing = getChannel(activeDb, params.channelId);
+      if (!existing) {
+        set.status = 404;
+        return { error: "Channel not found" };
+      }
+      const channel = applyChannelInput(
+        activeDb,
+        params.channelId,
+        body,
+        false,
+      );
+      if (!channel) {
+        set.status = 404;
+        return { error: "Channel not found" };
+      }
+      return channel;
+    },
+    {
+      params: t.Object({ channelId: t.String() }),
+      body: t.Object({
+        kind: t.Optional(t.Union([t.Literal("ntfy"), t.Literal("webhook")])),
+        name: t.Optional(t.String()),
+        url: t.Optional(t.String()),
+        enabled: t.Optional(t.Boolean()),
+        severities: t.Optional(
+          t.Array(
+            t.Union([
+              t.Literal("critical"),
+              t.Literal("default"),
+              t.Literal("info"),
+            ]),
+          ),
+        ),
+      }),
+      detail: {
+        summary: "Update a notification channel",
+        tags: ["Notifications"],
+        responses: {
+          200: { description: "Channel updated" },
+          400: { description: "Invalid channel input" },
+          404: { description: "Channel not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .delete(
+    "/notifications/channels/:channelId",
+    ({ params, set }) => {
+      const result = activeDb.run(
+        "DELETE FROM notification_channels WHERE id = ?",
+        [params.channelId],
+      );
+      if (result.changes === 0) {
+        set.status = 404;
+        return { error: "Channel not found" };
+      }
+      set.status = 204;
+      return null;
+    },
+    {
+      params: t.Object({ channelId: t.String() }),
+      detail: {
+        summary: "Delete a notification channel",
+        tags: ["Notifications"],
+        responses: {
+          204: { description: "Channel removed" },
+          404: { description: "Channel not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
   .post(
     "/notifications/test",
-    ({ set }) => {
+    async ({ body, set }) => {
+      // LAMA-221: with a channelId this delivers through ONLY that channel
+      // (Admin per-channel Test button). Without a body it exercises the
+      // whole record+fan-out pipeline like before.
+      if (body?.channelId) {
+        const result = await deliverTestToChannel(activeDb, body.channelId);
+        if (!result) {
+          set.status = 404;
+          return { error: "Channel not found" };
+        }
+        return { channelId: body.channelId, ...result };
+      }
       const event = emitNotificationEvent({
         type: "test",
         message: TEST_MESSAGE,
@@ -155,11 +312,13 @@ export const notificationsRoutes = new Elysia({ prefix: "/api/v1" })
       return event;
     },
     {
+      body: t.Optional(t.Object({ channelId: t.String() })),
       detail: {
-        summary: "Send and record a test notification",
+        summary: "Send and record a test notification (optionally via one channel)",
         tags: ["Notifications"],
         responses: {
           201: { description: "Test notification recorded" },
+          404: { description: "Channel not found (channelId provided)" },
           401: { description: "Unauthorized" },
           500: { description: "Notification could not be recorded" },
         },

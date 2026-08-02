@@ -82,7 +82,11 @@ Missing or wrong key → `401 Unauthorized`.
 | GET    | `/api/v1/operations`                              | Query the operation log                          |
 | POST   | `/api/v1/report`                                  | Append an operation_log entry                    |
 | GET    | `/api/v1/notifications?limit=…`                   | List durable notification events, newest first   |
-| POST   | `/api/v1/notifications/test`                      | Record and deliver an Admin test notification    |
+| GET    | `/api/v1/notifications/channels`                 | List configured delivery channels                |
+| POST   | `/api/v1/notifications/channels`                 | Create a channel (kind, name, url, severities)   |
+| PATCH  | `/api/v1/notifications/channels/:id`             | Update a channel (url/name/enabled/severities)   |
+| DELETE | `/api/v1/notifications/channels/:id`             | Delete a channel                                 |
+| POST   | `/api/v1/notifications/test`                      | Record/deliver a test; `{channelId}` targets one |
 | GET    | `/api/v1/browse/local?path=…`                     | Read-only browse of `LAMASYNC_BACKUP_DIR`        |
 | GET    | `/api/v1/browse/s3?folderId=…&path=…`             | Read-only S3 prefix listing for an S3 folder     |
 | GET    | `/api/v1/browse/restic`                             | Read-only proxy of restic snapshot metadata      |

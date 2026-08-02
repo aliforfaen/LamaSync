@@ -13,6 +13,7 @@ const {
   __resetNotificationStateForTests,
   emitNotification,
   runNotificationSweep,
+  seedChannelsFromEnv,
 } = await import("../notifications.ts");
 const { __setCachedLatestVersionForTests } = await import("../release-cache.ts");
 const { __setDb, notificationsRoutes } = await import("./notifications.ts");
@@ -155,7 +156,7 @@ describe("notification event router", () => {
     expect(severities).toEqual(["default", "critical", "default"]);
   });
 
-  test("delivers critical/default to ntfy and every severity to the LamaDB webhook", async () => {
+  test("delivers per seeded channel severities (DB-driven, LAMA-221)", async () => {
     const deliveries: Array<{
       path: string;
       body: Record<string, unknown>;
@@ -172,10 +173,13 @@ describe("notification event router", () => {
     });
 
     try {
+      // LAMA-221: channels come from the DB, not env. The seed mirrors the
+      // legacy behavior: ntfy skips info, the webhook gets everything.
       process.env.LAMASYNC_NTFY_URL =
         `http://127.0.0.1:${server.port}/lamasync-test`;
       process.env.LAMASYNC_LAMADB_WEBHOOK_URL =
         `http://127.0.0.1:${server.port}/webhook`;
+      seedChannelsFromEnv(db);
 
       emitNotification({ type: "restore_failed", message: "critical event" });
       emitNotification({ type: "test", message: "default event" });
@@ -244,11 +248,117 @@ describe("notification event router", () => {
       );
       expect(webhook?.body.type).toBe("restore_done");
       expect(webhook?.body.message).toBe("info event");
+
+      // Per-channel delivery state was recorded.
+      const ntfyChannel = db
+        .query<{ last_delivery_status: string | null }, []>(
+          "SELECT last_delivery_status FROM notification_channels WHERE kind = 'ntfy'",
+        )
+        .get();
+      expect(ntfyChannel?.last_delivery_status).toBe("success");
     } finally {
       delete process.env.LAMASYNC_NTFY_URL;
       delete process.env.LAMASYNC_LAMADB_WEBHOOK_URL;
       server.stop(true);
     }
+  });
+
+  test("empty channels table delivers nothing without crashing", () => {
+    expect(
+      emitNotification({ type: "restore_failed", message: "no channel" }),
+    ).toBe(true);
+    const count = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM notification_events",
+      )
+      .get();
+    expect(count?.count).toBe(1);
+    // Nothing to deliver to — just make sure the pipeline survived.
+    const channelCount = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM notification_channels",
+      )
+      .get();
+    expect(channelCount?.count).toBe(0);
+  });
+
+  test("severity filter: info events are skipped for a critical/default channel", async () => {
+    const deliveries: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch() {
+        deliveries.push("hit");
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    try {
+      db.run(
+        `INSERT INTO notification_channels
+           (id, kind, name, url, enabled, severities, created_at)
+         VALUES (?, 'ntfy', 'alerts', ?, 1, ?, ?)`,
+        [
+          crypto.randomUUID(),
+          `http://127.0.0.1:${server.port}/alerts`,
+          JSON.stringify(["critical", "default"]),
+          Date.now(),
+        ],
+      );
+
+      emitNotification({ type: "restore_done", message: "info event" });
+      emitNotification({ type: "restore_failed", message: "critical event" });
+
+      await Bun.sleep(50);
+      expect(deliveries).toEqual(["hit"]);
+      const rows = db
+        .query<
+          { type: string; ntfy_delivered: number | null },
+          []
+        >("SELECT type, ntfy_delivered FROM notification_events ORDER BY rowid")
+        .all();
+      expect(rows).toEqual([
+        { type: "restore_done", ntfy_delivered: 0 },
+        { type: "restore_failed", ntfy_delivered: 1 },
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("seedChannelsFromEnv seeds only an empty table (idempotent)", () => {
+    process.env.LAMASYNC_NTFY_URL = "https://ntfy.sh/seeded-topic";
+    process.env.LAMASYNC_LAMADB_WEBHOOK_URL = "https://lamadb.local/webhook";
+
+    seedChannelsFromEnv(db);
+    let rows = db
+      .query<{ kind: string; url: string; severities: string }, []>(
+        "SELECT kind, url, severities FROM notification_channels ORDER BY kind",
+      )
+      .all();
+    expect(rows).toHaveLength(2);
+    const ntfy = rows.find((row) => row.kind === "ntfy");
+    expect(ntfy?.url).toBe("https://ntfy.sh/seeded-topic");
+    expect(JSON.parse(ntfy?.severities ?? "[]")).toEqual([
+      "critical",
+      "default",
+    ]);
+    const webhook = rows.find((row) => row.kind === "webhook");
+    expect(webhook?.url).toBe("https://lamadb.local/webhook");
+    expect(JSON.parse(webhook?.severities ?? "[]")).toEqual([
+      "critical",
+      "default",
+      "info",
+    ]);
+
+    // Second call (restart) must not duplicate.
+    seedChannelsFromEnv(db);
+    const count = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM notification_channels",
+      )
+      .get();
+    expect(count?.count).toBe(2);
   });
 });
 
@@ -283,6 +393,203 @@ describe("notification routes", () => {
     expect(response.status).toBe(200);
     const body = await responseObjects(response);
     expect(body.map((event) => event.message)).toEqual(["second", "first"]);
+  });
+});
+
+describe("notification channels (LAMA-221)", () => {
+  test("POST creates, GET lists, PATCH updates, DELETE removes", async () => {
+    const create = await app.handle(
+      request("/api/v1/notifications/channels", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "ntfy",
+          name: "alerts",
+          url: "https://ntfy.sh/alerts",
+          severities: ["critical", "default"],
+        }),
+      }),
+    );
+    expect(create.status).toBe(201);
+    const created = await responseObject(create);
+    expect(created.kind).toBe("ntfy");
+    expect(created.name).toBe("alerts");
+    expect(created.url).toBe("https://ntfy.sh/alerts");
+    expect(created.severities).toEqual(["critical", "default"]);
+    expect(created.enabled).toBe(true);
+    const channelId = String(created.id);
+
+    const list = await app.handle(
+      request("/api/v1/notifications/channels"),
+    );
+    expect(list.status).toBe(200);
+    const listed = await responseObjects(list);
+    expect(listed.map((channel) => channel.id)).toContain(channelId);
+
+    const patch = await app.handle(
+      request(`/api/v1/notifications/channels/${channelId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ url: "https://ntfy.sh/renamed", enabled: false }),
+      }),
+    );
+    expect(patch.status).toBe(200);
+    const updated = await responseObject(patch);
+    expect(updated.url).toBe("https://ntfy.sh/renamed");
+    expect(updated.enabled).toBe(false);
+
+    const del = await app.handle(
+      request(`/api/v1/notifications/channels/${channelId}`, {
+        method: "DELETE",
+      }),
+    );
+    expect(del.status).toBe(204);
+    const after = await responseObjects(
+      await app.handle(request("/api/v1/notifications/channels")),
+    );
+    expect(after).toHaveLength(0);
+  });
+
+  test("PATCH returns 404 for an unknown channel", async () => {
+    const response = await app.handle(
+      request("/api/v1/notifications/channels/missing", {
+        method: "PATCH",
+        body: JSON.stringify({ url: "https://ntfy.sh/x" }),
+      }),
+    );
+    expect(response.status).toBe(404);
+  });
+
+  test("DELETE returns 404 for an unknown channel", async () => {
+    const response = await app.handle(
+      request("/api/v1/notifications/channels/missing", {
+        method: "DELETE",
+      }),
+    );
+    expect(response.status).toBe(404);
+  });
+
+  test("rejects invalid channel input", async () => {
+    const badUrl = await app.handle(
+      request("/api/v1/notifications/channels", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "ntfy",
+          name: "x",
+          url: "not-a-url",
+          severities: ["critical"],
+        }),
+      }),
+    );
+    expect(badUrl.status).toBe(400);
+
+    const emptySeverities = await app.handle(
+      request("/api/v1/notifications/channels", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "ntfy",
+          name: "x",
+          url: "https://ntfy.sh/x",
+          severities: [],
+        }),
+      }),
+    );
+    expect(emptySeverities.status).toBe(400);
+
+    const badKind = await app.handle(
+      request("/api/v1/notifications/channels", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "email",
+          name: "x",
+          url: "https://x",
+          severities: ["critical"],
+        }),
+      }),
+    );
+    expect(badKind.status).toBe(422);
+  });
+
+  test("per-channel test delivers only through the selected channel", async () => {
+    const deliveries: Array<{ path: string }> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(incoming) {
+        deliveries.push({ path: new URL(incoming.url).pathname });
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    try {
+      const ntfyId = crypto.randomUUID();
+      const webhookId = crypto.randomUUID();
+      db.run(
+        `INSERT INTO notification_channels
+           (id, kind, name, url, enabled, severities, created_at)
+         VALUES (?, 'ntfy', 'a', ?, 1, ?, ?)`,
+        [
+          ntfyId,
+          `http://127.0.0.1:${server.port}/a`,
+          JSON.stringify(["critical"]),
+          Date.now(),
+        ],
+      );
+      db.run(
+        `INSERT INTO notification_channels
+           (id, kind, name, url, enabled, severities, created_at)
+         VALUES (?, 'webhook', 'b', ?, 1, ?, ?)`,
+        [
+          webhookId,
+          `http://127.0.0.1:${server.port}/b`,
+          JSON.stringify(["critical", "default", "info"]),
+          Date.now(),
+        ],
+      );
+
+      const response = await app.handle(
+        request("/api/v1/notifications/test", {
+          method: "POST",
+          body: JSON.stringify({ channelId: ntfyId }),
+        }),
+      );
+      expect(response.status).toBe(200);
+      const body = await responseObject(response);
+      expect(body.delivered).toBe(true);
+      expect(body.status).toBe("success");
+
+      expect(deliveries.map((delivery) => delivery.path)).toEqual(["/a"]);
+      const ntfyRow = db
+        .query<{ last_delivery_status: string | null }, [string]>(
+          "SELECT last_delivery_status FROM notification_channels WHERE id = ?",
+        )
+        .get(ntfyId);
+      expect(ntfyRow?.last_delivery_status).toBe("success");
+      const webhookRow = db
+        .query<{ last_delivery_status: string | null }, [string]>(
+          "SELECT last_delivery_status FROM notification_channels WHERE id = ?",
+        )
+        .get(webhookId);
+      expect(webhookRow?.last_delivery_status).toBeNull();
+
+      // The test event is recorded and marked delivered for the ntfy kind.
+      const event = db
+        .query<{ ntfy_delivered: number | null }, []>(
+          "SELECT ntfy_delivered FROM notification_events ORDER BY rowid DESC LIMIT 1",
+        )
+        .get();
+      expect(event?.ntfy_delivered).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("per-channel test returns 404 for an unknown channel", async () => {
+    const response = await app.handle(
+      request("/api/v1/notifications/test", {
+        method: "POST",
+        body: JSON.stringify({ channelId: "missing" }),
+      }),
+    );
+    expect(response.status).toBe(404);
   });
 });
 

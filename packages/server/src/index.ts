@@ -17,7 +17,8 @@ import { actionsRoutes } from "./routes/actions.ts";
 import { notificationsRoutes } from "./routes/notifications.ts";
 import { browseRoutes } from "./routes/browse.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
-import { startNotificationSweep } from "./notifications.ts";
+import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
+import { db } from "./db.ts";
 import { VERSION, type ErrorResponse } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
 
@@ -37,6 +38,11 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
   process.exit(0);
 }
 
+
+// LAMA-221: first boot with legacy env vars (LAMASYNC_NTFY_URL /
+// LAMASYNC_LAMADB_WEBHOOK_URL) seeds the notification_channels table once;
+// later config is managed from the Admin page and survives restarts.
+seedChannelsFromEnv(db);
 
 const app = new Elysia()
   .use(

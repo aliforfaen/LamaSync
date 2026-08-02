@@ -11,6 +11,7 @@ import type {
   HealthResponse,
   Host,
   HostConfig,
+  NotificationChannel,
   NotificationEvent,
   OperationLog,
   QueuedAction,
@@ -203,6 +204,37 @@ export const api = {
     apiGet<NotificationEvent[]>(`/notifications?limit=${limit}`),
   sendTestNotification: () =>
     apiPost<NotificationEvent>("/notifications/test"),
+  // LAMA-221: configurable notification channels.
+  listNotificationChannels: () =>
+    apiGet<NotificationChannel[]>("/notifications/channels"),
+  createNotificationChannel: (body: {
+    kind: "ntfy" | "webhook";
+    name: string;
+    url: string;
+    enabled?: boolean;
+    severities: NotificationChannel["severities"];
+  }) => apiPost<NotificationChannel>("/notifications/channels", body),
+  updateNotificationChannel: (
+    id: string,
+    body: Partial<{
+      kind: "ntfy" | "webhook";
+      name: string;
+      url: string;
+      enabled: boolean;
+      severities: NotificationChannel["severities"];
+    }>,
+  ) =>
+    apiPut<NotificationChannel>(
+      `/notifications/channels/${encodeURIComponent(id)}`,
+      body,
+    ),
+  deleteNotificationChannel: (id: string) =>
+    apiDelete(`/notifications/channels/${encodeURIComponent(id)}`),
+  testNotificationChannel: (channelId: string) =>
+    apiPost<{ channelId: string; delivered: boolean; status: "success" | "failed" }>(
+      "/notifications/test",
+      { channelId },
+    ),
   // LAMA-198: queued-action model. The Web UI uses `enqueueAction` to ask
   // a daemon to do work (sync, backup, check-update, refresh-config); the
   // rest of the endpoints exist for the detail page to render recent
