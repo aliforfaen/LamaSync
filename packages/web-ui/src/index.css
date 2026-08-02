@@ -23,6 +23,9 @@
   --accent-info: #7cb6ff;
   --accent-info-rgb: 79, 124, 255;
   --accent-info-bg: rgba(var(--accent-info-rgb), 0.2);
+  /* LAMA-206: deeper blue for filled primary buttons — white text on
+     --accent-info-rgb is only 3.71:1 (below WCAG AA 4.5:1); this is 4.94:1. */
+  --accent-primary-rgb: 59, 101, 235;
 
   --accent-ok: #6fcf97;
   --accent-ok-rgb: 46, 160, 67;
@@ -90,6 +93,8 @@
   --accent-info: #1d4ed8;
   --accent-info-rgb: 37, 99, 235;
   --accent-info-bg: rgba(var(--accent-info-rgb), 0.12);
+  /* filled primary buttons; white text is 5.17:1 (WCAG AA pass) */
+  --accent-primary-rgb: 37, 99, 235;
 
   --accent-ok: #15803d;
   --accent-ok-rgb: 22, 163, 74;
@@ -234,7 +239,7 @@ a:hover {
 }
 
 .login-card button {
-  background: rgb(var(--accent-info-rgb));
+  background: rgb(var(--accent-primary-rgb));
   color: var(--text-on-accent);
   border: 0;
   padding: 0.55rem 0.85rem;
@@ -459,21 +464,9 @@ button.action:hover {
 }
 
 button.action.primary {
-  background: rgb(var(--accent-info-rgb));
-  border-color: rgb(var(--accent-info-rgb));
+  background: rgb(var(--accent-primary-rgb));
+  border-color: rgb(var(--accent-primary-rgb));
   color: var(--text-on-accent);
-}
-
-/* LAMA-206: in dark mode rgb(var(--accent-info-rgb)) is rgb(79,124,255) —
-   white text on it is only 3.71:1 (below WCAG AA 4.5:1). Use a deeper blue
-   (rgb(59,101,235) ≈ 4.94:1) so primary buttons stay legible. */
-[data-theme="dark"] button.action.primary {
-  background: rgb(59, 101, 235);
-  border-color: rgb(59, 101, 235);
-}
-
-[data-theme="dark"] .login-card button {
-  background: rgb(59, 101, 235);
 }
 
 button.action.danger {

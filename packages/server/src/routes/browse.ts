@@ -105,7 +105,11 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
           set.status = 400;
           return { error: "path is not a directory" };
         }
-        throw err;
+        // Unexpected fs failure (EACCES, EIO, …): log server-side, never
+        // leak the raw error (it embeds absolute server paths) to the client.
+        console.error(`[browse] stat failed for ${JSON.stringify(rawPath)}:`, err);
+        set.status = 500;
+        return { error: "failed to read path" };
       }
       if (!isDirectory) {
         set.status = 400;
@@ -128,7 +132,9 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
           set.status = 400;
           return { error: "path is not a directory" };
         }
-        throw err;
+        console.error(`[browse] readdir failed for ${JSON.stringify(rawPath)}:`, err);
+        set.status = 500;
+        return { error: "failed to list directory" };
       }
 
       const namesMap = folderNameMap();
