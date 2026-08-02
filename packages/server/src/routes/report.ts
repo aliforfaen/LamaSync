@@ -7,6 +7,7 @@ import {
   __setDb as __setNotificationDb,
   emitNotification,
 } from "../notifications.ts";
+import { invalidateFolderSize, invalidateStorageReport } from "../stats.ts";
 
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
@@ -48,6 +49,13 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       [ts, hostId, folderId ?? null, operation, status, summary ?? null, details ?? null, durationMs ?? null],
     );
     const opId = Number(result.lastInsertRowid);
+
+    // LAMA-224: a completed sync/backup/dotfile changes the stored size —
+    // drop the cached storage report and the folder's size entry.
+    if (operation === "sync" || operation === "backup" || operation === "dotfile") {
+      invalidateStorageReport();
+      if (folderId) invalidateFolderSize(folderId);
+    }
 
     if (folderId) {
       const assignment = activeDb

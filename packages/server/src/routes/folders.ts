@@ -8,6 +8,7 @@ import {
   bumpConfigRevision,
   bumpConfigRevisionForFolder,
 } from "../config-revision.ts";
+import { getFolderSize } from "../stats.ts";
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
 const FOLDER_BACKENDS: FolderBackend[] = ["sftp", "s3", "local"];
@@ -341,6 +342,45 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         responses: {
           200: { description: "Assignment list" },
           404: { description: "Folder not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .get(
+    "/folders/:id/size",
+    async ({ params, query, set }) => {
+      const row = db
+        .query<FolderRow, [string]>(
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
+        )
+        .get(params.id);
+      if (!row) {
+        set.status = 404;
+        return { error: "Folder not found" };
+      }
+      const folder = rowToFolder(row);
+      // LAMA-224: size of the folder's working set. For s3 folders the
+      // credentials resolve from the Backend row; for local folders the
+      // first assignment's localPath is measured.
+      const localPath = db
+        .query<{ local_path: string | null }, [string]>(
+          "SELECT local_path FROM folder_assignments WHERE folder_id = ? AND local_path IS NOT NULL LIMIT 1",
+        )
+        .get(params.id)?.local_path ?? null;
+      const refresh = query.refresh === "1" || query.refresh === "true";
+      const size = await getFolderSize(db, folder, localPath, refresh);
+      return size;
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      query: t.Object({ refresh: t.Optional(t.String()) }),
+      detail: {
+        summary: "Last-known working-set size for a folder (cached 15 min)",
+        tags: ["Folders"],
+        responses: {
+          200: { description: "Folder size" },
+          404: { description: "Not found" },
           401: { description: "Unauthorized" },
         },
       },

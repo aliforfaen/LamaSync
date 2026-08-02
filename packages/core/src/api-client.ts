@@ -18,6 +18,8 @@ import type {
   ResticRestoreJob,
   ResticSnapshot,
   Share,
+  StorageReport,
+  FolderSize,
 } from "./types.ts";
 
 export class LamaSyncApiError extends Error {
@@ -610,6 +612,20 @@ export class LamaSyncApiClient {
     return this.request<{ ok: boolean; detail?: string }>(
       "POST",
       `/api/v1/backends/${encodeURIComponent(backendId)}/test`,
+    );
+  }
+
+  // LAMA-224: storage statistics.
+  getStorageReport(refresh = false): Promise<StorageReport> {
+    const qs = refresh ? "?refresh=1" : "";
+    return this.request<StorageReport>("GET", `/api/v1/stats/storage${qs}`);
+  }
+
+  getFolderSize(folderId: string, refresh = false): Promise<FolderSize> {
+    const qs = refresh ? "?refresh=1" : "";
+    return this.request<FolderSize>(
+      "GET",
+      `/api/v1/folders/${encodeURIComponent(folderId)}/size${qs}`,
     );
   }
 

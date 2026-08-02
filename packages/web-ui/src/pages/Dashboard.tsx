@@ -8,6 +8,7 @@ import type {
   OperationLog,
   ResticSnapshot,
   Share,
+  StorageReport,
   WSEvent,
 } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -49,6 +50,21 @@ function mergeEvent(prev: DashboardData, event: WSEvent): DashboardData {
 
 function formatTimestamp(ts: number | null | undefined): string {
   return ts ? new Date(ts).toLocaleString() : "—";
+}
+
+/** Human-readable byte count (KiB/MiB/GiB/TiB). */
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+  let value = bytes;
+  let unit = "B";
+  for (const u of units) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = u;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
 /**
@@ -117,6 +133,9 @@ export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { state: wsState, event } = useWebSocket();
+  // LAMA-224: storage report (server-side 5-min cache; refresh button bypasses).
+  const [storage, setStorage] = useState<StorageReport | null>(null);
+  const [storageBusy, setStorageBusy] = useState(false);
   // LAMA-203: captured once; highlights are computed against the previous
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
@@ -143,6 +162,15 @@ export function Dashboard() {
       .catch((err: unknown) => {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : String(err));
+      });
+    // LAMA-224: storage totals (best-effort — the server caches for 5 min).
+    api
+      .storageReport()
+      .then((report) => {
+        if (!cancelled) setStorage(report);
+      })
+      .catch(() => {
+        // storage is a nice-to-have; don't fail the dashboard over it
       });
     return () => {
       cancelled = true;
@@ -184,6 +212,18 @@ export function Dashboard() {
 
   const allQuiet =
     data !== null && !counts.conflicts && !failed.length && !offline.length && !updates.length;
+
+  async function onRefreshStorage(): Promise<void> {
+    setStorageBusy(true);
+    setError(null);
+    try {
+      setStorage(await api.storageReport(true));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStorageBusy(false);
+    }
+  }
 
   return (
     <div className="page">
@@ -280,7 +320,69 @@ export function Dashboard() {
         <SummaryCard label="Folders" value={counts.folders} />
         <SummaryCard label="Shares" value={counts.shares} />
         <SummaryCard label="Snapshots" value={counts.snapshots} />
+        <SummaryCard label="Storage" value={storage ? formatBytes(storage.totalBytes) : "—"} />
       </div>
+
+      <section className="section">
+        <div className="toolbar">
+          <h2>Storage</h2>
+          <button
+            type="button"
+            className="action"
+            disabled={storageBusy}
+            onClick={() => void onRefreshStorage()}
+          >
+            {storageBusy ? "Measuring…" : "Refresh"}
+          </button>
+        </div>
+        {!storage ? (
+          <div className="empty-row">Loading storage report…</div>
+        ) : (
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Kind</th>
+                <th>Size</th>
+                <th>Objects</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {storage.backends.map((entry) => (
+                <tr key={entry.backendId ?? entry.label}>
+                  <td>{entry.label}</td>
+                  <td>
+                    <span className={`badge badge-${entry.kind}`}>{entry.kind}</span>
+                  </td>
+                  <td>{formatBytes(entry.bytes)}</td>
+                  <td className="muted">{entry.objectCount ?? "—"}</td>
+                  <td>
+                    {entry.error ? (
+                      <span className="badge badge-failed" title={entry.error}>
+                        error
+                      </span>
+                    ) : (
+                      <span className="badge badge-success">ok</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              <tr>
+                <td>
+                  <strong>Total</strong>
+                </td>
+                <td />
+                <td>
+                  <strong>{formatBytes(storage.totalBytes)}</strong>
+                </td>
+                <td />
+                <td />
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </section>
 
       <section className="section">
         <h2>Recent activity</h2>
@@ -334,7 +436,7 @@ export function Dashboard() {
 
 interface SummaryCardProps {
   label: string;
-  value: number;
+  value: number | string;
   accent?: "online" | "offline" | "conflict";
 }
 

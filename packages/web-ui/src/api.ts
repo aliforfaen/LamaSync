@@ -19,6 +19,8 @@ import type {
   QueuedActionType,
   ResticSnapshot,
   Share,
+  StorageReport,
+  FolderSize,
 } from "@lamasync/core";
 
 const API_KEY_STORAGE = "lamasync_api_key";
@@ -206,6 +208,11 @@ export const api = {
     apiDelete(`/backends/${encodeURIComponent(id)}`),
   testBackend: (id: string) =>
     apiPost<{ ok: boolean; detail?: string }>(`/backends/${encodeURIComponent(id)}/test`),
+  // LAMA-224: storage statistics.
+  storageReport: (refresh = false) =>
+    apiGet<StorageReport>(`/stats/storage${refresh ? "?refresh=1" : ""}`),
+  folderSize: (id: string, refresh = false) =>
+    apiGet<FolderSize>(`/folders/${encodeURIComponent(id)}/size${refresh ? "?refresh=1" : ""}`),
   listShares: () => apiGet<Share[]>("/shares"),
   listResticSnapshots: () => apiGet<ResticSnapshot[]>("/restic/snapshots"),
   pruneOperations: (olderThanMs: number) =>

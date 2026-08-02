@@ -48,6 +48,21 @@ function isFolderBackend(value: string): value is FolderBackend {
   return FOLDER_BACKENDS.includes(value as FolderBackend);
 }
 
+/** Human-readable byte count for the Size column (LAMA-224). */
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+  let value = bytes;
+  let unit = "B";
+  for (const u of units) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = u;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
+}
+
 function folderToForm(folder: Folder): FolderForm {
   return {
     name: folder.name,
@@ -91,6 +106,8 @@ export function Folders() {
   const [items, setItems] = useState<FolderWithAssignments[] | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [backends, setBackends] = useState<Backend[]>([]);
+  // LAMA-224: last-known working-set size per folder (server-cached 15 min).
+  const [sizes, setSizes] = useState<Record<string, { text: string; error?: boolean }>>({});
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<FolderForm>(DEFAULT_FORM);
@@ -122,6 +139,26 @@ export function Folders() {
       setItems(withAssignments);
       setHosts(hostList);
       setBackends(backendList);
+      // LAMA-224: best-effort per-folder sizes; individual failures show "—".
+      void Promise.all(
+        folders.map(async (folder) => {
+          try {
+            const size = await api.folderSize(folder.id);
+            setSizes((prev) => ({
+              ...prev,
+              [folder.id]: {
+                text: formatBytes(size.bytes),
+                error: Boolean(size.error),
+              },
+            }));
+          } catch {
+            setSizes((prev) => ({
+              ...prev,
+              [folder.id]: { text: "—", error: true },
+            }));
+          }
+        }),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -436,6 +473,7 @@ export function Folders() {
             <th>Name</th>
             <th>Type</th>
             <th>Backend</th>
+            <th>Size</th>
             <th>Assignments</th>
             <th>Created</th>
             <th />
@@ -444,14 +482,16 @@ export function Folders() {
         <tbody>
           {!items ? (
             <tr className="empty-row">
-              <td colSpan={6}>Loading…</td>
+              <td colSpan={7}>Loading…</td>
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={6}>No folders yet</td>
+              <td colSpan={7}>No folders yet</td>
             </tr>
           ) : (
-            items.map(({ folder, assignments }) => (
+            items.map(({ folder, assignments }) => {
+              const size = sizes[folder.id];
+              return (
               <tr key={folder.id}>
                 <td>{folder.name}</td>
                 <td>
@@ -462,6 +502,15 @@ export function Folders() {
                   {folder.backend === "s3" && folder.backendId ? (
                     <span className="muted"> / {folder.backendId.slice(0, 8)}</span>
                   ) : null}
+                </td>
+                <td className="muted">
+                  {size ? (
+                    <span title={size.error ? "size unavailable (unreachable backend)" : undefined}>
+                      {size.text}
+                    </span>
+                  ) : (
+                    "…"
+                  )}
                 </td>
                 <td>
                   {assignments.length === 0 ? (
@@ -517,7 +566,8 @@ export function Folders() {
                   </button>
                 </td>
               </tr>
-            ))
+              );
+            })
           )}
         </tbody>
       </table>

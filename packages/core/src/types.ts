@@ -413,3 +413,28 @@ export interface BrowseResponse {
   entries: BrowseEntry[];
 }
 
+// LAMA-224: storage statistics. The server computes each entry lazily and
+// caches the report for 5 minutes so dashboard loads don't spawn a swarm of
+// rclone/du processes. Backends with errors keep their entry (error set).
+export interface StorageReport {
+  generatedAt: number;
+  totalBytes: number;
+  backends: Array<{
+    backendId: string | null; // null for local roots
+    label: string; // e.g. "S3: backups-prod (s3.example.com)"
+    kind: "local" | "s3" | "nfs" | "restic";
+    bytes: number;
+    objectCount: number | null;
+    error: string | null;
+  }>;
+}
+
+// LAMA-224: last-known size of one folder's working set (rclone size).
+export interface FolderSize {
+  folderId: string;
+  bytes: number;
+  objectCount: number | null;
+  error: string | null;
+  measuredAt: number;
+}
+
