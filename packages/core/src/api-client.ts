@@ -1,4 +1,5 @@
 import type {
+  Backend,
   BrowseResponse,
   Conflict,
   ConflictResolution,
@@ -552,6 +553,64 @@ export class LamaSyncApiClient {
 
   browseRestic(): Promise<ResticSnapshot[]> {
     return this.request<ResticSnapshot[]>("GET", "/api/v1/browse/restic");
+  }
+
+  // LAMA-222: reusable backends (S3 credentials stored once, referenced by
+  // folders via backendId). Secrets are write-only; responses expose
+  // `hasSecret` instead of the value.
+  listBackends(): Promise<Backend[]> {
+    return this.request<Backend[]>("GET", "/api/v1/backends");
+  }
+
+  getBackend(backendId: string): Promise<Backend> {
+    return this.request<Backend>("GET", `/api/v1/backends/${encodeURIComponent(backendId)}`);
+  }
+
+  createBackend(body: {
+    name: string;
+    kind?: string;
+    s3Provider?: string;
+    s3Endpoint?: string;
+    s3Region?: string;
+    s3AccessKeyId?: string;
+    s3SecretAccessKey?: string;
+  }): Promise<Backend> {
+    return this.request<Backend>(
+      "POST",
+      "/api/v1/backends",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  updateBackend(
+    backendId: string,
+    body: {
+      name?: string;
+      s3Provider?: string;
+      s3Endpoint?: string;
+      s3Region?: string;
+      s3AccessKeyId?: string;
+      s3SecretAccessKey?: string;
+    },
+  ): Promise<Backend> {
+    return this.request<Backend>(
+      "PATCH",
+      `/api/v1/backends/${encodeURIComponent(backendId)}`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  deleteBackend(backendId: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/backends/${encodeURIComponent(backendId)}`);
+  }
+
+  testBackend(backendId: string): Promise<{ ok: boolean; detail?: string }> {
+    return this.request<{ ok: boolean; detail?: string }>(
+      "POST",
+      `/api/v1/backends/${encodeURIComponent(backendId)}/test`,
+    );
   }
 
   // Conflicts

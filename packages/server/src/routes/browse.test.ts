@@ -8,6 +8,9 @@ import { join } from "node:path";
 import { browseRoutes, __setDb, __setListS3Impl } from "./browse.ts";
 import { S3ListObjectsError } from "../s3-list.ts";
 import type { S3Listing } from "../s3-list.ts";
+import { encryptSecret } from "../crypto.ts";
+
+process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "browse-test-secret-key-0123456789abcdef";
 
 let db: Database;
 let dataDir: string;
@@ -25,9 +28,15 @@ afterEach(() => {
 });
 
 function makeS3Folder(name: string, id: string): void {
+  const backendId = crypto.randomUUID();
+  // LAMA-222: credentials live on the Backend row; the folder references it.
   db.run(
-    "INSERT INTO folders (id, name, type, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [id, name, "backup", "s3", "s3.example.com", "bucket", "KEY", "SECRET", "us-east-1"],
+    "INSERT INTO backends (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at) VALUES (?, ?, 's3', 'other', 's3.example.com', 'us-east-1', 'KEY', ?, ?)",
+    [backendId, `${name}-backend`, encryptSecret("SECRET"), Date.now()],
+  );
+  db.run(
+    "INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket) VALUES (?, ?, ?, ?, ?, ?)",
+    [id, name, "backup", "s3", backendId, "bucket"],
   );
 }
 
@@ -150,20 +159,19 @@ describe("GET /api/v1/browse/s3", () => {
     expect(res.status).toBe(400);
   });
 
-  test("returns 400 for missing credentials", async () => {
-    db.run("INSERT INTO folders (id, name, type, backend, s3_endpoint, s3_bucket) VALUES (?, ?, ?, ?, ?, ?)", [
-      "folder-1",
-      "BadS3",
-      "backup",
-      "s3",
-      "s3.example.com",
-      "bucket",
-    ]);
+  test("returns 400 for unresolvable backend", async () => {
+    // Folder claims s3 but the referenced backend does not exist.
+    db.run(
+      "INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket) VALUES (?, ?, ?, ?, ?, ?)",
+      ["folder-1", "BadS3", "backup", "s3", "no-such-backend", "bucket"],
+    );
     const app = new Elysia().use(browseRoutes);
     const res = await app.handle(
       new Request("http://localhost/api/v1/browse/s3?folderId=folder-1"),
     );
     expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("no resolvable S3 backend");
   });
 
   test("happy path maps S3 entries to BrowseResponse", async () => {

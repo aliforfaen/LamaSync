@@ -64,11 +64,18 @@ Missing or wrong key → `401 Unauthorized`.
 | GET    | `/api/v1/folders`                                 | List all folder definitions                      |
 | POST   | `/api/v1/folders`                                 | Create a folder definition                       |
 | GET    | `/api/v1/folders/:id`                             | Read a single folder                             |
-| PUT    | `/api/v1/folders/:id`                             | Update folder name/type/backend/S3 credentials   |
+| PUT    | `/api/v1/folders/:id`                             | Update folder name/type/backend (backendId+bucket for s3) |
 | DELETE | `/api/v1/folders/:id`                             | Delete folder + cascade its assignments          |
 | POST   | `/api/v1/folders/:id/assign`                      | Assign folder to a host                          |
 | DELETE | `/api/v1/folders/:id/assign/:hostId`              | Unassign                                         |
 | GET    | `/api/v1/folders/:id/assignments`                 | List a folder's host assignments                 |
+| GET    | `/api/v1/backends`                                | List reusable backends (S3 creds stored once)    |
+| POST   | `/api/v1/backends`                                | Create a backend (secrets encrypted at rest)     |
+| GET    | `/api/v1/backends/:id`                            | Read a single backend                            |
+| PATCH  | `/api/v1/backends/:id`                            | Update/rotate backend credentials                |
+| DELETE | `/api/v1/backends/:id`                            | Delete a backend (409 while folders use it)      |
+| POST   | `/api/v1/backends/:id/test`                       | Test connection (rclone lsd, 5s timeout)         |
+| PATCH  | `/api/v1/hosts/:hostId`                           | Rename a host's display label (id stays stable)  |
 | GET    | `/api/v1/dotfiles/manifests`                      | List effective manifests (global + host override)|
 | POST   | `/api/v1/dotfiles/manifests`                      | Create a dotfile manifest                        |
 | PUT    | `/api/v1/dotfiles/manifests/:id`                  | Update a manifest                                |

@@ -45,6 +45,9 @@ export function Nav() {
       <NavLink to="/folders">
         <IconFolder /> Folders
       </NavLink>
+      <NavLink to="/backends">
+        <IconStorage /> Backends
+      </NavLink>
       <NavLink to="/dotfiles">
         <IconDotfile /> Dotfiles
       </NavLink>

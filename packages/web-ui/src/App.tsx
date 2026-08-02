@@ -6,6 +6,7 @@ import { Dashboard } from "./pages/Dashboard.tsx";
 import { Hosts } from "./pages/Hosts.tsx";
 import { HostDetail } from "./pages/HostDetail.tsx";
 import { Folders } from "./pages/Folders.tsx";
+import { Backends } from "./pages/Backends.tsx";
 import { Dotfiles } from "./pages/Dotfiles.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
 import { Admin } from "./pages/Admin.tsx";
@@ -47,6 +48,7 @@ export function App() {
                   <Route path="/hosts" element={<Hosts />} />
                   <Route path="/hosts/:hostId" element={<HostDetail />} />
                   <Route path="/folders" element={<Folders />} />
+                  <Route path="/backends" element={<Backends />} />
                   <Route path="/dotfiles" element={<Dotfiles />} />
                   <Route path="/conflicts" element={<Conflicts />} />
                   <Route path="/data" element={<DataBrowser />} />

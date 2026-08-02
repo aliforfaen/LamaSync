@@ -16,6 +16,7 @@ import type {
 import { initDb } from "@lamasync/core";
 import { Database } from "bun:sqlite";
 import { detectLanPeers, generateRcloneConfig } from "./config.ts";
+import { encryptSecret } from "../crypto.ts";
 
 // Module-scoped DB instance so `db` (imported transitively by config.ts) sees
 // the right schema. config.ts queries the DB to look up peer-shared folder ids,
@@ -229,17 +230,61 @@ describe("generateRcloneConfig — encryption at rest (LAMA-124)", () => {
   });
 });
 
-describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
+// LAMA-222: S3 folders reference a reusable Backend row. The helper inserts
+// a backend into the shared test DB (fresh per test via beforeEach) and
+// returns a folder pointing at it, so generateRcloneConfig can resolve the
+// credentials the same way production does.
+function makeS3Folder(
+  overrides: Partial<Folder> = {},
+  backendOverrides: Partial<{
+    name: string;
+    s3Provider: string;
+    s3Endpoint: string;
+    s3Region: string | null;
+    s3AccessKeyId: string;
+    s3SecretAccessKey: string;
+  }> = {},
+): Folder {
+  const backendId = crypto.randomUUID();
+  const s3 = {
+    name: "test-backend",
+    s3Provider: "other",
+    s3Endpoint: "sos-at-vie-1.exo.io",
+    s3Region: null as string | null,
+    s3AccessKeyId: "EXO_KEY",
+    s3SecretAccessKey: "EXO_SECRET",
+    ...backendOverrides,
+  };
+  db.run(
+    `INSERT INTO backends
+       (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
+     VALUES (?, ?, 's3', ?, ?, ?, ?, ?, ?)`,
+    [
+      backendId,
+      s3.name,
+      s3.s3Provider,
+      s3.s3Endpoint,
+      s3.s3Region,
+      s3.s3AccessKeyId,
+      encryptSecret(s3.s3SecretAccessKey),
+      Date.now(),
+    ],
+  );
+  return makeFolder({
+    backend: "s3",
+    backendId,
+    s3Bucket: "lamasync-vault",
+    ...overrides,
+  });
+}
+
+describe("generateRcloneConfig — S3 backend (LAMA-105, LAMA-222)", () => {
   test("non-encrypted S3 folder emits backend + alias remote", () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-1",
       name: "exoscale-vault",
       type: "sync",
-      backend: "s3",
-      s3Endpoint: "sos-at-vie-1.exo.io",
-      s3Bucket: "lamasync-vault",
-      s3AccessKeyId: "EXO_KEY",
-      s3SecretAccessKey: "EXO_SECRET",
+    }, {
       s3Region: "vie-1",
     });
     const assignment = makeAssignment({ folderId: "s3-1" });
@@ -265,17 +310,13 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
   });
 
   test("encrypted S3 folder emits S3 backend + crypt remote pointing at bucket", () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-2",
       name: "exoscale-vault-enc",
       type: "sync",
       encrypted: true,
       cryptPassword: "cGFzc3dvcmQ=",
-      backend: "s3",
-      s3Endpoint: "sos-at-vie-1.exo.io",
       s3Bucket: "lamasync-vault-enc",
-      s3AccessKeyId: "EXO_KEY2",
-      s3SecretAccessKey: "EXO_SECRET2",
     });
     const assignment = makeAssignment({ folderId: "s3-2" });
     const out = generateRcloneConfig(
@@ -297,15 +338,11 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
   });
 
   test("S3 folder honours assignment.remoteName on the alias section", () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-3",
       name: "exoscale-vault-named",
       type: "sync",
-      backend: "s3",
-      s3Endpoint: "sos-at-vie-1.exo.io",
       s3Bucket: "named-bucket",
-      s3AccessKeyId: "KEY",
-      s3SecretAccessKey: "SECRET",
     });
     const assignment = makeAssignment({ folderId: "s3-3", remoteName: "my-vault" });
     const out = generateRcloneConfig(
@@ -322,16 +359,11 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
   });
 
   test("S3 folder without region omits the region key", () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-4",
       name: "no-region",
       type: "backup",
-      backend: "s3",
-      s3Endpoint: "s3.amazonaws.com",
-      s3Bucket: "no-region-bucket",
-      s3AccessKeyId: "KEY",
-      s3SecretAccessKey: "SECRET",
-    });
+    }, { s3Endpoint: "s3.amazonaws.com", s3Region: null });
     const assignment = makeAssignment({ folderId: "s3-4" });
     const out = generateRcloneConfig(
       "host-1",
@@ -364,17 +396,14 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
     expect(cfg).toMatch(/\[lamasync-sftp-1\][\s\S]*type = sftp/);
     expect(cfg).not.toContain("[lamasync-sftp-1-backend]");
   });
+
   test("Exoscale S3 folder emits provider = Other and region = other-v2-signature", () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-exo",
       name: "exoscale-vault",
       type: "sync",
-      backend: "s3",
+    }, {
       s3Provider: "exoscale",
-      s3Endpoint: "sos-at-vie-1.exo.io",
-      s3Bucket: "lamasync-vault",
-      s3AccessKeyId: "EXO_KEY",
-      s3SecretAccessKey: "EXO_SECRET",
       s3Region: "other-v2-signature",
     });
     const assignment = makeAssignment({ folderId: "s3-exo" });
@@ -395,16 +424,12 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
   });
 
   test("generic S3 folder keeps provider = Other", () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-generic",
       name: "generic-vault",
       type: "sync",
-      backend: "s3",
-      s3Provider: "other",
+    }, {
       s3Endpoint: "s3.example.com",
-      s3Bucket: "bucket",
-      s3AccessKeyId: "KEY",
-      s3SecretAccessKey: "SECRET",
       s3Region: "us-east-1",
     });
     const assignment = makeAssignment({ folderId: "s3-generic" });
@@ -421,16 +446,12 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
   });
 
   test("Exoscale S3 config can be parsed by rclone when available", async () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-exo-live",
       name: "exoscale-vault",
       type: "sync",
-      backend: "s3",
+    }, {
       s3Provider: "exoscale",
-      s3Endpoint: "sos-at-vie-1.exo.io",
-      s3Bucket: "lamasync-vault",
-      s3AccessKeyId: "EXO_KEY",
-      s3SecretAccessKey: "EXO_SECRET",
       s3Region: "other-v2-signature",
     });
     const assignment = makeAssignment({ folderId: "s3-exo-live" });
@@ -472,16 +493,12 @@ describe("generateRcloneConfig — S3 backend (LAMA-105)", () => {
   });
 
   test("generated rclone config is valid INI with no duplicate sections", () => {
-    const folder = makeFolder({
+    const folder = makeS3Folder({
       id: "s3-exo-ini",
       name: "exoscale-vault",
       type: "sync",
-      backend: "s3",
+    }, {
       s3Provider: "exoscale",
-      s3Endpoint: "sos-at-vie-1.exo.io",
-      s3Bucket: "lamasync-vault",
-      s3AccessKeyId: "EXO_KEY",
-      s3SecretAccessKey: "EXO_SECRET",
     });
     const assignment = makeAssignment({ folderId: "s3-exo-ini" });
     const out = generateRcloneConfig(

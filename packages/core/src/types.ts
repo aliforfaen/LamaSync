@@ -154,16 +154,27 @@ export interface Folder {
   cryptPassword?: string | null;
   gitProvider?: "git" | "gh" | null;
   gitRemote?: string | null;
+  // LAMA-222: `backend` is the kind (sftp/local/s3); `backendId` references
+  // the reusable Backend row that holds S3 credentials. For s3 folders only
+  // the bucket name stays per-folder — endpoint/keys/region live on Backend.
   backend?: FolderBackend | null;
-  s3Provider?: S3Provider | null;
-  s3Endpoint?: string | null;
+  backendId?: string | null;
   s3Bucket?: string | null;
-  s3AccessKeyId?: string | null;
-  // Write-only credential (LAMA-178): accepted on create/update, but folder
-  // CRUD responses always return null here. The plaintext value is only
-  // exposed to daemons via the /config/:hostId rclone config endpoint.
-  s3SecretAccessKey?: string | null;
-  s3Region?: string | null;
+}
+
+// LAMA-222: fully-resolved S3 settings for a folder, produced server-side
+// by joining the folder's backendId against the backends table and
+// decrypting the stored secret. Only used internally (rclone config
+// generation, Data Browser, stats) — never exposed on the wire.
+export interface S3FolderConfig {
+  folderId: string;
+  backendId: string;
+  provider: S3Provider;
+  endpoint: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string | null;
 }
 
 export interface FolderAssignment {

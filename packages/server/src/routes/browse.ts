@@ -6,6 +6,7 @@ import { db as defaultDb } from "../db.ts";
 import type { BrowseEntry, BrowseResponse, Folder } from "@lamasync/core";
 import { resolveBrowsePath, statEntry, validateBrowseInput } from "../browse-paths.ts";
 import { listS3Objects, S3ListObjectsError } from "../s3-list.ts";
+import { resolveFolderS3Config } from "../backends.ts";
 
 let activeDb: Database = defaultDb;
 let listS3 = listS3Objects;
@@ -22,11 +23,8 @@ interface FolderRow {
   id: string;
   name: string;
   backend: string | null;
-  s3_endpoint: string | null;
+  backend_id: string | null;
   s3_bucket: string | null;
-  s3_access_key_id: string | null;
-  s3_secret_access_key: string | null;
-  s3_region: string | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
@@ -36,11 +34,8 @@ function rowToFolder(r: FolderRow): Folder {
     name: r.name,
     type: "sync" as const,
     backend,
-    s3Endpoint: r.s3_endpoint,
+    backendId: backend === "s3" ? r.backend_id : null,
     s3Bucket: r.s3_bucket,
-    s3AccessKeyId: r.s3_access_key_id,
-    s3SecretAccessKey: r.s3_secret_access_key,
-    s3Region: r.s3_region,
   };
 }
 
@@ -194,20 +189,23 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const row = activeDb
         .query<FolderRow, [string]>(
-          "SELECT id, name, backend, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE id = ?",
+          "SELECT id, name, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
         )
         .get(folderId);
       if (!row) {
         set.status = 404;
         return { error: "Folder not found" };
       }
-      if (row.backend !== "s3" || !row.s3_endpoint || !row.s3_bucket || !row.s3_access_key_id || !row.s3_secret_access_key) {
-        set.status = 400;
-        return { error: "folder is not a valid S3 backend" };
-      }
       const folder = rowToFolder(row);
+      // LAMA-222: S3 credentials come from the referenced Backend row;
+      // the resolved config is only used to sign the listing request.
+      const s3 = resolveFolderS3Config(activeDb, folder);
+      if (!s3) {
+        set.status = 400;
+        return { error: "folder has no resolvable S3 backend" };
+      }
       try {
-        const listing = await listS3(folder, rawPath, 1000);
+        const listing = await listS3(s3, rawPath, 1000);
         const response: BrowseResponse = {
           backend: "s3",
           path: canonicalRelativePath(rawPath),

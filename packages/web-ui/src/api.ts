@@ -3,6 +3,7 @@
 // API key and the global fetch API. Imports types only from core.
 
 import type {
+  Backend,
   BrowseResponse,
   Conflict,
   DotfileManifest,
@@ -194,6 +195,17 @@ export const api = {
     return apiGet<BrowseResponse>(`/browse/s3${qs}`);
   },
   browseRestic: () => apiGet<ResticSnapshot[]>("/browse/restic"),
+  // LAMA-222: reusable backends. Secrets are write-only (hasSecret flags
+  // presence); the test endpoint surfaces rclone's error detail.
+  listBackends: () => apiGet<Backend[]>("/backends"),
+  createBackend: (body: Partial<Backend>) =>
+    apiPost<Backend>("/backends", body),
+  updateBackend: (id: string, body: Partial<Backend>) =>
+    apiPatch<Backend>(`/backends/${encodeURIComponent(id)}`, body),
+  deleteBackend: (id: string) =>
+    apiDelete(`/backends/${encodeURIComponent(id)}`),
+  testBackend: (id: string) =>
+    apiPost<{ ok: boolean; detail?: string }>(`/backends/${encodeURIComponent(id)}/test`),
   listShares: () => apiGet<Share[]>("/shares"),
   listResticSnapshots: () => apiGet<ResticSnapshot[]>("/restic/snapshots"),
   pruneOperations: (olderThanMs: number) =>

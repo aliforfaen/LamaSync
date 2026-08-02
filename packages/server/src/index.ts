@@ -16,6 +16,7 @@ import { releaseRoutes } from "./routes/release.ts";
 import { actionsRoutes } from "./routes/actions.ts";
 import { notificationsRoutes } from "./routes/notifications.ts";
 import { browseRoutes } from "./routes/browse.ts";
+import { backendsRoutes } from "./routes/backends.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -110,6 +111,7 @@ const app = new Elysia()
   .use(releaseRoutes)
   .use(actionsRoutes)
   .use(notificationsRoutes)
+  .use(backendsRoutes)
   .use(browseRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {

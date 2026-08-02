@@ -22,12 +22,8 @@ CREATE TABLE IF NOT EXISTS folders (
     git_provider          TEXT,
     git_remote            TEXT,
     backend               TEXT DEFAULT 'sftp',
-    s3_provider           TEXT DEFAULT 'other',
-    s3_endpoint           TEXT,
-    s3_bucket             TEXT,
-    s3_access_key_id      TEXT,
-    s3_secret_access_key  TEXT,
-    s3_region             TEXT
+    backend_id            TEXT REFERENCES backends(id),
+    s3_bucket             TEXT
 );
 
 CREATE TABLE IF NOT EXISTS folder_assignments (
@@ -269,4 +265,13 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE hosts ADD COLUMN tailnet_ip TEXT",
   "CREATE TABLE IF NOT EXISTS notification_channels (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, enabled INTEGER DEFAULT 1, severities TEXT NOT NULL DEFAULT '[\"critical\",\"default\",\"info\"]', last_delivery_status TEXT, last_delivery_at INTEGER, created_at INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS backends (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL DEFAULT 's3', s3_provider TEXT DEFAULT 'other', s3_endpoint TEXT, s3_region TEXT, s3_access_key_id TEXT, s3_secret_key_enc TEXT, created_at INTEGER NOT NULL)",
+  // LAMA-222: folders gain a backend reference and the legacy per-folder
+  // s3_* columns are dropped (values were lifted into `backends` by the
+  // server-side migration in packages/server/src/db.ts before these run).
+  "ALTER TABLE folders ADD COLUMN backend_id TEXT",
+  "ALTER TABLE folders DROP COLUMN s3_provider",
+  "ALTER TABLE folders DROP COLUMN s3_endpoint",
+  "ALTER TABLE folders DROP COLUMN s3_access_key_id",
+  "ALTER TABLE folders DROP COLUMN s3_secret_access_key",
+  "ALTER TABLE folders DROP COLUMN s3_region",
 ];

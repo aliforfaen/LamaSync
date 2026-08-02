@@ -1,22 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { signRequest, listS3Objects, S3ListObjectsError } from "./s3-list.ts";
-import type { Folder } from "@lamasync/core";
+import type { S3FolderConfig } from "@lamasync/core";
 
 const AWS_TEST_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE";
 const AWS_TEST_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
-function s3Folder(overrides: Partial<Folder> = {}): Folder {
+// LAMA-222: listS3Objects consumes a fully-resolved S3FolderConfig (folder
+// joined against its Backend row + decrypted secret), not the Folder itself.
+function s3Config(overrides: Partial<S3FolderConfig> = {}): S3FolderConfig {
   return {
-    id: "folder-1",
-    name: "test-bucket",
-    type: "backup",
-    backend: "s3",
-    s3Provider: "other",
-    s3Endpoint: "s3.example.com",
-    s3Bucket: "test-bucket",
-    s3AccessKeyId: AWS_TEST_ACCESS_KEY,
-    s3SecretAccessKey: AWS_TEST_SECRET_KEY,
-    s3Region: "us-east-1",
+    folderId: "folder-1",
+    backendId: "backend-1",
+    provider: "other",
+    endpoint: "s3.example.com",
+    bucket: "test-bucket",
+    accessKeyId: AWS_TEST_ACCESS_KEY,
+    secretAccessKey: AWS_TEST_SECRET_KEY,
+    region: "us-east-1",
     ...overrides,
   };
 }
@@ -149,7 +149,7 @@ describe("listS3Objects", () => {
       );
     };
 
-    const listing = await listS3Objects(s3Folder(), "backups/", 1000, fetchImpl);
+    const listing = await listS3Objects(s3Config(), "backups/", 1000, fetchImpl);
     expect(listing.entries).toHaveLength(2);
     expect(listing.entries).toContainEqual({
       name: "photo.jpg",
@@ -172,7 +172,7 @@ describe("listS3Objects", () => {
       );
     };
 
-    await expect(listS3Objects(s3Folder(), "", 1000, fetchImpl)).rejects.toBeInstanceOf(
+    await expect(listS3Objects(s3Config(), "", 1000, fetchImpl)).rejects.toBeInstanceOf(
       S3ListObjectsError,
     );
   });
@@ -182,13 +182,13 @@ describe("listS3Objects", () => {
       return Promise.reject(new TypeError("fetch failed"));
     };
 
-    await expect(listS3Objects(s3Folder(), "", 1000, fetchImpl)).rejects.toBeInstanceOf(
+    await expect(listS3Objects(s3Config(), "", 1000, fetchImpl)).rejects.toBeInstanceOf(
       S3ListObjectsError,
     );
   });
 
   test("rejects prefixes containing traversal", async () => {
-    await expect(listS3Objects(s3Folder(), "../etc", 1000)).rejects.toBeInstanceOf(
+    await expect(listS3Objects(s3Config(), "../etc", 1000)).rejects.toBeInstanceOf(
       S3ListObjectsError,
     );
   });

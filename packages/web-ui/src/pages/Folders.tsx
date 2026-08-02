@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Folder, FolderAssignment, FolderBackend, Host, S3Provider } from "@lamasync/core";
+import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { api } from "../api.ts";
 
 interface FolderWithAssignments {
@@ -23,28 +23,21 @@ interface FolderForm {
   name: string;
   type: FolderType;
   backend: FolderBackend;
-  s3Provider: S3Provider;
-  s3Endpoint: string;
+  // LAMA-222: an s3 folder references a reusable Backend (credentials live
+  // there) and only needs the per-folder bucket name here.
+  backendId: string;
   s3Bucket: string;
-  s3AccessKeyId: string;
-  s3SecretAccessKey: string;
-  s3Region: string;
 }
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
 const FOLDER_BACKENDS: FolderBackend[] = ["sftp", "s3", "local"];
-const S3_PROVIDERS: S3Provider[] = ["exoscale", "aws", "other"];
 
 const DEFAULT_FORM: FolderForm = {
   name: "",
   type: "sync",
   backend: "sftp",
-  s3Provider: "other",
-  s3Endpoint: "",
+  backendId: "",
   s3Bucket: "",
-  s3AccessKeyId: "",
-  s3SecretAccessKey: "",
-  s3Region: "",
 };
 
 function isFolderType(value: string): value is FolderType {
@@ -55,21 +48,13 @@ function isFolderBackend(value: string): value is FolderBackend {
   return FOLDER_BACKENDS.includes(value as FolderBackend);
 }
 
-function isS3Provider(value: string): value is S3Provider {
-  return S3_PROVIDERS.includes(value as S3Provider);
-}
-
 function folderToForm(folder: Folder): FolderForm {
   return {
     name: folder.name,
     type: folder.type,
     backend: folder.backend ?? "sftp",
-    s3Provider: folder.s3Provider ?? "other",
-    s3Endpoint: folder.s3Endpoint ?? "",
+    backendId: folder.backendId ?? "",
     s3Bucket: folder.s3Bucket ?? "",
-    s3AccessKeyId: folder.s3AccessKeyId ?? "",
-    s3SecretAccessKey: folder.s3SecretAccessKey ?? "",
-    s3Region: folder.s3Region ?? "",
   };
 }
 
@@ -80,12 +65,8 @@ function buildCreateBody(form: FolderForm): Record<string, unknown> {
     backend: form.backend,
   };
   if (form.backend === "s3") {
-    body.s3Provider = form.s3Provider;
-    body.s3Endpoint = form.s3Endpoint.trim() || null;
+    body.backendId = form.backendId.trim() || null;
     body.s3Bucket = form.s3Bucket.trim() || null;
-    body.s3AccessKeyId = form.s3AccessKeyId.trim() || null;
-    body.s3SecretAccessKey = form.s3SecretAccessKey.trim() || null;
-    body.s3Region = form.s3Region.trim() || null;
   }
   return body;
 }
@@ -97,22 +78,11 @@ function buildUpdateBody(form: FolderForm): Record<string, unknown> {
     backend: form.backend,
   };
   if (form.backend === "s3") {
-    body.s3Provider = form.s3Provider;
-    body.s3Endpoint = form.s3Endpoint.trim() || null;
+    body.backendId = form.backendId.trim() || null;
     body.s3Bucket = form.s3Bucket.trim() || null;
-    body.s3AccessKeyId = form.s3AccessKeyId.trim() || null;
-    // The API redacts the stored secret (LAMA-178), so the edit form always
-    // loads blank. Blank means "keep the existing secret" — only send the
-    // field when the user actually typed a new one.
-    const secret = form.s3SecretAccessKey.trim();
-    if (secret !== "") body.s3SecretAccessKey = secret;
-    body.s3Region = form.s3Region.trim() || null;
   } else {
-    body.s3Endpoint = null;
+    body.backendId = null;
     body.s3Bucket = null;
-    body.s3AccessKeyId = null;
-    body.s3SecretAccessKey = null;
-    body.s3Region = null;
   }
   return body;
 }
@@ -120,6 +90,7 @@ function buildUpdateBody(form: FolderForm): Record<string, unknown> {
 export function Folders() {
   const [items, setItems] = useState<FolderWithAssignments[] | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
+  const [backends, setBackends] = useState<Backend[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<FolderForm>(DEFAULT_FORM);
@@ -137,9 +108,10 @@ export function Folders() {
   async function refresh() {
     setError(null);
     try {
-      const [folders, hostList] = await Promise.all([
+      const [folders, hostList, backendList] = await Promise.all([
         api.listFolders(),
         api.listHosts(),
+        api.listBackends().catch(() => [] as Backend[]),
       ]);
       const withAssignments = await Promise.all(
         folders.map(async (folder) => ({
@@ -149,6 +121,7 @@ export function Folders() {
       );
       setItems(withAssignments);
       setHosts(hostList);
+      setBackends(backendList);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -259,23 +232,8 @@ export function Folders() {
     if (!isFolderBackend(value)) return;
     const next = { ...current, backend: value };
     if (value !== "s3") {
-      next.s3Provider = "other";
-      next.s3Endpoint = "";
+      next.backendId = "";
       next.s3Bucket = "";
-      next.s3AccessKeyId = "";
-      next.s3SecretAccessKey = "";
-      next.s3Region = "";
-    }
-    setter(next);
-  }
-
-  function updateFormS3Provider(value: string, current: FolderForm, setter: (f: FolderForm) => void) {
-    if (!isS3Provider(value)) return;
-    const next = { ...current, s3Provider: value };
-    if (value === "exoscale") {
-      next.s3Region = "other-v2-signature";
-    } else if (current.s3Region === "other-v2-signature") {
-      next.s3Region = "";
     }
     setter(next);
   }
@@ -284,60 +242,36 @@ export function Folders() {
     return (
       <>
         <label>
-          S3 provider
+          Backend
           <select
-            value={current.s3Provider}
-            onChange={(e) => updateFormS3Provider(e.target.value, current, setter)}
+            required
+            value={current.backendId}
+            onChange={(e) => setter({ ...current, backendId: e.target.value })}
           >
-            {S3_PROVIDERS.map((p) => (
-              <option key={p} value={p}>{p}</option>
+            <option value="">Select a backend…</option>
+            {backends.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+                {b.s3Endpoint ? ` (${b.s3Endpoint})` : ""}
+              </option>
             ))}
           </select>
         </label>
         <label>
-          Endpoint
-          <input
-            required
-            value={current.s3Endpoint}
-            placeholder={current.s3Provider === "exoscale" ? "sos-at-vie-1.exo.io" : "s3.example.com"}
-            onChange={(e) => setter({ ...current, s3Endpoint: e.target.value })}
-          />
-        </label>
-        <label>
-          Bucket
+          Bucket name
           <input
             required
             value={current.s3Bucket}
+            placeholder="my-bucket"
             onChange={(e) => setter({ ...current, s3Bucket: e.target.value })}
           />
         </label>
-        <label>
-          Access key ID
-          <input
-            required
-            value={current.s3AccessKeyId}
-            onChange={(e) => setter({ ...current, s3AccessKeyId: e.target.value })}
-          />
-        </label>
-        <label>
-          Secret access key
-          <input
-            required={!isEditing}
-            type="password"
-            value={current.s3SecretAccessKey}
-            placeholder={isEditing ? "(unchanged)" : undefined}
-            onChange={(e) => setter({ ...current, s3SecretAccessKey: e.target.value })}
-          />
-        </label>
-        <label>
-          Region
-          <input
-            required={current.s3Provider !== "exoscale"}
-            disabled={current.s3Provider === "exoscale"}
-            value={current.s3Provider === "exoscale" ? "other-v2-signature" : current.s3Region}
-            onChange={(e) => setter({ ...current, s3Region: e.target.value })}
-          />
-        </label>
+        {backends.length === 0 ? (
+          <p className="muted">
+            No backends configured yet — create one on the{" "}
+            <a href="#/backends">Backends</a> page first.
+          </p>
+        ) : null}
       </>
     );
   }
@@ -525,9 +459,9 @@ export function Folders() {
                 </td>
                 <td>
                   {folder.backend ?? "sftp"}
-                  {folder.backend === "s3" && folder.s3Provider && (
-                    <span className="muted"> / {folder.s3Provider}</span>
-                  )}
+                  {folder.backend === "s3" && folder.backendId ? (
+                    <span className="muted"> / {folder.backendId.slice(0, 8)}</span>
+                  ) : null}
                 </td>
                 <td>
                   {assignments.length === 0 ? (

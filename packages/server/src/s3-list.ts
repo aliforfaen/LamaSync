@@ -1,5 +1,5 @@
 import { createHmac, createHash } from "node:crypto";
-import type { Folder } from "@lamasync/core";
+import type { S3FolderConfig } from "@lamasync/core";
 
 export interface S3Entry {
   name: string;
@@ -82,7 +82,7 @@ export async function signRequest(
 }
 
 export async function listS3Objects(
-  folder: Folder,
+  s3: S3FolderConfig,
   prefix: string,
   limit: number,
   fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = globalThis.fetch,
@@ -91,16 +91,15 @@ export async function listS3Objects(
     throw new S3ListObjectsError("invalid S3 prefix");
   }
 
-  const endpoint = (folder.s3Endpoint ?? "").trim().replace(/\/+$/, "");
-  const bucket = (folder.s3Bucket ?? "").trim();
-  const accessKeyId = (folder.s3AccessKeyId ?? "").trim();
-  const secretAccessKey = (folder.s3SecretAccessKey ?? "").trim();
+  const endpoint = s3.endpoint.replace(/\/+$/, "");
+  const bucket = s3.bucket;
+  const accessKeyId = s3.accessKeyId;
+  const secretAccessKey = s3.secretAccessKey;
   if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
     throw new S3ListObjectsError("missing S3 credentials");
   }
 
-  const rawRegion = (folder.s3Region ?? "").trim();
-  const region = rawRegion || "us-east-1";
+  const region = s3.region && s3.region.trim() !== "" ? s3.region : "us-east-1";
 
   const urlBase = endpoint.startsWith("http://") || endpoint.startsWith("https://")
     ? endpoint
