@@ -60,6 +60,10 @@ lamasync/                     # Bun workspace root
         auth.ts               # lazy Bearer token middleware (skips Upgrade: websocket)
         db.ts                 # singleton SQLite handle (lazy + test-safe)
         ws.ts                 # WebSocket event stream (subprotocol auth)
+        crypto.ts             # LAMA-222: AES-256-GCM at-rest encryption (LAMASYNC_SECRET_KEY)
+        backends.ts           # LAMA-222: backend row helpers + legacy s3_* lift migration
+        browse-jobs.ts        # LAMA-226: browse write-op engine (rclone jobs, busy guard)
+        stats.ts              # LAMA-224: storage report + folder-size caching
         routes/
           health.ts           # GET /api/v1/health
           hosts.ts            # POST /register, POST /report/health
@@ -73,6 +77,9 @@ lamasync/                     # Bun workspace root
           restic.ts           # restic config for backup/dotfile types
           conflicts.ts        # conflict resolution API
           release.ts          # GET /api/v1/release/latest
+          backends.ts         # LAMA-222: reusable S3 backends CRUD + connection test
+          stats.ts            # LAMA-224: storage report + folder-size endpoints
+          browse.ts           # LAMA-226: Data Browser write ops (copy/move/rename/mkdir/upload)
     daemon/                   # @lamasync/daemon — client sync daemon
       src/
         index.ts              # heartbeat + Unix socket server + --version/--check-update/--update
@@ -201,6 +208,12 @@ lamasync/                     # Bun workspace root
 | LAMA-200 | Notification foundation: ntfy + LamaDB webhook + durable event log + host-staleness sweep | `server/src/{notifications.ts,routes/notifications.ts}`, `web-ui/src/pages/Admin.tsx` |
 | LAMA-202 | Read-only Data Browser (local dir, SigV4 S3 listing, restic metadata) | `server/src/{browse-paths.ts,s3-list.ts,routes/browse.ts}`, `web-ui/src/pages/DataBrowser.tsx` |
 | LAMA-203 | "Since last visit" highlighting on Command Center | `web-ui/src/pages/Dashboard.tsx` |
+| LAMA-221 | Notification channels config UI (ntfy + webhook, severity filters, test button, env seeding) | `server/src/{notifications.ts,routes/notifications.ts}`, `core/src/db/schema.ts`, `web-ui/src/pages/Admin.tsx` |
+| LAMA-222 | Reusable S3 backends: credentials stored once (encrypted at rest), folders reference by backendId; legacy s3_* columns lifted+dropped | `core/src/{types.ts,db/schema.ts,api-client.ts}`, `server/src/{crypto.ts,backends.ts,routes/backends.ts,routes/{config,folders,browse}.ts}`, `web-ui/src/pages/{Backends,Folders}.tsx` |
+| LAMA-223 | Tailnet IP surfacing: daemon detection + heartbeat, tailnet-first peer rclone config, UI columns/copy | `daemon/src/{lan-peer.ts,index.ts}`, `server/src/routes/{hosts,config}.ts`, `web-ui/src/pages/{Hosts,HostDetail,Dashboard}.tsx`, `tui/src/views/fleet.ts` |
+| LAMA-224 | Storage stats: per-backend report + folder sizes (cached), Dashboard Storage card, Folders Size column | `core/src/types.ts`, `server/src/{stats.ts,routes/stats.ts,routes/folders.ts,routes/report.ts}`, `web-ui/src/pages/{Dashboard,Folders}.tsx` |
+| LAMA-225 | Host rename: PATCH /hosts/:id (label-first, id stable), re-key cascade on re-registration, host_renamed WS + banner, inline edit | `server/src/routes/hosts.ts`, `core/src/api-client.ts`, `web-ui/src/{components/EditableHostname.tsx,pages/{Hosts,HostDetail}.tsx}`, `daemon/src/index.ts` |
+| LAMA-226 | Data Browser write ops: copy/move/rename/mkdir/upload with jobs + progress + busy guard | `core/src/{types.ts,db/schema.ts}`, `server/src/{browse-jobs.ts,routes/browse.ts}`, `web-ui/src/pages/DataBrowser.tsx` |
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
@@ -392,10 +405,12 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.
 - **Self-update**: daemon checks GitHub Releases on startup and supports `lamasyncd --check-update` / `lamasyncd --update`. The server proxies release info at `GET /api/v1/release/latest`. A standalone `curl | bash` updater lives in `packaging/install/update.sh`.
 
-## Current status (as of 2026-08-01)
+## Current status (as of 2026-08-03)
 
 - Project version: **0.2.3**
-- Tests: **308 passing** across 35 files, 1 skip, 0 failures.
+- Tests: **366 passing** across 39 files, 1 skip, 0 failures.
+- **LAMA-221..226 shipped** (batch: notification channels UI, reusable S3 backends with encrypted secrets, tailnet IP surfacing, storage stats, host rename, Data Browser write ops) — see the features table above. No push yet; changes are local commits awaiting operator go.
+- Install scripts and release workflow unchanged by this batch.
 - **Install scripts**: `packaging/install/install.sh` and `packaging/install/update.sh` patched to be self-contained and aligned with the CI-published binary names (`lamasyncd`, `lamasync-tui`). Docker smoke tests (`scripts/test-install.sh`, `scripts/test-update.sh`) both pass.
 - **Release**: v0.2.3 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
