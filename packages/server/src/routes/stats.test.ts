@@ -94,7 +94,7 @@ describe("GET /api/v1/stats/storage", () => {
     const body = (await res.json()) as {
       generatedAt: number;
       totalBytes: number;
-      backends: Array<{ backendId: string | null; kind: string; bytes: number; error: string | null }>;
+      backends: Array<{ backendId: string | null; kind: string; bytes: number; objectCount: number | null; error: string | null }>;
     };
     const local = body.backends.find((b) => b.kind === "local");
     expect(local).toBeTruthy();
