@@ -19,6 +19,15 @@ export interface ActionCompletion {
 }
 
 /**
+ * Folders that the `trigger_backup` action should fire. From the user's
+ * perspective both `backup` (rclone copy to a remote) and `dotfile`
+ * (tar+upload to the server) are backup operations — the dotfile type
+ * produces a versioned tarball on the server's `/data` volume, so the
+ * "Trigger backup" button on HostDetail should fire it. (LAMA-219)
+ */
+const BACKUP_FOLDER_TYPES: ReadonlySet<FolderType> = new Set(["backup", "dotfile"]);
+
+/**
  * Resolve the `trigger_sync` / `trigger_backup` action into the list of
  * assignments the daemon should run. The empty-list / unknown-folder
  * branches are caller errors that the dispatcher turns into a `failed`
@@ -35,7 +44,8 @@ export interface ActionCompletion {
  * The `folderTypes` lookup (assignment id → Folder.type) lets the helper
  * filter by folder type when `backupOnly` is requested, per the LAMA-198
  * spec ("trigger_backup … filter assignments to folder type 'backup' when
- * no folderId given").
+ * no folderId given"). LAMA-219 extends the set to also include
+ * `dotfile` folders, since both produce versioned backups.
  */
 export function selectAssignmentsForSyncAction(
   assignments: readonly FolderAssignment[],
@@ -50,16 +60,21 @@ export function selectAssignmentsForSyncAction(
   if (folderId === null) {
     if (!options.backupOnly) return [...assignments];
     const lookup = options.folderTypes ?? null;
-    return assignments.filter((a) =>
-      lookup ? lookup.get(a.folderId) === "backup" : false,
-    );
+    return assignments.filter((a) => {
+      const t = lookup?.get(a.folderId);
+      return t !== undefined && BACKUP_FOLDER_TYPES.has(t);
+    });
   }
   const matches = assignments.filter((a) => a.folderId === folderId);
   if (!options.backupOnly) return matches;
   const lookup = options.folderTypes ?? null;
-  return matches.filter((a) =>
-    lookup ? lookup.get(a.folderId) === "backup" : true,
-  );
+  return matches.filter((a) => {
+    const t = lookup?.get(a.folderId);
+    // Without a lookup we still keep the explicit match — the user asked
+    // for a specific folder; refusing it because we don't know the type
+    // would be a worse UX than firing it.
+    return t === undefined || BACKUP_FOLDER_TYPES.has(t);
+  });
 }
 
 /**

@@ -71,27 +71,40 @@ describe("selectAssignmentsForSyncAction", () => {
     ).toEqual([]);
   });
 
-  test("backupOnly with folder-types filters to backup assignments only", () => {
+  test("backupOnly with folder-types filters to backup + dotfile assignments (LAMA-219)", () => {
     const folderTypes = new Map<string, "sync" | "backup" | "mount" | "dotfile" | "git">([
       ["f1", "backup"],
       ["f2", "sync"],
-      ["f3", "backup"],
+      ["f3", "dotfile"],
     ]);
     expect(
       selectAssignmentsForSyncAction(ALL, null, { backupOnly: true, folderTypes }),
     ).toEqual([A, C]);
   });
 
-  test("backupOnly with a folderId still keeps the explicit match", () => {
+  test("backupOnly with a folderId still keeps the explicit match (LAMA-219: dotfile match)", () => {
     const folderTypes = new Map<string, "sync" | "backup" | "mount" | "dotfile" | "git">([
       ["f1", "sync"],
-      ["f2", "backup"],
+      ["f2", "dotfile"],
     ]);
     expect(
       selectAssignmentsForSyncAction(
         ALL,
         { folderId: "f2" },
         { backupOnly: true, folderTypes },
+      ),
+    ).toEqual([B]);
+  });
+
+  test("backupOnly with a folderId keeps a sync match when lookup is missing (LAMA-219)", () => {
+    // Without a folder-type lookup we still keep the explicit match —
+    // refusing a user-requested folder because we don't know its type
+    // would be worse UX than firing it.
+    expect(
+      selectAssignmentsForSyncAction(
+        ALL,
+        { folderId: "f2" },
+        { backupOnly: true },
       ),
     ).toEqual([B]);
   });

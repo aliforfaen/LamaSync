@@ -141,12 +141,18 @@ export function startSocketServer(
   }
 
   const server: Server = createServer((socket) => handleConnection(socket, opts));
-  server.listen(opts.socketPath);
+  // Register the error listener BEFORE calling listen(): on AF_UNIX the
+  // bind can fail synchronously (e.g. under systemd hardening where
+  // ProtectHome/PrivateTmp/etc. overlay the socket path), and an error
+  // emitted before this listener is attached becomes an unhandled 'error'
+  // event that crashes the process with exit code 0.
   server.on("error", (err) => {
+    const e = err as NodeJS.ErrnoException;
     console.error(
-      `[socket] listener error: ${err instanceof Error ? err.message : String(err)}`,
+      `[socket] listener error: code=${e?.code ?? "(none)"} errno=${e?.errno ?? "(none)"} syscall=${e?.syscall ?? "(none)"} path=${e?.path ?? opts.socketPath} message=${err instanceof Error ? err.message : String(err)}`,
     );
   });
+  server.listen(opts.socketPath);
 
   const close = (): void => {
     try {

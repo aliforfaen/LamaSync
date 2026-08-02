@@ -30,7 +30,7 @@ describe("buildMountUnitContent", () => {
       "ExecStart=%h/.local/bin/lamasyncd --mount abc-123",
     );
     expect(content).toContain(
-      "Environment=LAMASYNC_SOCKET_PATH=%h/lamasync.sock",
+      "Environment=LAMASYNC_SOCKET_PATH=${XDG_RUNTIME_DIR}/lamasync.sock",
     );
     expect(content).toContain("After=lamasyncd.service network-online.target");
     expect(content).toContain("WantedBy=default.target");
@@ -71,8 +71,9 @@ describe("daemonServiceTemplate", () => {
     expect(content).toContain("CPUQuota=50%\n");
     expect(content).not.toContain("CPUQuota=50%%");
     expect(content).toContain(
-      "Environment=LAMASYNC_SOCKET_PATH=%h/lamasync.sock",
+      "Environment=LAMASYNC_SOCKET_PATH=${XDG_RUNTIME_DIR}/lamasync.sock",
     );
+    expect(content).toContain("Environment=PATH=/home/%u/.local/bin");
   });
 
   test("honours custom binaryPath and socketPath", () => {

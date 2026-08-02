@@ -18,7 +18,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const DEFAULT_INSTALL_DIR = "%h/.local/bin/lamasyncd";
-const DEFAULT_SOCKET_PATH = "%h/lamasync.sock";
+// Default lives under XDG_RUNTIME_DIR (writable under systemd user
+// services without needing a ReadWritePaths exception). When unset,
+// systemd --user sets XDG_RUNTIME_DIR to /run/user/<uid>, which is
+// already on the writable set for the user service. When the daemon
+// runs outside systemd (interactive shell), $XDG_RUNTIME_DIR is also
+// set on every modern Linux desktop.
+const DEFAULT_SOCKET_PATH = "${XDG_RUNTIME_DIR}/lamasync.sock";
 const MOUNT_WAIT_TIMEOUT_MS = 30_000;
 const MOUNT_POLL_INTERVAL_MS = 500;
 
@@ -195,13 +201,24 @@ export function daemonServiceTemplate(opts: {
     "StandardOutput=journal",
     "StandardError=journal",
     "SyslogIdentifier=lamasyncd",
+    "# systemd user services start with a minimal PATH (/usr/local/bin:/usr/bin)",
+    "# even when the user manager has a richer one. Set PATH explicitly so",
+    "# user-installed binaries (rclone at ~/.local/bin, bun at ~/.bun/bin,",
+    "# etc.) are visible to the daemon. Bun.which() in the executor relies",
+    "# on PATH for rclone, tar, restic, etc.",
+    "Environment=PATH=/home/%u/.local/bin:/home/%u/.bun/bin:/home/%u/.cargo/bin:/usr/local/bin:/usr/bin",
     "# Hardening (relaxed for development; tighten in production)",
     "NoNewPrivileges=true",
     "PrivateTmp=true",
     "ProtectSystem=full",
     "ProtectHome=read-only",
-    "# Allow the daemon to write its socket, cache, share data, and project mounts in $HOME.",
-    `ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/lamasync.sock %h/projects`,
+    "# Allow the daemon to write its cache, share data, project mounts in $HOME,",
+    "# and its Unix socket under $XDG_RUNTIME_DIR (/run/user/<uid>).",
+    "# IMPORTANT: ProtectHome=read-only also marks /run/user as read-only, so",
+    "# /run/user must be explicitly whitelisted or the socket bind fails with",
+    "# EROFS (errno 30, syscall=listen). The %U specifier expands to the",
+    "# invoking UID, matching where systemd places $XDG_RUNTIME_DIR.",
+    `ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/projects /run/user/%U`,
     "# Standardize socket path so the daemon, TUI, and per-mount units agree.",
     `Environment=LAMASYNC_SOCKET_PATH=${socketPath}`,
     "# Resource limits",
