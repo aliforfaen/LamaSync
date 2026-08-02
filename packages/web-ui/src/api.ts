@@ -114,6 +114,13 @@ export function apiPut<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
+export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  return apiFetch<T>(path, {
+    method: "PATCH",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
 export function apiDelete<T = void>(path: string): Promise<T> {
   return apiFetch<T>(path, { method: "DELETE" });
 }
@@ -125,6 +132,8 @@ export const api = {
   listHosts: () => apiGet<Host[]>("/hosts"),
   getHost: (hostId: string) =>
     apiGet<Host>(`/hosts/${encodeURIComponent(hostId)}`),
+  patchHost: (hostId: string, body: { hostname: string }) =>
+    apiPatch<Host>(`/hosts/${encodeURIComponent(hostId)}`, body),
   getConfig: (hostId: string) =>
     apiGet<HostConfig>(`/config/${encodeURIComponent(hostId)}`),
   listFolders: () => apiGet<Folder[]>("/folders"),

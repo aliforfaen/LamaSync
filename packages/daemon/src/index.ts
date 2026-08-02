@@ -468,6 +468,9 @@ async function main(): Promise<void> {
   let hostConfig: HostConfig | null = loadCache();
   const operations: OperationLog[] = [];
   let lastHeartbeatAt = 0;
+  // LAMA-225: last hostname the server returned for this daemon, so the
+  // rename log line fires once per change instead of every refresh.
+  let lastServerHostname = clientConfig.hostname;
 
   const socketState = (): SocketState =>
     buildSocketState(hostId, hostConfig, operations);
@@ -480,6 +483,16 @@ async function main(): Promise<void> {
       const cfg = await client.getConfig(hostId);
       hostConfig = cfg;
       saveCache(cfg);
+      // LAMA-225: the server owns the display label. When an operator
+      // renamed this host via the UI, /config/:hostId returns the new
+      // hostname while this daemon still identifies by its local
+      // client.toml hostname — log the change so the operator sees it.
+      if (cfg.host.hostname !== lastServerHostname) {
+        console.log(
+          `[config] host renamed: ${lastServerHostname} → ${cfg.host.hostname}`,
+        );
+        lastServerHostname = cfg.host.hostname;
+      }
       console.log(
         `[config] refreshed host=${hostId} assignments=${cfg.assignments.length}`,
       );

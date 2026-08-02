@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { Host } from "@lamasync/core";
 import { api } from "../api.ts";
 import { AddHostGuide } from "../components/AddHostGuide.tsx";
+import { EditableHostname } from "../components/EditableHostname.tsx";
+import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 function formatTimestamp(ts: number | null | undefined): string {
   return ts ? new Date(ts).toLocaleString() : "—";
@@ -12,6 +14,18 @@ export function Hosts() {
   const [items, setItems] = useState<Host[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(false);
+  // LAMA-225: transient banner on host.renamed WebSocket events.
+  const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
+  const { event } = useWebSocket();
+
+  const refresh = useCallback(async (): Promise<void> => {
+    setError(null);
+    try {
+      setItems(await api.listHosts());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -31,6 +45,13 @@ export function Hosts() {
     };
   }, []);
 
+  useEffect(() => {
+    if (event && event.kind === "host_renamed") {
+      setRenamedBanner(`host renamed: ${event.oldId} → ${event.hostname}`);
+      void refresh();
+    }
+  }, [event, refresh]);
+
   return (
     <div className="page">
       <div className="toolbar">
@@ -45,6 +66,19 @@ export function Hosts() {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
+      {renamedBanner ? (
+        <div className="banner">
+          <span>{renamedBanner}</span>
+          <button
+            type="button"
+            className="banner-close"
+            aria-label="Dismiss"
+            onClick={() => setRenamedBanner(null)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       {(showGuide || (items !== null && items.length === 0)) && <AddHostGuide />}
 
@@ -57,7 +91,7 @@ export function Hosts() {
           {items.map((h) => (
             <Link className="host-card" key={h.id} to={`/hosts/${encodeURIComponent(h.id)}`}>
               <div className="host-card-head">
-                <strong>{h.hostname}</strong>
+                <EditableHostname host={h} onRenamed={() => void refresh()} />
                 <span className={`badge badge-${h.status}`}>{h.status}</span>
               </div>
               <div className="host-card-meta">

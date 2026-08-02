@@ -175,6 +175,18 @@ export class LamaSyncApiClient {
     return this.request<Host>("GET", `/api/v1/hosts/${encodeURIComponent(hostId)}`);
   }
 
+  // LAMA-225: rename a host's display label. hosts.id stays stable (the
+  // daemon keys every call on it); the id is re-keyed automatically when
+  // the daemon later re-registers under the new name.
+  patchHost(hostId: string, body: { hostname: string }): Promise<Host> {
+    return this.request<Host>(
+      "PATCH",
+      `/api/v1/hosts/${encodeURIComponent(hostId)}`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
   listPendingActions(hostId: string, limit = 10): Promise<QueuedAction[]> {
     return this.request<QueuedAction[]>(
       "GET",

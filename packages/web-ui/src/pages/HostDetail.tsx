@@ -10,6 +10,8 @@ import type {
   QueuedActionType,
 } from "@lamasync/core";
 import { api } from "../api.ts";
+import { EditableHostname } from "../components/EditableHostname.tsx";
+import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 interface DetailData {
   host: Host;
@@ -52,6 +54,9 @@ export function HostDetail() {
   const [data, setData] = useState<DetailData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<QueuedActionType | null>(null);
+  // LAMA-225: transient banner when this host's label is renamed.
+  const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
+  const { event } = useWebSocket();
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!hostId) return;
@@ -72,6 +77,13 @@ export function HostDetail() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (event && event.kind === "host_renamed" && event.oldId === hostId) {
+      setRenamedBanner(`host renamed: ${event.oldId} → ${event.hostname}`);
+      void refresh();
+    }
+  }, [event, hostId, refresh]);
 
   const assignments = data?.config.assignments ?? [];
   const folders = data?.config.folders ?? [];
@@ -137,6 +149,19 @@ export function HostDetail() {
         <Link className="action" to="/hosts">← All hosts</Link>
       </div>
       {error && <div className="error">{error}</div>}
+      {renamedBanner ? (
+        <div className="banner">
+          <span>{renamedBanner}</span>
+          <button
+            type="button"
+            className="banner-close"
+            aria-label="Dismiss"
+            onClick={() => setRenamedBanner(null)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       <section className="section host-detail-identity">
         <h2>Identity</h2>
@@ -144,7 +169,9 @@ export function HostDetail() {
           <dt>Status</dt>
           <dd><span className={`badge badge-${host.status}`}>{host.status}</span></dd>
           <dt>Hostname</dt>
-          <dd>{host.hostname}</dd>
+          <dd>
+            <EditableHostname host={host} onRenamed={() => void refresh()} />
+          </dd>
           <dt>Host ID</dt>
           <dd><code>{host.id}</code></dd>
           <dt>Last seen</dt>

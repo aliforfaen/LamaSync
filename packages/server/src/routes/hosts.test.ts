@@ -290,3 +290,151 @@ describe("GET /api/v1/hosts and /api/v1/hosts/:hostId (LAMA-198)", () => {
     expect(events).toEqual([{ type: "host_online", host_id: "host-a" }]);
   });
 });
+
+describe("PATCH /api/v1/hosts/:hostId — host rename (LAMA-225)", () => {
+  async function patch(path: string, body: Record<string, unknown>): Promise<Response> {
+    return app.handle(request(path, { method: "PATCH", body: JSON.stringify(body) }));
+  }
+
+  test("renames the display label; id stays stable", async () => {
+    const res = await patch("/api/v1/hosts/host-a", { hostname: "cachy-laptop" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.id).toBe("host-a");
+    expect(body.hostname).toBe("cachy-laptop");
+
+    const row = db
+      .query<{ id: string; hostname: string }, [string]>(
+        "SELECT id, hostname FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(row).toEqual({ id: "host-a", hostname: "cachy-laptop" });
+  });
+
+  test("returns 404 for an unknown host", async () => {
+    const res = await patch("/api/v1/hosts/ghost", { hostname: "new-name" });
+    expect(res.status).toBe(404);
+  });
+
+  test("returns 409 when the hostname collides with another host's hostname (case-insensitive)", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-b', 'cachy-laptop')`);
+    const res = await patch("/api/v1/hosts/host-a", { hostname: "CACHY-LAPTOP" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("already in use");
+  });
+
+  test("returns 409 when the hostname collides with another host's id", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-b', 'host-b')`);
+    const res = await patch("/api/v1/hosts/host-a", { hostname: "host-b" });
+    expect(res.status).toBe(409);
+  });
+
+  test("rejects non-DNS-safe hostnames with 400", async () => {
+    const badNames = ["Upper Case", "has space", "leading-", "-trailing", "", "x".repeat(64)];
+    for (const bad of badNames) {
+      const res = await patch("/api/v1/hosts/host-a", { hostname: bad });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  test("records a host_rename row in operation_log", async () => {
+    const res = await patch("/api/v1/hosts/host-a", { hostname: "cachy-laptop" });
+    expect(res.status).toBe(200);
+    const rows = db
+      .query<
+        { operation: string; status: string; summary: string | null; host_id: string },
+        []
+      >(
+        "SELECT operation, status, summary, host_id FROM operation_log WHERE operation = 'host_rename'",
+      )
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      operation: "host_rename",
+      status: "success",
+      summary: "host-a → cachy-laptop",
+      host_id: "host-a",
+    });
+  });
+
+  test("bumps the renamed host's own config revision so its daemon refreshes promptly", async () => {
+    db.run("UPDATE hosts SET config_revision = 3 WHERE id = 'host-a'");
+    const res = await patch("/api/v1/hosts/host-a", { hostname: "cachy-laptop" });
+    expect(res.status).toBe(200);
+    const row = db
+      .query<{ config_revision: number | null }, [string]>(
+        "SELECT config_revision FROM hosts WHERE id = 'host-a'",
+      )
+      .get("host-a");
+    expect(row?.config_revision).toBe(4);
+  });
+});
+
+describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
+  function seedDependentRows(hostId: string): void {
+    db.run(
+      `INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path)
+       VALUES ('fa-1', 'folder-1', ?, 'source', '/tmp/f1')`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO operation_log (timestamp, host_id, operation, status, summary)
+       VALUES (1700000000000, ?, 'sync', 'success', 'seed')`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO queued_actions (id, host_id, type, created_at)
+       VALUES ('qa-1', ?, 'check_update', 1700000000000)`,
+      [hostId],
+    );
+  }
+
+  test("re-keys a renamed host on re-registration, preserving history", async () => {
+    // Operator renamed host-a → cachy via the UI (label-only PATCH).
+    db.run("UPDATE hosts SET hostname = 'cachy' WHERE id = 'host-a'");
+    seedDependentRows("host-a");
+
+    // Daemon restarts with client.toml hostname = 'cachy'.
+    const res = await post("/api/v1/register", {
+      id: "cachy",
+      hostname: "cachy",
+      tailnetIp: null,
+    });
+    expect(res.status).toBe(201);
+
+    // The row was re-keyed: id is now cachy, no duplicate host remains.
+    const hosts = db
+      .query<{ id: string; hostname: string }, []>(
+        "SELECT id, hostname FROM hosts ORDER BY id",
+      )
+      .all();
+    expect(hosts).toEqual([{ id: "cachy", hostname: "cachy" }]);
+
+    // Every host_id reference followed the host.
+    const fa = db.query<{ host_id: string }, []>("SELECT host_id FROM folder_assignments").all();
+    expect(fa).toEqual([{ host_id: "cachy" }]);
+    const ops = db.query<{ host_id: string }, []>("SELECT host_id FROM operation_log").all();
+    expect(ops).toEqual([{ host_id: "cachy" }]);
+    const qa = db.query<{ host_id: string }, []>("SELECT host_id FROM queued_actions").all();
+    expect(qa).toEqual([{ host_id: "cachy" }]);
+  });
+
+  test("normal registration of an existing host does not re-key", async () => {
+    seedDependentRows("host-a");
+    const res = await post("/api/v1/register", {
+      id: "host-a",
+      hostname: "host-a",
+      tailnetIp: null,
+    });
+    expect(res.status).toBe(201);
+    const row = db
+      .query<{ id: string; hostname: string }, [string]>(
+        "SELECT id, hostname FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(row).toEqual({ id: "host-a", hostname: "host-a" });
+    const fa = db.query<{ host_id: string }, []>("SELECT host_id FROM folder_assignments").all();
+    expect(fa).toEqual([{ host_id: "host-a" }]);
+  });
+});
