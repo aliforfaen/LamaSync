@@ -35,11 +35,11 @@ function request(path: string, init: RequestInit = {}): Request {
 }
 
 function postJson(path: string, body: unknown): Promise<Response> {
-  return app.handle(request(path, { method: "POST", body: JSON.stringify(body) }));
+  return Promise.resolve(app.handle(request(path, { method: "POST", body: JSON.stringify(body) })));
 }
 
 function patchJson(path: string, body: unknown): Promise<Response> {
-  return app.handle(request(path, { method: "PATCH", body: JSON.stringify(body) }));
+  return Promise.resolve(app.handle(request(path, { method: "PATCH", body: JSON.stringify(body) })));
 }
 
 beforeEach(() => {
