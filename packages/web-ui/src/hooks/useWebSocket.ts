@@ -18,6 +18,7 @@ function encodeApiKeyForProtocol(key: string): string {
 const EVENT_KINDS = new Set<string>([
   "operation",
   "host",
+  "host_renamed",
   "conflict",
   "restic_snapshot",
   "restic_restore",

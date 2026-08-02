@@ -14,6 +14,53 @@ export type OperationStatus =
   | "recovery"  // bisync state was corrupted and recovered
   | "retry";    // transient failure, will retry
 
+// LAMA-222: first-class reusable backend (S3 today; local/nfs/restic future).
+export type BackendKind = "s3" | "local" | "nfs" | "restic";
+
+/**
+ * A reusable storage backend. `Folder.backend` references `Backend.id`;
+ * S3 credentials are stored once here instead of per-folder. Secrets are
+ * encrypted at rest (AES-256-GCM under LAMASYNC_SECRET_KEY); the plaintext
+ * never appears in API responses — `hasSecret` is the write-only signal.
+ */
+export interface Backend {
+  id: string;
+  /** User-facing label; unique across all backends. */
+  name: string;
+  kind: BackendKind;
+  // s3-specific:
+  s3Provider?: S3Provider | null;
+  s3Endpoint?: string | null;
+  s3Region?: string | null;
+  s3AccessKeyId?: string | null;
+  /** True when an encrypted secret is stored (UI shows masked value). */
+  hasSecret?: boolean;
+  /** Write-only: accepted on create/update, never returned. */
+  s3SecretAccessKey?: string | null;
+  createdAt: number;
+}
+
+// LAMA-221: configurable notification delivery channels (ntfy / webhook).
+export type NotificationChannelKind = "ntfy" | "webhook";
+
+export interface NotificationChannel {
+  id: string;
+  kind: NotificationChannelKind;
+  name: string;
+  url: string;
+  enabled: boolean;
+  /** Severity levels this channel delivers (allowlist). */
+  severities: NotificationSeverity[];
+  lastDeliveryStatus: "success" | "failed" | null;
+  lastDeliveryAt: number | null;
+  createdAt: number;
+}
+
+// LAMA-225: host rename request body (PATCH /hosts/:id).
+export interface PatchHost {
+  hostname: string;
+}
+
 export type ConflictStrategy =
   | "newer_wins"
   | "source_wins"
@@ -271,6 +318,9 @@ export type PeerRole = "serve" | "use";
 export interface Peer {
   peerHostId: string;
   peerLanIp: string;
+  // LAMA-223: the peer's tailnet (100.x.x.x) address when reported; the
+  // rclone SFTP section prefers this over peerLanIp.
+  peerTailnetIp?: string | null;
   peerRemote: string; // rclone section name in HostConfig.rcloneConfig
   role: PeerRole;
   folderIds: string[]; // folder ids whose rclone remotes can be replaced with the peer
@@ -282,6 +332,10 @@ export interface HealthReport {
   status: HostStatus;
   uptimeSec?: number;
   lanIp?: string | null;
+  // LAMA-223: daemon-reported tailnet (100.x.x.x / fd7a:...) address.
+  // When the tailnet interface is down the daemon reports null and the
+  // server config generator falls back to lanIp for peer SFTP targets.
+  tailnetIp?: string | null;
   // LAMA-199: optional daemon version. Heartbeats without a `version`
   // preserve whatever the daemon reported last, so transient blank reports
   // don't downgrade the stored value.
@@ -307,6 +361,9 @@ export interface OperationReport {
 export type WSEvent =
   | { kind: "operation"; entry: OperationLog }
   | { kind: "host"; host: Host }
+  // LAMA-225: emitted after a host rename (id == hostname). The UI shows a
+  // banner and re-fetches host lists; other fields reference the NEW id.
+  | { kind: "host_renamed"; oldId: string; newId: string; hostname: string }
   | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released"; status?: string; lockId?: string }
   | { kind: "mount"; folderId: string; status: MountEntry["status"]; path: string }
   | { kind: "conflict"; conflict: Conflict }

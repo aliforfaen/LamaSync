@@ -151,6 +151,36 @@ CREATE TABLE IF NOT EXISTS notification_events (
     webhook_delivered   INTEGER DEFAULT 0
 );
 
+-- LAMA-221: configurable delivery channels. Replaces the env-only
+-- LAMASYNC_NTFY_URL / LAMASYNC_LAMADB_WEBHOOK_URL gates; the env values
+-- seed a channel row on first boot (see notifications.ts).
+CREATE TABLE IF NOT EXISTS notification_channels (
+    id                   TEXT PRIMARY KEY,
+    kind                 TEXT NOT NULL,      -- 'ntfy' | 'webhook'
+    name                 TEXT NOT NULL,
+    url                  TEXT NOT NULL,
+    enabled              INTEGER DEFAULT 1,
+    severities           TEXT NOT NULL DEFAULT '["critical","default","info"]', -- JSON allowlist
+    last_delivery_status TEXT,               -- 'success' | 'failed' | NULL
+    last_delivery_at     INTEGER,
+    created_at           INTEGER NOT NULL
+);
+
+-- LAMA-222: reusable backends. folders.backend becomes a reference to
+-- backends.id; S3 credentials live here once instead of per folder. Secrets
+-- are encrypted at rest (AES-256-GCM) in s3_secret_key_enc.
+CREATE TABLE IF NOT EXISTS backends (
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL UNIQUE,
+    kind               TEXT NOT NULL DEFAULT 's3',
+    s3_provider        TEXT DEFAULT 'other',
+    s3_endpoint        TEXT,
+    s3_region          TEXT,
+    s3_access_key_id   TEXT,
+    s3_secret_key_enc  TEXT,
+    created_at         INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schedule_state (
     folder_assignment_id TEXT NOT NULL UNIQUE REFERENCES folder_assignments(id),
     last_run             INTEGER,
@@ -233,4 +263,10 @@ export const MIGRATIONS: string[] = [
   "CREATE TABLE IF NOT EXISTS queued_actions (id TEXT PRIMARY KEY, host_id TEXT NOT NULL REFERENCES hosts(id), type TEXT NOT NULL, payload TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, taken_at INTEGER, completed_at INTEGER, result TEXT)",
   "CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status ON queued_actions(host_id, status)",
   "CREATE TABLE IF NOT EXISTS notification_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, severity TEXT NOT NULL, message TEXT NOT NULL, host_id TEXT, folder_id TEXT, payload TEXT, created_at INTEGER NOT NULL, ntfy_delivered INTEGER DEFAULT 0, webhook_delivered INTEGER DEFAULT 0)",
+  // LAMA-223: hosts.tailnet_ip was added to SERVER_SCHEMA but never shipped
+  // as a migration — existing databases would crash on HOST_SELECT. This is
+  // the missing piece; "duplicate column" errors are ignored by initDb.
+  "ALTER TABLE hosts ADD COLUMN tailnet_ip TEXT",
+  "CREATE TABLE IF NOT EXISTS notification_channels (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, enabled INTEGER DEFAULT 1, severities TEXT NOT NULL DEFAULT '[\"critical\",\"default\",\"info\"]', last_delivery_status TEXT, last_delivery_at INTEGER, created_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS backends (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL DEFAULT 's3', s3_provider TEXT DEFAULT 'other', s3_endpoint TEXT, s3_region TEXT, s3_access_key_id TEXT, s3_secret_key_enc TEXT, created_at INTEGER NOT NULL)",
 ];

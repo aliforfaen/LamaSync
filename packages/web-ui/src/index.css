@@ -276,6 +276,25 @@ a:hover {
 .attention-count { color: var(--accent-warn); font-size: var(--font-size-xl); font-weight: 700; }
 .attention-detail { color: var(--text-dim); font-size: var(--font-size-sm); }
 .attention-detail ul { margin: 0; padding-left: var(--space-4); }
+/* Each attention entry is one tight line: text truncates with ellipsis,
+   the time-ago label stays pinned right and never wraps. */
+.attention-detail li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  white-space: nowrap;
+  min-width: 0;
+}
+.attention-entry-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.attention-entry-time {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
 .attention-host { display: block; }
 .all-quiet { color: var(--accent-ok); background: var(--accent-ok-bg); border-radius: var(--radius-md); padding: var(--space-3); }
 .fleet-card { display: flex; flex-direction: column; gap: var(--space-2); }

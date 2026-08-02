@@ -52,6 +52,24 @@ function formatTimestamp(ts: number | null | undefined): string {
 }
 
 /**
+ * Compact "time ago" label for triage cards. Full `toLocaleString()`
+ * timestamps wrap to 2-3 lines inside the narrow attention-grid columns;
+ * a relative label keeps each entry on a single line.
+ */
+function formatTimeAgo(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  const diffMs = Date.now() - ts;
+  if (diffMs < 60_000) return "just now";
+  const min = Math.floor(diffMs / 60_000);
+  if (min < 60) return `${min}m ago`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
+/**
  * LAMA-203: the last-visit timestamp used to highlight "what changed since
  * last visit". `null` means "never visited" — nothing is highlighted on the
  * first visit. The value is refreshed to `now` on every Command Center mount
@@ -184,8 +202,11 @@ export function Dashboard() {
             <AttentionItem title="Pending conflicts" count={counts.conflicts} to="/conflicts">
               <ul>
                 {data?.pendingConflicts.slice(0, 3).map((c) => (
-                  <li key={c.id}>
-                    {c.folderId} · {formatTimestamp(c.createdAt)}
+                  <li key={c.id} title={formatTimestamp(c.createdAt)}>
+                    <span className="attention-entry-text">{c.folderId}</span>
+                    <span className="attention-entry-time">
+                      {formatTimeAgo(c.createdAt)}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -193,8 +214,16 @@ export function Dashboard() {
             <AttentionItem title="Failed operations (24h)" count={failed.length}>
               <ul>
                 {failed.slice(0, 3).map((op) => (
-                  <li key={String(op.id)}>
-                    {op.summary ?? op.operation} · {formatTimestamp(op.timestamp)}
+                  <li
+                    key={String(op.id)}
+                    title={`${op.summary ?? op.operation} · ${formatTimestamp(op.timestamp)}`}
+                  >
+                    <span className="attention-entry-text">
+                      {op.summary ?? op.operation}
+                    </span>
+                    <span className="attention-entry-time">
+                      {formatTimeAgo(op.timestamp)}
+                    </span>
                   </li>
                 ))}
               </ul>
