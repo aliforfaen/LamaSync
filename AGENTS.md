@@ -395,7 +395,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 ## Current status (as of 2026-08-01)
 
 - Project version: **0.2.3**
-- Tests: **300 passing** across 35 files, 1 skip, 0 failures.
+- Tests: **308 passing** across 35 files, 1 skip, 0 failures.
 - **Install scripts**: `packaging/install/install.sh` and `packaging/install/update.sh` patched to be self-contained and aligned with the CI-published binary names (`lamasyncd`, `lamasync-tui`). Docker smoke tests (`scripts/test-install.sh`, `scripts/test-update.sh`) both pass.
 - **Release**: v0.2.3 tag pushed; GitHub Actions will publish the matching release assets (`lamasyncd`, `lamasync-tui`, `lamasync-server`) and the GHCR Docker image.
 - **LAMA-173 done**: TUI unified into a tabbed shell with 6 persistent views and 2 guided wizards; LAMA-167 Enter-crash invariants preserved.
@@ -404,36 +404,31 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **LAMA-183 Batch 3 done**: LAMA-198 shipped (commit 3f4594d) — host list/detail pages + full queued-action model (design agreed on the issue) + config-revision auto-refresh. Remaining pillars: LAMA-200 (notifications), LAMA-202 (data browser).
 - **LAMA-183 complete (2026-08-01)**: LAMA-200 (bfa1a07) notifications — ntfy + LamaDB webhook + host-staleness sweep; LAMA-202 (a449160) read-only Data Browser with hand-rolled SigV4 S3 listing (anchored to the AWS test-suite vector); LAMA-203 (954ecec) since-last-visit highlighting. All seven epic issues done. Full dogfood/testing handoff: `docs/handoff/command-center-testing.md`.
 - **LAMA-183 dogfooded (2026-08-01)**: full-epic session against a local dev server (`docs/handoff/dogfood-2026-08-01/report.md`) — zero critical; 2 high + 3 medium + 1 low filed as LAMA-205 (nav clip), LAMA-206 (dark-theme button contrast), LAMA-207 (quick-action links dead on click, high), LAMA-208 (stale /login redirect), LAMA-209 (browse 400 vs 404), LAMA-210 (browse ENOTDIR leak, high). Epic marked done; fixes tracked on the new issues. Daemon-dependent checks (D4/D5) and live S3/ntfy delivery still untested.
+- **Dogfood fixes landed (2026-08-02, commit 41c7cad)**: LAMA-205/206/208/209/210 fixed and verified live; LAMA-207 closed as not-an-app-bug (agent-browser below-fold click artifact — post-mortem note in `docs/handoff/command-center-testing.md`). All six issues done.
 - **LamaDB integration (LAMA-204, LamaDB project)**: receiving endpoint for the LAMA-200 webhook (`POST /api/lamasync/webhook`) — LamaSync side is live and env-gated via `LAMASYNC_LAMADB_WEBHOOK_URL`.
-- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers), LAMA-182 (TUI process lingers after quit), LAMA-205..210 (dogfood bugs).
+- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers), LAMA-182 (TUI process lingers after quit).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
 
 ## Next session options
 
 Ready-to-pick work, ordered by likely value/urgency:
 
-1. **Dogfood bugfix batch — LAMA-207 + LAMA-210 first (high)**, then LAMA-205, LAMA-206, LAMA-209 (medium), LAMA-208 (low)
-   - LAMA-207: quick-action links dead on mouse click (event handling, Command Center).
-   - LAMA-210: `browse/local` leaks raw ENOTDIR + server path as HTTP 500 — sanitize to 400.
-   - LAMA-205/206 likely share a root cause (WS re-render lags theme/layout tokens).
-   - Full repro steps: `docs/handoff/dogfood-2026-08-01/report.md`.
-
-2. **LAMA-105 — Backend storage: Exoscale S3 backend + basic tests** (in_progress, urgent)
+1. **LAMA-105 — Backend storage: Exoscale S3 backend + basic tests** (in_progress, urgent)
    - Wire up the Exoscale S3-compatible backend as a folder target.
    - Add validation for `s3Endpoint`, `s3Bucket`, `s3AccessKeyId`, `s3SecretAccessKey`.
    - Run basic end-to-end tests: create folder, assign, daemon sync, verify object listing in bucket.
    - Revisit rclone config generation for S3 in `server/src/routes/config.ts` and folder validation in `server/src/routes/folders.ts`.
 
-3. **LAMA-171 — `@reboot`/`@login` dotfile schedule triggers** (in_progress, urgent)
+2. **LAMA-171 — `@reboot`/`@login` dotfile schedule triggers** (in_progress, urgent)
    - Scheduler special-token support + tests done; LAMA-168 (host selector, excludes, cron presets, deployment tracking) is done.
 
-4. **LAMA-104 — Error handling** (backlog, high)
+3. **LAMA-104 — Error handling** (backlog, high)
    - Harden error propagation, structured error responses, and retry/circuit-breaker behavior across the daemon and server.
 
-5. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
+4. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
    - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
 
-6. **Polish / tech debt**
+5. **Polish / tech debt**
    - Dotfile diff preview against current disk files before extraction.
    - `nts` / tabbed-cycle keyboard interactions in OpenTUI native mode.
    - Multi-user auth scoping, operation-log archival.
