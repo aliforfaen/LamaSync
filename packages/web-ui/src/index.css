@@ -612,6 +612,32 @@ button.action:disabled {
   font-size: var(--font-size-sm);
 }
 
+/* LAMA-223: tailnet address chip with copy affordance (host list cards). */
+.tailnet-ip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.copy-btn {
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.copy-btn:hover {
+  color: var(--text);
+  border-color: var(--accent-info);
+}
+
+/* LAMA-223: tailnet IP is the primary address on the host detail card. */
+.address-primary {
+  font-weight: 600;
+}
+
 .host-detail-dl {
   display: grid;
   grid-template-columns: max-content 1fr;

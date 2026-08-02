@@ -10,6 +10,56 @@ function formatTimestamp(ts: number | null | undefined): string {
   return ts ? new Date(ts).toLocaleString() : "—";
 }
 
+/** Best-effort clipboard copy with an execCommand fallback. Resolves to
+ * false when neither path is available. */
+async function copyText(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="copy-btn"
+      title={`Copy ${label}`}
+      aria-label={`Copy ${label}`}
+      onClick={(e) => {
+        // The card is a Link; copying must not trigger navigation.
+        e.preventDefault();
+        e.stopPropagation();
+        void copyText(value).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+    >
+      {copied ? "✓" : "⧉"}
+    </button>
+  );
+}
+
 export function Hosts() {
   const [items, setItems] = useState<Host[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +146,10 @@ export function Hosts() {
               </div>
               <div className="host-card-meta">
                 <span className="muted">ID {h.id}</span>
-                {h.tailnetIp ? <code>{h.tailnetIp}</code> : null}
+                <span className="tailnet-ip">
+                  {h.tailnetIp ? <code>{h.tailnetIp}</code> : <span className="muted">tailnet —</span>}
+                  {h.tailnetIp ? <CopyButton value={h.tailnetIp} label="tailnet IP" /> : null}
+                </span>
                 {h.lanIp ? <code>lan {h.lanIp}</code> : null}
               </div>
               <div className="host-card-meta">

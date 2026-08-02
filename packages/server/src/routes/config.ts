@@ -200,6 +200,9 @@ export function detectLanPeers(
     peers.push({
       peerHostId: other.id,
       peerLanIp: other.lan_ip,
+      // LAMA-223: prefer the tailnet address for peer SFTP targets; the
+      // config generator falls back to the LAN IP when this is null.
+      peerTailnetIp: other.tailnet_ip,
       peerRemote: `lamasync-peer-${other.id}`,
       role,
       folderIds: [],
@@ -342,11 +345,15 @@ export function generateRcloneConfig(
   }
 
   for (const p of peers) {
+    // LAMA-223: the tailnet address is the primary way LamaSync reaches a
+    // peer; the LAN IP is the fallback for hosts with no tailscale interface.
+    const via = p.peerTailnetIp ? "tailnet" : "lan";
+    const peerAddress = p.peerTailnetIp ?? p.peerLanIp;
     lines.push(`[${p.peerRemote}]`);
     lines.push("type = sftp");
-    lines.push(`host = ${p.peerLanIp}`);
+    lines.push(`host = ${peerAddress}`);
     lines.push(`user = ${PEER_SFTP_USER}`);
-    lines.push(`description = "LAN peer ${p.peerHostId} (${p.role})"`);
+    lines.push(`description = "LAN peer ${p.peerHostId} (${p.role}) via ${via} (${peerAddress})"`);
     if (apiKey) {
       lines.push(`pass = ${apiKey}`);
     }

@@ -176,18 +176,23 @@ export function HostDetail() {
           <dd><code>{host.id}</code></dd>
           <dt>Last seen</dt>
           <dd>{formatTimestamp(host.lastSeen)}</dd>
-          {host.tailnetIp ? (
-            <>
-              <dt>Tailnet IP</dt>
-              <dd><code>{host.tailnetIp}</code></dd>
-            </>
-          ) : null}
-          {host.lanIp ? (
-            <>
-              <dt>LAN IP</dt>
-              <dd><code>{host.lanIp}</code></dd>
-            </>
-          ) : null}
+          {/* LAMA-223: tailnet is the primary address; LAN IP is fallback info. */}
+          <dt>Tailnet IP</dt>
+          <dd>
+            {host.tailnetIp ? (
+              <code className="address-primary">{host.tailnetIp}</code>
+            ) : (
+              <span className="muted">—</span>
+            )}
+          </dd>
+          <dt>LAN IP</dt>
+          <dd>
+            {host.lanIp ? (
+              <code className="muted">{host.lanIp}</code>
+            ) : (
+              <span className="muted">—</span>
+            )}
+          </dd>
           <dt>Daemon version</dt>
           <dd>
             v{host.version ?? "—"}

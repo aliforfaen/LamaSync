@@ -263,6 +263,7 @@ export function Dashboard() {
                   <span className={`badge badge-${h.status}`}>{h.status}</span>
                 </div>
                 <span className="muted">Last seen {formatTimestamp(h.lastSeen)}</span>
+                {h.tailnetIp ? <span className="muted">tailnet {h.tailnetIp}</span> : null}
                 <span>
                   v{h.version ?? "—"}{" "}
                   {h.updateAvailable && <span className="badge badge-update">update</span>}

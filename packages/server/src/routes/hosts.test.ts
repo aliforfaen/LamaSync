@@ -56,14 +56,21 @@ async function post(path: string, body: Record<string, unknown>): Promise<Respon
 function loadHostRow(hostId: string): {
   version: string | null;
   lan_ip: string | null;
+  tailnet_ip: string | null;
   last_seen: number | null;
   status: string | null;
 } {
   const row = db
     .query<
-      { version: string | null; lan_ip: string | null; last_seen: number | null; status: string | null },
+      {
+        version: string | null;
+        lan_ip: string | null;
+        tailnet_ip: string | null;
+        last_seen: number | null;
+        status: string | null;
+      },
       [string]
-    >("SELECT version, lan_ip, last_seen, status FROM hosts WHERE id = ?")
+    >("SELECT version, lan_ip, tailnet_ip, last_seen, status FROM hosts WHERE id = ?")
     .get(hostId);
   if (!row) throw new Error(`host ${hostId} not found`);
   return row;
@@ -140,6 +147,34 @@ describe("POST /api/v1/report/health — version field (LAMA-199)", () => {
     expect(row.status).toBe("degraded");
     expect(row.lan_ip).toBe("192.168.1.42");
     expect(row.version).toBe("0.5.0");
+  });
+
+  test("heartbeat persists tailnetIp alongside lanIp (LAMA-223)", async () => {
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: 1_700_000_000_000,
+      status: "online",
+      lanIp: "192.168.10.183",
+      tailnetIp: "100.64.0.5",
+    });
+    expect(res.status).toBe(204);
+    const row = loadHostRow("host-a");
+    expect(row.tailnet_ip).toBe("100.64.0.5");
+    expect(row.lan_ip).toBe("192.168.10.183");
+  });
+
+  test("heartbeat with null tailnetIp preserves the stored value (LAMA-223)", async () => {
+    db.run(`UPDATE hosts SET tailnet_ip = '100.64.0.5' WHERE id = 'host-a'`);
+
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      tailnetIp: null,
+    });
+    expect(res.status).toBe(204);
+    const row = loadHostRow("host-a");
+    expect(row.tailnet_ip).toBe("100.64.0.5");
   });
 
   test("heartbeat for an unknown host returns 404", async () => {

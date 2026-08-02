@@ -15,7 +15,7 @@ import type {
 } from "@lamasync/core";
 import { initDb } from "@lamasync/core";
 import { Database } from "bun:sqlite";
-import { generateRcloneConfig } from "./config.ts";
+import { detectLanPeers, generateRcloneConfig } from "./config.ts";
 
 // Module-scoped DB instance so `db` (imported transitively by config.ts) sees
 // the right schema. config.ts queries the DB to look up peer-shared folder ids,
@@ -526,6 +526,112 @@ describe("GET /api/v1/config/:hostId — dotfile manifests (LAMA-168)", () => {
     const manifest = body.manifests.find((m) => m.appName === "nvim");
     expect(manifest?.excludes).toEqual(["*.log", "cache/"]);
     expect(manifest?.schedule).toBe("@login");
+  });
+});
+
+describe("peer SFTP emission (LAMA-223 tailnet preference)", () => {
+  test("detectLanPeers carries the peer's tailnet IP when reported", () => {
+    const hosts = [
+      {
+        id: "host-1",
+        hostname: "alpha",
+        tailnet_ip: "100.64.0.1" as string | null,
+        last_seen: 1,
+        status: "online",
+        lan_ip: "192.168.10.1",
+        config_revision: 0,
+      },
+      {
+        id: "host-2",
+        hostname: "beta",
+        tailnet_ip: "100.64.0.2" as string | null,
+        last_seen: 1,
+        status: "online",
+        lan_ip: "192.168.10.2",
+        config_revision: 0,
+      },
+    ];
+    const peers = detectLanPeers("host-1", hosts, null);
+    expect(peers).toHaveLength(1);
+    expect(peers[0]?.peerHostId).toBe("host-2");
+    expect(peers[0]?.peerTailnetIp).toBe("100.64.0.2");
+    expect(peers[0]?.peerLanIp).toBe("192.168.10.2");
+  });
+
+  test("detectLanPeers sets peerTailnetIp to null when the peer has none", () => {
+    const hosts = [
+      {
+        id: "host-1",
+        hostname: "alpha",
+        tailnet_ip: "100.64.0.1" as string | null,
+        last_seen: 1,
+        status: "online",
+        lan_ip: "192.168.10.1",
+        config_revision: 0,
+      },
+      {
+        id: "host-2",
+        hostname: "beta",
+        tailnet_ip: null as string | null,
+        last_seen: 1,
+        status: "online",
+        lan_ip: "192.168.10.2",
+        config_revision: 0,
+      },
+    ];
+    const peers = detectLanPeers("host-1", hosts, null);
+    expect(peers[0]?.peerTailnetIp).toBeNull();
+  });
+
+  test("peer rclone section uses the tailnet address when available", () => {
+    const peers = [
+      {
+        peerHostId: "host-2",
+        peerLanIp: "192.168.10.2",
+        peerTailnetIp: "100.64.0.2",
+        peerRemote: "lamasync-peer-host-2",
+        role: "use" as const,
+        folderIds: [] as string[],
+      },
+    ];
+    const out = generateRcloneConfig(
+      "host-1",
+      [],
+      [],
+      null,
+      "/backups",
+      peers,
+      "test-key",
+    );
+    expect(out.rcloneConfig).toContain("[lamasync-peer-host-2]");
+    expect(out.rcloneConfig).toContain("host = 100.64.0.2");
+    expect(out.rcloneConfig).toContain("via tailnet (100.64.0.2)");
+    expect(out.rcloneConfig).not.toContain("host = 192.168.10.2");
+  });
+
+  test("peer rclone section falls back to the LAN IP when no tailnet IP exists", () => {
+    const peers = [
+      {
+        peerHostId: "host-2",
+        peerLanIp: "192.168.10.2",
+        peerTailnetIp: null,
+        peerRemote: "lamasync-peer-host-2",
+        role: "serve" as const,
+        folderIds: [] as string[],
+      },
+    ];
+    const out = generateRcloneConfig(
+      "host-1",
+      [],
+      [],
+      null,
+      "/backups",
+      peers,
+      "test-key",
+    );
+    expect(out.rcloneConfig).toContain("[lamasync-peer-host-2]");
+    expect(out.rcloneConfig).toContain("host = 192.168.10.2");
+    expect(out.rcloneConfig).toContain("via lan (192.168.10.2)");
   });
 });
 

@@ -381,11 +381,12 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/report/health",
     async ({ body, set }) => {
-      const { hostId, timestamp, status, lanIp, version } = body as {
+      const { hostId, timestamp, status, lanIp, tailnetIp, version } = body as {
         hostId: string;
         timestamp: number;
         status: HostStatus;
         lanIp?: string | null;
+        tailnetIp?: string | null;
         version?: string | null;
       };
       const previous = activeDb
@@ -397,12 +398,17 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       // the heartbeat actually carries a truthy value. A heartbeat without
       // `version` (older daemons, transient blanks) preserves whatever the
       // daemon reported last so the dashboard's Version column doesn't
-      // flicker.
+      // flicker. The same rule keeps tailnet_ip stable when a daemon's
+      // tailscale interface is down (it sends `tailnetIp: null`).
       const sets: string[] = ["last_seen = ?", "status = ?"];
       const params: (string | number | null)[] = [timestamp, status];
       if (lanIp) {
         sets.push("lan_ip = ?");
         params.push(lanIp);
+      }
+      if (tailnetIp) {
+        sets.push("tailnet_ip = ?");
+        params.push(tailnetIp);
       }
       if (typeof version === "string" && version.length > 0) {
         sets.push("version = ?");
@@ -451,6 +457,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
           t.Literal("unknown"),
         ]),
         lanIp: t.Optional(t.Union([t.String(), t.Null()])),
+        tailnetIp: t.Optional(t.Union([t.String(), t.Null()])),
         version: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {

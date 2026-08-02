@@ -29,6 +29,7 @@ import {
   type SocketState,
 } from "./socket.ts";
 import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
+import { detectTailnetIp } from "./lan-peer.ts";
 import {
   acquireLock,
   heartbeatLock,
@@ -819,10 +820,11 @@ async function main(): Promise<void> {
   });
 
   try {
+    const tailnetIp = await detectTailnetIp();
     await client.registerHost({
       id: hostId,
       hostname: hostId,
-      tailnetIp: null,
+      tailnetIp,
     });
     const lanIp = getLocalLanIp();
     await client.reportHealth({
@@ -830,11 +832,12 @@ async function main(): Promise<void> {
       timestamp: Date.now(),
       status: "online",
       lanIp,
+      tailnetIp,
       version: VERSION,
     });
     lastHeartbeatAt = Date.now();
     await reportQueue.flush();
-    console.log(`[boot] registered and reported online host=${hostId} lanIp=${lanIp ?? "(none)"}`);
+    console.log(`[boot] registered and reported online host=${hostId} lanIp=${lanIp ?? "(none)"} tailnetIp=${tailnetIp ?? "(none)"}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[boot] initial registration failed: ${msg}`);
@@ -866,11 +869,13 @@ async function main(): Promise<void> {
     const now = Date.now();
     void (async () => {
       try {
+        const tailnetIp = await detectTailnetIp();
         await client.reportHealth({
           hostId,
           timestamp: now,
           status: "online",
           lanIp: getLocalLanIp(),
+          tailnetIp,
           version: VERSION,
         });
         lastHeartbeatAt = now;

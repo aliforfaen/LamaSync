@@ -9,6 +9,7 @@
 
 import { homedir } from "os";
 import { join } from "path";
+import { readFileSync } from "fs";
 import type { FolderAssignment, HostConfig, Peer } from "@lamasync/core";
 
 const PEER_SFTP_PORT = 2022;
@@ -179,4 +180,136 @@ export async function startLanPeerSession(opts: {
 // point at the same canonical location.
 export function peerStateDir(): string {
   return join(homedir(), ".local", "share", "lamasync", "peers");
+}
+
+// -----------------------------------------------------------------------------
+// Tailnet IP detection (LAMA-223).
+//
+// The daemon reports its tailnet (100.x.x.x / fd7a:115c:a1e0::/48) address so
+// the server can surface it everywhere a host is referenced and prefer it as
+// the peer SFTP target. Detection is best-effort and never throws:
+//   1. read /proc/net/route to find the default route's interface
+//   2. `ip -4 -o addr show dev <iface>` and pick a 100.0.0.0/8 address
+//   3. fallback: `tailscale status --json` -> Self.TailscaleIPs[0]
+// The parsing helpers are pure (string -> string | null) so unit tests can
+// exercise them with fake command output.
+// -----------------------------------------------------------------------------
+
+/**
+ * Find the default route's interface name in a `/proc/net/route` dump.
+ * Columns are `Iface Destination Gateway ...`; the destination `00000000`
+ * marks the default route and the interface is the first field. Returns
+ * null when there is no default route.
+ */
+export function parseDefaultRouteInterface(routeTable: string): string | null {
+  for (const rawLine of routeTable.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0) continue;
+    const fields = line.split(/\s+/);
+    if (fields.length < 2) continue;
+    const [iface, destination] = fields as [string, string];
+    if (iface === "Iface") continue; // header row
+    if (destination !== "00000000") continue;
+    return iface.length > 0 ? iface : null;
+  }
+  return null;
+}
+
+/**
+ * Pick the first Tailscale (100.0.0.0/8) IPv4 address from `ip -4 -o addr`
+ * output. Lines look like:
+ *   `2: tailscale0    inet 100.64.0.5/32 scope global ...`
+ * Returns null when no address in the tailnet range is present.
+ */
+export function parseIpAddrOutput(output: string): string | null {
+  for (const rawLine of output.split("\n")) {
+    const match = /\binet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\//.exec(rawLine);
+    if (!match) continue;
+    const ip = match[1] ?? "";
+    // 100.0.0.0/8 covers Tailscale's CGNAT range (100.64.0.0/10).
+    if (ip.startsWith("100.")) return ip;
+  }
+  return null;
+}
+
+/**
+ * Pull the first tailnet IP from `tailscale status --json` output.
+ * The interesting shape is `{ "Self": { "TailscaleIPs": ["100.64.0.5", ...] } }`.
+ * Malformed or non-object payloads yield null (never throws).
+ */
+export function parseTailscaleStatusJson(output: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const self = (parsed as Record<string, unknown>).Self;
+    if (self === null || typeof self !== "object") return null;
+    const ips = (self as Record<string, unknown>).TailscaleIPs;
+    if (!Array.isArray(ips)) return null;
+    for (const entry of ips) {
+      if (typeof entry === "string" && entry.length > 0) return entry;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Spawn a short-lived command and return its trimmed stdout, or null. */
+async function runCommand(argv: string[]): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+    const [stdout, , code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return code === 0 && stdout.length > 0 ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Best-effort tailnet IP detection. Never throws — every failure path returns
+ * null so callers (heartbeat/register) always produce a valid payload.
+ */
+export async function detectTailnetIp(): Promise<string | null> {
+  try {
+    let routeTable: string | null = null;
+    try {
+      routeTable = readFileSync("/proc/net/route", "utf8");
+    } catch {
+      routeTable = null; // non-Linux or restricted /proc
+    }
+    if (routeTable !== null) {
+      const iface = parseDefaultRouteInterface(routeTable);
+      if (iface !== null) {
+        const ipOutput = await runCommand([
+          "ip",
+          "-4",
+          "-o",
+          "addr",
+          "show",
+          "dev",
+          iface,
+        ]);
+        if (ipOutput !== null) {
+          const ip = parseIpAddrOutput(ipOutput);
+          if (ip !== null) return ip;
+        }
+      }
+    }
+    // Fallback: the tailscale status socket knows the tailnet addresses
+    // even when the default-route interface lookup missed.
+    const statusOutput = await runCommand(["tailscale", "status", "--json"]);
+    if (statusOutput !== null) {
+      const ip = parseTailscaleStatusJson(statusOutput);
+      if (ip !== null) return ip;
+    }
+  } catch {
+    // never throw
+  }
+  return null;
 }

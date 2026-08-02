@@ -90,9 +90,11 @@ function toFleetHostLike(host: {
 function describeHost(host: FleetHost, now: number): string {
   const status = host.status || "unknown";
   if (host.lastSeen === null || host.lastSeen === undefined) {
-    return `${status} · never`;
+    const tailnet = host.tailnetIp ? ` · ${host.tailnetIp}` : "";
+    return `${status} · never${tailnet}`;
   }
-  return `${status} · ${formatLastSeen(host.lastSeen, now)}`;
+  const tailnet = host.tailnetIp ? ` · ${host.tailnetIp}` : "";
+  return `${status} · ${formatLastSeen(host.lastSeen, now)}${tailnet}`;
 }
 
 function formatLastSeen(ts: number, now: number): string {
