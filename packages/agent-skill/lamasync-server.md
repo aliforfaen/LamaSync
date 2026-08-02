@@ -94,9 +94,17 @@ Missing or wrong key → `401 Unauthorized`.
 | PATCH  | `/api/v1/notifications/channels/:id`             | Update a channel (url/name/enabled/severities)   |
 | DELETE | `/api/v1/notifications/channels/:id`             | Delete a channel                                 |
 | POST   | `/api/v1/notifications/test`                      | Record/deliver a test; `{channelId}` targets one |
-| GET    | `/api/v1/browse/local?path=…`                     | Read-only browse of `LAMASYNC_BACKUP_DIR`        |
-| GET    | `/api/v1/browse/s3?folderId=…&path=…`             | Read-only S3 prefix listing for an S3 folder     |
+| GET    | `/api/v1/browse/local?path=…`                     | Browse the server's `LAMASYNC_BACKUP_DIR`        |
+| GET    | `/api/v1/browse/s3?folderId=…&path=…`             | S3 prefix listing for an S3 folder (backend)     |
 | GET    | `/api/v1/browse/restic`                             | Read-only proxy of restic snapshot metadata      |
+| POST   | `/api/v1/browse/copy`                             | Copy entries to another browse path (job)        |
+| POST   | `/api/v1/browse/move`                             | Move entries (copy then delete source) (job)     |
+| POST   | `/api/v1/browse/rename`                           | Rename an entry in place (job)                   |
+| POST   | `/api/v1/browse/mkdir`                            | Create a directory (job)                         |
+| POST   | `/api/v1/browse/upload`                           | Upload base64 file (<= 64 MiB) to a directory    |
+| GET    | `/api/v1/browse/jobs`                             | Recent browse write jobs (status + progress)     |
+| GET    | `/api/v1/stats/storage?refresh=1`                 | Storage report (local/S3/restic, 5-min cache)    |
+| GET    | `/api/v1/folders/:id/size?refresh=1`              | Last-known working-set size (15-min cache)       |
 | GET    | `/api/v1/restic/snapshots`                        | List restic snapshot metadata                    |
 | POST   | `/api/v1/restic/snapshots`                        | Daemon reports a new snapshot                    |
 | GET    | `/api/v1/restic/restore`                          | List restic restore jobs                         |

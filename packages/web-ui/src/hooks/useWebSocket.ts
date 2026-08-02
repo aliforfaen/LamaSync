@@ -25,6 +25,7 @@ const EVENT_KINDS = new Set<string>([
   "mount",
   "lock",
   "action",
+  "browse_job",
 ]);
 
 function isWSEvent(value: unknown): value is WSEvent {

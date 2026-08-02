@@ -380,7 +380,9 @@ export type WSEvent =
   | { kind: "conflict"; conflict: Conflict }
   | { kind: "restic_snapshot"; snapshot: ResticSnapshot }
   | { kind: "restic_restore"; job: ResticRestoreJob }
-  | { kind: "action"; action: QueuedAction };
+  | { kind: "action"; action: QueuedAction }
+  // LAMA-226: Data Browser write-operation progress.
+  | { kind: "browse_job"; job: BrowseJob };
 
 export interface PruneResult {
   deleted: number;
@@ -436,5 +438,34 @@ export interface FolderSize {
   objectCount: number | null;
   error: string | null;
   measuredAt: number;
+}
+
+// LAMA-226: Data Browser write operations. Jobs are created when an op
+// starts, updated as entries complete (progress_bytes/total_bytes count
+// entries when rclone byte-level stats are unavailable), and written to
+// operation_log once terminal for the audit trail.
+export type BrowseJobOperation = "copy" | "move" | "upload" | "rename" | "mkdir";
+export type BrowseJobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+export interface BrowseJob {
+  id: string;
+  operation: BrowseJobOperation;
+  source: string;
+  destination: string;
+  status: BrowseJobStatus;
+  error: string | null;
+  progressBytes: number | null;
+  totalBytes: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// LAMA-226: a source or destination reference for a browse operation.
+// `local` paths are relative to the server's backup root (same root the
+// read-only browser uses); `s3` references a folder's backend + prefix.
+export interface BrowseRef {
+  kind: "local" | "s3";
+  folderId?: string | null;
+  path: string;
 }
 

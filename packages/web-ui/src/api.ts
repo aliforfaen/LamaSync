@@ -21,6 +21,8 @@ import type {
   Share,
   StorageReport,
   FolderSize,
+  BrowseRef,
+  BrowseJob,
 } from "@lamasync/core";
 
 const API_KEY_STORAGE = "lamasync_api_key";
@@ -197,6 +199,19 @@ export const api = {
     return apiGet<BrowseResponse>(`/browse/s3${qs}`);
   },
   browseRestic: () => apiGet<ResticSnapshot[]>("/browse/restic"),
+  // LAMA-226: Data Browser write operations.
+  browseCopy: (source: BrowseRef, destination: BrowseRef, names: string[]) =>
+    apiPost<BrowseJob>("/browse/copy", { source, destination, names }),
+  browseMove: (source: BrowseRef, destination: BrowseRef, names: string[]) =>
+    apiPost<BrowseJob>("/browse/move", { source, destination, names }),
+  browseRename: (ref: BrowseRef, from: string, to: string) =>
+    apiPost<BrowseJob>("/browse/rename", { ref, from, to }),
+  browseMkdir: (ref: BrowseRef, name: string) =>
+    apiPost<BrowseJob>("/browse/mkdir", { ref, name }),
+  browseUpload: (destination: BrowseRef, name: string, content: string) =>
+    apiPost<BrowseJob>("/browse/upload", { destination, name, content }),
+  listBrowseJobs: (limit = 50) =>
+    apiGet<BrowseJob[]>(`/browse/jobs?limit=${limit}`),
   // LAMA-222: reusable backends. Secrets are write-only (hasSecret flags
   // presence); the test endpoint surfaces rclone's error detail.
   listBackends: () => apiGet<Backend[]>("/backends"),

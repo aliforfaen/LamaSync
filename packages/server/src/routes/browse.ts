@@ -3,10 +3,17 @@ import type { Database } from "bun:sqlite";
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { db as defaultDb } from "../db.ts";
-import type { BrowseEntry, BrowseResponse, Folder } from "@lamasync/core";
+import type { BrowseEntry, BrowseResponse, BrowseRef, Folder } from "@lamasync/core";
 import { resolveBrowsePath, statEntry, validateBrowseInput } from "../browse-paths.ts";
 import { listS3Objects, S3ListObjectsError } from "../s3-list.ts";
 import { resolveFolderS3Config } from "../backends.ts";
+import {
+  listBrowseJobs,
+  startBrowseCopyMove,
+  startBrowseMkdir,
+  startBrowseRename,
+  startBrowseUpload,
+} from "../browse-jobs.ts";
 
 let activeDb: Database = defaultDb;
 let listS3 = listS3Objects;
@@ -287,6 +294,236 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         },
       },
     },
+  )
+  // LAMA-226: Data Browser write operations. Each op runs as a browse_job
+  // (status + progress, WS events) and appends an operation_log row when
+  // terminal.
+  .get(
+    "/browse/jobs",
+    ({ query }) => {
+      const rawLimit = query.limit;
+      const parsed =
+        typeof rawLimit === "number"
+          ? rawLimit
+          : rawLimit
+            ? Number.parseInt(rawLimit, 10)
+            : 50;
+      return listBrowseJobs(activeDb, Number.isFinite(parsed) ? parsed : 50);
+    },
+    {
+      query: t.Object({ limit: t.Optional(t.Union([t.Number(), t.String()])) }),
+      detail: {
+        summary: "List recent Data Browser write jobs",
+        tags: ["Data Browser"],
+        responses: {
+          200: { description: "Browse job list" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/browse/copy",
+    async ({ body, set }) => {
+      const { source, destination, names } = body as {
+        source: BrowseRef;
+        destination: BrowseRef;
+        names: string[];
+      };
+      try {
+        const result = await startBrowseCopyMove(
+          activeDb,
+          "copy",
+          source,
+          destination,
+          names,
+          sourceLabel(source),
+        );
+        if (result.busy) {
+          set.status = 409;
+          return { error: "destination busy — another operation is writing there" };
+        }
+        set.status = 201;
+        return result.job;
+      } catch (error) {
+        set.status = 400;
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    {
+      body: t.Object({
+        source: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        destination: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        names: t.Array(t.String()),
+      }),
+      detail: {
+        summary: "Copy entries from one browse path to another",
+        tags: ["Data Browser"],
+        responses: {
+          201: { description: "Job started" },
+          400: { description: "Invalid input" },
+          409: { description: "Destination busy" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/browse/move",
+    async ({ body, set }) => {
+      const { source, destination, names } = body as {
+        source: BrowseRef;
+        destination: BrowseRef;
+        names: string[];
+      };
+      try {
+        const result = await startBrowseCopyMove(
+          activeDb,
+          "move",
+          source,
+          destination,
+          names,
+          sourceLabel(source),
+        );
+        if (result.busy) {
+          set.status = 409;
+          return { error: "destination busy — another operation is writing there" };
+        }
+        set.status = 201;
+        return result.job;
+      } catch (error) {
+        set.status = 400;
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    {
+      body: t.Object({
+        source: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        destination: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        names: t.Array(t.String()),
+      }),
+      detail: {
+        summary: "Move entries (copy then delete source)",
+        tags: ["Data Browser"],
+        responses: {
+          201: { description: "Job started" },
+          400: { description: "Invalid input" },
+          409: { description: "Destination busy" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/browse/rename",
+    async ({ body, set }) => {
+      const { ref, from, to } = body as { ref: BrowseRef; from: string; to: string };
+      if (!from || !to || from === to) {
+        set.status = 400;
+        return { error: "from and to are required and must differ" };
+      }
+      try {
+        const job = await startBrowseRename(activeDb, ref, from, to, sourceLabel(ref));
+        set.status = 201;
+        return job;
+      } catch (error) {
+        set.status = 400;
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    {
+      body: t.Object({
+        ref: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        from: t.String(),
+        to: t.String(),
+      }),
+      detail: {
+        summary: "Rename an entry in place",
+        tags: ["Data Browser"],
+        responses: {
+          201: { description: "Job started" },
+          400: { description: "Invalid input" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/browse/mkdir",
+    async ({ body, set }) => {
+      const { ref, name } = body as { ref: BrowseRef; name: string };
+      if (!name) {
+        set.status = 400;
+        return { error: "name is required" };
+      }
+      try {
+        const job = await startBrowseMkdir(activeDb, ref, name, sourceLabel(ref));
+        set.status = 201;
+        return job;
+      } catch (error) {
+        set.status = 400;
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    {
+      body: t.Object({
+        ref: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        name: t.String(),
+      }),
+      detail: {
+        summary: "Create a directory at the current path",
+        tags: ["Data Browser"],
+        responses: {
+          201: { description: "Job started" },
+          400: { description: "Invalid input" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/browse/upload",
+    async ({ body, set }) => {
+      const { destination, name, content } = body as {
+        destination: BrowseRef;
+        name: string;
+        content: string;
+      };
+      if (!name || typeof content !== "string" || content.length === 0) {
+        set.status = 400;
+        return { error: "name and base64 content are required" };
+      }
+      try {
+        const job = await startBrowseUpload(
+          activeDb,
+          destination,
+          name,
+          content,
+          sourceLabel(destination),
+        );
+        set.status = 201;
+        return job;
+      } catch (error) {
+        set.status = 400;
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    {
+      body: t.Object({
+        destination: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        name: t.String(),
+        content: t.String(),
+      }),
+      detail: {
+        summary: "Upload a small file (base64, <= 64 MiB) to a directory",
+        tags: ["Data Browser"],
+        responses: {
+          201: { description: "Job started" },
+          400: { description: "Invalid input" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
   );
 
 function parseStringArray(value: string | null): string[] {
@@ -298,4 +535,10 @@ function parseStringArray(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+// hostId used for the operation_log audit row — the server is the actor for
+// browse operations, so a stable synthetic id keeps the log uniform.
+function sourceLabel(ref: BrowseRef): string {
+  return ref.kind === "s3" ? (ref.folderId ?? "server") : "server";
 }

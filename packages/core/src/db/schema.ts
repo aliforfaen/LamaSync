@@ -177,6 +177,23 @@ CREATE TABLE IF NOT EXISTS backends (
     created_at         INTEGER NOT NULL
 );
 
+-- LAMA-226: Data Browser write operations (copy/move/upload/rename/mkdir).
+-- Rows are created when an operation starts and updated as it progresses,
+-- giving the UI a pollable + WS-driven progress source. A terminal
+-- operation_log row is also written for the audit trail.
+CREATE TABLE IF NOT EXISTS browse_jobs (
+    id             TEXT PRIMARY KEY,
+    operation      TEXT NOT NULL,   -- copy | move | upload | rename | mkdir
+    source         TEXT NOT NULL,   -- human label, e.g. "local:dotfiles/pi"
+    destination    TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed|cancelled
+    error          TEXT,
+    progress_bytes INTEGER,
+    total_bytes    INTEGER,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schedule_state (
     folder_assignment_id TEXT NOT NULL UNIQUE REFERENCES folder_assignments(id),
     last_run             INTEGER,
@@ -274,4 +291,5 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE folders DROP COLUMN s3_access_key_id",
   "ALTER TABLE folders DROP COLUMN s3_secret_access_key",
   "ALTER TABLE folders DROP COLUMN s3_region",
+  "CREATE TABLE IF NOT EXISTS browse_jobs (id TEXT PRIMARY KEY, operation TEXT NOT NULL, source TEXT NOT NULL, destination TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, progress_bytes INTEGER, total_bytes INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
 ];
