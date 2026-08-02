@@ -92,6 +92,39 @@ describe("GET /api/v1/browse/local", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "invalid path" });
   });
+
+  test("returns 404 for a well-formed but non-existent path", async () => {
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/local?path=missing-dir"),
+    );
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "path not found" });
+  });
+
+  test("returns 400 sanitized for a file path (no ENOTDIR leak)", async () => {
+    mkdirSync(join(dataDir, "folder"));
+    writeFileSync(join(dataDir, "folder", "hello.txt"), "hi");
+
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/local?path=folder/hello.txt"),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "path is not a directory" });
+  });
+
+  test("returns 400 sanitized when a path segment is a file", async () => {
+    mkdirSync(join(dataDir, "folder"));
+    writeFileSync(join(dataDir, "folder", "hello.txt"), "hi");
+
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/local?path=folder/hello.txt/sub"),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "path is not a directory" });
+  });
 });
 
 describe("GET /api/v1/browse/s3", () => {

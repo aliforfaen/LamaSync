@@ -1,10 +1,10 @@
 import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
-import { readdirSync, realpathSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { db as defaultDb } from "../db.ts";
 import type { BrowseEntry, BrowseResponse, Folder } from "@lamasync/core";
-import { resolveBrowsePath, statEntry } from "../browse-paths.ts";
+import { resolveBrowsePath, statEntry, validateBrowseInput } from "../browse-paths.ts";
 import { listS3Objects, S3ListObjectsError } from "../s3-list.ts";
 
 let activeDb: Database = defaultDb;
@@ -80,12 +80,57 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
     "/browse/local",
     ({ query, set }) => {
       const rawPath = query.path ?? "";
-      const resolved = resolveBrowsePath(getBackupRoot(), rawPath);
-      if (resolved === null) {
+      // Safety first: traversal / absolute / null-byte / empty segments are
+      // rejected with 400 before any filesystem access.
+      if (!validateBrowseInput(rawPath)) {
         set.status = 400;
         return { error: "invalid path" };
       }
-      const names = readdirSync(resolved);
+
+      const root = getBackupRoot();
+      const normalized = rawPath.replace(/\\/g, "/");
+      const target = rawPath === "" ? root : join(root, normalized);
+
+      // Distinguish "does not exist" (404) from "rejected for safety" (400).
+      let isDirectory = false;
+      try {
+        isDirectory = statSync(target).isDirectory();
+      } catch (err) {
+        if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+          set.status = 404;
+          return { error: "path not found" };
+        }
+        if (err instanceof Error && "code" in err && err.code === "ENOTDIR") {
+          // A path segment resolves to a file (e.g. file.txt/sub).
+          set.status = 400;
+          return { error: "path is not a directory" };
+        }
+        throw err;
+      }
+      if (!isDirectory) {
+        set.status = 400;
+        return { error: "path is not a directory" };
+      }
+
+      const resolved = resolveBrowsePath(root, rawPath);
+      if (resolved === null) {
+        // Unreachable after the stat above except for a symlink escaping the
+        // root, which is a safety rejection.
+        set.status = 400;
+        return { error: "invalid path" };
+      }
+
+      let names: string[];
+      try {
+        names = readdirSync(resolved);
+      } catch (err) {
+        if (err instanceof Error && "code" in err && err.code === "ENOTDIR") {
+          set.status = 400;
+          return { error: "path is not a directory" };
+        }
+        throw err;
+      }
+
       const namesMap = folderNameMap();
       const rootReal = realpathSync(getBackupRoot());
       const entries: BrowseEntry[] = names
@@ -121,7 +166,8 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Data Browser"],
         responses: {
           200: { description: "Directory listing" },
-          400: { description: "Invalid path" },
+          400: { description: "Invalid path or path is not a directory" },
+          404: { description: "Path not found" },
           401: { description: "Unauthorized" },
         },
       },

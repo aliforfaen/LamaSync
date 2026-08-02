@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveBrowsePath, statEntry } from "./browse-paths.ts";
+import { resolveBrowsePath, statEntry, validateBrowseInput } from "./browse-paths.ts";
 
 let root: string;
 
@@ -14,6 +14,33 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
+});
+
+describe("validateBrowseInput", () => {
+  test("accepts root and relative paths", () => {
+    expect(validateBrowseInput("")).toBe(true);
+    expect(validateBrowseInput("sub/file.txt")).toBe(true);
+    expect(validateBrowseInput("a\\b")).toBe(true);
+  });
+
+  test("rejects traversal segments", () => {
+    expect(validateBrowseInput("../etc")).toBe(false);
+    expect(validateBrowseInput("a/../../etc")).toBe(false);
+    expect(validateBrowseInput("sub/../../../etc")).toBe(false);
+  });
+
+  test("rejects absolute paths", () => {
+    expect(validateBrowseInput("/etc/passwd")).toBe(false);
+  });
+
+  test("rejects null bytes", () => {
+    expect(validateBrowseInput("sub\0file")).toBe(false);
+  });
+
+  test("rejects empty segments", () => {
+    expect(validateBrowseInput("sub//file.txt")).toBe(false);
+    expect(validateBrowseInput("sub/")).toBe(false);
+  });
 });
 
 describe("resolveBrowsePath", () => {

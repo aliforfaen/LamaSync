@@ -28,7 +28,14 @@ export function App() {
   return (
     <HashRouter>
       <Routes>
-        <Route path="/login" element={<Login onAuthenticated={() => setAuthenticated(true)} />} />
+        <Route
+          path="/login"
+          element={
+            // LAMA-208: a stale #/login URL (bookmark, previous visit) must
+            // not trap an already-authenticated session on the login form.
+            authed ? <Navigate to="/" replace /> : <Login onAuthenticated={() => setAuthenticated(true)} />
+          }
+        />
         <Route
           path="/*"
           element={

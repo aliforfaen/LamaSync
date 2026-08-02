@@ -155,11 +155,22 @@ a:hover {
 
 .nav {
   display: flex;
+  /* LAMA-205: wrap instead of clip when the row runs out of width (the nav
+     sits at its exact limit at 1280px — any scrollbar/narrowing used to
+     shrink trailing items like "Sign out" into "gn out"). */
+  flex-wrap: wrap;
   gap: var(--space-3);
+  row-gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   align-items: center;
+}
+
+/* LAMA-205: never squeeze nav items below their natural width; overflow
+   wraps to the next row instead of clipping the text. */
+.nav > * {
+  flex-shrink: 0;
 }
 
 .nav .brand {
@@ -451,6 +462,18 @@ button.action.primary {
   background: rgb(var(--accent-info-rgb));
   border-color: rgb(var(--accent-info-rgb));
   color: var(--text-on-accent);
+}
+
+/* LAMA-206: in dark mode rgb(var(--accent-info-rgb)) is rgb(79,124,255) —
+   white text on it is only 3.71:1 (below WCAG AA 4.5:1). Use a deeper blue
+   (rgb(59,101,235) ≈ 4.94:1) so primary buttons stay legible. */
+[data-theme="dark"] button.action.primary {
+  background: rgb(59, 101, 235);
+  border-color: rgb(59, 101, 235);
+}
+
+[data-theme="dark"] .login-card button {
+  background: rgb(59, 101, 235);
 }
 
 button.action.danger {

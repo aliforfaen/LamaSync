@@ -199,3 +199,12 @@ and Data Browser breadcrumbs.
   mutation happens, listing only.
 - WebSocket live checks (C5, G4) — post operations while the page is open.
 - Swagger at `/swagger` lists every endpoint for cross-checking shapes (H2).
+- **Below-fold clicks (LAMA-207 post-mortem):** `agent-browser` dispatches
+  clicks at element coordinates WITHOUT auto-scrolling first. In the default
+  1280x720 headless window the effective `innerHeight` is only ~577px, so
+  elements below the fold (e.g. the Command Center quick-action links at
+  y≈606) get a click at a point outside the viewport — `elementFromPoint`
+  returns null and nothing happens. This is an automation artifact, NOT an
+  app bug: scroll the element into view first
+  (`a.scrollIntoView({block:'center'})` via `eval`), re-snapshot, then click.
+  Verified: the same quick-action links navigate correctly after scrolling.
