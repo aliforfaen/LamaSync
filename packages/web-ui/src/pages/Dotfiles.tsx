@@ -41,9 +41,21 @@ function schedulePresetForCron(cron: string | null | undefined): string {
   return preset ? preset.value : "custom";
 }
 
+type Scope =
+  | { kind: "all" }
+  | { kind: "global" }
+  | { kind: "host"; hostId: string };
+
+function scopeKey(s: Scope): string {
+  if (s.kind === "all") return "__all__";
+  if (s.kind === "global") return "__global__";
+  return `host:${s.hostId}`;
+}
+
 export function Dotfiles() {
   const [items, setItems] = useState<DotfileManifest[] | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
+  const [scope, setScope] = useState<Scope>({ kind: "all" });
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<ManifestForm>(EMPTY_FORM);
@@ -51,20 +63,56 @@ export function Dotfiles() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<ManifestForm>(EMPTY_FORM);
 
-  async function refresh() {
+  async function refresh(currentScope: Scope) {
     setError(null);
     try {
-      const [list, health] = await Promise.all([api.listManifests(), api.health()]);
+      // Always need the host list for the scope dropdown and the table's
+      // HOST column (even when filtering to a single host, we want the
+      // rest of the dropdown populated).
+      const hostsResp = await api.listHosts();
+      setHosts(hostsResp);
+
+      let list: DotfileManifest[];
+      if (currentScope.kind === "global") {
+        list = await api.listManifests();
+      } else if (currentScope.kind === "host") {
+        list = await api.listManifests(currentScope.hostId);
+      } else {
+        // Aggregate global manifests + each known host's manifests.
+        // Dedupe by manifest id (host rows override global rows with the
+        // same (hostId, appName)). Sorting by appName then hostId makes
+        // the fleet view stable.
+        const aggregated = new Map<string, DotfileManifest>();
+        try {
+          const globals = await api.listManifests();
+          for (const m of globals) aggregated.set(m.id, m);
+        } catch {
+          // Tolerate global-list failure — fall through to per-host fetch.
+        }
+        for (const h of hostsResp) {
+          try {
+            const perHost = await api.listManifests(h.id);
+            for (const m of perHost) aggregated.set(m.id, m);
+          } catch {
+            // Skip hosts we can't read; show what we have.
+          }
+        }
+        list = Array.from(aggregated.values()).sort((a, b) => {
+          const app = a.appName.localeCompare(b.appName);
+          if (app !== 0) return app;
+          return a.hostId.localeCompare(b.hostId);
+        });
+      }
       setItems(list);
-      setHosts(health.hosts ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   useEffect(() => {
-    refresh();
-  }, []);
+    refresh(scope);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope]);
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -89,7 +137,7 @@ export function Dotfiles() {
       });
       setForm(EMPTY_FORM);
       setShowForm(false);
-      await refresh();
+      await refresh(scope);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -132,7 +180,7 @@ export function Dotfiles() {
         instructions: editForm.instructions.trim() || null,
       });
       setEditingId(null);
-      await refresh();
+      await refresh(scope);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -145,7 +193,7 @@ export function Dotfiles() {
     setBusy(true);
     try {
       await api.deleteManifest(id);
-      await refresh();
+      await refresh(scope);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -172,6 +220,26 @@ export function Dotfiles() {
     <div className="page">
       <div className="toolbar">
         <h1>Dotfiles</h1>
+        <label className="scope-filter">
+          Scope
+          <select
+            value={scopeKey(scope)}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "__all__") setScope({ kind: "all" });
+              else if (v === "__global__") setScope({ kind: "global" });
+              else setScope({ kind: "host", hostId: v });
+            }}
+          >
+            <option value="__all__">All hosts</option>
+            <option value="__global__">Global only</option>
+            {hosts.map((h) => (
+              <option key={h.id} value={h.id}>
+                {h.hostname}
+              </option>
+            ))}
+          </select>
+        </label>
         <button type="button" className="action primary" onClick={() => setShowForm((s) => !s)}>
           {showForm ? "Cancel" : "New manifest"}
         </button>
@@ -355,7 +423,13 @@ export function Dotfiles() {
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={8}>No manifests yet</td>
+              <td colSpan={8}>
+                {scope.kind === "all"
+                  ? "No manifests yet"
+                  : scope.kind === "global"
+                    ? "No global manifests yet"
+                    : `No manifests for ${hostLabel(scope.hostId)} yet`}
+              </td>
             </tr>
           ) : (
             items.map((m) => (
