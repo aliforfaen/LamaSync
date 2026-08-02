@@ -74,18 +74,26 @@ async function probePeerTcp(ip: string, port: number): Promise<boolean> {
 // remote name (e.g. `lamasync-peer-<peerId>`) on success, or null when the
 // peer is not reachable (caller falls back to the standard remote).
 async function usePeer(peer: Peer): Promise<{ remote: string | null; detail: string }> {
-  const reachable = await probePeerTcp(peer.peerLanIp, PEER_SFTP_PORT).catch(
-    () => false,
-  );
-  if (!reachable) {
-    return {
-      remote: null,
-      detail: `peer ${peer.peerHostId} (${peer.peerLanIp}) unreachable; using server relay`,
-    };
+  // LAMA-223: the rclone section prefers the peer's tailnet address, so
+  // probe that first and fall back to the LAN IP before declaring the
+  // peer unreachable — tailscale may have dropped after the last heartbeat
+  // while the server still emits the (stale) tailnet address.
+  const candidates: Array<{ ip: string; label: string }> = [];
+  if (peer.peerTailnetIp) candidates.push({ ip: peer.peerTailnetIp, label: "tailnet" });
+  if (peer.peerLanIp) candidates.push({ ip: peer.peerLanIp, label: "lan" });
+  for (const { ip, label } of candidates) {
+    const reachable = await probePeerTcp(ip, PEER_SFTP_PORT).catch(() => false);
+    if (reachable) {
+      return {
+        remote: peer.peerRemote,
+        detail: `LAN peer ${peer.peerHostId} (${ip}:${PEER_SFTP_PORT}, ${label}) used as sync target`,
+      };
+    }
   }
+  const shown = candidates.map((c) => c.ip).join(", ") || "unknown";
   return {
-    remote: peer.peerRemote,
-    detail: `LAN peer ${peer.peerHostId} (${peer.peerLanIp}:${PEER_SFTP_PORT}) used as sync target`,
+    remote: null,
+    detail: `peer ${peer.peerHostId} (${shown}) unreachable; using server relay`,
   };
 }
 
