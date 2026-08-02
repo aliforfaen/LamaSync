@@ -408,6 +408,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **LamaDB integration (LAMA-204, LamaDB project)**: receiving endpoint for the LAMA-200 webhook (`POST /api/lamasync/webhook`) — LamaSync side is live and env-gated via `LAMASYNC_LAMADB_WEBHOOK_URL`.
 - Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers), LAMA-182 (TUI process lingers after quit).
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`, with daily cron auto-update at 04:00.
+- **Web UI final pass (2026-08-02)**: audit + fixes — Add-host onboarding guide (copy-pasteable install commands, `web-ui/src/components/AddHostGuide.tsx`), folder assign/unassign UI on the Folders page. Testing guide: `docs/handoff/web-ui-final-pass-2026-08-02.md`. Findings filed as LAMA-211..217 (dotfiles edit-form clobber, dead hotkey hints, conflict-resolve confirm, operations page, assign hostId validation, unwired TUI backup wizard, web-ui polish).
 
 ## Next session options
 

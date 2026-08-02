@@ -749,3 +749,74 @@ button.action:disabled {
   background: var(--surface-elevated);
 }
 
+/* --- Add-host guide + folder assignment UI --- */
+
+.guide-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.guide-panel h2,
+.guide-panel h3 {
+  margin: 0;
+}
+
+.guide-panel p {
+  margin: 0;
+}
+
+.guide-panel details {
+  margin-top: var(--space-2);
+}
+
+.guide-panel summary {
+  cursor: pointer;
+  color: var(--accent-info);
+}
+
+.command-block {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.command-block pre {
+  flex: 1;
+  margin: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--font-size-sm);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  color: var(--text);
+}
+
+.copy-btn {
+  flex-shrink: 0;
+}
+
+.form-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-base, 1rem);
+}
+
+.unassign-btn {
+  padding: 0 0.45rem;
+  line-height: 1.4;
+}
+
+.assignment-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+

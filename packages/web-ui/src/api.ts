@@ -134,6 +134,23 @@ export const api = {
   updateFolder: (id: string, body: Partial<Folder>) =>
     apiPut<Folder>(`/folders/${encodeURIComponent(id)}`, body),
   deleteFolder: (id: string) => apiDelete(`/folders/${encodeURIComponent(id)}`),
+  assignFolder: (
+    folderId: string,
+    body: {
+      hostId: string;
+      role: string;
+      localPath: string;
+      syncExpr?: string | null;
+    },
+  ) =>
+    apiPost<FolderAssignment>(
+      `/folders/${encodeURIComponent(folderId)}/assign`,
+      body,
+    ),
+  unassignFolder: (folderId: string, hostId: string) =>
+    apiDelete(
+      `/folders/${encodeURIComponent(folderId)}/assign/${encodeURIComponent(hostId)}`,
+    ),
   listManifests: (hostId?: string) =>
     apiGet<DotfileManifest[]>(
       hostId

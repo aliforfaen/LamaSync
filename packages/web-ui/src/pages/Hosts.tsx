@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { Host } from "@lamasync/core";
 import { api } from "../api.ts";
+import { AddHostGuide } from "../components/AddHostGuide.tsx";
 
 function formatTimestamp(ts: number | null | undefined): string {
   return ts ? new Date(ts).toLocaleString() : "—";
@@ -10,6 +11,7 @@ function formatTimestamp(ts: number | null | undefined): string {
 export function Hosts() {
   const [items, setItems] = useState<Host[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showGuide, setShowGuide] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,10 +36,21 @@ export function Hosts() {
       <div className="toolbar">
         <h1>Hosts</h1>
         <span className="muted">{items ? `${items.length} registered` : "loading…"}</span>
+        <button
+          type="button"
+          className="action primary"
+          onClick={() => setShowGuide((s) => !s)}
+        >
+          {showGuide ? "Hide guide" : "Add host"}
+        </button>
       </div>
       {error && <div className="error">{error}</div>}
 
-      {!items || items.length === 0 ? (
+      {(showGuide || (items !== null && items.length === 0)) && <AddHostGuide />}
+
+      {!items ? (
+        <div className="empty-row">Loading…</div>
+      ) : items.length === 0 ? (
         <div className="empty-row">No hosts registered yet</div>
       ) : (
         <div className="host-list">
