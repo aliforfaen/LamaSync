@@ -432,9 +432,13 @@ export interface StorageReport {
 }
 
 // LAMA-224: last-known size of one folder's working set (rclone size).
+// S3-only: non-S3 folders are not measurable server-side (their paths live
+// on daemon hosts) and return bytes: null (P1-7). Note the measurement is
+// BUCKET-level, not prefix-level — folders sharing a bucket each report the
+// full bucket size.
 export interface FolderSize {
   folderId: string;
-  bytes: number;
+  bytes: number | null;
   objectCount: number | null;
   error: string | null;
   measuredAt: number;

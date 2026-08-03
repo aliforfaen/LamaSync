@@ -273,6 +273,16 @@ function assertSafePath(path: string, name: string): void {
   }
 }
 
+/**
+ * LAMA-226 P1-9: rclone stderr can embed endpoint/bucket/host details.
+ * Log it server-side; the job error (readable back via GET /browse/jobs)
+ * gets a generic message — same scrubbing the route layer applies.
+ */
+function rcloneFailure(op: string, result: { code: number; stderr: string }): Error {
+  console.error(`[browse-jobs] rclone ${op} failed (${result.code}): ${result.stderr.trim()}`);
+  return new Error(`rclone ${op} failed (${result.code})`);
+}
+
 async function runCopy(
   db: Database,
   job: BrowseJob,
@@ -285,6 +295,11 @@ async function runCopy(
   },
 ): Promise<void> {
   const config = buildJobConfig(db, src, dst);
+  // Same-folder s3 configs carry only a `[src]` section (see buildJobConfig)
+  // — the destination argv must reference `src:` there, `dst:` otherwise.
+  const sameS3Folder =
+    src.kind === "s3" && dst.kind === "s3" && src.folderId === dst.folderId;
+  const dstRemote = sameS3Folder ? "src" : "dst";
   let completed = 0;
   await withTempRcloneConfig(config, async (configPath) => {
     for (const name of names) {
@@ -297,13 +312,13 @@ async function runCopy(
         configPath,
         srcRemote: "src",
         srcPath: remotePath(src, name, resolved.srcBucket ?? undefined),
-        dstRemote: "dst",
+        dstRemote,
         dstPath: remotePath(dst, name, resolved.dstBucket ?? undefined),
         timeout: "30s",
       };
       const result = await runRclone(buildRcloneArgv(argvInput));
       if (result.code !== 0) {
-        throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone copy failed (${result.code})`);
+        throw rcloneFailure("copy", result);
       }
       completed += 1;
       job.progressBytes = completed;
@@ -349,7 +364,7 @@ async function deleteSource(
       };
       const result = await runRclone(buildRcloneArgv(argvInput));
       if (result.code !== 0) {
-        throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone delete failed (${result.code})`);
+        throw rcloneFailure("delete", result);
       }
     }
   });
@@ -390,7 +405,7 @@ export async function startBrowseCopyMove(
     dst.kind === "s3" &&
     src.folderId === dst.folderId
   ) {
-    if (!isSafeS3IntraFolderMove(src.path, dst.path)) {
+    if (!isSafeS3IntraFolderMove(src.path, dst.path, names)) {
       throw new Error("source and destination are the same prefix");
     }
   }
@@ -560,7 +575,7 @@ export async function startBrowseRename(
         };
         const result = await runRclone(buildRcloneArgv(argvInput));
         if (result.code !== 0) {
-          throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone moveto failed (${result.code})`);
+          throw rcloneFailure("moveto", result);
         }
       });
       job.status = "done";
@@ -650,7 +665,7 @@ export async function startBrowseMkdir(
         };
         const result = await runRclone(buildRcloneArgv(argvInput));
         if (result.code !== 0) {
-          throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone mkdir failed (${result.code})`);
+          throw rcloneFailure("mkdir", result);
         }
       });
       job.status = "done";
@@ -750,27 +765,27 @@ export async function startBrowseUpload(
     try {
       const config = buildJobConfig(db, dst, dst);
       await withTempRcloneConfig(config, async (configPath) => {
-        const argvInput: BuildArgvInput = {
-          operation: "copyto",
+        // The source is a plain local temp file: pass it BARE (no colon).
+        // `buildRcloneArgv` would join `srcRemote:srcPath` as `<tmp>:` —
+        // rclone then parses the temp path (which contains `/`) including
+        // the colon as a local path and fails with ENOENT.
+        // Remote naming: for an s3 dst, buildJobConfig(dst, dst) takes the
+        // same-folder branch and names the single s3 section `[src]`; for a
+        // local dst the generic branch names the local section `[dst]`.
+        const dstRemote = bucket === null ? "dst" : "src";
+        const argv = [
+          "rclone",
+          "copyto",
+          tmp,
+          `${dstRemote}:${remotePath(dst, fileName, bucket ?? undefined)}`,
+          "--config",
           configPath,
-          srcRemote: tmp,
-          srcPath: "",
-          dstRemote: "dst",
-          dstPath: remotePath(dst, fileName, bucket ?? undefined),
-          timeout: "30s",
-        };
-        // Local source: rclone accepts `path:relative/key` where the remote
-        // is the literal filesystem path and the second colon-separated
-        // piece is the relative target. Our `remotePath` returns "" here,
-        // so the argv is `<tmp>:` (empty target is invalid) — instead we
-        // special-case local: pass the temp path as the srcRemote and the
-        // dstPath alone as the destination.
-        const argv = bucket === null
-          ? ["rclone", "copyto", tmp, `${argvInput.dstRemote}:${argvInput.dstPath}`, "--config", configPath, "--timeout", "30s"]
-          : buildRcloneArgv(argvInput);
+          "--timeout",
+          "30s",
+        ];
         const result = await runRclone(argv);
         if (result.code !== 0) {
-          throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone copyto failed (${result.code})`);
+          throw rcloneFailure("copyto", result);
         }
       });
       job.status = "done";
@@ -830,7 +845,9 @@ export function listBrowseJobs(db: Database, limit = 50): BrowseJob[] {
  */
 function buildJobConfig(db: Database, src: BrowseRef, dst: BrowseRef): string {
   if (src.kind === "s3" && dst.kind === "s3" && src.folderId === dst.folderId) {
-    // Both sides resolve to the same bucket — emit a single `[src]` section.
+    // Both sides resolve to the same bucket — emit a single `[src]` section
+    // (dst: null). Callers must use the `src` remote for BOTH argv sides;
+    // there is no `[dst]` section in this config.
     const r = resolveS3(db, src);
     return buildRcloneConfig({
       src: {
@@ -843,16 +860,7 @@ function buildJobConfig(db: Database, src: BrowseRef, dst: BrowseRef): string {
         region: r.region,
         bucket: r.bucket,
       },
-      dst: {
-        name: "src",
-        folder: r.folder,
-        provider: r.provider,
-        endpoint: r.endpoint,
-        accessKeyId: r.accessKeyId,
-        secretAccessKey: r.secretAccessKey,
-        region: r.region,
-        bucket: r.bucket,
-      },
+      dst: null,
     });
   }
   const srcSection =

@@ -221,16 +221,18 @@ export async function getFolderSize(
     measuredAt: now,
   };
 
-  let result: { bytes: number; objectCount: number | null; error: string | null };
+  let result: { bytes: number | null; objectCount: number | null; error: string | null };
   if (folder.backend === "s3") {
     const s3 = resolveFolderS3Config(db, folder);
     if (!s3) {
-      result = { bytes: 0, objectCount: null, error: "no resolvable S3 backend" };
+      result = { bytes: null, objectCount: null, error: "no resolvable S3 backend" };
     } else {
       const backend = getBackend(db, s3.backendId);
       if (!backend) {
-        result = { bytes: 0, objectCount: null, error: "backend not found" };
+        result = { bytes: null, objectCount: null, error: "backend not found" };
       } else {
+        // Bucket-level measurement (`remote:bucket`), not prefix-level:
+        // folders sharing a bucket each report the full bucket size.
         result = await rcloneSize(
           s3ConfigText(backend, s3.bucket),
           `stats:${s3.bucket}`,
@@ -240,7 +242,7 @@ export async function getFolderSize(
   } else {
     // Non-S3: the working set lives on the daemon host. Return a typed
     // null (the caller surfaces it on the Folders page as "n/a").
-    result = { bytes: 0, objectCount: null, error: "not measurable server-side" };
+    result = { bytes: null, objectCount: null, error: "not measurable server-side" };
   }
 
   const value: FolderSize = { ...base, ...result, measuredAt: now };

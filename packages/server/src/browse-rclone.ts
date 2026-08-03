@@ -199,18 +199,27 @@ export function isContainedLocalMove(
 /**
  * Resolve the s3 same-folder check (LAMA-226 P1-2). Returns true when an
  * intra-folder prefix move is safe — i.e. the destination prefix doesn't
- * equal or contain the source prefix. Moves inside the same folder are
- * allowed only when they don't fold a directory into itself.
+ * fold a moved entry into itself. Each entry in `names` resolves to
+ * `<src>/<name>`; a destination prefix equal to or nested under any of them
+ * means rclone no-ops the copy and the source delete destroys the data.
+ * Moving `dir` from the bucket root into prefix `dir` is the classic case.
  */
 export function isSafeS3IntraFolderMove(
   srcPath: string,
   dstPath: string,
+  names: string[],
 ): boolean {
   const norm = (p: string): string => p.replace(/^\/+/, "").replace(/\/+$/, "");
   const src = norm(srcPath);
   const dst = norm(dstPath);
+  // Same prefix: rclone copies each entry onto itself (no-op), then the
+  // source delete removes it.
   if (src === dst) return false;
-  return !dst.startsWith(`${src}/`);
+  for (const name of names) {
+    const srcEntry = src === "" ? norm(name) : `${src}/${norm(name)}`;
+    if (dst === srcEntry || dst.startsWith(`${srcEntry}/`)) return false;
+  }
+  return true;
 }
 
 export type { BrowseJobOperation };

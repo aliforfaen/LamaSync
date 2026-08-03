@@ -82,7 +82,7 @@ docker run --rm \
     # LAMA-218: the root container has no XDG_RUNTIME_DIR, so the socket
     # falls back to /root/.lamasync/lamasync.sock.
     grep -q 'LAMASYNC_SOCKET_PATH=/root/.lamasync/lamasync.sock' ~/.config/systemd/user/lamasyncd.service
-    grep -q 'ReadWritePaths=.* /root/.lamasync ' ~/.config/systemd/user/lamasyncd.service
+    grep -q 'ReadWritePaths=.*%h/.lamasync' ~/.config/systemd/user/lamasyncd.service
     echo '[client] All install checks passed.'
   "
 

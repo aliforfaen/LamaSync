@@ -70,15 +70,15 @@ export function Dotfiles() {
     // LAMA-225 P1-8: a request-counter guard ignores stale responses.
     // Rapid scope changes used to race: the "All hosts" fetch could
     // resolve AFTER a host-scoped fetch and overwrite the host view.
-    // The token here is owned by the caller so the in-flight check
-    // always matches the current scope.
-    if (requestId !== refreshCounter) return;
+    // Compare against the live ref AFTER each await — a render-time
+    // snapshot goes stale the moment any request increments it.
     setError(null);
     try {
       // Always need the host list for the scope dropdown and the table's
       // HOST column (even when filtering to a single host, we want the
       // rest of the dropdown populated).
       const hostsResp = await api.listHosts();
+      if (requestId !== refreshCounterRef.current) return;
       setHosts(hostsResp);
 
       let list: DotfileManifest[];
@@ -112,17 +112,19 @@ export function Dotfiles() {
           return a.hostId.localeCompare(b.hostId);
         });
       }
+      if (requestId !== refreshCounterRef.current) return;
       setItems(list);
     } catch (err) {
+      if (requestId !== refreshCounterRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
-  // LAMA-225 P1-8: monotonic request id; refresh() rejects resolves whose
-  // id doesn't match. Lets rapid scope changes cancel in-flight fetches
-  // without aborting the underlying Promise (which would leak listeners).
+  // LAMA-225 P1-8: monotonic request id; refresh() drops resolves whose
+  // id is no longer current. Lets rapid scope changes cancel in-flight
+  // fetches without aborting the underlying Promise (which would leak
+  // listeners).
   const refreshCounterRef = useRef(0);
-  const refreshCounter = refreshCounterRef.current;
 
   useEffect(() => {
     const requestId = ++refreshCounterRef.current;

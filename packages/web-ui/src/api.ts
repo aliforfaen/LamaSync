@@ -226,8 +226,8 @@ export const api = {
   // LAMA-224: storage statistics.
   storageReport: (refresh = false) =>
     apiGet<StorageReport>(`/stats/storage${refresh ? "?refresh=1" : ""}`),
-  folderSize: (id: string, refresh = false) =>
-    apiGet<FolderSize>(`/folders/${encodeURIComponent(id)}/size${refresh ? "?refresh=1" : ""}`),
+  folderSize: (id: string) =>
+    apiGet<FolderSize>(`/folders/${encodeURIComponent(id)}/size`),
   listShares: () => apiGet<Share[]>("/shares"),
   listResticSnapshots: () => apiGet<ResticSnapshot[]>("/restic/snapshots"),
   pruneOperations: (olderThanMs: number) =>

@@ -256,14 +256,36 @@ describe("isContainedLocalMove", () => {
 
 describe("isSafeS3IntraFolderMove", () => {
   test("rejects same-prefix intra-folder move", () => {
-    expect(isSafeS3IntraFolderMove("a/b", "a/b")).toBe(false);
+    expect(isSafeS3IntraFolderMove("a/b", "a/b", ["k"])).toBe(false);
   });
 
-  test("rejects dst nested under src prefix", () => {
-    expect(isSafeS3IntraFolderMove("a", "a/b")).toBe(false);
+  test("rejects dst equal to the moved entry", () => {
+    expect(isSafeS3IntraFolderMove("a", "a/b", ["b"])).toBe(false);
+  });
+
+  test("rejects dst nested under the moved entry", () => {
+    expect(isSafeS3IntraFolderMove("a", "a/b/c", ["b"])).toBe(false);
+  });
+
+  test("rejects bucket-root self-move (src path empty)", () => {
+    // Moving root-level `dir` into prefix `dir`: rclone no-ops, the source
+    // delete then destroys the data. The empty src must not degenerate the
+    // containment check.
+    expect(isSafeS3IntraFolderMove("", "dir", ["dir"])).toBe(false);
+    expect(isSafeS3IntraFolderMove("", "dir/sub", ["dir"])).toBe(false);
   });
 
   test("accepts a sibling prefix", () => {
-    expect(isSafeS3IntraFolderMove("a", "b")).toBe(true);
+    expect(isSafeS3IntraFolderMove("a", "b", ["k"])).toBe(true);
+  });
+
+  test("accepts a dst nested under src but not under the moved entry", () => {
+    // Moving `k` from prefix `a` into `a/b` is fine — only the entry's own
+    // subtree is dangerous.
+    expect(isSafeS3IntraFolderMove("a", "a/b", ["k"])).toBe(true);
+  });
+
+  test("checks every name in a multi-entry move", () => {
+    expect(isSafeS3IntraFolderMove("a", "a/b", ["k", "b"])).toBe(false);
   });
 });
