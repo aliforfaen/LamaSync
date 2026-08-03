@@ -177,6 +177,46 @@ describe("POST /api/v1/report/health — version field (LAMA-199)", () => {
     expect(row.tailnet_ip).toBe("100.64.0.5");
   });
 
+  // LAMA-223 P1-4: tailnet_ip change must bump config_revision so
+  // every daemon pulls /config/:hostId with the new peer sections.
+  test("heartbeat with a new tailnetIp bumps config_revision", async () => {
+    db.run("UPDATE hosts SET config_revision = 2 WHERE id = 'host-a'");
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      tailnetIp: "100.64.0.5",
+    });
+    expect(res.status).toBe(204);
+    const row = loadHostRow("host-a");
+    expect(row.tailnet_ip).toBe("100.64.0.5");
+    const rev = db
+      .query<{ config_revision: number | null }, [string]>(
+        "SELECT config_revision FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(rev?.config_revision).toBe(3);
+  });
+
+  test("heartbeat with an unchanged tailnetIp does not bump config_revision", async () => {
+    db.run(
+      "UPDATE hosts SET tailnet_ip = '100.64.0.5', config_revision = 4 WHERE id = 'host-a'",
+    );
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      tailnetIp: "100.64.0.5",
+    });
+    expect(res.status).toBe(204);
+    const rev = db
+      .query<{ config_revision: number | null }, [string]>(
+        "SELECT config_revision FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(rev?.config_revision).toBe(4);
+  });
+
   test("heartbeat for an unknown host returns 404", async () => {
     const res = await post("/api/v1/report/health", {
       hostId: "ghost",
@@ -408,10 +448,19 @@ describe("PATCH /api/v1/hosts/:hostId — host rename (LAMA-225)", () => {
 
 describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
   function seedDependentRows(hostId: string): void {
+    // LAMA-225 P1-5: seed every host-keyed column the cascade touches.
+    // P0 used a subset (folder_assignments, operation_log, queued_actions);
+    // the wider coverage guards against future column additions silently
+    // breaking re-key again.
     db.run(
       `INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path)
        VALUES ('fa-1', 'folder-1', ?, 'source', '/tmp/f1')`,
       [hostId],
+    );
+    db.run(
+      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths, original_uploader_host_id)
+       VALUES ('dm-1', ?, 'git', '["~/.gitconfig"]', ?)`,
+      [hostId, hostId],
     );
     db.run(
       `INSERT INTO operation_log (timestamp, host_id, operation, status, summary)
@@ -421,6 +470,34 @@ describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
     db.run(
       `INSERT INTO queued_actions (id, host_id, type, created_at)
        VALUES ('qa-1', ?, 'check_update', 1700000000000)`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO conflicts (id, host_id, folder_id, path, created_at)
+       VALUES ('cf-1', ?, 'folder-1', 'a.txt', 1700000000000)`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO restic_snapshots (id, folder_id, host_id, snapshot_id, timestamp, paths)
+       VALUES ('rs-1', 'folder-1', ?, 'snap-1', 1700000000000, '[]')`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO restic_restore_jobs (id, snapshot_id, folder_id, target_host_id, target_path, created_at)
+       VALUES ('rr-1', 'snap-1', 'folder-1', ?, '/tmp/restore', 1700000000000)`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO notification_events (id, type, severity, message, host_id, created_at)
+       VALUES ('ne-1', 'host_online', 'info', 'seed', ?, 1700000000000)`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO folder_locks (folder_id, locked_by) VALUES ('folder-1', ?)`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO schedule_state (folder_assignment_id, locked_by) VALUES ('fa-1', ?)`,
       [hostId],
     );
   }
@@ -453,6 +530,30 @@ describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
     expect(ops).toEqual([{ host_id: "cachy" }]);
     const qa = db.query<{ host_id: string }, []>("SELECT host_id FROM queued_actions").all();
     expect(qa).toEqual([{ host_id: "cachy" }]);
+    const cf = db.query<{ host_id: string }, []>("SELECT host_id FROM conflicts").all();
+    expect(cf).toEqual([{ host_id: "cachy" }]);
+    const rs = db.query<{ host_id: string }, []>("SELECT host_id FROM restic_snapshots").all();
+    expect(rs).toEqual([{ host_id: "cachy" }]);
+    const rr = db
+      .query<{ target_host_id: string }, []>("SELECT target_host_id FROM restic_restore_jobs")
+      .all();
+    expect(rr).toEqual([{ target_host_id: "cachy" }]);
+    const ne = db.query<{ host_id: string | null }, []>("SELECT host_id FROM notification_events").all();
+    expect(ne).toEqual([{ host_id: "cachy" }]);
+    // LAMA-225 P1-5: dotfile_manifests has TWO host-keyed columns.
+    const dm = db
+      .query<{ host_id: string; original_uploader_host_id: string | null }, []>(
+        "SELECT host_id, original_uploader_host_id FROM dotfile_manifests",
+      )
+      .all();
+    expect(dm).toEqual([{ host_id: "cachy", original_uploader_host_id: "cachy" }]);
+    // Locks/schedule: locked_by column re-keyed.
+    const fl = db.query<{ locked_by: string | null }, []>("SELECT locked_by FROM folder_locks").all();
+    expect(fl).toEqual([{ locked_by: "cachy" }]);
+    const ss = db
+      .query<{ locked_by: string | null }, []>("SELECT locked_by FROM schedule_state")
+      .all();
+    expect(ss).toEqual([{ locked_by: "cachy" }]);
   });
 
   test("normal registration of an existing host does not re-key", async () => {

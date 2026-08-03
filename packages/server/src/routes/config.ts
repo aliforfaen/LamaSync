@@ -346,19 +346,40 @@ export function generateRcloneConfig(
   }
 
   for (const p of peers) {
-    // LAMA-223: the tailnet address is the primary way LamaSync reaches a
-    // peer; the LAN IP is the fallback for hosts with no tailscale interface.
-    const via = p.peerTailnetIp ? "tailnet" : "lan";
-    const peerAddress = p.peerTailnetIp ?? p.peerLanIp;
-    lines.push(`[${p.peerRemote}]`);
-    lines.push("type = sftp");
-    lines.push(`host = ${peerAddress}`);
-    lines.push(`user = ${PEER_SFTP_USER}`);
-    lines.push(`description = "LAN peer ${p.peerHostId} (${p.role}) via ${via} (${peerAddress})"`);
-    if (apiKey) {
-      lines.push(`pass = ${apiKey}`);
+    // LAMA-223 P1-4: emit two rclone sections per peer when both addresses
+    // are known — `lamasync-peer-<id>` (tailnet, preferred) and
+    // `lamasync-peer-<id>-lan` (fallback). The daemon's `usePeer` TCP-probes
+    // both and selects the reachable one. The previous single-section form
+    // pinned the host at config-generation time, so a tailscale outage
+    // stranded the peer entirely.
+    const sections: Array<{ name: string; host: string; via: string }> = [];
+    if (p.peerTailnetIp) {
+      sections.push({ name: p.peerRemote, host: p.peerTailnetIp, via: "tailnet" });
+      if (p.peerLanIp && p.peerLanIp !== p.peerTailnetIp) {
+        sections.push({
+          name: `${p.peerRemote}-lan`,
+          host: p.peerLanIp,
+          via: "lan",
+        });
+      }
     }
-    lines.push("");
+    // Last-resort fallback: only the LAN IP exists.
+    if (sections.length === 0 && p.peerLanIp) {
+      sections.push({ name: p.peerRemote, host: p.peerLanIp, via: "lan" });
+    }
+    for (const section of sections) {
+      lines.push(`[${section.name}]`);
+      lines.push("type = sftp");
+      lines.push(`host = ${section.host}`);
+      lines.push(`user = ${PEER_SFTP_USER}`);
+      lines.push(
+        `description = "LAN peer ${p.peerHostId} (${p.role}) via ${section.via} (${section.host})"`,
+      );
+      if (apiKey) {
+        lines.push(`pass = ${apiKey}`);
+      }
+      lines.push("");
+    }
   }
 
   const enriched: Peer[] = peers.map((p) => {

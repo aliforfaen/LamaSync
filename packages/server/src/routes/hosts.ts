@@ -86,6 +86,14 @@ function cascadeHostId(database: Database, oldId: string, newId: string): void {
     "UPDATE dotfile_manifests SET host_id = ? WHERE host_id = ?",
     [newId, oldId],
   );
+  // LAMA-225 P1-5: dotfile_manifests.original_uploader_host_id is also a
+  // host-keyed reference (the Dotfiles UI renders it via hostLabel). One
+  // missed column left orphaned uploaders on re-key. Both columns update
+  // in the same transaction so partial failures abort the whole lift.
+  database.run(
+    "UPDATE dotfile_manifests SET original_uploader_host_id = ? WHERE original_uploader_host_id = ?",
+    [newId, oldId],
+  );
   database.run(
     "UPDATE queued_actions SET host_id = ? WHERE host_id = ?",
     [newId, oldId],
@@ -111,6 +119,9 @@ function cascadeHostId(database: Database, oldId: string, newId: string): void {
   // release its stale locks.
   database.run("UPDATE folder_locks SET locked_by = ? WHERE locked_by = ?", [newId, oldId]);
   database.run("UPDATE schedule_state SET locked_by = ? WHERE locked_by = ?", [newId, oldId]);
+  // NOTE: relies on `PRAGMA foreign_keys` being OFF (the server-side
+  // schema leaves them off — on=ON would fail these UPDATEs because the
+  // existing rows reference the old id).
 }
 
 export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
@@ -215,12 +226,10 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const latestVersion = await getCachedLatestVersion();
       const host = rowToHost(updated, latestVersion);
-      broadcast({
-        kind: "host_renamed",
-        oldId: params.hostId,
-        newId: params.hostId,
-        hostname: newHostname,
-      });
+      // LAMA-225 P1-5: PATCH changes the display label only (the id is
+      // still params.hostId). The real `host_renamed` event with
+      // oldId != newId is broadcast at re-registration time (see
+      // POST /register) — that one actually changes the id.
       broadcast({ kind: "host", host });
       // Bump the renamed host's own revision so its daemon pulls a fresh
       // /config/:hostId on the next heartbeat and logs the rename.
@@ -282,6 +291,16 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         console.log(
           `[register] host renamed on re-registration: ${oldId} → ${id}; re-keyed host_id references`,
         );
+        // LAMA-225 P1-5: broadcast the real id change so /hosts/<oldId>
+        // detail pages and the Hosts list refresh. The PATCH endpoint
+        // emits `{kind:"host"}` only because the id is stable there; the
+        // broadcast-with-different-ids belongs to re-registration.
+        broadcast({
+          kind: "host_renamed",
+          oldId,
+          newId: id,
+          hostname: hostname,
+        });
       } else if (renamedRow && idTaken) {
         console.warn(
           `[register] re-key skipped: both id '${id}' and hostname '${id}' already exist as separate hosts`,
@@ -406,6 +425,20 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         sets.push("lan_ip = ?");
         params.push(lanIp);
       }
+      // LAMA-223 P1-4: a tailnet IP change must bump config_revision so
+      // every daemon re-pulls /config/:hostId — the rclone sections for
+      // LAN peers depend on the latest tailnet_ip (tailnet primary, LAN
+      // fallback). Without this bump a stale daemon kept pinning its
+      // peers at the previous (potentially invalid) tailnet address.
+      const previousTailnet = activeDb
+        .query<{ tailnet_ip: string | null }, [string]>(
+          "SELECT tailnet_ip FROM hosts WHERE id = ?",
+        )
+        .get(hostId)?.tailnet_ip ?? null;
+      const tailnetChanged =
+        typeof tailnetIp === "string" &&
+        tailnetIp !== "" &&
+        tailnetIp !== previousTailnet;
       if (tailnetIp) {
         sets.push("tailnet_ip = ?");
         params.push(tailnetIp);
@@ -442,6 +475,12 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
             message: `Host ${row.hostname} is online`,
           });
         }
+      }
+      // Bump config_revision after the row is written so the diff between
+      // the cached and server-side value drives the daemon's heartbeat
+      // refresh check (see packages/daemon/src/index.ts `recordRevision`).
+      if (tailnetChanged) {
+        bumpConfigRevision([hostId]);
       }
       set.status = 204;
       return null;

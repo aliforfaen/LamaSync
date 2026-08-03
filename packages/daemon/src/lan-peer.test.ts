@@ -61,6 +61,27 @@ describe("parseIpAddrOutput", () => {
   test("returns null for empty output", () => {
     expect(parseIpAddrOutput("")).toBeNull();
   });
+
+  // LAMA-223 P1-4: ISP CGNAT (100.64.0.0/10) on eth0 must not be
+  // mis-classified as a tailnet address. The narrower /10 range still
+  // covers the CGNAT range by coincidence, so the actual fix lives in
+  // `detectTailnetIp` (tailscale0 first, then tailscale status --json,
+  // then the default-route iface as a last resort). The pure parser
+  // here only narrows the /8 to /10 — an address like 100.10.x.y is
+  // rejected, the CGNAT-overlap case is handled by detection order.
+  test("rejects addresses outside the 100.64-100.127 range (P1-4)", () => {
+    const cgnat = [
+      "3: eth0    inet 100.10.50.7/24 brd 100.10.50.255 scope global dynamic noprefixroute eth0",
+    ].join("\n");
+    expect(parseIpAddrOutput(cgnat)).toBeNull();
+  });
+
+  test("accepts the upper bound of the CGNAT /10 range", () => {
+    const upper = [
+      "2: tailscale0    inet 100.127.255.254/32 scope global tailscale0",
+    ].join("\n");
+    expect(parseIpAddrOutput(upper)).toBe("100.127.255.254");
+  });
 });
 
 describe("parseTailscaleStatusJson", () => {
@@ -71,6 +92,26 @@ describe("parseTailscaleStatusJson", () => {
       },
     });
     expect(parseTailscaleStatusJson(status)).toBe("100.64.0.5");
+  });
+
+  // LAMA-223 P1-4: prefer the IPv4 entry even when Tailscale lists the
+  // ULA first. Many networks don't route the IPv6 ULAs.
+  test("prefers the IPv4 entry when the IPv6 ULA is listed first (P1-4)", () => {
+    const status = JSON.stringify({
+      Self: {
+        TailscaleIPs: ["fd7a:115c:a1e0::1", "100.64.0.5"],
+      },
+    });
+    expect(parseTailscaleStatusJson(status)).toBe("100.64.0.5");
+  });
+
+  test("falls back to the IPv6 entry when no IPv4 is present", () => {
+    const status = JSON.stringify({
+      Self: {
+        TailscaleIPs: ["fd7a:115c:a1e0::1"],
+      },
+    });
+    expect(parseTailscaleStatusJson(status)).toBe("fd7a:115c:a1e0::1");
   });
 
   test("returns null for an empty TailscaleIPs list", () => {

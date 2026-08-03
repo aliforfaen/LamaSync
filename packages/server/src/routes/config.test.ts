@@ -600,7 +600,7 @@ describe("peer SFTP emission (LAMA-223 tailnet preference)", () => {
     expect(peers[0]?.peerTailnetIp).toBeNull();
   });
 
-  test("peer rclone section uses the tailnet address when available", () => {
+  test("peer emits a tailnet section and a separate -lan fallback (P1-4)", () => {
     const peers = [
       {
         peerHostId: "host-2",
@@ -620,10 +620,14 @@ describe("peer SFTP emission (LAMA-223 tailnet preference)", () => {
       peers,
       "test-key",
     );
+    // Two sections: the primary (tailnet) and a -lan fallback the
+    // daemon's usePeer can probe when the tailnet drops.
     expect(out.rcloneConfig).toContain("[lamasync-peer-host-2]");
+    expect(out.rcloneConfig).toContain("[lamasync-peer-host-2-lan]");
     expect(out.rcloneConfig).toContain("host = 100.64.0.2");
     expect(out.rcloneConfig).toContain("via tailnet (100.64.0.2)");
-    expect(out.rcloneConfig).not.toContain("host = 192.168.10.2");
+    expect(out.rcloneConfig).toContain("host = 192.168.10.2");
+    expect(out.rcloneConfig).toContain("via lan (192.168.10.2)");
   });
 
   test("peer rclone section falls back to the LAN IP when no tailnet IP exists", () => {
@@ -647,6 +651,7 @@ describe("peer SFTP emission (LAMA-223 tailnet preference)", () => {
       "test-key",
     );
     expect(out.rcloneConfig).toContain("[lamasync-peer-host-2]");
+    expect(out.rcloneConfig).not.toContain("[lamasync-peer-host-2-lan]");
     expect(out.rcloneConfig).toContain("host = 192.168.10.2");
     expect(out.rcloneConfig).toContain("via lan (192.168.10.2)");
   });

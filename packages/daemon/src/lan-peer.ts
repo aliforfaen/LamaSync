@@ -71,21 +71,37 @@ async function probePeerTcp(ip: string, port: number): Promise<boolean> {
 
 // "Use" the peer: swap the rclone target from the standard remote to the
 // peer's SFTP section, when the peer is reachable. Returns the substituted
-// remote name (e.g. `lamasync-peer-<peerId>`) on success, or null when the
+// remote name (e.g. `lamasync-peer-<peerId>` for tailnet, or the
+// `-lan` suffix when only the LAN IP probes) on success, or null when the
 // peer is not reachable (caller falls back to the standard remote).
 async function usePeer(peer: Peer): Promise<{ remote: string | null; detail: string }> {
-  // LAMA-223: the rclone section prefers the peer's tailnet address, so
-  // probe that first and fall back to the LAN IP before declaring the
-  // peer unreachable — tailscale may have dropped after the last heartbeat
-  // while the server still emits the (stale) tailnet address.
-  const candidates: Array<{ ip: string; label: string }> = [];
-  if (peer.peerTailnetIp) candidates.push({ ip: peer.peerTailnetIp, label: "tailnet" });
-  if (peer.peerLanIp) candidates.push({ ip: peer.peerLanIp, label: "lan" });
-  for (const { ip, label } of candidates) {
+  // LAMA-223 P1-4: probe tailnet first, then LAN. Each candidate carries
+  // the rclone section name the server emitted for that target
+  // (`peerRemote` for tailnet, `peerRemote-lan` for LAN fallback).
+  const candidates: Array<{ ip: string; label: string; remote: string }> = [];
+  if (peer.peerTailnetIp) {
+    candidates.push({
+      ip: peer.peerTailnetIp,
+      label: "tailnet",
+      remote: peer.peerRemote,
+    });
+  }
+  if (peer.peerLanIp) {
+    candidates.push({
+      ip: peer.peerLanIp,
+      label: "lan",
+      // LAN-only section is emitted as `<peerRemote>-lan`. When no
+      // tailnet exists, the LAN section reuses the base name.
+      remote: peer.peerTailnetIp
+        ? `${peer.peerRemote}-lan`
+        : peer.peerRemote,
+    });
+  }
+  for (const { ip, label, remote } of candidates) {
     const reachable = await probePeerTcp(ip, PEER_SFTP_PORT).catch(() => false);
     if (reachable) {
       return {
-        remote: peer.peerRemote,
+        remote,
         detail: `LAN peer ${peer.peerHostId} (${ip}:${PEER_SFTP_PORT}, ${label}) used as sync target`,
       };
     }
@@ -224,26 +240,50 @@ export function parseDefaultRouteInterface(routeTable: string): string | null {
 }
 
 /**
- * Pick the first Tailscale (100.0.0.0/8) IPv4 address from `ip -4 -o addr`
- * output. Lines look like:
+ * Pick the first Tailscale IPv4 address from `ip -4 -o addr` output.
+ * Lines look like:
  *   `2: tailscale0    inet 100.64.0.5/32 scope global ...`
  * Returns null when no address in the tailnet range is present.
+ *
+ * LAMA-223 P1-4: matches only the CGNAT /10 (100.64.0.0/10 → 100.64 to
+ * 100.127). The previous `ip.startsWith("100.")` accepted every 100.x
+ * address, so ISP CGNAT on eth0 (very common in mobile/4G networks) was
+ * mis-reported as a tailnet IP. Tailscale specifically uses 100.64–100.127.
  */
 export function parseIpAddrOutput(output: string): string | null {
   for (const rawLine of output.split("\n")) {
     const match = /\binet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\//.exec(rawLine);
     if (!match) continue;
     const ip = match[1] ?? "";
-    // 100.0.0.0/8 covers Tailscale's CGNAT range (100.64.0.0/10).
-    if (ip.startsWith("100.")) return ip;
+    if (!isTailscaleIp(ip)) continue;
+    return ip;
   }
   return null;
+}
+
+/**
+ * True when `ip` is in the IANA-allocated CGNAT /10 (100.64.0.0/10) that
+ * Tailscale actually uses for its IPv4 addresses. Excludes the broader
+ * 100.0.0.0/8 to avoid ISP CGNAT false positives (LAMA-223 P1-4).
+ */
+export function isTailscaleIp(ip: string): boolean {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return false;
+  const a = Number(parts[0]);
+  const b = Number(parts[1]);
+  if (a !== 100) return false;
+  // 100.64.0.0/10 → second octet in [64, 127].
+  return b >= 64 && b <= 127;
 }
 
 /**
  * Pull the first tailnet IP from `tailscale status --json` output.
  * The interesting shape is `{ "Self": { "TailscaleIPs": ["100.64.0.5", ...] } }`.
  * Malformed or non-object payloads yield null (never throws).
+ *
+ * LAMA-223 P1-4: TailscaleIPs often contains an IPv6 entry first
+ * (fd7a:115c:a1e0::/48). Prefer the IPv4 entry so peers use the more
+ * reachable target — many networks don't route the IPv6 ULAs.
  */
 export function parseTailscaleStatusJson(output: string): string | null {
   try {
@@ -255,10 +295,16 @@ export function parseTailscaleStatusJson(output: string): string | null {
     if (self === null || typeof self !== "object") return null;
     const ips = (self as Record<string, unknown>).TailscaleIPs;
     if (!Array.isArray(ips)) return null;
+    let firstIpv6: string | null = null;
     for (const entry of ips) {
-      if (typeof entry === "string" && entry.length > 0) return entry;
+      if (typeof entry !== "string" || entry.length === 0) continue;
+      if (entry.includes(":")) {
+        if (firstIpv6 === null) firstIpv6 = entry;
+        continue;
+      }
+      return entry;
     }
-    return null;
+    return firstIpv6;
   } catch {
     return null;
   }
@@ -282,42 +328,59 @@ async function runCommand(argv: string[]): Promise<string | null> {
 /**
  * Best-effort tailnet IP detection. Never throws — every failure path returns
  * null so callers (heartbeat/register) always produce a valid payload.
+ *
+ * LAMA-223 P1-4: detection order is
+ *   1. `tailscale0` interface (explicit — the canonical Tailscale iface
+ *      name; CGNAT on eth0 cannot match this)
+ *   2. `tailscale status --json` (Self.TailscaleIPs, IPv4 preferred)
+ *   3. the default-route interface as a last-resort fallback
+ * The previous order scanned the default-route first, so ISP CGNAT on
+ * eth0 (100.64–100.127) was reported as a tailnet IP.
  */
 export async function detectTailnetIp(): Promise<string | null> {
+  // 1. tailscale0 by name — unambiguous when present.
+  const tsIface = await runCommand([
+    "ip",
+    "-4",
+    "-o",
+    "addr",
+    "show",
+    "dev",
+    "tailscale0",
+  ]);
+  if (tsIface !== null) {
+    const ip = parseIpAddrOutput(tsIface);
+    if (ip !== null) return ip;
+  }
+  // 2. tailscale status --json (authoritative — Self.TailscaleIPs is the
+  //    source of truth for Tailscale's own view of the address).
+  const statusOutput = await runCommand(["tailscale", "status", "--json"]);
+  if (statusOutput !== null) {
+    const ip = parseTailscaleStatusJson(statusOutput);
+    if (ip !== null) return ip;
+  }
+  // 3. Default-route interface fallback (some users disable tailscale0
+  //    by name and put Tailscale on a custom interface).
   try {
-    let routeTable: string | null = null;
-    try {
-      routeTable = readFileSync("/proc/net/route", "utf8");
-    } catch {
-      routeTable = null; // non-Linux or restricted /proc
-    }
-    if (routeTable !== null) {
-      const iface = parseDefaultRouteInterface(routeTable);
-      if (iface !== null) {
-        const ipOutput = await runCommand([
-          "ip",
-          "-4",
-          "-o",
-          "addr",
-          "show",
-          "dev",
-          iface,
-        ]);
-        if (ipOutput !== null) {
-          const ip = parseIpAddrOutput(ipOutput);
-          if (ip !== null) return ip;
-        }
+    const routeTable = readFileSync("/proc/net/route", "utf8");
+    const iface = parseDefaultRouteInterface(routeTable);
+    if (iface !== null && iface !== "tailscale0") {
+      const ipOutput = await runCommand([
+        "ip",
+        "-4",
+        "-o",
+        "addr",
+        "show",
+        "dev",
+        iface,
+      ]);
+      if (ipOutput !== null) {
+        const ip = parseIpAddrOutput(ipOutput);
+        if (ip !== null) return ip;
       }
     }
-    // Fallback: the tailscale status socket knows the tailnet addresses
-    // even when the default-route interface lookup missed.
-    const statusOutput = await runCommand(["tailscale", "status", "--json"]);
-    if (statusOutput !== null) {
-      const ip = parseTailscaleStatusJson(statusOutput);
-      if (ip !== null) return ip;
-    }
   } catch {
-    // never throw
+    // non-Linux or restricted /proc — fall through.
   }
   return null;
 }
