@@ -79,7 +79,10 @@ docker run --rm \
     grep -q 'serverUrl = \"http://lamasync-server:8080\"' ~/.config/lamasync/client.toml
     grep -q 'apiKey = \"test-install-key\"' ~/.config/lamasync/client.toml
     grep -q 'ExecStart=/root/.local/bin/lamasyncd' ~/.config/systemd/user/lamasyncd.service
-    grep -q 'LAMASYNC_SOCKET_PATH=/root/lamasync.sock' ~/.config/systemd/user/lamasyncd.service
+    # LAMA-218: the root container has no XDG_RUNTIME_DIR, so the socket
+    # falls back to /root/.lamasync/lamasync.sock.
+    grep -q 'LAMASYNC_SOCKET_PATH=/root/.lamasync/lamasync.sock' ~/.config/systemd/user/lamasyncd.service
+    grep -q 'ReadWritePaths=.* /root/.lamasync ' ~/.config/systemd/user/lamasyncd.service
     echo '[client] All install checks passed.'
   "
 

@@ -30,11 +30,25 @@ ProtectHome=read-only
 # ReadWritePaths lists the directories and socket files the daemon needs
 # to write. Paths must be absolute (systemd does not expand %h here) and
 # must NOT live under $HOME itself, because ProtectHome=read-only blanks
-# the whole tree. Add custom project mount roots here, e.g.:
-#   ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/lamasync.sock %h/your/project/root
-ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/lamasync.sock
+# the whole tree. The socket defaults to $XDG_RUNTIME_DIR/lamasync.sock
+# (=/run/user/<uid>/lamasync.sock); /run/user must be explicitly
+# whitelisted or the bind fails with EROFS. If the socket falls back to
+# ~/.lamasync/lamasync.sock (no XDG_RUNTIME_DIR — e.g. root containers,
+# old shells), %h/.lamasync covers it. Add custom project mount roots
+# here, e.g.:
+#   ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
+ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
 # Standardize socket path so the daemon, TUI, and per-mount units agree.
-Environment=LAMASYNC_SOCKET_PATH=%h/lamasync.sock
+# `$XDG_RUNTIME_DIR` expands to /run/user/<uid> at runtime under
+# systemd --user; matches the default in @lamasync/core's socket-path
+# helper. client.toml's `socketPath` overrides this when set.
+Environment=LAMASYNC_SOCKET_PATH=${XDG_RUNTIME_DIR}/lamasync.sock
+# systemd user services inherit a minimal PATH from the user manager
+# (/usr/local/bin:/usr/bin) regardless of what `systemctl --user show-environment`
+# shows. Set PATH explicitly so user-installed binaries (rclone at
+# ~/.local/bin, bun at ~/.bun/bin, restic via package manager, etc.) are
+# visible to the daemon. `%h` works for /root and every non-/home home.
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin
 # Resource limits
 MemoryMax=512M
 CPUQuota=50%

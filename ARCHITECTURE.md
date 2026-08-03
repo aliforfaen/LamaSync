@@ -506,8 +506,13 @@ curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/update
 └── vfs/<folderId>/       # mount VFS cache
 
 /run/user/<uid>/lamasync/
-├── lamasync.sock         # daemon control socket
+├── lamasync.sock         # daemon control socket (LAMA-218; XDG fallback)
 └── mounts/<folderId>.pid # LAMA-113: mount PID tracking
+
+# LAMA-218: when $XDG_RUNTIME_DIR is unset (root containers, old shells),
+# the socket falls back to ~/.lamasync/lamasync.sock rather than
+# polluting $HOME itself. The shared helper that decides this lives in
+# `@lamasync/core/socket-path.ts`.
 ```
 
 ```

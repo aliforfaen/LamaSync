@@ -73,7 +73,9 @@ describe("daemonServiceTemplate", () => {
     expect(content).toContain(
       "Environment=LAMASYNC_SOCKET_PATH=${XDG_RUNTIME_DIR}/lamasync.sock",
     );
-    expect(content).toContain("Environment=PATH=/home/%u/.local/bin");
+    // LAMA-218: %h (home) works for /root and every non-/home home; the
+    // previous /home/%u only matched homes under /home.
+    expect(content).toContain("Environment=PATH=%h/.local/bin");
   });
 
   test("honours custom binaryPath and socketPath", () => {

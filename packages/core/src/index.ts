@@ -16,3 +16,4 @@ export {
 } from "./api-client.ts";
 export { VERSION } from "./version.ts";
 export { isNewer } from "./version-compare.ts";
+export { defaultSocketPath, defaultSocketDir } from "./socket-path.ts";

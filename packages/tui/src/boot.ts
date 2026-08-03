@@ -14,11 +14,9 @@
  * renderer, and the daemon socket path, then constructs the view instances
  * against a shared `ViewContext` and mounts them through the Shell.
  */
-import { homedir } from "os";
-import { join } from "path";
-
 import { createCliRenderer } from "@opentui/core";
 import type { CliRenderer } from "@opentui/core";
+import { defaultSocketPath } from "@lamasync/core";
 
 import { buildClient } from "./api.ts";
 import type { TuiClient } from "./api.ts";
@@ -47,8 +45,7 @@ export async function bootShell(): Promise<void> {
     autoFocus: true,
   });
 
-  const socketPath =
-    process.env.LAMASYNC_SOCKET_PATH ?? join(homedir(), "lamasync.sock");
+  const socketPath = defaultSocketPath();
 
   const apiBaseUrl =
     process.env.LAMASYNC_SERVER_URL ?? "http://localhost:8080";

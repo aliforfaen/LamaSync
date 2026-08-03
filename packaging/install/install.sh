@@ -75,7 +75,7 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
 # IMPORTANT: ProtectHome=read-only also marks /run/user as read-only. The
-# socket defaults to $XDG_RUNTIME_DIR/lamasync.sock = /run/user/<uid>/...
+# socket defaults to \$XDG_RUNTIME_DIR/lamasync.sock = /run/user/<uid>/...
 # so /run/user must be explicitly whitelisted or the bind fails with
 # EROFS. If SOCKET_PATH falls back to ~/.lamasync/lamasync.sock, the
 # %h/.lamasync entry below covers it.
@@ -85,7 +85,7 @@ Environment=LAMASYNC_SOCKET_PATH=${socket_path}
 # (/usr/local/bin:/usr/bin) regardless of what `systemctl --user show-environment`
 # shows. Set PATH explicitly so user-installed binaries (rclone at
 # ~/.local/bin, bun at ~/.bun/bin, restic via package manager, etc.) are
-# visible to the daemon.
+# visible to the daemon. %h expands to \$HOME (works for /root too).
 Environment=PATH=${HOME}/.local/bin:${HOME}/.bun/bin:${HOME}/.cargo/bin:/usr/local/bin:/usr/bin
 MemoryMax=512M
 CPUQuota=50%
@@ -113,7 +113,7 @@ Options:
   -h, --help          Show this help
 
 Environment:
-  LAMASYNC_SOCKET_PATH      Override the Unix socket path (default: $XDG_RUNTIME_DIR/lamasync.sock, or ~/.lamasync/lamasync.sock when XDG_RUNTIME_DIR is unset)
+  LAMASYNC_SOCKET_PATH      Override the Unix socket path (default: \$XDG_RUNTIME_DIR/lamasync.sock, or ~/.lamasync/lamasync.sock when XDG_RUNTIME_DIR is unset)
   LAMASYNC_INSTALL_BASE_URL Override the release download base URL (for testing)
 EOF
   exit "${1:-0}"

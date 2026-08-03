@@ -12,7 +12,7 @@ import type {
   QueuedActionStatus,
   ResticRestoreJob,
 } from "@lamasync/core";
-import { LamaSyncApiClient, VERSION } from "@lamasync/core";
+import { LamaSyncApiClient, VERSION, defaultSocketPath } from "@lamasync/core";
 import {
   selectAssignmentsForSyncAction,
   summarizeConfigRefresh,
@@ -63,18 +63,11 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const CONFIG_REFRESH_MS = 5 * 60 * 1000;
 const OPERATIONS_RING_SIZE = 200;
 
-function defaultSocketPath(): string {
-  if (process.env.LAMASYNC_SOCKET_PATH) return process.env.LAMASYNC_SOCKET_PATH;
-  // Prefer $XDG_RUNTIME_DIR (always writable under systemd user services
-  // and removed on logout) — falling back to ~/.lamasync/ inside $HOME
-  // (XDG_CONFIG_HOME-style) rather than polluting $HOME itself. The old
-  // ~/lamasync.sock default collided with `ProtectHome=read-only` and
-  // forced every installer to add the socket file to ReadWritePaths, which
-  // systemd treats inconsistently.
-  const xdg = process.env.XDG_RUNTIME_DIR;
-  if (xdg) return join(xdg, "lamasync.sock");
-  return join(homedir(), ".lamasync", "lamasync.sock");
-}
+// LAMA-218: the shared helper in @lamasync/core owns the resolution
+// (env → XDG_RUNTIME_DIR → ~/.lamasync). Kept exported as a name for
+// `socket.ts` callers and any external tools that want to point at the
+// daemon.
+export { defaultSocketPath };
 
 export function getLocalLanIp(): string | null {
   const ifaces = networkInterfaces();
@@ -457,7 +450,10 @@ async function main(): Promise<void> {
 
   const clientConfig = loadConfig();
   const hostId = clientConfig.hostname;
-  const socketPath = defaultSocketPath();
+  // LAMA-218: client.toml's `socketPath` overrides every default when
+  // set. env (LAMASYNC_SOCKET_PATH) and the helper's fallback chain
+  // remain in effect otherwise.
+  const socketPath = defaultSocketPath(clientConfig.socketPath ?? undefined);
 
   console.log(
     `lamasyncd starting host=${hostId} url=${clientConfig.serverUrl} socket=${socketPath}`,

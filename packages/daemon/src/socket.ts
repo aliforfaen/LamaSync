@@ -8,7 +8,8 @@
 // Implemented on `node:net.Server` so the framing matches the TUI's
 // `node:net` client and the protocol is genuinely raw (no HTTP, no WebSocket).
 
-import { existsSync, unlinkSync } from "fs";
+import { existsSync, mkdirSync, unlinkSync } from "fs";
+import { dirname } from "node:path";
 import { createServer, type Server, type Socket } from "node:net";
 import type {
   FolderType,
@@ -128,6 +129,14 @@ function handleConnection(socket: Socket, opts: StartSocketOptions): void {
 export function startSocketServer(
   opts: StartSocketOptions,
 ): { close: () => void } {
+  // LAMA-218: ensure the parent dir exists before bind(). The default
+  // location under XDG_RUNTIME_DIR is always present on Linux, but the
+  // ~/.lamasync fallback is NOT created by systemd or any installer —
+  // a daemon that just calls server.listen() there fails with ENOENT.
+  const socketDir = dirname(opts.socketPath);
+  if (socketDir !== "" && socketDir !== ".") {
+    mkdirSync(socketDir, { recursive: true });
+  }
   if (existsSync(opts.socketPath)) {
     try {
       unlinkSync(opts.socketPath);

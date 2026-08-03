@@ -13,6 +13,9 @@ export interface ClientConfig {
   apiKey: string;
   hostname: string;
   dataDir: string;
+  /** LAMA-218: optional override for the daemon's Unix socket path.
+   *  Falls back to defaultSocketPath() (env → XDG → ~/.lamasync). */
+  socketPath?: string | null;
 }
 
 const DEFAULT_SERVER: Omit<ServerConfig, "apiKey"> = {
@@ -63,5 +66,9 @@ export function parseClientConfig(buf: string): ClientConfig {
     hostname: raw.hostname,
     dataDir:
       typeof raw.dataDir === "string" ? raw.dataDir : DEFAULT_CLIENT.dataDir,
+    socketPath:
+      typeof raw.socketPath === "string" && raw.socketPath.length > 0
+        ? raw.socketPath
+        : null,
   };
 }

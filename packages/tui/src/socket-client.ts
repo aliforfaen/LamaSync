@@ -1,6 +1,5 @@
 import { connect } from "node:net";
-import { homedir } from "os";
-import { join } from "path";
+import { defaultSocketPath } from "@lamasync/core";
 
 export interface SocketResponse {
   ok: boolean;
@@ -13,8 +12,6 @@ export interface SocketClient {
   close(): void;
 }
 
-const DEFAULT_SOCKET_PATH = join(homedir(), "lamasync.sock");
-
 
 /**
  * Opens a fresh Unix-socket connection per request and exchanges a single
@@ -22,9 +19,13 @@ const DEFAULT_SOCKET_PATH = join(homedir(), "lamasync.sock");
  *
  * The daemon (or any counterpart) is expected to read one line, write a
  * single JSON response terminated by `\n`, and close the connection.
+ *
+ * LAMA-218: the default socket path comes from `@lamasync/core`'s shared
+ * helper — same resolution chain as the daemon (env → XDG → ~/.lamasync)
+ * so the TUI always points at the daemon the user actually started.
  */
 export function connectSocket(path?: string): Promise<SocketClient> {
-  const socketPath = path ?? (process.env.LAMASYNC_SOCKET_PATH ?? DEFAULT_SOCKET_PATH);
+  const socketPath = path ?? defaultSocketPath();
   const { promise, resolve, reject } = Promise.withResolvers<SocketClient>();
   let settled = false;
   const probe = connect(socketPath);

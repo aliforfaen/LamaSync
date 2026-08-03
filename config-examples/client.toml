@@ -25,5 +25,9 @@ hostname = "my-laptop"
 dataDir = "~/.local/share/lamasync"
 
 # Optional: path to the Unix socket the TUI uses to talk to the daemon.
-# Default: ~/lamasync.sock. Set via LAMASYNC_SOCKET_PATH.
+# Default resolution chain (LAMA-218):
+#   1. this `socketPath` (when set)
+#   2. $LAMASYNC_SOCKET_PATH env var (also used by systemd --user)
+#   3. $XDG_RUNTIME_DIR/lamasync.sock   (= /run/user/<uid>/...)
+#   4. ~/.lamasync/lamasync.sock        (no-XDG fallback)
 # socketPath = "/run/user/1000/lamasync.sock"
