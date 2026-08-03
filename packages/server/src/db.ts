@@ -3,6 +3,7 @@ import { join } from "path";
 import { initDb } from "@lamasync/core";
 import { Database } from "bun:sqlite";
 import { migrateLegacyS3FoldersToBackends } from "./backends.ts";
+import { reconcileStuckBrowseJobs } from "./browse-jobs.ts";
 
 const dataDir = process.env.LAMASYNC_DATA_DIR ?? "/data";
 
@@ -54,6 +55,21 @@ export function getDb(): Database {
       // Fallback: tests call __setDb before any query, so an inaccessible
       // default path is benign. An in-memory placeholder will be replaced.
       _db = initDb(":memory:");
+    }
+    // LAMA-226 P1-3: any `running` browse_jobs rows survived a crash
+    // would otherwise block their destinations forever (the busy-guard
+    // probe now matches the canonical key). Mark them failed at boot.
+    try {
+      const reconciled = reconcileStuckBrowseJobs(_db);
+      if (reconciled > 0) {
+        console.log(`[boot] reconciled ${reconciled} stuck browse_job(s)`);
+      }
+    } catch (error) {
+      console.error(
+        `[boot] browse_job reconcile failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
   return _db;

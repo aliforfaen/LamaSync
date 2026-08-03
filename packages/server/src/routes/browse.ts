@@ -14,6 +14,14 @@ import {
   startBrowseRename,
   startBrowseUpload,
 } from "../browse-jobs.ts";
+// LAMA-226 P1-9: write-op bodies share a single validated `ref` shape.
+// The Elysia-validated body is used directly (no `as` casts) so the type
+// system proves we never feed untrusted input to rclone/DB helpers.
+const browseRefSchema = t.Object({
+  kind: t.Union([t.Literal("local"), t.Literal("s3")]),
+  folderId: t.Optional(t.Union([t.String(), t.Null()])),
+  path: t.String(),
+});
 
 let activeDb: Database = defaultDb;
 let listS3 = listS3Objects;
@@ -325,11 +333,7 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/browse/copy",
     async ({ body, set }) => {
-      const { source, destination, names } = body as {
-        source: BrowseRef;
-        destination: BrowseRef;
-        names: string[];
-      };
+      const { source, destination, names } = body;
       try {
         const result = await startBrowseCopyMove(
           activeDb,
@@ -346,14 +350,13 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 201;
         return result.job;
       } catch (error) {
-        set.status = 400;
-        return { error: error instanceof Error ? error.message : String(error) };
+        return scrubWriteError(set, error, "copy");
       }
     },
     {
       body: t.Object({
-        source: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
-        destination: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        source: browseRefSchema,
+        destination: browseRefSchema,
         names: t.Array(t.String()),
       }),
       detail: {
@@ -371,11 +374,7 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/browse/move",
     async ({ body, set }) => {
-      const { source, destination, names } = body as {
-        source: BrowseRef;
-        destination: BrowseRef;
-        names: string[];
-      };
+      const { source, destination, names } = body;
       try {
         const result = await startBrowseCopyMove(
           activeDb,
@@ -392,14 +391,13 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 201;
         return result.job;
       } catch (error) {
-        set.status = 400;
-        return { error: error instanceof Error ? error.message : String(error) };
+        return scrubWriteError(set, error, "move");
       }
     },
     {
       body: t.Object({
-        source: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
-        destination: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        source: browseRefSchema,
+        destination: browseRefSchema,
         names: t.Array(t.String()),
       }),
       detail: {
@@ -417,7 +415,7 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/browse/rename",
     async ({ body, set }) => {
-      const { ref, from, to } = body as { ref: BrowseRef; from: string; to: string };
+      const { ref, from, to } = body;
       if (!from || !to || from === to) {
         set.status = 400;
         return { error: "from and to are required and must differ" };
@@ -427,13 +425,12 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 201;
         return job;
       } catch (error) {
-        set.status = 400;
-        return { error: error instanceof Error ? error.message : String(error) };
+        return scrubWriteError(set, error, "rename");
       }
     },
     {
       body: t.Object({
-        ref: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        ref: browseRefSchema,
         from: t.String(),
         to: t.String(),
       }),
@@ -451,7 +448,7 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/browse/mkdir",
     async ({ body, set }) => {
-      const { ref, name } = body as { ref: BrowseRef; name: string };
+      const { ref, name } = body;
       if (!name) {
         set.status = 400;
         return { error: "name is required" };
@@ -461,13 +458,12 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 201;
         return job;
       } catch (error) {
-        set.status = 400;
-        return { error: error instanceof Error ? error.message : String(error) };
+        return scrubWriteError(set, error, "mkdir");
       }
     },
     {
       body: t.Object({
-        ref: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        ref: browseRefSchema,
         name: t.String(),
       }),
       detail: {
@@ -484,11 +480,7 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/browse/upload",
     async ({ body, set }) => {
-      const { destination, name, content } = body as {
-        destination: BrowseRef;
-        name: string;
-        content: string;
-      };
+      const { destination, name, content } = body;
       if (!name || typeof content !== "string" || content.length === 0) {
         set.status = 400;
         return { error: "name and base64 content are required" };
@@ -504,13 +496,12 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 201;
         return job;
       } catch (error) {
-        set.status = 400;
-        return { error: error instanceof Error ? error.message : String(error) };
+        return scrubWriteError(set, error, "upload");
       }
     },
     {
       body: t.Object({
-        destination: t.Object({ kind: t.String(), folderId: t.Optional(t.Union([t.String(), t.Null()])), path: t.String() }),
+        destination: browseRefSchema,
         name: t.String(),
         content: t.String(),
       }),
@@ -541,4 +532,22 @@ function parseStringArray(value: string | null): string[] {
 // browse operations, so a stable synthetic id keeps the log uniform.
 function sourceLabel(ref: BrowseRef): string {
   return ref.kind === "s3" ? (ref.folderId ?? "server") : "server";
+}
+
+/**
+ * LAMA-226 P1-9: write-op failures must not leak the underlying rclone
+ * stderr (it embeds bucket names, access key prefixes, and absolute local
+ * paths). The job row carries the full error for the audit trail + UI
+ * details; the API response returns only a stable, generic message tagged
+ * with the operation type so the client can correlate with the listed job.
+ */
+function scrubWriteError(
+  set: { status?: number | string },
+  error: unknown,
+  op: string,
+): { error: string } {
+  const fullMessage = error instanceof Error ? error.message : String(error);
+  console.error(`[browse/${op}] ${fullMessage}`);
+  set.status = 400;
+  return { error: `${op} failed` };
 }

@@ -1,7 +1,12 @@
-// LAMA-226: Data Browser write operations — real end-to-end against a temp
-// backup root using the locally installed rclone (the unit-test suite runs
-// on hosts where rclone exists; where it does not, these tests fail at the
-// spawn and the job row still reports failed — never a crash).
+// LAMA-226 P0-2: these are real end-to-end tests that spawn rclone against a
+// temp backup root. They are gated on `Bun.which("rclone")` so the unit
+// suite stays green on hosts without rclone installed (AGENTS.md:
+// "`bun test` always works"). The pure config/argv helpers — and the busy
+// guard, self-move, and S3 bucket threading — are covered by
+// `browse-rclone.test.ts` which has zero external deps.
+//
+// Set `LAMASYNC_TEST_RCLONE=1` to force-skip these tests even when rclone is
+// installed (CI uses this when running a hermetic rclone-less job).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Elysia } from "elysia";
@@ -14,6 +19,9 @@ import type { BrowseJob } from "@lamasync/core";
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "browse-ops-test-key";
 process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-browse-ops-test-data";
 process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "browse-ops-test-secret-key-0123456789abcdef";
+
+const HAS_RCLONE = !!Bun.which("rclone") && process.env.LAMASYNC_TEST_RCLONE !== "1";
+const e2e = HAS_RCLONE ? describe : describe.skip;
 
 const { getAuthPlugin } = await import("../auth.ts");
 const { browseRoutes, __setDb } = (await import("./browse.ts")) as unknown as {
@@ -96,7 +104,7 @@ async function waitForJob(id: string, timeoutMs = 15000): Promise<BrowseJob> {
   }
 }
 
-describe("POST /api/v1/browse/mkdir", () => {
+e2e("POST /api/v1/browse/mkdir", () => {
   test("creates a local directory", async () => {
     const res = await postJson("/api/v1/browse/mkdir", {
       ref: { kind: "local", path: "dst" },
@@ -118,7 +126,7 @@ describe("POST /api/v1/browse/mkdir", () => {
   });
 });
 
-describe("POST /api/v1/browse/copy", () => {
+e2e("POST /api/v1/browse/copy", () => {
   test("copies a file local → local; source stays", async () => {
     const res = await postJson("/api/v1/browse/copy", {
       source: { kind: "local", path: "src" },
@@ -134,7 +142,7 @@ describe("POST /api/v1/browse/copy", () => {
   });
 });
 
-describe("POST /api/v1/browse/move", () => {
+e2e("POST /api/v1/browse/move", () => {
   test("moves a file; the source is gone afterwards", async () => {
     const res = await postJson("/api/v1/browse/move", {
       source: { kind: "local", path: "src" },
@@ -170,7 +178,7 @@ describe("POST /api/v1/browse/move", () => {
   });
 });
 
-describe("POST /api/v1/browse/rename", () => {
+e2e("POST /api/v1/browse/rename", () => {
   test("renames an entry in place", async () => {
     const res = await postJson("/api/v1/browse/rename", {
       ref: { kind: "local", path: "src" },
@@ -186,7 +194,7 @@ describe("POST /api/v1/browse/rename", () => {
   });
 });
 
-describe("POST /api/v1/browse/upload", () => {
+e2e("POST /api/v1/browse/upload", () => {
   test("uploads base64 content as a file", async () => {
     const res = await postJson("/api/v1/browse/upload", {
       destination: { kind: "local", path: "dst" },
@@ -201,7 +209,7 @@ describe("POST /api/v1/browse/upload", () => {
   });
 });
 
-describe("GET /api/v1/browse/jobs", () => {
+e2e("GET /api/v1/browse/jobs", () => {
   test("lists recent jobs newest-first", async () => {
     await postJson("/api/v1/browse/mkdir", { ref: { kind: "local", path: "dst" }, name: "a" });
     await postJson("/api/v1/browse/mkdir", { ref: { kind: "local", path: "dst" }, name: "b" });

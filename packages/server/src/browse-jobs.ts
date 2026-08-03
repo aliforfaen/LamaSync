@@ -7,8 +7,8 @@
 // two operators can't write to the same target simultaneously.
 
 import type { Database } from "bun:sqlite";
-import { join } from "node:path";
 import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type {
   BrowseJob,
   BrowseJobOperation,
@@ -20,6 +20,17 @@ import { resolveFolderS3Config, getBackend } from "./backends.ts";
 import { decryptSecret } from "./crypto.ts";
 import { invalidateFolderSize, invalidateStorageReport } from "./stats.ts";
 import { validateBrowseInput } from "./browse-paths.ts";
+import {
+  buildRcloneArgv,
+  buildRcloneConfig,
+  destKey,
+  isContainedLocalMove,
+  isSafeS3IntraFolderMove,
+  refLabel,
+  remotePath,
+  type BuildArgvInput,
+} from "./browse-rclone.ts";
+import { withTempRcloneConfig } from "./temp-rclone-config.ts";
 
 export interface BrowseJobRow {
   id: string;
@@ -37,10 +48,21 @@ export interface BrowseJobRow {
 const JOB_SELECT =
   "SELECT id, operation, source, destination, status, error, progress_bytes, total_bytes, created_at, updated_at FROM browse_jobs";
 
+/**
+ * In-memory mirrors of the DB-backed concurrency guard. The DB row is the
+ * source of truth for "busy" checks across server restarts; this mirror
+ * just avoids a SELECT on every request while the server is up.
+ *
+ * The keys are `destKey(ref)` (canonical) for destination contention and
+ * `srcKey(ref, names)` for source contention — both prevent two writes
+ * from racing on the same entry.
+ */
 const activeDestinations = new Set<string>();
+const activeSources = new Set<string>();
 
 export function __resetBrowseJobsForTests(): void {
   activeDestinations.clear();
+  activeSources.clear();
 }
 
 function jobStatus(value: string): BrowseJob["status"] {
@@ -56,10 +78,27 @@ function jobStatus(value: string): BrowseJob["status"] {
   }
 }
 
+function jobOperation(value: string): BrowseJobOperation | null {
+  switch (value) {
+    case "copy":
+    case "move":
+    case "upload":
+    case "rename":
+    case "mkdir":
+      return value;
+    default:
+      return null;
+  }
+}
+
 function rowToJob(row: BrowseJobRow): BrowseJob {
+  const operation = jobOperation(row.operation);
+  if (operation === null) {
+    throw new Error(`browse_jobs row ${row.id} has unknown operation '${row.operation}'`);
+  }
   return {
     id: row.id,
-    operation: row.operation as BrowseJobOperation,
+    operation,
     source: row.source,
     destination: row.destination,
     status: jobStatus(row.status),
@@ -69,18 +108,6 @@ function rowToJob(row: BrowseJobRow): BrowseJob {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-}
-
-/** Human-readable label for a ref, used in the job + operation log. */
-export function refLabel(ref: BrowseRef): string {
-  const p = ref.path.replace(/\/+$/, "") || ".";
-  return ref.kind === "s3" ? `s3:${ref.folderId ?? "?"}:${p}` : `local:${p}`;
-}
-
-/** Canonical destination key for the concurrency guard. */
-function destKey(ref: BrowseRef, path: string): string {
-  const joined = `${ref.path}/${path}`.replace(/\/+/g, "/");
-  return `${ref.kind}:${ref.folderId ?? ""}:${joined}`;
 }
 
 function writeJob(db: Database, job: BrowseJob): void {
@@ -106,6 +133,41 @@ function writeJob(db: Database, job: BrowseJob): void {
 
 function emit(db: Database, job: BrowseJob): void {
   broadcast({ kind: "browse_job", job });
+}
+
+/**
+ * Insert a terminal "failed" browse_jobs row and broadcast it. Used by the
+ * busy-guard short-circuit paths so every API call (even an immediately-
+ * rejected one) leaves a row the UI can list. Returns the row that was
+ * inserted.
+ */
+function insertFailedJob(
+  db: Database,
+  op: BrowseJobOperation,
+  source: string,
+  destination: string,
+  error: string,
+): BrowseJob {
+  const now = Date.now();
+  const job: BrowseJob = {
+    id: crypto.randomUUID(),
+    operation: op,
+    source,
+    destination,
+    status: "failed",
+    error,
+    progressBytes: null,
+    totalBytes: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.run(
+    `INSERT INTO browse_jobs (id, operation, source, destination, status, error, progress_bytes, total_bytes, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'failed', ?, NULL, NULL, ?, ?)`,
+    [job.id, op, source, destination, error, now, now],
+  );
+  emit(db, job);
+  return job;
 }
 
 function appendOperationLog(
@@ -134,7 +196,11 @@ async function runRclone(
   argv: string[],
   opts: { cwd?: string } = {},
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", ...opts });
+  // Local rclone remotes resolve relative paths against the spawn cwd; the
+  // browse operations live under $LAMASYNC_BACKUP_DIR. Default to that
+  // root so call sites can pass `{}` and still get a sensible cwd.
+  const finalOpts = opts.cwd !== undefined ? opts : { ...opts, cwd: process.env.LAMASYNC_BACKUP_DIR ?? "/backups" };
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", ...finalOpts });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -143,64 +209,40 @@ async function runRclone(
   return { stdout, stderr, code };
 }
 
-/** Build a temp rclone config with the remotes needed for one operation. */
-async function buildConfig(
-  db: Database,
-  src: BrowseRef,
-  dst: BrowseRef,
-): Promise<{ config: string; configPath: string }> {
-  const lines: string[] = [];
-  const addS3 = (name: string, folder: Folder): void => {
-    const s3 = resolveFolderS3Config(db, folder);
-    if (!s3) throw new Error(`folder ${folder.id} has no resolvable S3 backend`);
-    const backend = getBackend(db, s3.backendId);
-    const secret = decryptSecret(backend?.s3_secret_key_enc) ?? "";
-    lines.push(`[${name}]`);
-    lines.push("type = s3");
-    lines.push(`provider = ${s3.provider === "aws" ? "AWS" : "Other"}`);
-    lines.push("env_auth = false");
-    lines.push(`access_key_id = ${s3.accessKeyId}`);
-    lines.push(`secret_access_key = ${secret}`);
-    lines.push(`endpoint = ${s3.endpoint}`);
-    if (s3.region) lines.push(`region = ${s3.region}`);
-    lines.push("");
-  };
-  const addLocal = (name: string): void => {
-    lines.push(`[${name}]`);
-    lines.push("type = local");
-    lines.push("");
-  };
-
-  if (src.kind === "s3") {
-    const folder = loadFolder(db, src.folderId);
-    addS3("src", folder);
-  } else {
-    addLocal("src");
-  }
-  if (dst.kind === "s3") {
-    const folder = loadFolder(db, dst.folderId);
-    addS3("dst", folder);
-  } else {
-    addLocal("dst");
-  }
-
-  const configPath = `/tmp/lamasync-browse-${crypto.randomUUID()}.conf`;
-  await Bun.write(configPath, lines.join("\n"));
-  return { config: lines.join("\n"), configPath };
+interface ResolvedFolder {
+  folder: Folder;
+  bucket: string;
+  provider: "aws" | "other";
+  endpoint: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string | null;
 }
 
-function loadFolder(db: Database, folderId: string | null | undefined): Folder {
-  if (!folderId) throw new Error("s3 ref requires folderId");
+function resolveS3(db: Database, ref: BrowseRef): ResolvedFolder {
+  if (ref.kind !== "s3") {
+    throw new Error("resolveS3 called on non-s3 ref");
+  }
+  if (!ref.folderId) throw new Error("s3 ref requires folderId");
   const row = db
-    .query<{ id: string; name: string; backend: string | null; backend_id: string | null; s3_bucket: string | null }, [string]>(
+    .query<
+      {
+        id: string;
+        name: string;
+        backend: string | null;
+        backend_id: string | null;
+        s3_bucket: string | null;
+      },
+      [string]
+    >(
       "SELECT id, name, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
     )
-    .get(folderId);
-  if (!row) throw new Error(`folder ${folderId} not found`);
+    .get(ref.folderId);
+  if (!row) throw new Error(`folder ${ref.folderId} not found`);
   if (row.backend !== "s3" || !row.backend_id) {
-    throw new Error(`folder ${folderId} is not an S3 folder`);
+    throw new Error(`folder ${ref.folderId} is not an S3 folder`);
   }
-  return {
+  const folder: Folder = {
     id: row.id,
     name: row.name,
     type: "backup",
@@ -208,13 +250,21 @@ function loadFolder(db: Database, folderId: string | null | undefined): Folder {
     backendId: row.backend_id,
     s3Bucket: row.s3_bucket,
   };
-}
-
-/** Resolve a ref's relative path into an rclone remote path string. */
-function remotePath(ref: BrowseRef, name?: string): string {
-  const base = ref.path.replace(/^\/+/, "").replace(/\/+$/, "");
-  const parts = [base, name].filter((p): p is string => p !== undefined && p !== "");
-  return parts.join("/");
+  const s3 = resolveFolderS3Config(db, folder);
+  if (!s3) throw new Error(`folder ${row.id} has no resolvable S3 backend`);
+  const backend = getBackend(db, s3.backendId);
+  if (!backend) throw new Error(`backend ${s3.backendId} not found`);
+  const secret = decryptSecret(backend.s3_secret_key_enc) ?? "";
+  if (!s3.bucket) throw new Error(`folder ${row.id} has no S3 bucket configured`);
+  return {
+    folder,
+    bucket: s3.bucket,
+    provider: s3.provider === "aws" ? "aws" : "other",
+    endpoint: s3.endpoint,
+    accessKeyId: s3.accessKeyId,
+    secretAccessKey: secret,
+    region: s3.region,
+  };
 }
 
 function assertSafePath(path: string, name: string): void {
@@ -223,40 +273,35 @@ function assertSafePath(path: string, name: string): void {
   }
 }
 
-/** Local backup root — same root the read-only browser uses. */
-function backupRoot(): string {
-  return process.env.LAMASYNC_BACKUP_DIR ?? "/backups";
-}
-
 async function runCopy(
   db: Database,
   job: BrowseJob,
   src: BrowseRef,
   dst: BrowseRef,
   names: string[],
+  resolved: {
+    srcBucket: string | null;
+    dstBucket: string | null;
+  },
 ): Promise<void> {
-  const { configPath } = await buildConfig(db, src, dst);
-  const cwd = backupRoot();
+  const config = buildJobConfig(db, src, dst);
   let completed = 0;
-  try {
+  await withTempRcloneConfig(config, async (configPath) => {
     for (const name of names) {
       assertSafePath(src.path, name);
       assertSafePath(dst.path, name);
       // `copyto` handles both files and directories (recursive for dirs) and
       // creates the destination path — uniform per-entry copy.
-      const result = await runRclone(
-        [
-          "rclone",
-          "copyto",
-          `src:${remotePath(src, name)}`,
-          `dst:${remotePath(dst, name)}`,
-          "--config",
-          configPath,
-          "--timeout",
-          "30s",
-        ],
-        { cwd },
-      );
+      const argvInput: BuildArgvInput = {
+        operation: "copyto",
+        configPath,
+        srcRemote: "src",
+        srcPath: remotePath(src, name, resolved.srcBucket ?? undefined),
+        dstRemote: "dst",
+        dstPath: remotePath(dst, name, resolved.dstBucket ?? undefined),
+        timeout: "30s",
+      };
+      const result = await runRclone(buildRcloneArgv(argvInput));
       if (result.code !== 0) {
         throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone copy failed (${result.code})`);
       }
@@ -267,49 +312,47 @@ async function runCopy(
       writeJob(db, job);
       emit(db, job);
     }
-  } finally {
-    try {
-      await Bun.spawn(["rm", "-f", configPath]).exited;
-    } catch {
-      // best-effort cleanup
-    }
-  }
+  });
 }
 
 async function deleteSource(
   db: Database,
   src: BrowseRef,
   names: string[],
-  configPath: string,
+  srcBucket: string | null,
 ): Promise<void> {
-  const cwd = backupRoot();
-  for (const name of names) {
-    if (src.kind === "local") {
-      // Server-side rm -rf of the copied source (the issue's contract:
-      // "server-side rm -rf of source after success").
+  // The local branch is a server-side rm -rf; only the source's backup-root
+  // subtree matters — no rclone config required.
+  if (src.kind === "local") {
+    const cwd = process.env.LAMASYNC_BACKUP_DIR ?? "/backups";
+    for (const name of names) {
       const target = join(cwd, src.path, name);
       if (existsSync(target)) rmSync(target, { recursive: true, force: true });
-    } else {
-      // S3 source: `rclone delete <path> --rmdirs` removes files under the
-      // path and prunes the emptied directories (the rm -rf equivalent).
-      const result = await runRclone(
-        [
-          "rclone",
-          "delete",
-          `src:${remotePath(src, name)}`,
-          "--rmdirs",
-          "--config",
-          configPath,
-          "--timeout",
-          "30s",
-        ],
-        { cwd },
-      );
+    }
+    return;
+  }
+
+  // S3 source: `rclone delete <path> --rmdirs` against the same per-job
+  // config used for the copy step. The bucket is always set for s3 (or
+  // we'd have rejected the ref earlier).
+  if (!srcBucket) throw new Error("s3 source missing resolved bucket");
+  const config = buildJobConfig(db, src, src);
+  await withTempRcloneConfig(config, async (configPath) => {
+    for (const name of names) {
+      const argvInput: BuildArgvInput = {
+        operation: "delete",
+        configPath,
+        srcRemote: "src",
+        srcPath: remotePath(src, name, srcBucket),
+        timeout: "30s",
+        rmdirs: true,
+      };
+      const result = await runRclone(buildRcloneArgv(argvInput));
       if (result.code !== 0) {
         throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone delete failed (${result.code})`);
       }
     }
-  }
+  });
 }
 
 export interface StartBrowseJobResult {
@@ -319,7 +362,8 @@ export interface StartBrowseJobResult {
 
 /**
  * Start a copy/move operation for the given entries. Returns busy=true when
- * another job is already writing to the same destination.
+ * another job is already writing to the same destination (or reading from
+ * the same source).
  */
 export async function startBrowseCopyMove(
   db: Database,
@@ -330,26 +374,61 @@ export async function startBrowseCopyMove(
   hostId: string,
 ): Promise<StartBrowseJobResult> {
   if (names.length === 0) throw new Error("no entries selected");
-  if (src.kind === "s3" && dst.kind === "s3" && src.folderId === dst.folderId) {
-    throw new Error("source and destination are the same folder");
+
+  // LAMA-226 P1-2: self-move deletes data. Two cases that need different
+  // handling — same-kind local moves must reject when dst equals or nests
+  // under any of the source names (rmSync of the same path); same-folder
+  // S3 moves are allowed when the prefix changes.
+  if (src.kind === "local" && dst.kind === "local") {
+    for (const name of names) {
+      if (isContainedLocalMove(src.path, name, dst.path)) {
+        throw new Error("source and destination are the same path");
+      }
+    }
+  } else if (
+    src.kind === "s3" &&
+    dst.kind === "s3" &&
+    src.folderId === dst.folderId
+  ) {
+    if (!isSafeS3IntraFolderMove(src.path, dst.path)) {
+      throw new Error("source and destination are the same prefix");
+    }
   }
+
   // Concurrency guard: same destination (ref + path) must not see two jobs.
-  const key = destKey(dst, "");
-  if (activeDestinations.has(key)) return { job: null as never, busy: true };
-  const pending = db
+  const dKey = destKey(dst);
+  const sKey = `${destKey(src)}|${names.join(",")}`;
+  if (activeDestinations.has(dKey) || activeSources.has(sKey)) {
+    const job = insertFailedJob(db, operation, sKey, dKey, "destination busy — another operation is writing there");
+    return { job, busy: true };
+  }
+  const pendingDest = db
     .query<{ id: string }, [string]>(
       `SELECT id FROM browse_jobs WHERE destination = ? AND status IN ('pending','running') LIMIT 1`,
     )
-    .get(`${dst.kind}:${dst.folderId ?? ""}:${dst.path}`);
-  if (pending) return { job: null as never, busy: true };
+    .get(dKey);
+  if (pendingDest) {
+    const job = insertFailedJob(db, operation, sKey, dKey, "destination busy — another operation is writing there");
+    return { job, busy: true };
+  }
+  const pendingSrc = db
+    .query<{ id: string }, [string]>(
+      `SELECT id FROM browse_jobs WHERE source = ? AND status IN ('pending','running') LIMIT 1`,
+    )
+    .get(sKey);
+  if (pendingSrc) {
+    const job = insertFailedJob(db, operation, sKey, dKey, "destination busy — another operation is writing there");
+    return { job, busy: true };
+  }
 
-  activeDestinations.add(key);
+  activeDestinations.add(dKey);
+  activeSources.add(sKey);
   const now = Date.now();
   const job: BrowseJob = {
     id: crypto.randomUUID(),
     operation,
-    source: refLabel(src),
-    destination: `${refLabel(dst)}${names.length === 1 ? `/${names[0]}` : ""}`,
+    source: sKey,
+    destination: dKey,
     status: "running",
     error: null,
     progressBytes: 0,
@@ -364,21 +443,32 @@ export async function startBrowseCopyMove(
   );
   emit(db, job);
 
+  // Pre-resolve the buckets so the job rows match the rclone argv even when
+  // the source folder is deleted mid-flight (the spawned process still has
+  // its config file). For local refs the bucket is null.
+  let srcBucket: string | null = null;
+  let dstBucket: string | null = null;
+  try {
+    if (src.kind === "s3") srcBucket = resolveS3(db, src).bucket;
+    if (dst.kind === "s3") dstBucket = resolveS3(db, dst).bucket;
+  } catch (error) {
+    activeDestinations.delete(dKey);
+    activeSources.delete(sKey);
+    const msg = error instanceof Error ? error.message : String(error);
+    job.status = "failed";
+    job.error = msg;
+    job.updatedAt = Date.now();
+    writeJob(db, job);
+    emit(db, job);
+    return { job, busy: false };
+  }
+
   void (async () => {
     try {
-      await runCopy(db, job, src, dst, names);
+      await runCopy(db, job, src, dst, names, { srcBucket, dstBucket });
       if (operation === "move") {
         // Move = copy then delete the source; both report into the same job.
-        const { configPath } = await buildConfig(db, src, dst);
-        try {
-          await deleteSource(db, src, names, configPath);
-        } finally {
-          try {
-            await Bun.spawn(["rm", "-f", configPath]).exited;
-          } catch {
-            // best-effort
-          }
-        }
+        await deleteSource(db, src, names, srcBucket);
       }
       job.status = "done";
       job.updatedAt = Date.now();
@@ -397,7 +487,8 @@ export async function startBrowseCopyMove(
       emit(db, job);
       appendOperationLog(db, job, hostId);
     } finally {
-      activeDestinations.delete(key);
+      activeDestinations.delete(dKey);
+      activeSources.delete(sKey);
     }
   })();
 
@@ -414,12 +505,17 @@ export async function startBrowseRename(
 ): Promise<BrowseJob> {
   assertSafePath(ref.path, from);
   assertSafePath(ref.path, to);
+  const dKey = destKey(ref);
+  const sKey = `${destKey(ref)}|${from}`;
+  if (activeDestinations.has(dKey) || activeSources.has(sKey)) {
+    return insertFailedJob(db, "rename", sKey, dKey, "destination busy — another operation is writing there");
+  }
   const now = Date.now();
   const job: BrowseJob = {
     id: crypto.randomUUID(),
     operation: "rename",
-    source: refLabel(ref),
-    destination: `${refLabel(ref)}/${to}`,
+    source: sKey,
+    destination: dKey,
     status: "running",
     error: null,
     progressBytes: null,
@@ -433,33 +529,40 @@ export async function startBrowseRename(
     [job.id, job.source, job.destination, now, now],
   );
   emit(db, job);
+
+  let bucket: string | null = null;
+  try {
+    if (ref.kind === "s3") bucket = resolveS3(db, ref).bucket;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    job.status = "failed";
+    job.error = msg;
+    job.updatedAt = Date.now();
+    writeJob(db, job);
+    emit(db, job);
+    return job;
+  }
+
+  activeDestinations.add(dKey);
+  activeSources.add(sKey);
   void (async () => {
     try {
-      const { configPath } = await buildConfig(db, ref, ref);
-      try {
-        const result = await runRclone(
-          [
-            "rclone",
-            "moveto",
-            `src:${remotePath(ref, from)}`,
-            `src:${remotePath(ref, to)}`,
-            "--config",
-            configPath,
-            "--timeout",
-            "30s",
-          ],
-          { cwd: backupRoot() },
-        );
+      const config = buildJobConfig(db, ref, ref);
+      await withTempRcloneConfig(config, async (configPath) => {
+        const argvInput: BuildArgvInput = {
+          operation: "moveto",
+          configPath,
+          srcRemote: "src",
+          srcPath: remotePath(ref, from, bucket ?? undefined),
+          dstRemote: "src",
+          dstPath: remotePath(ref, to, bucket ?? undefined),
+          timeout: "30s",
+        };
+        const result = await runRclone(buildRcloneArgv(argvInput));
         if (result.code !== 0) {
           throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone moveto failed (${result.code})`);
         }
-      } finally {
-        try {
-          await Bun.spawn(["rm", "-f", configPath]).exited;
-        } catch {
-          // best-effort
-        }
-      }
+      });
       job.status = "done";
       job.updatedAt = Date.now();
       writeJob(db, job);
@@ -474,6 +577,9 @@ export async function startBrowseRename(
       writeJob(db, job);
       emit(db, job);
       appendOperationLog(db, job, hostId);
+    } finally {
+      activeDestinations.delete(dKey);
+      activeSources.delete(sKey);
     }
   })();
   return job;
@@ -487,12 +593,22 @@ export async function startBrowseMkdir(
   hostId: string,
 ): Promise<BrowseJob> {
   assertSafePath(ref.path, name);
+  const dKey = destKey(ref);
+  if (activeDestinations.has(dKey)) {
+    return insertFailedJob(
+      db,
+      "mkdir",
+      dKey,
+      `${dKey}/${name}`,
+      "destination busy — another operation is writing there",
+    );
+  }
   const now = Date.now();
   const job: BrowseJob = {
     id: crypto.randomUUID(),
     operation: "mkdir",
-    source: refLabel(ref),
-    destination: `${refLabel(ref)}/${name}`,
+    source: dKey,
+    destination: `${dKey}/${name}`,
     status: "running",
     error: null,
     progressBytes: null,
@@ -506,24 +622,37 @@ export async function startBrowseMkdir(
     [job.id, job.source, job.destination, now, now],
   );
   emit(db, job);
+
+  let bucket: string | null = null;
+  try {
+    if (ref.kind === "s3") bucket = resolveS3(db, ref).bucket;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    job.status = "failed";
+    job.error = msg;
+    job.updatedAt = Date.now();
+    writeJob(db, job);
+    emit(db, job);
+    return job;
+  }
+
+  activeDestinations.add(dKey);
   void (async () => {
     try {
-      const { configPath } = await buildConfig(db, ref, ref);
-      try {
-        const result = await runRclone(
-          ["rclone", "mkdir", `src:${remotePath(ref, name)}`, "--config", configPath, "--timeout", "30s"],
-          { cwd: backupRoot() },
-        );
+      const config = buildJobConfig(db, ref, ref);
+      await withTempRcloneConfig(config, async (configPath) => {
+        const argvInput: BuildArgvInput = {
+          operation: "mkdir",
+          configPath,
+          srcRemote: "src",
+          srcPath: remotePath(ref, name, bucket ?? undefined),
+          timeout: "30s",
+        };
+        const result = await runRclone(buildRcloneArgv(argvInput));
         if (result.code !== 0) {
           throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone mkdir failed (${result.code})`);
         }
-      } finally {
-        try {
-          await Bun.spawn(["rm", "-f", configPath]).exited;
-        } catch {
-          // best-effort
-        }
-      }
+      });
       job.status = "done";
       job.updatedAt = Date.now();
       writeJob(db, job);
@@ -537,6 +666,8 @@ export async function startBrowseMkdir(
       writeJob(db, job);
       emit(db, job);
       appendOperationLog(db, job, hostId);
+    } finally {
+      activeDestinations.delete(dKey);
     }
   })();
   return job;
@@ -561,12 +692,27 @@ export async function startBrowseUpload(
   }
   const tmp = `/tmp/lamasync-upload-${crypto.randomUUID()}`;
   await Bun.write(tmp, bytes);
+  const dKey = destKey(dst);
+  if (activeDestinations.has(dKey)) {
+    try {
+      await Bun.spawn(["rm", "-f", tmp]).exited;
+    } catch {
+      // best-effort
+    }
+    return insertFailedJob(
+      db,
+      "upload",
+      `upload:${fileName} (${bytes.length} bytes)`,
+      `${dKey}/${fileName}`,
+      "destination busy — another operation is writing there",
+    );
+  }
   const now = Date.now();
   const job: BrowseJob = {
     id: crypto.randomUUID(),
     operation: "upload",
     source: `upload:${fileName} (${bytes.length} bytes)`,
-    destination: `${refLabel(dst)}/${fileName}`,
+    destination: `${dKey}/${fileName}`,
     status: "running",
     error: null,
     progressBytes: 0,
@@ -580,24 +726,53 @@ export async function startBrowseUpload(
     [job.id, job.source, job.destination, now, now],
   );
   emit(db, job);
+
+  let bucket: string | null = null;
+  try {
+    if (dst.kind === "s3") bucket = resolveS3(db, dst).bucket;
+  } catch (error) {
+    try {
+      await Bun.spawn(["rm", "-f", tmp]).exited;
+    } catch {
+      // best-effort
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    job.status = "failed";
+    job.error = msg;
+    job.updatedAt = Date.now();
+    writeJob(db, job);
+    emit(db, job);
+    return job;
+  }
+
+  activeDestinations.add(dKey);
   void (async () => {
     try {
-      const { configPath } = await buildConfig(db, dst, dst);
-      try {
-        const result = await runRclone(
-          ["rclone", "copyto", tmp, `dst:${remotePath(dst, fileName)}`, "--config", configPath, "--timeout", "30s"],
-          { cwd: backupRoot() },
-        );
+      const config = buildJobConfig(db, dst, dst);
+      await withTempRcloneConfig(config, async (configPath) => {
+        const argvInput: BuildArgvInput = {
+          operation: "copyto",
+          configPath,
+          srcRemote: tmp,
+          srcPath: "",
+          dstRemote: "dst",
+          dstPath: remotePath(dst, fileName, bucket ?? undefined),
+          timeout: "30s",
+        };
+        // Local source: rclone accepts `path:relative/key` where the remote
+        // is the literal filesystem path and the second colon-separated
+        // piece is the relative target. Our `remotePath` returns "" here,
+        // so the argv is `<tmp>:` (empty target is invalid) — instead we
+        // special-case local: pass the temp path as the srcRemote and the
+        // dstPath alone as the destination.
+        const argv = bucket === null
+          ? ["rclone", "copyto", tmp, `${argvInput.dstRemote}:${argvInput.dstPath}`, "--config", configPath, "--timeout", "30s"]
+          : buildRcloneArgv(argvInput);
+        const result = await runRclone(argv);
         if (result.code !== 0) {
           throw new Error(result.stderr.trim().split("\n").pop() ?? `rclone copyto failed (${result.code})`);
         }
-      } finally {
-        try {
-          await Bun.spawn(["rm", "-f", configPath, tmp]).exited;
-        } catch {
-          // best-effort
-        }
-      }
+      });
       job.status = "done";
       job.progressBytes = 1;
       job.updatedAt = Date.now();
@@ -613,6 +788,13 @@ export async function startBrowseUpload(
       writeJob(db, job);
       emit(db, job);
       appendOperationLog(db, job, hostId);
+    } finally {
+      activeDestinations.delete(dKey);
+      try {
+        await Bun.spawn(["rm", "-f", tmp]).exited;
+      } catch {
+        // best-effort
+      }
     }
   })();
   return job;
@@ -624,7 +806,88 @@ export function listBrowseJobs(db: Database, limit = 50): BrowseJob[] {
       `${JOB_SELECT} ORDER BY created_at DESC, rowid DESC LIMIT ?`,
     )
     .all(Math.max(1, Math.min(limit, 200)));
-  return rows.map(rowToJob);
+  const jobs: BrowseJob[] = [];
+  for (const row of rows) {
+    try {
+      jobs.push(rowToJob(row));
+    } catch (err) {
+      // An unknown operation slipped in (e.g. a legacy row). Skip rather
+      // than fail the whole list — the detail endpoint surfaces the raw
+      // row, the list view should still render the rest.
+      console.warn(`[browse-jobs] dropping unparseable row: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return jobs;
+}
+
+/**
+ * Build the rclone config text for one browse operation. Resolves the S3
+ * sections for both sides (or local placeholders) and emits a complete
+ * config body. Pure apart from the DB read of the folder rows + secrets.
+ *
+ * Exported for tests via the wrapped pure helpers in `browse-rclone.ts`
+ * (this function is the seam that joins those with `db`).
+ */
+function buildJobConfig(db: Database, src: BrowseRef, dst: BrowseRef): string {
+  if (src.kind === "s3" && dst.kind === "s3" && src.folderId === dst.folderId) {
+    // Both sides resolve to the same bucket — emit a single `[src]` section.
+    const r = resolveS3(db, src);
+    return buildRcloneConfig({
+      src: {
+        name: "src",
+        folder: r.folder,
+        provider: r.provider,
+        endpoint: r.endpoint,
+        accessKeyId: r.accessKeyId,
+        secretAccessKey: r.secretAccessKey,
+        region: r.region,
+        bucket: r.bucket,
+      },
+      dst: {
+        name: "src",
+        folder: r.folder,
+        provider: r.provider,
+        endpoint: r.endpoint,
+        accessKeyId: r.accessKeyId,
+        secretAccessKey: r.secretAccessKey,
+        region: r.region,
+        bucket: r.bucket,
+      },
+    });
+  }
+  const srcSection =
+    src.kind === "s3"
+      ? (() => {
+          const r = resolveS3(db, src);
+          return {
+            name: "src",
+            folder: r.folder,
+            provider: r.provider,
+            endpoint: r.endpoint,
+            accessKeyId: r.accessKeyId,
+            secretAccessKey: r.secretAccessKey,
+            region: r.region,
+            bucket: r.bucket,
+          };
+        })()
+      : { name: "src" };
+  const dstSection =
+    dst.kind === "s3"
+      ? (() => {
+          const r = resolveS3(db, dst);
+          return {
+            name: "dst",
+            folder: r.folder,
+            provider: r.provider,
+            endpoint: r.endpoint,
+            accessKeyId: r.accessKeyId,
+            secretAccessKey: r.secretAccessKey,
+            region: r.region,
+            bucket: r.bucket,
+          };
+        })()
+      : { name: "dst" };
+  return buildRcloneConfig({ src: srcSection, dst: dstSection });
 }
 
 // Re-exported for tests (statSync unused in prod path but handy for the
@@ -633,4 +896,35 @@ export function __jobExists(db: Database, id: string): boolean {
   return db
     .query<{ id: string }, [string]>("SELECT id FROM browse_jobs WHERE id = ?")
     .get(id) !== undefined;
+}
+
+/**
+ * LAMA-226 P1-3: jobs left `running` after a server crash would otherwise
+ * block destinations forever once the key matches. Walk the rows at boot
+ * and mark them `failed` with an explanatory note. Idempotent.
+ */
+export function reconcileStuckBrowseJobs(db: Database): number {
+  const rows = db
+    .query<
+      {
+        id: string;
+        operation: string;
+        source: string;
+        destination: string;
+      },
+      []
+    >(
+      `SELECT id, operation, source, destination FROM browse_jobs WHERE status = 'running'`,
+    )
+    .all();
+  const now = Date.now();
+  let reconciled = 0;
+  for (const row of rows) {
+    db.run(
+      `UPDATE browse_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`,
+      ["server restarted while job was in flight", now, row.id],
+    );
+    reconciled += 1;
+  }
+  return reconciled;
 }
