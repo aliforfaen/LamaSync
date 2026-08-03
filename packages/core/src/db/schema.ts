@@ -282,14 +282,27 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE hosts ADD COLUMN tailnet_ip TEXT",
   "CREATE TABLE IF NOT EXISTS notification_channels (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, enabled INTEGER DEFAULT 1, severities TEXT NOT NULL DEFAULT '[\"critical\",\"default\",\"info\"]', last_delivery_status TEXT, last_delivery_at INTEGER, created_at INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS backends (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL DEFAULT 's3', s3_provider TEXT DEFAULT 'other', s3_endpoint TEXT, s3_region TEXT, s3_access_key_id TEXT, s3_secret_key_enc TEXT, created_at INTEGER NOT NULL)",
-  // LAMA-222: folders gain a backend reference and the legacy per-folder
-  // s3_* columns are dropped (values were lifted into `backends` by the
-  // server-side migration in packages/server/src/db.ts before these run).
+  // LAMA-222: folders gain a backend reference. The legacy per-folder s3_*
+  // columns are NOT dropped here — see LEGACY_S3_DROP_MIGRATIONS below.
   "ALTER TABLE folders ADD COLUMN backend_id TEXT",
+  "CREATE TABLE IF NOT EXISTS browse_jobs (id TEXT PRIMARY KEY, operation TEXT NOT NULL, source TEXT NOT NULL, destination TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, progress_bytes INTEGER, total_bytes INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+];
+
+/**
+ * LAMA-222 / P0-3: drops for the legacy per-folder s3_* columns (values
+ * were lifted into `backends` by the server-side migration in
+ * packages/server/src/backends.ts). These are deliberately NOT part of the
+ * unconditional MIGRATIONS runner: a failed lift must never cascade into
+ * dropping the only copy of the credentials. initDb applies them only when
+ * called with `{ dropLegacyS3Columns: true }`, which the server does solely
+ * after the lift reports success (or finds nothing to lift).
+ * "no such column" errors are safe to ignore (fresh schemas never had them;
+ * SQLite cannot DROP COLUMN IF EXISTS).
+ */
+export const LEGACY_S3_DROP_MIGRATIONS = [
   "ALTER TABLE folders DROP COLUMN s3_provider",
   "ALTER TABLE folders DROP COLUMN s3_endpoint",
   "ALTER TABLE folders DROP COLUMN s3_access_key_id",
   "ALTER TABLE folders DROP COLUMN s3_secret_access_key",
   "ALTER TABLE folders DROP COLUMN s3_region",
-  "CREATE TABLE IF NOT EXISTS browse_jobs (id TEXT PRIMARY KEY, operation TEXT NOT NULL, source TEXT NOT NULL, destination TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, progress_bytes INTEGER, total_bytes INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
 ];

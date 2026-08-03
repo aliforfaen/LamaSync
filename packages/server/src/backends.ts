@@ -97,21 +97,34 @@ export function setBackendSecret(db: Database, backendId: string, plaintext: str
 }
 
 /**
+ * Outcome of the legacy s3_* → backends lift:
+ * - "clean": nothing (left) to lift — safe to drop the legacy columns.
+ * - "lifted": rows were migrated in this run — safe to drop.
+ * - "failed": an error aborted the lift — the legacy columns MUST be kept;
+ *   they still hold the only copy of the credentials (P0-3).
+ */
+export type LegacyLiftResult = "clean" | "lifted" | "failed";
+
+/**
  * LAMA-222 data migration: lift legacy per-folder s3_* values into
  * `backends` rows (one per folder that has S3 data) and point the folder's
- * backend_id at the new row. Runs BEFORE initDb's MIGRATIONS drop the
- * legacy columns. Idempotent: skips when the legacy column is already gone
- * or when no folders carry s3_* values. The backend name is derived from
- * the folder name and uniquified against existing backends.
+ * backend_id at the new row. Runs BEFORE initDb is allowed to drop the
+ * legacy columns (see LEGACY_S3_DROP_MIGRATIONS). The whole lift is a
+ * single transaction: a mid-loop failure rolls everything back and returns
+ * "failed" so the caller keeps the legacy columns and retries on next boot.
+ * Convergent: skips when the legacy column is already gone, and skips
+ * folders that already point at a backend (e.g. lifted by an earlier,
+ * pre-transactional run). The backend name is derived from the folder name
+ * and uniquified against existing backends.
  */
-export function migrateLegacyS3FoldersToBackends(db: Database): void {
+export function migrateLegacyS3FoldersToBackends(db: Database): LegacyLiftResult {
   try {
     const hasColumn = db
       .query<{ c: number }, []>(
         "SELECT COUNT(*) AS c FROM pragma_table_info('folders') WHERE name = 's3_endpoint'",
       )
       .get();
-    if (!hasColumn || hasColumn.c === 0) return;
+    if (!hasColumn || hasColumn.c === 0) return "clean";
 
     // The folders table may still be missing backend_id (the ADD COLUMN in
     // MIGRATIONS runs AFTER this lift, in initDb). Add it here so the
@@ -122,6 +135,8 @@ export function migrateLegacyS3FoldersToBackends(db: Database): void {
       // column already exists
     }
 
+    // Folders already pointing at a backend were lifted by an earlier run
+    // (or created post-LAMA-222) — never re-lift them.
     const rows = db
       .query<
         {
@@ -136,10 +151,10 @@ export function migrateLegacyS3FoldersToBackends(db: Database): void {
         },
         []
       >(
-        "SELECT id, name, s3_provider, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE s3_endpoint IS NOT NULL AND s3_endpoint != ''",
+        "SELECT id, name, s3_provider, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region FROM folders WHERE s3_endpoint IS NOT NULL AND s3_endpoint != '' AND (backend_id IS NULL OR backend_id = '')",
       )
       .all();
-    if (rows.length === 0) return;
+    if (rows.length === 0) return "clean";
 
     const taken = new Set(
       db
@@ -147,43 +162,53 @@ export function migrateLegacyS3FoldersToBackends(db: Database): void {
         .all()
         .map((r) => r.name),
     );
-    for (const row of rows) {
-      const backendId = crypto.randomUUID();
-      let base = `${row.name} (S3)`;
-      let name = base;
-      let n = 2;
-      while (taken.has(name)) {
-        name = `${base} ${n}`;
-        n += 1;
-      }
-      taken.add(name);
-      const secret = row.s3_secret_access_key ?? "";
-      db.run(
-        `INSERT INTO backends
-           (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
-         VALUES (?, ?, 's3', ?, ?, ?, ?, ?, ?)`,
-        [
+
+    db.exec("BEGIN");
+    try {
+      for (const row of rows) {
+        const backendId = crypto.randomUUID();
+        let base = `${row.name} (S3)`;
+        let name = base;
+        let n = 2;
+        while (taken.has(name)) {
+          name = `${base} ${n}`;
+          n += 1;
+        }
+        taken.add(name);
+        const secret = row.s3_secret_access_key ?? "";
+        db.run(
+          `INSERT INTO backends
+             (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
+           VALUES (?, ?, 's3', ?, ?, ?, ?, ?, ?)`,
+          [
+            backendId,
+            name,
+            row.s3_provider ?? "other",
+            (row.s3_endpoint ?? "").trim(),
+            row.s3_region,
+            (row.s3_access_key_id ?? "").trim(),
+            secret === "" ? null : encryptSecret(secret),
+            Date.now(),
+          ],
+        );
+        db.run("UPDATE folders SET backend = 's3', backend_id = ? WHERE id = ?", [
           backendId,
-          name,
-          row.s3_provider ?? "other",
-          (row.s3_endpoint ?? "").trim(),
-          row.s3_region,
-          (row.s3_access_key_id ?? "").trim(),
-          secret === "" ? null : encryptSecret(secret),
-          Date.now(),
-        ],
-      );
-      db.run("UPDATE folders SET backend = 's3', backend_id = ? WHERE id = ?", [
-        backendId,
-        row.id,
-      ]);
+          row.id,
+        ]);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
     console.log(
       `[migrate] lifted ${rows.length} legacy S3 folder(s) into backends (LAMA-222)`,
     );
+    return "lifted";
   } catch (error) {
     console.error(
-      `[migrate] legacy S3 → backends lift failed: ${error instanceof Error ? error.message : String(error)}`,
+      `[migrate] legacy S3 → backends lift failed (legacy s3_* columns preserved): ${error instanceof Error ? error.message : String(error)}`,
     );
+    return "failed";
   }
 }

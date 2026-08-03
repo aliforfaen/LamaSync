@@ -310,4 +310,84 @@ describe("legacy s3_* → backends lift (LAMA-222 migration)", () => {
       .get();
     expect(count?.c).toBe(0);
   });
+
+  // Build a pre-LAMA-222 folders table (legacy s3_* columns) with one row.
+  function seedLegacyFolder(secret = "EXO_SECRET") {
+    db.exec(`
+      CREATE TABLE legacy_folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        backend TEXT DEFAULT 'sftp',
+        s3_provider TEXT DEFAULT 'other',
+        s3_endpoint TEXT,
+        s3_bucket TEXT,
+        s3_access_key_id TEXT,
+        s3_secret_access_key TEXT,
+        s3_region TEXT
+      )
+    `);
+    db.run(
+      `INSERT INTO legacy_folders (id, name, type, backend, s3_provider, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, s3_region)
+       VALUES (?, ?, ?, 's3', 'exoscale', 'sos-at-vie-1.exo.io', 'vault', 'EXO_KEY', ?, 'other-v2-signature')`,
+      ["f1", "vault", "backup", secret],
+    );
+    db.exec("DROP TABLE folders");
+    db.exec("ALTER TABLE legacy_folders RENAME TO folders");
+  }
+
+  test("rolls back and reports failure when the lift errors (P0-3)", () => {
+    seedLegacyFolder();
+    // Force the first INSERT INTO backends to fail: the lift assumes the
+    // table exists (prod db.ts creates it beforehand).
+    db.exec("DROP TABLE backends");
+
+    const result = migrateLegacyS3FoldersToBackends(db);
+    expect(result).toBe("failed");
+
+    // The transaction rolled back: no partial state, credentials intact.
+    const folder = db
+      .query<
+        { backend_id: string | null; s3_secret_access_key: string | null },
+        [string]
+      >("SELECT backend_id, s3_secret_access_key FROM folders WHERE id = ?")
+      .get("f1");
+    expect(folder?.backend_id).toBeNull();
+    expect(folder?.s3_secret_access_key).toBe("EXO_SECRET");
+
+    // After the cause is fixed, a retry lifts cleanly and converges.
+    db.exec(`
+      CREATE TABLE backends (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL DEFAULT 's3',
+        s3_provider TEXT DEFAULT 'other',
+        s3_endpoint TEXT,
+        s3_region TEXT,
+        s3_access_key_id TEXT,
+        s3_secret_key_enc TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    expect(migrateLegacyS3FoldersToBackends(db)).toBe("lifted");
+    expect(decryptSecret(
+      db.query<{ s3_secret_key_enc: string }, []>(
+        "SELECT s3_secret_key_enc FROM backends",
+      ).get()?.s3_secret_key_enc,
+    )).toBe("EXO_SECRET");
+    // Nothing left to lift → safe to drop the legacy columns.
+    expect(migrateLegacyS3FoldersToBackends(db)).toBe("clean");
+  });
+
+  test("re-run after a successful lift is a no-op (P0-3)", () => {
+    seedLegacyFolder();
+    expect(migrateLegacyS3FoldersToBackends(db)).toBe("lifted");
+    // The legacy columns are still present but every folder already points
+    // at a backend — a second run must not create duplicate backends.
+    expect(migrateLegacyS3FoldersToBackends(db)).toBe("clean");
+    const count = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM backends")
+      .get();
+    expect(count?.c).toBe(1);
+  });
 });

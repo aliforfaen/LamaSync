@@ -9,6 +9,7 @@ import {
   SERVER_SCHEMA,
   MIGRATIONS,
 } from "./index.ts";
+import type { Database } from "./index.ts";
 
 describe("initDb", () => {
   test("applies schema and creates expected tables", () => {
@@ -61,6 +62,42 @@ describe("initDb", () => {
     } finally {
       // tmpdir is OS-managed
     }
+  });
+
+  test("legacy s3_* drops are gated behind dropLegacyS3Columns (LAMA-222 P0-3)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "lamasync-core-gated-drop-"));
+    const path = join(tmp, "test.db");
+    const hasLegacyColumn = (db: Database): boolean =>
+      (db
+        .query<{ c: number }, []>(
+          "SELECT COUNT(*) AS c FROM pragma_table_info('folders') WHERE name = 's3_endpoint'",
+        )
+        .get()?.c ?? 0) > 0;
+
+    // Simulate a pre-LAMA-222 database: the legacy LAMA-124 ADD COLUMN
+    // migrations in MIGRATIONS give folders its s3_endpoint column; only
+    // the row data distinguishes "legacy" from "fresh".
+    const setup = initDb(path);
+    setup.run(
+      `INSERT INTO folders (id, name, type, s3_endpoint) VALUES ('f1', 'vault', 'backup', 'sos-at-vie-1.exo.io')`,
+    );
+    setup.close();
+
+    // Default open: the legacy column and its data MUST survive.
+    const kept = initDb(path);
+    expect(hasLegacyColumn(kept)).toBe(true);
+    const row = kept
+      .query<{ s3_endpoint: string | null }, [string]>(
+        "SELECT s3_endpoint FROM folders WHERE id = ?",
+      )
+      .get("f1");
+    expect(row?.s3_endpoint).toBe("sos-at-vie-1.exo.io");
+    kept.close();
+
+    // Gated open: only now may the column be dropped.
+    const dropped = initDb(path, { dropLegacyS3Columns: true });
+    expect(hasLegacyColumn(dropped)).toBe(false);
+    dropped.close();
   });
 });
 
