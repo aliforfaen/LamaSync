@@ -349,7 +349,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/folders/:id/size",
-    async ({ params, query, set }) => {
+    async ({ params, set }) => {
       const row = db
         .query<FolderRow, [string]>(
           "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
@@ -360,26 +360,34 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Folder not found" };
       }
       const folder = rowToFolder(row);
-      // LAMA-224: size of the folder's working set. For s3 folders the
-      // credentials resolve from the Backend row; for local folders the
-      // first assignment's localPath is measured.
-      const localPath = db
-        .query<{ local_path: string | null }, [string]>(
-          "SELECT local_path FROM folder_assignments WHERE folder_id = ? AND local_path IS NOT NULL LIMIT 1",
-        )
-        .get(params.id)?.local_path ?? null;
-      const refresh = query.refresh === "1" || query.refresh === "true";
-      const size = await getFolderSize(db, folder, localPath, refresh);
+      // LAMA-224 P1-7: only S3 folder sizes are measurable server-side.
+      // The local / mount / sftp backends store their working set on the
+      // daemon host — running `du` here against `folder_assignments.local_path`
+      // always returns ENOENT in real deployments and showed a dash on
+      // the Folders Size column for every non-S3 row. The endpoint now
+      // returns a typed null for non-S3 folders; the UI renders "n/a".
+      if (folder.backend !== "s3") {
+        return {
+          folderId: folder.id,
+          bytes: null,
+          objectCount: null,
+          error: "not measurable server-side",
+          measuredAt: Date.now(),
+        };
+      }
+      const size = await getFolderSize(db, folder, false);
       return size;
     },
     {
       params: t.Object({ id: t.String() }),
-      query: t.Object({ refresh: t.Optional(t.String()) }),
       detail: {
-        summary: "Last-known working-set size for a folder (cached 15 min)",
+        summary: "Last-known working-set size for an S3 folder (cached 15 min)",
         tags: ["Folders"],
         responses: {
-          200: { description: "Folder size" },
+          200: {
+            description:
+              "Folder size; non-S3 folders return {bytes:null, error:'not measurable server-side'}",
+          },
           404: { description: "Not found" },
           401: { description: "Unauthorized" },
         },

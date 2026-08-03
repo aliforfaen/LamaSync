@@ -31,6 +31,7 @@ let app: { handle(request: Request): Response | Promise<Response> };
 let dataDir: string;
 let backupDir: string;
 let localRoot: string;
+let base: string;
 
 function request(path: string): Request {
   return new Request(`http://localhost${path}`, {
@@ -39,7 +40,7 @@ function request(path: string): Request {
 }
 
 beforeEach(() => {
-  const base = mkdtempSync(join(tmpdir(), "lamasync-stats-"));
+  base = mkdtempSync(join(tmpdir(), "lamasync-stats-"));
   dataDir = join(base, "data");
   backupDir = join(base, "backups");
   localRoot = join(base, "localroot");
@@ -70,7 +71,11 @@ beforeEach(() => {
 
 afterEach(() => {
   db.close();
-  rmSync(join(tmpdir(), "lamasync-stats-"), { recursive: true, force: true });
+  // LAMA-224 P1-7: the previous afterEach tried to rm a literal prefix
+  // path (`/tmp/lamasync-stats-`) which never matched the unique random
+  // directory mkdtempSync produced — every test leaked its temp tree.
+  // Capture and remove the actual base instead.
+  rmSync(base, { recursive: true, force: true });
 });
 
 function insertS3BackendWithFolder(): string {
@@ -136,7 +141,11 @@ describe("GET /api/v1/stats/storage", () => {
 });
 
 describe("GET /api/v1/folders/:id/size", () => {
-  test("measures a local folder's working set via its assignment path", async () => {
+  test("returns a typed null for non-S3 folders (LAMA-224 P1-7)", async () => {
+    // Local/sftp folders store their working set on the daemon host —
+    // running `du` server-side always returns ENOENT. The endpoint now
+    // returns a typed null + 'not measurable server-side' error so the
+    // Folders page renders "n/a" instead of a misleading error dash.
     db.run(
       "INSERT INTO folders (id, name, type, backend) VALUES ('f1', 'mydocs', 'sync', 'sftp')",
     );
@@ -146,10 +155,14 @@ describe("GET /api/v1/folders/:id/size", () => {
     );
     const res = await app.handle(request("/api/v1/folders/f1/size"));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { folderId: string; bytes: number; error: string | null };
+    const body = (await res.json()) as {
+      folderId: string;
+      bytes: number | null;
+      error: string | null;
+    };
     expect(body.folderId).toBe("f1");
-    expect(body.bytes).toBe(1024);
-    expect(body.error).toBeNull();
+    expect(body.bytes).toBeNull();
+    expect(body.error).toBe("not measurable server-side");
   });
 
   test("404 for unknown folder", async () => {

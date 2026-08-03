@@ -50,7 +50,7 @@ function isFolderBackend(value: string): value is FolderBackend {
 
 /** Human-readable byte count for the Size column (LAMA-224). */
 function formatBytes(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "—";
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "n/a";
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KiB", "MiB", "GiB", "TiB", "PiB"];
   let value = bytes;
@@ -139,26 +139,27 @@ export function Folders() {
       setItems(withAssignments);
       setHosts(hostList);
       setBackends(backendList);
-      // LAMA-224: best-effort per-folder sizes; individual failures show "—".
-      void Promise.all(
-        folders.map(async (folder) => {
-          try {
-            const size = await api.folderSize(folder.id);
-            setSizes((prev) => ({
-              ...prev,
-              [folder.id]: {
-                text: formatBytes(size.bytes),
-                error: Boolean(size.error),
-              },
-            }));
-          } catch {
-            setSizes((prev) => ({
-              ...prev,
-              [folder.id]: { text: "—", error: true },
-            }));
-          }
-        }),
-      );
+      // LAMA-224 P1-7: per-folder sizes are sequential, not parallel —
+      // a fleet with many S3 folders used to spawn N concurrent rclone
+      // processes against the same bucket. Individual failures (or the
+      // non-S3 'not measurable server-side' response) show "n/a".
+      for (const folder of folders) {
+        try {
+          const size = await api.folderSize(folder.id);
+          setSizes((prev) => ({
+            ...prev,
+            [folder.id]: {
+              text: formatBytes(size.bytes),
+              error: Boolean(size.error),
+            },
+          }));
+        } catch {
+          setSizes((prev) => ({
+            ...prev,
+            [folder.id]: { text: "n/a", error: true },
+          }));
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
