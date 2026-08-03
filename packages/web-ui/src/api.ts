@@ -258,7 +258,10 @@ export const api = {
       severities: NotificationChannel["severities"];
     }>,
   ) =>
-    apiPut<NotificationChannel>(
+    // LAMA-221: the server registers `PATCH /notifications/channels/:id`
+    // (not PUT). Edit/Save, severity toggle, and enable toggle on the
+    // Admin page all 404'd with `apiPut`; `apiPatch` matches the route.
+    apiPatch<NotificationChannel>(
       `/notifications/channels/${encodeURIComponent(id)}`,
       body,
     ),
