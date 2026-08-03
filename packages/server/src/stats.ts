@@ -10,8 +10,9 @@ import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { StorageReport, FolderSize } from "@lamasync/core";
-import { BACKEND_SELECT, type BackendRow, resolveFolderS3Config } from "./backends.ts";
+import { BACKEND_SELECT, type BackendRow, getBackend, resolveFolderS3Config } from "./backends.ts";
 import { decryptSecret } from "./crypto.ts";
+import { withTempRcloneConfig } from "./temp-rclone-config.ts";
 import type { Folder } from "@lamasync/core";
 
 const REPORT_TTL_MS = 5 * 60 * 1000;
@@ -62,11 +63,11 @@ async function rcloneSize(configText: string, remoteBucket: string): Promise<{
   objectCount: number | null;
   error: string | null;
 }> {
-  const tmp = `/tmp/lamasync-stats-${crypto.randomUUID()}.conf`;
-  try {
-    await Bun.write(tmp, configText);
+  // LAMA-226 P1-6: use the shared helper so the rclone config never sits
+  // on disk past the call (private dir, 0600 perms, removed on both paths).
+  return withTempRcloneConfig(configText, async (configPath) => {
     const proc = Bun.spawn(
-      ["rclone", "size", remoteBucket, "--config", tmp, "--timeout", RCLONE_TIMEOUT],
+      ["rclone", "size", remoteBucket, "--config", configPath, "--timeout", RCLONE_TIMEOUT],
       { stdout: "pipe", stderr: "pipe" },
     );
     const [stdout, stderr, code] = await Promise.all([
@@ -86,15 +87,11 @@ async function rcloneSize(configText: string, remoteBucket: string): Promise<{
       objectCount: objects ? Number.parseInt(objects[1], 10) : null,
       error: null,
     };
-  } catch (err) {
-    return { bytes: 0, objectCount: null, error: err instanceof Error ? err.message : String(err) };
-  } finally {
-    try {
-      await Bun.spawn(["rm", "-f", tmp]).exited;
-    } catch {
-      // best-effort cleanup
-    }
-  }
+  }).catch((err) => ({
+    bytes: 0,
+    objectCount: null,
+    error: err instanceof Error ? err.message : String(err),
+  }));
 }
 
 function s3ConfigText(backend: BackendRow, bucket: string): string {
@@ -132,9 +129,9 @@ export async function computeStorageReport(db: Database): Promise<StorageReport>
   });
 
   // S3: one entry per backend (credentials stored once, LAMA-222). The
-  // bucket is taken from the backend's first referencing folder — a backend
-  // with no folders still reports bucket-level size by using the backend
-  // name as the bucket key if no folder provides one.
+  // bucket is taken from the first folder that references this backend.
+  // A backend with no referencing folder has no resolvable bucket — we
+  // omit the entry rather than fabricate a name (LAMA-224 P1-7).
   const backends = db.query<BackendRow, []>(BACKEND_SELECT).all();
   for (const backend of backends) {
     if (backend.kind !== "s3") continue;
@@ -144,17 +141,7 @@ export async function computeStorageReport(db: Database): Promise<StorageReport>
       )
       .get(backend.id);
     const bucket = bucketRow?.s3_bucket?.trim();
-    if (!bucket) {
-      entries.push({
-        backendId: backend.id,
-        label: `S3: ${backend.name} (${backend.s3_endpoint ?? "no endpoint"})`,
-        kind: "s3",
-        bytes: 0,
-        objectCount: null,
-        error: null,
-      });
-      continue;
-    }
+    if (!bucket) continue;
     const result = await rcloneSize(s3ConfigText(backend, bucket), `stats:${bucket}`);
     entries.push({
       backendId: backend.id,
@@ -210,15 +197,16 @@ export function invalidateStorageReport(): void {
 }
 
 /**
- * Last-known size of a single folder's working set. Local folders (sftp or
- * local type) measure their localPath via `rclone size` on a local remote;
- * s3 folders measure the bucket prefix. Cached 15 minutes; callers can pass
- * refresh to force a re-measure.
+ * Last-known size of a single folder's working set. S3 folders measure
+ * the bucket via `rclone size`; non-S3 folders are NOT measurable server-
+ * side (the working set lives on the daemon host). LAMA-224 P1-7: callers
+ * (the route layer) return a typed `{bytes:null, error:"not measurable
+ * server-side"}` for non-S3 folders instead of measuring a path that does
+ * not exist on the server.
  */
 export async function getFolderSize(
   db: Database,
   folder: Folder,
-  assignmentLocalPath: string | null,
   refresh = false,
 ): Promise<FolderSize> {
   const now = Date.now();
@@ -239,21 +227,20 @@ export async function getFolderSize(
     if (!s3) {
       result = { bytes: 0, objectCount: null, error: "no resolvable S3 backend" };
     } else {
-      const backend = db
-        .query<BackendRow, [string]>(`${BACKEND_SELECT} WHERE id = ?`)
-        .get(s3.backendId);
-      result = await rcloneSize(
-        s3ConfigText(backend!, s3.bucket),
-        `stats:${s3.bucket}`,
-      );
+      const backend = getBackend(db, s3.backendId);
+      if (!backend) {
+        result = { bytes: 0, objectCount: null, error: "backend not found" };
+      } else {
+        result = await rcloneSize(
+          s3ConfigText(backend, s3.bucket),
+          `stats:${s3.bucket}`,
+        );
+      }
     }
-  } else if (assignmentLocalPath && existsSync(assignmentLocalPath)) {
-    // Local folder: measure the host-side path. `rclone size local:` is not
-    // required — du is cheaper and equally correct for a local dir.
-    const du = await duBytes(assignmentLocalPath);
-    result = { bytes: du.bytes, objectCount: null, error: du.error };
   } else {
-    result = { bytes: 0, objectCount: null, error: assignmentLocalPath ? "path does not exist" : "no local path" };
+    // Non-S3: the working set lives on the daemon host. Return a typed
+    // null (the caller surfaces it on the Folders page as "n/a").
+    result = { bytes: 0, objectCount: null, error: "not measurable server-side" };
   }
 
   const value: FolderSize = { ...base, ...result, measuredAt: now };

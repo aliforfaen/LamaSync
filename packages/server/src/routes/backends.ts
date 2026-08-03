@@ -12,6 +12,7 @@ import {
 } from "../backends.ts";
 import { encryptSecret, decryptSecret } from "../crypto.ts";
 import { bumpConfigRevision } from "../config-revision.ts";
+import { withTempRcloneConfig } from "../temp-rclone-config.ts";
 
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
@@ -365,27 +366,27 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
         `endpoint = ${existing.s3_endpoint ?? ""}`,
         ...(existing.s3_region ? [`region = ${existing.s3_region}`] : []),
       ].join("\n");
-      const tmpConfig = `/tmp/lamasync-backend-test-${params.backendId}.conf`;
-      await Bun.write(tmpConfig, config);
-      const proc = Bun.spawn(
-        ["rclone", "lsd", "test:", "--config", tmpConfig, "--timeout", "5s"],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      try {
-        await Bun.write(tmpConfig, "");
-        await Bun.spawn(["rm", "-f", tmpConfig]).exited;
-      } catch {
-        // best-effort cleanup
-      }
-      if (code === 0) {
+      // LAMA-226 P1-6: drop the secret into a private 0600 temp dir and
+      // remove it on both the happy and error paths via the shared helper.
+      // Concurrent calls no longer clobber each other because each gets a
+      // unique directory (the previous `/tmp/lamasync-backend-test-${id}.conf`
+      // name collided under load and used 0644 perms by default).
+      const result = await withTempRcloneConfig(config, async (configPath) => {
+        const proc = Bun.spawn(
+          ["rclone", "lsd", "test:", "--config", configPath, "--timeout", "5s"],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const [stdout, stderr, code] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        return { stdout, stderr, code };
+      });
+      if (result.code === 0) {
         return { ok: true, detail: "connection ok" };
       }
-      const detail = stderr.trim().split("\n").pop() ?? "unknown rclone error";
+      const detail = result.stderr.trim().split("\n").pop() ?? "unknown rclone error";
       set.status = 502;
       return { ok: false, detail };
     },
