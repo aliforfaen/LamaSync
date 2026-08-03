@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DotfileManifest, Host } from "@lamasync/core";
 import { api } from "../api.ts";
 
@@ -49,7 +49,10 @@ type Scope =
 function scopeKey(s: Scope): string {
   if (s.kind === "all") return "__all__";
   if (s.kind === "global") return "__global__";
-  return `host:${s.hostId}`;
+  // LAMA-225 P1-8: the <select> options use bare hostId values (see
+  // below), so scopeKey() must return the same string — otherwise the
+  // control snaps back to "All hosts" while the table shows host data.
+  return s.hostId;
 }
 
 export function Dotfiles() {
@@ -63,7 +66,13 @@ export function Dotfiles() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<ManifestForm>(EMPTY_FORM);
 
-  async function refresh(currentScope: Scope) {
+  async function refresh(currentScope: Scope, requestId: number) {
+    // LAMA-225 P1-8: a request-counter guard ignores stale responses.
+    // Rapid scope changes used to race: the "All hosts" fetch could
+    // resolve AFTER a host-scoped fetch and overwrite the host view.
+    // The token here is owned by the caller so the in-flight check
+    // always matches the current scope.
+    if (requestId !== refreshCounter) return;
     setError(null);
     try {
       // Always need the host list for the scope dropdown and the table's
@@ -109,8 +118,15 @@ export function Dotfiles() {
     }
   }
 
+  // LAMA-225 P1-8: monotonic request id; refresh() rejects resolves whose
+  // id doesn't match. Lets rapid scope changes cancel in-flight fetches
+  // without aborting the underlying Promise (which would leak listeners).
+  const refreshCounterRef = useRef(0);
+  const refreshCounter = refreshCounterRef.current;
+
   useEffect(() => {
-    refresh(scope);
+    const requestId = ++refreshCounterRef.current;
+    void refresh(scope, requestId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope]);
 
@@ -137,7 +153,7 @@ export function Dotfiles() {
       });
       setForm(EMPTY_FORM);
       setShowForm(false);
-      await refresh(scope);
+      await refresh(scope, ++refreshCounterRef.current);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -180,7 +196,7 @@ export function Dotfiles() {
         instructions: editForm.instructions.trim() || null,
       });
       setEditingId(null);
-      await refresh(scope);
+      await refresh(scope, ++refreshCounterRef.current);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -193,7 +209,7 @@ export function Dotfiles() {
     setBusy(true);
     try {
       await api.deleteManifest(id);
-      await refresh(scope);
+      await refresh(scope, ++refreshCounterRef.current);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
