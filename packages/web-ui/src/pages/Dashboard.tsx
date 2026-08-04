@@ -153,7 +153,7 @@ export function Dashboard() {
       api.listConflicts("pending"),
       api.listShares(),
       api.listResticSnapshots(),
-      api.listOperations(100),
+      api.listOperations({ limit: 100 }),
     ])
       .then(([health, folders, pendingConflicts, shares, snapshots, operations]) => {
         if (cancelled) return;
@@ -251,7 +251,11 @@ export function Dashboard() {
                 ))}
               </ul>
             </AttentionItem>
-            <AttentionItem title="Failed operations (24h)" count={failed.length}>
+            <AttentionItem
+              title="Failed operations (24h)"
+              count={failed.length}
+              to="/operations"
+            >
               <ul>
                 {failed.slice(0, 3).map((op) => (
                   <li

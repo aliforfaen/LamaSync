@@ -83,7 +83,11 @@ export function Conflicts() {
                     type="button"
                     className="action"
                     disabled={busy === c.id}
-                    onClick={() => onResolve(c.id, "local")}
+                    onClick={() => {
+                      if (confirm("Resolve conflict using the local version?")) {
+                        onResolve(c.id, "local");
+                      }
+                    }}
                   >
                     Local
                   </button>
@@ -92,7 +96,11 @@ export function Conflicts() {
                     type="button"
                     className="action"
                     disabled={busy === c.id}
-                    onClick={() => onResolve(c.id, "remote")}
+                    onClick={() => {
+                      if (confirm("Resolve conflict using the remote version?")) {
+                        onResolve(c.id, "remote");
+                      }
+                    }}
                   >
                     Remote
                   </button>
@@ -101,7 +109,11 @@ export function Conflicts() {
                     type="button"
                     className="action"
                     disabled={busy === c.id}
-                    onClick={() => onResolve(c.id, "both")}
+                    onClick={() => {
+                      if (confirm("Resolve conflict by keeping both versions?")) {
+                        onResolve(c.id, "both");
+                      }
+                    }}
                   >
                     Both
                   </button>

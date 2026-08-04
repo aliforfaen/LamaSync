@@ -219,12 +219,15 @@ export function Dotfiles() {
     }
   }
 
-  function updateSchedule(formUpdater: (f: ManifestForm) => void, value: string) {
+  function updateSchedule(
+    formUpdater: (updater: (current: ManifestForm) => ManifestForm) => void,
+    value: string,
+  ) {
     const preset = SCHEDULE_PRESETS.find((p) => p.value === value);
     if (preset && value !== "custom") {
-      formUpdater({ ...form, schedulePreset: value, schedule: preset.cron });
+      formUpdater((current) => ({ ...current, schedulePreset: value, schedule: preset.cron }));
     } else {
-      formUpdater({ ...form, schedulePreset: "custom", schedule: "" });
+      formUpdater((current) => ({ ...current, schedulePreset: "custom", schedule: "" }));
     }
   }
 

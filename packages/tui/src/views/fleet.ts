@@ -13,7 +13,6 @@ import type {
 import type { BoxRenderable, SelectRenderable } from "@opentui/core";
 
 import {
-  errorBox,
   hotkeyFooter,
   realize,
   statusBox,
@@ -25,7 +24,7 @@ import type {
   ViewContext,
   ViewId,
 } from "../app/view-manager.ts";
-import type { Wizard } from "../app/wizard.ts";
+import { createBackupSetupWizard } from "../flows/backup-setup.ts";
 import {
   createFleetService,
   type FleetHost,
@@ -324,24 +323,7 @@ export class FleetView implements View {
       this.setStatus("wizard unavailable: no view context.", "error");
       return;
     }
-    // Same wizard gesture as LocalView — slice I (flows/backup-setup.ts) will
-    // replace this placeholder with the real step-wizard container.
-    const wizard: Wizard = {
-      id: "backup-setup",
-      title: "New backup",
-      container: errorBox(
-        "Backup wizard not yet wired",
-        "The backup-setup flow ships in a later slice. Until then, use the API or web UI to create folders.",
-      ) as unknown as Renderable,
-      onCancel: () => {
-        // Shell removes the wizard from its registry when escape fires.
-      },
-    };
-    try {
-      ctx.openWizard(wizard);
-    } catch {
-      this.setStatus("wizard unavailable", "error");
-    }
+    ctx.openWizard(createBackupSetupWizard({ ctx }));
   }
 }
 

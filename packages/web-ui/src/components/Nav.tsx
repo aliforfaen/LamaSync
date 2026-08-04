@@ -8,6 +8,7 @@ import {
   type ThemeChoice,
 } from "../theme.ts";
 import {
+  IconActivity,
   IconConflict,
   IconDotfile,
   IconFolder,
@@ -53,6 +54,9 @@ export function Nav() {
       </NavLink>
       <NavLink to="/conflicts">
         <IconConflict /> Conflicts
+      </NavLink>
+      <NavLink to="/operations">
+        <IconActivity /> Operations
       </NavLink>
       <NavLink to="/data">
         <IconStorage /> Data

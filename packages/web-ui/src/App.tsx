@@ -9,6 +9,7 @@ import { Folders } from "./pages/Folders.tsx";
 import { Backends } from "./pages/Backends.tsx";
 import { Dotfiles } from "./pages/Dotfiles.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
+import { Operations } from "./pages/Operations.tsx";
 import { Admin } from "./pages/Admin.tsx";
 import { DataBrowser } from "./pages/DataBrowser.tsx";
 import { getApiKey, UNAUTHORIZED_EVENT } from "./api.ts";
@@ -51,6 +52,7 @@ export function App() {
                   <Route path="/backends" element={<Backends />} />
                   <Route path="/dotfiles" element={<Dotfiles />} />
                   <Route path="/conflicts" element={<Conflicts />} />
+                  <Route path="/operations" element={<Operations />} />
                   <Route path="/data" element={<DataBrowser />} />
                   <Route path="/admin" element={<Admin />} />
                   <Route path="*" element={<Navigate to="/" replace />} />

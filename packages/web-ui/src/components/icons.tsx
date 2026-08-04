@@ -54,18 +54,6 @@ export function IconDotfile(props: SVGProps<SVGSVGElement>) {
   });
 }
 
-export function IconBackup(props: SVGProps<SVGSVGElement>) {
-  return iconBase({
-    children: (
-      <>
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-        <polyline points="9 12 12 15 16 10" />
-      </>
-    ),
-    ...props,
-  });
-}
-
 export function IconStorage(props: SVGProps<SVGSVGElement>) {
   return iconBase({
     children: (
@@ -92,12 +80,11 @@ export function IconConflict(props: SVGProps<SVGSVGElement>) {
   });
 }
 
-export function IconUpdate(props: SVGProps<SVGSVGElement>) {
+export function IconActivity(props: SVGProps<SVGSVGElement>) {
   return iconBase({
     children: (
       <>
-        <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
-        <path d="M21 3v5h-5" />
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
       </>
     ),
     ...props,

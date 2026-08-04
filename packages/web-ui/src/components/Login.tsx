@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiGet, setApiKey } from "../api.ts";
+import { apiGet, ApiError, setApiKey } from "../api.ts";
 
 interface LoginProps {
   onAuthenticated: () => void;
@@ -24,7 +24,7 @@ export function Login({ onAuthenticated }: LoginProps) {
     } catch (err) {
       setApiKey("");
       setError(
-        err instanceof Error && err.message.includes("401")
+        err instanceof ApiError && err.status === 401
           ? "Invalid API key"
           : "Unable to reach the server",
       );

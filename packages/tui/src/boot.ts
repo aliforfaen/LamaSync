@@ -40,9 +40,22 @@ import { LogsView } from "./views/logs.ts";
  */
 export async function bootShell(): Promise<void> {
   const tui: TuiClient = buildClient();
+  // LAMA-182: a parked promise alone does not keep the event loop alive, but
+  // it makes `bootShell` return cleanly once the renderer tears down. The
+  // renderer's `onDestroy` fires on BOTH quit paths (`q` → Shell.destroy() →
+  // renderer.destroy(), and Ctrl+C → renderer-initiated destroy), so it is
+  // the single place to close the FleetService WebSocket and release this
+  // promise; `main()` then returns and Bun exits once the loop drains.
+  const { promise: runtimeHeld, resolve: releaseRuntime } =
+    Promise.withResolvers<void>();
   const renderer: CliRenderer = await createCliRenderer({
     exitOnCtrlC: true,
     autoFocus: true,
+    onDestroy: () => {
+      for (const spec of specs) spec.destroy?.();
+      fleetService.close();
+      releaseRuntime();
+    },
   });
 
   const socketPath = defaultSocketPath();
@@ -138,6 +151,7 @@ export async function bootShell(): Promise<void> {
 
   // Hold the runtime alive until the renderer is destroyed. The OpenTUI
   // renderer keeps the event loop busy on its own; this promise just parks
-  // a microtask so the boot function doesn't return prematurely.
-  await new Promise<void>(() => undefined);
+  // a microtask so the boot function doesn't return prematurely. The
+  // renderer's onDestroy resolves it once the shell tears down.
+  await runtimeHeld;
 }

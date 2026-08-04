@@ -1,7 +1,7 @@
 /**
  * Backup-setup wizard — guide the user through creating a Folder and
- * assigning it to the current host. Mounted from the Local view when the
- * user presses `n`.
+ * assigning it to the current host. Mounted from the Local/Fleet views when
+ * the user presses `w`.
  *
  * Step layout (the schedule step inserts an extra "Cron expression" step
  * right after itself when the user picks the "custom" preset):

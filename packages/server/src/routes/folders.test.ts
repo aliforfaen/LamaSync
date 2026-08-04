@@ -398,3 +398,38 @@ describe("config_revision bumps (LAMA-198)", () => {
     expect(getRev("b")).toBe(beforeB3 + 1);
   });
 });
+
+describe("POST /api/v1/folders/:id/assign — host existence (LAMA-215)", () => {
+  test("unknown hostId returns 404 and does not insert", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('real-host','real-host')`);
+    const folder = (await (await postJson("/api/v1/folders", { name: "x", type: "sync" })).json()) as { id: string };
+
+    const res = await postJson(`/api/v1/folders/${folder.id}/assign`, {
+      hostId: "no-such-host",
+      role: "both",
+      localPath: "/tmp/nope",
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Host not found");
+
+    const rows = db
+      .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM folder_assignments")
+      .get() as { count: number };
+    expect(rows.count).toBe(0);
+  });
+
+  test("known hostId returns 201", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('real-host','real-host')`);
+    const folder = (await (await postJson("/api/v1/folders", { name: "y", type: "sync" })).json()) as { id: string };
+
+    const res = await postJson(`/api/v1/folders/${folder.id}/assign`, {
+      hostId: "real-host",
+      role: "both",
+      localPath: "/tmp/yes",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { hostId: string };
+    expect(body.hostId).toBe("real-host");
+  });
+});

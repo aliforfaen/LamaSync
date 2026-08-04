@@ -13,7 +13,6 @@ import type {
 import type { BoxRenderable, SelectRenderable } from "@opentui/core";
 
 import {
-  errorBox,
   hotkeyFooter,
   pageShell,
   realize,
@@ -26,7 +25,7 @@ import type {
   ViewContext,
   ViewId,
 } from "../app/view-manager.ts";
-import type { Wizard } from "../app/wizard.ts";
+import { createBackupSetupWizard } from "../flows/backup-setup.ts";
 import {
   requestSwitchMount,
   requestSwitchSync,
@@ -508,24 +507,6 @@ export class LocalView implements View {
       this.setStatus("wizard unavailable: no view context.", "error");
       return;
     }
-    // The wizard container is built lazily by slice I (flows/backup-setup.ts).
-    // Until that slice lands we surface a status error rather than crash — the
-    // `w` key is reserved for the wizard gesture and must not no-op silently.
-    const wizard: Wizard = {
-      id: "backup-setup",
-      title: "New backup",
-      container: errorBox(
-        "Backup wizard not yet wired",
-        "The backup-setup flow ships in a later slice. Until then, use the API or web UI to create folders.",
-      ) as unknown as Renderable,
-      onCancel: () => {
-        // Shell removes the wizard from its registry when escape fires.
-      },
-    };
-    try {
-      ctx.openWizard(wizard);
-    } catch {
-      this.setStatus("wizard unavailable", "error");
-    }
+    ctx.openWizard(createBackupSetupWizard({ ctx }));
   }
 }

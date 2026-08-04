@@ -588,6 +588,14 @@ button.action:disabled {
   white-space: nowrap;
 }
 
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
 .toolbar {
   display: flex;
   justify-content: space-between;

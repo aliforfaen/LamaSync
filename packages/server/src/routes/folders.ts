@@ -606,6 +606,13 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         resticRepository?: string | null;
         resticPassword?: string | null;
       };
+      const host = db
+        .query<{ id: string }, [string]>("SELECT id FROM hosts WHERE id = ?")
+        .get(b.hostId);
+      if (!host) {
+        set.status = 404;
+        return { error: "Host not found" };
+      }
       const id = crypto.randomUUID();
       db.run(
         `INSERT INTO folder_assignments
@@ -691,7 +698,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Folders"],
         responses: {
           201: { description: "Assignment created" },
-          404: { description: "Folder not found" },
+          404: { description: "Folder or host not found" },
           401: { description: "Unauthorized" },
         },
       },

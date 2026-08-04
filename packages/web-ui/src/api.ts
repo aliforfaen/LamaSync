@@ -178,8 +178,19 @@ export const api = {
     apiPut<DotfileManifest>(`/dotfiles/manifests/${encodeURIComponent(id)}`, body),
   deleteManifest: (id: string) =>
     apiDelete(`/dotfiles/manifests/${encodeURIComponent(id)}`),
-  listOperations: (limit = 20) =>
-    apiGet<OperationLog[]>(`/operations?limit=${limit}`),
+  listOperations: (opts: {
+    limit?: number;
+    offset?: number;
+    status?: string;
+    hostId?: string;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+    if (opts.status) qs.set("status", opts.status);
+    if (opts.hostId) qs.set("hostId", opts.hostId);
+    return apiGet<OperationLog[]>(`/operations?${qs.toString()}`);
+  },
   listOperationsForHost: (hostId: string, limit = 50) =>
     apiGet<OperationLog[]>(
       `/operations?hostId=${encodeURIComponent(hostId)}&limit=${limit}`,
