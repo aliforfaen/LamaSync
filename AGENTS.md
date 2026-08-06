@@ -15,6 +15,12 @@ Bun workspace with five packages under `packages/`:
 - `tui` — OpenTUI tabbed shell (6 views, guided wizards, CLI fallback)
 - `web-ui` — React SPA embedded in the server binary
 
+**Onboarding as a user, not a developer?** If your task is to install and
+run LamaSync as a client on your host (rather than hack on this repo), read
+`packages/agent-skill/lamasync-client.md` first — it has the production
+server URL, prereqs, install steps, and verification. Server API operations:
+`packages/agent-skill/lamasync-server.md`.
+
 Full annotated tree: `docs/repository-layout.md`. System design & DB schema:
 `ARCHITECTURE.md`. Feature history by LAMA issue: `docs/features.md`.
 Status log & work queue: `docs/status.md`.

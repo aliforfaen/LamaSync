@@ -10,9 +10,9 @@ description: Operate a LamaSync fleet server — register hosts, inspect health,
 `lamasync-server` is a single-process REST + Swagger API (Bun + Elysia) that
 acts as the control plane for a small personal "sync fleet". It owns a SQLite
 database of hosts, folders, folder-assignments, dotfile manifests/versions, and
-an append-only `operation_log`. The server is typically deployed on TrueNAS
-behind a tailnet, but it is self-contained: the binary, a data dir, and a
-backup dir are the only runtime requirements.
+an append-only `operation_log`. The server is typically deployed as a Docker
+container on a small LXC behind a tailnet, but it is self-contained: the
+binary, a data dir, and a backup dir are the only runtime requirements.
 
 The server also embeds a self-contained React Management UI at `GET /`. Auth
 is the same pre-shared API key; the UI stores it in `sessionStorage` and
