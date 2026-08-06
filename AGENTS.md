@@ -2,8 +2,9 @@
 
 ## Overview
 
-LamaSync is a personal sync-fleet system: one server (on TrueNAS/Docker), a
-lightweight daemon on each client, and a terminal UI for local & fleet views.
+LamaSync is a personal sync-fleet system: one server (Docker on an LXC
+container, tailnet-only), a lightweight daemon on each client, and a terminal
+UI for local & fleet views.
 It wraps **rclone** for file transfers and uses a **pre-shared API key** for auth.
 Everything is written in **TypeScript** running on **Bun**.
 

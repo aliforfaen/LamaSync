@@ -181,13 +181,15 @@ function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onTog
 
 /** Generic browser that lists a ref and reports its context upward. */
 function RefBrowser({
-  ref,
+  // Named `browseRef`, not `ref`: React <19 strips `ref` from function
+  // component props, so it would always arrive as undefined.
+  browseRef: ref,
   onContext,
   selection,
   onToggleSelect,
   onRename,
 }: {
-  ref: BrowseRef;
+  browseRef: BrowseRef;
   onContext: (ctx: TabContext) => void;
   selection?: Set<string>;
   onToggleSelect?: (name: string) => void;
@@ -310,7 +312,7 @@ function DestinationPicker({
           </select>
         ) : null}
         <RefBrowser
-          ref={ref}
+          browseRef={ref}
           onContext={(ctx) => setPath(ctx.ref.path)}
         />
         <div className="modal-actions">
@@ -557,7 +559,7 @@ export function DataBrowser() {
 
       {tab === "local" && (
         <RefBrowser
-          ref={{ kind: "local", path: "" }}
+          browseRef={{ kind: "local", path: "" }}
           onContext={(ctx) => setContext((prev) => ({ ...prev, local: ctx }))}
           selection={selection}
           onToggleSelect={toggleSelect}
@@ -646,7 +648,7 @@ function S3Browser({
       </div>
       <RefBrowser
         key={state.folderId}
-        ref={{ kind: "s3", folderId: state.folderId, path: state.path }}
+        browseRef={{ kind: "s3", folderId: state.folderId, path: state.path }}
         onContext={(ctx) => {
           onContext(ctx);
           setState({ folderId: state.folderId, path: ctx.ref.path });

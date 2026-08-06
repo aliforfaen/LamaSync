@@ -3,9 +3,11 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
-## Current status (as of 2026-08-03)
+## Current status (as of 2026-08-06)
 
 - Project version: **0.2.3**
+- **Web UI Data page blank-screen fixed (2026-08-06, local only — not yet committed/deployed)**: clicking "Data" blanked the whole app. Root cause: `RefBrowser` in `packages/web-ui/src/pages/DataBrowser.tsx` declared a prop literally named `ref`, which React 18 strips from function-component props, so it always arrived as `undefined` and the first render threw `Cannot read properties of undefined (reading 'path')`. Fix: prop renamed to `browseRef` (destructure-aliased) at the definition and three call sites. Verified live in the Orca browser against a local dev server — page renders, zero console errors.
+- **Deployment topology note**: TrueNAS is not involved anywhere. The production server is the LXC container `lamasync` at `100.113.52.108` (GHCR image, 04:00 cron auto-update); all server-side data and the small local backups live in Docker volumes local to that LXC. Web-UI fixes reach prod by tagging a release (CI publishes the GHCR image, the LXC's cron pulls it overnight).
 - Tests: **425 passing** across 45 files, 1 skip, 0 failures. With rclone off PATH: 417 pass, 9 skip (LAMA-226 P0-2 — e2e browse-ops tests gated on `Bun.which("rclone")`).
 - **LAMA-221..226 shipped** (batch: notification channels UI, reusable S3 backends with encrypted secrets, tailnet IP surfacing, storage stats, host rename, Data Browser write ops) — see `docs/features.md`. Pushed to master 2026-08-03 (26 commits, `32e983f..fa3a12e`), CI green (check/build/docker), deployed to production the same day.
 - **Pre-push review fixes landed (this pass)**:
