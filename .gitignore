@@ -3,3 +3,6 @@ dist/
 .pi-subagents/
 docker/.env
 docker/.env.api-key
+
+# Local agent memory (memsearch index sources)
+.memsearch/
