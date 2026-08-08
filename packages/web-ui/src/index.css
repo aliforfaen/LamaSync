@@ -991,3 +991,78 @@ button.action:disabled {
   font-size: var(--font-size-lg);
   line-height: 1;
 }
+
+/* Status tabs (Conflicts page, hidden-api-power). Minimal segmented
+   control; deliberately not part of the visual-redesign workstream. */
+.tabs {
+  display: inline-flex;
+  gap: var(--space-1, 0.25rem);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.125rem;
+  background: var(--surface);
+}
+.tab {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab-active,
+.tab-active:hover {
+  color: var(--text);
+  background: var(--accent, var(--border-strong));
+}
+
+/* Inline glossary hint badge (workstream 2). */
+.hint-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  border: 1px solid var(--text-muted, var(--border-strong));
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+
+/* First-run checklist (workstream 2). Plain ordered list — no new visual
+   language, just spacing + a done state. */
+.getting-started-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+.getting-started-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.gs-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  font-size: var(--font-size-sm);
+  flex-shrink: 0;
+}
+.getting-started-list li.gs-done .gs-marker {
+  color: var(--accent-ok, var(--text-muted));
+  border-color: var(--accent-ok, var(--border-strong));
+}

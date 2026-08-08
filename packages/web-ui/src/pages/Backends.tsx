@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Backend, S3Provider } from "@lamasync/core";
 import { api, ApiError } from "../api.ts";
+import { BACKEND_KIND_HINTS } from "../concepts.ts";
 
 const PROVIDERS: Array<{ value: S3Provider; label: string }> = [
   { value: "other", label: "Other / S3-compatible" },
@@ -22,6 +23,9 @@ interface FormState {
   s3Region: string;
   s3AccessKeyId: string;
   s3SecretAccessKey: string;
+  localPath: string;
+  resticRepository: string;
+  resticPassword: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -32,6 +36,9 @@ const EMPTY_FORM: FormState = {
   s3Region: "",
   s3AccessKeyId: "",
   s3SecretAccessKey: "",
+  localPath: "",
+  resticRepository: "",
+  resticPassword: "",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,6 +67,9 @@ function backendToForm(b: Backend): FormState {
     s3Region: b.s3Region ?? "",
     s3AccessKeyId: b.s3AccessKeyId ?? "",
     s3SecretAccessKey: "",
+    localPath: b.localPath ?? "",
+    resticRepository: b.resticRepository ?? "",
+    resticPassword: "",
   };
 }
 
@@ -72,6 +82,7 @@ export function Backends() {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [showResticPassword, setShowResticPassword] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -106,18 +117,24 @@ export function Backends() {
           s3Region: form.s3Region,
           s3AccessKeyId: form.s3AccessKeyId,
           s3SecretAccessKey: form.s3SecretAccessKey || undefined,
+          localPath: form.localPath || undefined,
+          resticRepository: form.resticRepository || undefined,
+          resticPassword: form.resticPassword || undefined,
         });
         setNotice("Backend updated");
       } else {
         await api.createBackend({
-        name: form.name,
-        kind: form.kind as Backend["kind"],
-        s3Provider: form.s3Provider,
-        s3Endpoint: form.s3Endpoint,
-        s3Region: form.s3Region,
-        s3AccessKeyId: form.s3AccessKeyId,
-        s3SecretAccessKey: form.s3SecretAccessKey,
-      });
+          name: form.name,
+          kind: form.kind as Backend["kind"],
+          s3Provider: form.s3Provider,
+          s3Endpoint: form.s3Endpoint,
+          s3Region: form.s3Region,
+          s3AccessKeyId: form.s3AccessKeyId,
+          s3SecretAccessKey: form.s3SecretAccessKey,
+          localPath: form.localPath,
+          resticRepository: form.resticRepository,
+          resticPassword: form.resticPassword,
+        });
         setNotice("Backend created");
       }
       setForm(EMPTY_FORM);
@@ -278,10 +295,81 @@ export function Backends() {
                 ) : null}
               </div>
             </>
+          ) : form.kind === "local" || form.kind === "nfs" ? (
+            <>
+              <div className="form-row">
+                <label>
+                  Server path
+                  <input
+                    value={form.localPath}
+                    onChange={(e) => set("localPath", e.target.value)}
+                    placeholder="/mnt/disk1 or /srv/nfs/home"
+                    required
+                  />
+                </label>
+                <label>
+                  &nbsp;
+                  <button
+                    type="button"
+                    className="action"
+                    onClick={() => {
+                      setForm(EMPTY_FORM);
+                      setEditingId(null);
+                    }}
+                  >
+                    Cancel edit
+                  </button>
+                </label>
+              </div>
+              <p className="muted">{BACKEND_KIND_HINTS[form.kind]}</p>
+            </>
+          ) : form.kind === "restic" ? (
+            <>
+              <div className="form-row">
+                <label>
+                  Repository
+                  <input
+                    value={form.resticRepository}
+                    onChange={(e) => set("resticRepository", e.target.value)}
+                    placeholder="s3:endpoint/bucket or /srv/restic-repo"
+                    required
+                  />
+                </label>
+                <label>
+                  Password
+                  <span className="tailnet-ip">
+                    <input
+                      type={showResticPassword ? "text" : "password"}
+                      value={form.resticPassword}
+                      onChange={(e) => set("resticPassword", e.target.value)}
+                      autoComplete="new-password"
+                      placeholder={editingId ? "leave blank to keep the stored password" : ""}
+                      required={!editingId}
+                    />
+                    <button
+                      type="button"
+                      className="copy-btn"
+                      onClick={() => setShowResticPassword((v) => !v)}
+                      title={showResticPassword ? "Hide password" : "Show password"}
+                      aria-label={showResticPassword ? "Hide password" : "Show password"}
+                    >
+                      {showResticPassword ? "🙈" : "👁"}
+                    </button>
+                  </span>
+                </label>
+              </div>
+              {editingId ? (
+                <p className="muted">
+                  Password stored: {form.resticPassword === "" ? "kept as-is on save" : "will be replaced on save"}
+                </p>
+              ) : null}
+              <p className="muted">
+                {BACKEND_KIND_HINTS.restic} Per-assignment overrides keep working.
+              </p>
+            </>
           ) : (
             <p className="muted">
-              {form.kind} backends are reserved for future use — no extra
-              fields yet.
+              {form.kind} backends are reserved for future use — no extra fields yet.
             </p>
           )}
           <button type="submit" className="action primary" disabled={busy}>
@@ -322,12 +410,18 @@ export function Backends() {
                   <td>
                     <span className={`badge badge-${b.kind}`}>{b.kind}</span>
                   </td>
-                  <td>{b.s3Provider ?? "—"}</td>
+                  <td>{b.kind === "s3" ? (b.s3Provider ?? "—") : "—"}</td>
                   <td className="muted">
-                    <code>{b.s3Endpoint ?? "—"}</code>
+                    {b.kind === "local" || b.kind === "nfs" ? (
+                      <code title={`server path (${b.kind})`}>{b.localPath ?? "—"}</code>
+                    ) : b.kind === "restic" ? (
+                      <code title="restic repository">{b.resticRepository ?? "—"}</code>
+                    ) : (
+                      <code>{b.s3Endpoint ?? "—"}</code>
+                    )}
                   </td>
                   <td>
-                    {b.s3AccessKeyId ? (
+                    {b.kind === "s3" && b.s3AccessKeyId ? (
                       <span className="tailnet-ip">
                         <code>
                           {revealed[b.id]
@@ -350,7 +444,15 @@ export function Backends() {
                       <span className="muted">—</span>
                     )}
                   </td>
-                  <td>{b.hasSecret ? <span className="badge badge-ok">✓</span> : <span className="muted">—</span>}</td>
+                  <td>
+                    {b.kind === "s3" ? (
+                      b.hasSecret ? <span className="badge badge-ok">✓</span> : <span className="muted">—</span>
+                    ) : b.kind === "restic" ? (
+                      b.hasResticPassword ? <span className="badge badge-ok">✓</span> : <span className="muted">—</span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
                   <td>{b.folderCount ?? 0}</td>
                   <td>
                     <div className="row-actions">

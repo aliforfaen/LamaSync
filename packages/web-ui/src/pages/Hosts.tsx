@@ -66,6 +66,7 @@ export function Hosts() {
   const [showGuide, setShowGuide] = useState(false);
   // LAMA-225: transient banner on host.renamed WebSocket events.
   const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const { event } = useWebSocket();
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -101,6 +102,31 @@ export function Hosts() {
       void refresh();
     }
   }, [event, refresh]);
+
+  // LAMA-198: decommission a host. The server cascades assignments,
+  // dotfile manifests, and history — the daemon on that machine will just
+  // re-register unless it's stopped/uninstalled first.
+  async function onDelete(h: Host): Promise<void> {
+    if (
+      !confirm(
+        `Delete host “${h.hostname}” (${h.id})?\n\n` +
+          "This removes its assignments, dotfile manifests, and operation history.\n" +
+          "Stop/uninstall the daemon on that machine too, or it will re-register.",
+      )
+    ) {
+      return;
+    }
+    setDeletingId(h.id);
+    setError(null);
+    try {
+      await api.deleteHost(h.id);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   return (
     <div className="page">
@@ -143,6 +169,21 @@ export function Hosts() {
               <div className="host-card-head">
                 <EditableHostname host={h} onRenamed={() => void refresh()} />
                 <span className={`badge badge-${h.status}`}>{h.status}</span>
+                <button
+                  type="button"
+                  className="action danger host-delete-btn"
+                  aria-label={`Delete host ${h.hostname}`}
+                  title="Delete host (removes assignments, manifests, history)"
+                  onClick={(e) => {
+                    // The card is a Link; deleting must not navigate.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void onDelete(h);
+                  }}
+                  disabled={deletingId === h.id}
+                >
+                  {deletingId === h.id ? "…" : "Delete"}
+                </button>
               </div>
               <div className="host-card-meta">
                 <span className="muted">ID {h.id}</span>

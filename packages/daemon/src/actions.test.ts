@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FolderAssignment, QueuedAction } from "@lamasync/core";
 import {
+  isDryRunRequested,
   selectAssignmentsForSyncAction,
   summarizeConfigRefresh,
   summarizeReportForAction,
@@ -107,6 +108,41 @@ describe("selectAssignmentsForSyncAction", () => {
         { backupOnly: true },
       ),
     ).toEqual([B]);
+  });
+
+  test("dryRun in the payload does not change selection (flag is execution-only)", () => {
+    // The dry-run flag is read by the dispatcher and forwarded into
+    // `runOnce(assignment, { dryRun })` → `executeAssignment`; it must not
+    // filter which assignments run.
+    expect(
+      selectAssignmentsForSyncAction(
+        ALL,
+        { folderId: "f2", dryRun: true },
+        { backupOnly: false },
+      ),
+    ).toEqual([B]);
+    expect(
+      selectAssignmentsForSyncAction(
+        ALL,
+        { dryRun: true },
+        { backupOnly: false },
+      ),
+    ).toEqual([A, B, C]);
+  });
+});
+
+describe("isDryRunRequested", () => {
+  test("true only when the payload carries dryRun exactly true", () => {
+    expect(isDryRunRequested({ dryRun: true })).toBe(true);
+    expect(isDryRunRequested({ folderId: "f1", dryRun: true })).toBe(true);
+  });
+
+  test("false for absent, falsy, or non-boolean values", () => {
+    expect(isDryRunRequested(null)).toBe(false);
+    expect(isDryRunRequested({})).toBe(false);
+    expect(isDryRunRequested({ dryRun: false })).toBe(false);
+    expect(isDryRunRequested({ dryRun: "yes" })).toBe(false);
+    expect(isDryRunRequested({ dryRun: 1 })).toBe(false);
   });
 });
 

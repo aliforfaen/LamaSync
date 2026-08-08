@@ -8,7 +8,7 @@ import type {
   HostConfig,
   Peer,
 } from "@lamasync/core";
-import { resolveFolderS3Config } from "../backends.ts";
+import { resolveFolderLocalConfig, resolveFolderResticConfig, resolveFolderS3Config } from "../backends.ts";
 
 // Test seam: allows unit tests to substitute the production DB. Production
 // code never calls this; the default `db` is the live one.
@@ -64,6 +64,8 @@ interface AssignmentRow {
   available_space_threshold: number | null;
   cache_profile: string | null;
   cache_max_size: string | null;
+  restic_repository: string | null;
+  restic_password: string | null;
 }
 
 interface ManifestRow {
@@ -79,7 +81,17 @@ interface ManifestRow {
 function rowToFolder(r: FolderRow): Folder {
   const backend = r.backend;
   const normalizedBackend: Folder["backend"] =
-    backend === "s3" || backend === "local" ? backend : "sftp";
+    backend === "s3" ||
+    backend === "local" ||
+    backend === "nfs" ||
+    backend === "restic"
+      ? backend
+      : "sftp";
+  const backendNeedsRef =
+    normalizedBackend === "s3" ||
+    normalizedBackend === "local" ||
+    normalizedBackend === "nfs" ||
+    normalizedBackend === "restic";
   return {
     id: r.id,
     name: r.name,
@@ -88,8 +100,8 @@ function rowToFolder(r: FolderRow): Folder {
     encrypted: (r.encrypted ?? 0) === 1,
     cryptPassword: r.crypt_password,
     backend: normalizedBackend,
-    backendId: normalizedBackend === "s3" ? r.backend_id : null,
-    s3Bucket: r.s3_bucket,
+    backendId: backendNeedsRef ? r.backend_id : null,
+    s3Bucket: normalizedBackend === "s3" ? r.s3_bucket : null,
   };
 }
 
@@ -113,6 +125,8 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     availableSpaceThreshold: r.available_space_threshold,
     cacheProfile: (r.cache_profile as FolderAssignment["cacheProfile"]) ?? null,
     cacheMaxSize: r.cache_max_size,
+    resticRepository: r.restic_repository,
+    resticPassword: r.restic_password,
   };
 }
 
@@ -262,6 +276,30 @@ export function generateRcloneConfig(
     return true;
   }
 
+  function writeLocalBackend(
+    name: string,
+    folder: Folder,
+    description: string,
+    localPath: string,
+  ): boolean {
+    // LAMA-232: local/nfs backends are server-side directories (rclone
+    // type = local, root = /). The daemon appends the folder name, so the
+    // alias points at the backend's absolute path.
+    const resolved = resolveFolderLocalConfig(activeDb, folder);
+    if (!resolved) {
+      console.warn(
+        `[config] folder ${folder.id} (${folder.name}) is ${folder.backend}-typed but has no resolvable backend; skipping`,
+      );
+      return false;
+    }
+    lines.push(`[${name}]`);
+    lines.push("type = local");
+    lines.push(`description = "${description}"`);
+    lines.push(`# local path on client: ${localPath}`);
+    lines.push(`# server path: ${resolved.localPath}`);
+    return true;
+  }
+
   for (const a of assignments) {
     const folder = folders.find((f) => f.id === a.folderId);
     if (!folder) continue;
@@ -279,6 +317,7 @@ export function generateRcloneConfig(
       folder.type !== "dotfile";
     const backendKind = folder.backend ?? "sftp";
     const useS3 = backendKind === "s3";
+    const useLocalBackend = backendKind === "local" || backendKind === "nfs";
     if (isEncrypted) {
       const backendName = `lamasync-${folder.id}-backend`;
       if (useS3) {
@@ -286,6 +325,14 @@ export function generateRcloneConfig(
         const wrote = s3 !== null
           ? writeS3Backend(backendName, folder, `${folder.name} (${folder.type}) — encrypted S3 backend`, a.localPath)
           : false;
+        if (!wrote) continue;
+      } else if (useLocalBackend) {
+        const wrote = writeLocalBackend(
+          backendName,
+          folder,
+          `${folder.name} (${folder.type}) — encrypted ${backendKind} backend`,
+          a.localPath,
+        );
         if (!wrote) continue;
       } else if (serverTailnetIp) {
         lines.push(`[${backendName}]`);
@@ -303,7 +350,12 @@ export function generateRcloneConfig(
       lines.push("");
       lines.push(`[${cryptName}]`);
       lines.push("type = crypt");
-      lines.push(`remote = ${backendName}:${useS3 ? ((resolveFolderS3Config(activeDb, folder) ?? { bucket: "" }).bucket) : folder.name}`);
+      const cryptRemoteBase = useS3
+        ? (resolveFolderS3Config(activeDb, folder) ?? { bucket: "" }).bucket
+        : useLocalBackend
+          ? ((resolveFolderLocalConfig(activeDb, folder) ?? { localPath: "" }).localPath)
+          : folder.name;
+      lines.push(`remote = ${backendName}:${cryptRemoteBase}`);
       lines.push(`password = ${folder.cryptPassword}`);
       lines.push(`password2 = ${folder.cryptPassword}`);
       lines.push(`description = "${folder.name} (encrypted ${folder.type})"`);
@@ -327,6 +379,21 @@ export function generateRcloneConfig(
         lines.push("type = alias");
         lines.push(`remote = ${backendName}:${(resolveFolderS3Config(activeDb, folder) ?? { bucket: "" }).bucket}`);
         lines.push(`description = "${folder.name} (${folder.type}) — S3 alias"`);
+        lines.push(`# local path on client: ${a.localPath}`);
+      } else if (useLocalBackend) {
+        const backendName = `lamasync-${folder.id}-backend`;
+        const wrote = writeLocalBackend(
+          backendName,
+          folder,
+          `${folder.name} (${folder.type}) — ${backendKind} backend`,
+          a.localPath,
+        );
+        if (!wrote) continue;
+        lines.push("");
+        lines.push(`[${remoteName}]`);
+        lines.push("type = alias");
+        lines.push(`remote = ${backendName}:${(resolveFolderLocalConfig(activeDb, folder) ?? { localPath: "" }).localPath}`);
+        lines.push(`description = "${folder.name} (${folder.type}) — ${backendKind} alias"`);
         lines.push(`# local path on client: ${a.localPath}`);
       } else if (serverTailnetIp) {
         lines.push(`[${remoteName}]`);
@@ -411,7 +478,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
         `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
                 conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                 timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-                cache_profile, cache_max_size
+                cache_profile, cache_max_size, restic_repository, restic_password
          FROM folder_assignments WHERE host_id = ?`,
       )
       .all(hostId);
@@ -452,6 +519,31 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const assignments = assignmentRows.map(rowToAssignment);
     const folders = folderRows.map(rowToFolder);
     const manifests = Array.from(manifestRowsByApp.values()).map(rowToManifest);
+
+    // LAMA-232: restic-kind backends provide the default repository +
+    // password for restic folders whose assignment doesn't override them.
+    // The resolved password is decrypted here and travels only inside the
+    // daemon-bound HostConfig, never back through the API surface.
+    const resticDefaults = new Map<string, { repository: string; password: string }>();
+    for (const folder of folders) {
+      const resolved = resolveFolderResticConfig(activeDb, folder);
+      if (resolved) {
+        resticDefaults.set(folder.id, {
+          repository: resolved.repository,
+          password: resolved.password,
+        });
+      }
+    }
+    for (const assignment of assignments) {
+      const def = resticDefaults.get(assignment.folderId);
+      if (!def) continue;
+      // Fill each field independently: an assignment overriding only the
+      // repository still gets the backend's default password (and vice
+      // versa) — otherwise a partial override silently degrades the backup
+      // to a plain rclone copy (daemon-side hasResticConfig needs both).
+      if (!assignment.resticRepository) assignment.resticRepository = def.repository;
+      if (!assignment.resticPassword) assignment.resticPassword = def.password;
+    }
 
     const serverTailnetIp = process.env.LAMASYNC_TAILNET_IP ?? null;
     const backupDir = process.env.LAMASYNC_BACKUP_DIR ?? "/backups";

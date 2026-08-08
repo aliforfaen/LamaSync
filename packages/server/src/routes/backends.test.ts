@@ -145,6 +145,93 @@ describe("POST /api/v1/backends", () => {
   });
 });
 
+describe("POST /api/v1/backends — local / nfs / restic kinds (hidden-api-power)", () => {
+  test("creates a local backend storing the absolute path", async () => {
+    const res = await postJson("/api/v1/backends", {
+      name: "disk1",
+      kind: "local",
+      localPath: "/mnt/disk1",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.kind).toBe("local");
+    expect(body.localPath).toBe("/mnt/disk1");
+    expect(body.hasSecret).toBe(false);
+  });
+
+  test("rejects a non-absolute localPath for local/nfs", async () => {
+    for (const kind of ["local", "nfs"] as const) {
+      const res = await postJson("/api/v1/backends", {
+        name: `bad-${kind}`,
+        kind,
+        localPath: "relative/path",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("absolute");
+    }
+  });
+
+  test("requires localPath for local/nfs backends", async () => {
+    const res = await postJson("/api/v1/backends", { name: "nopath", kind: "nfs" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("localPath");
+  });
+
+  test("creates a restic backend with the password encrypted at rest", async () => {
+    const res = await postJson("/api/v1/backends", {
+      name: "repo-main",
+      kind: "restic",
+      resticRepository: "s3:backups.example.com/lamasync",
+      resticPassword: "hunter2",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.kind).toBe("restic");
+    expect(body.resticRepository).toBe("s3:backups.example.com/lamasync");
+    expect(body.hasResticPassword).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("hunter2");
+    const row = db
+      .query<{ restic_password_enc: string | null }, [string]>(
+        "SELECT restic_password_enc FROM backends WHERE id = ?",
+      )
+      .get(body.id as string);
+    expect(decryptSecret(row?.restic_password_enc)).toBe("hunter2");
+  });
+
+  test("requires repository + password for restic backends", async () => {
+    const res = await postJson("/api/v1/backends", { name: "norepo", kind: "restic" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("resticRepository");
+  });
+
+  test("PATCH rotates the restic password (write-only round-trip)", async () => {
+    const created = await postJson("/api/v1/backends", {
+      name: "rotate-repo",
+      kind: "restic",
+      resticRepository: "s3:backups.example.com/lamasync",
+      resticPassword: "OLD_PASS",
+    });
+    expect(created.status).toBe(201);
+    const { id } = (await created.json()) as { id: string };
+    const res = await patchJson(`/api/v1/backends/${id}`, {
+      resticPassword: "NEW_PASS",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.hasResticPassword).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("NEW_PASS");
+    const row = db
+      .query<{ restic_password_enc: string | null }, [string]>(
+        "SELECT restic_password_enc FROM backends WHERE id = ?",
+      )
+      .get(id);
+    expect(decryptSecret(row?.restic_password_enc)).toBe("NEW_PASS");
+  });
+});
+
 describe("PATCH /api/v1/backends/:id", () => {
   async function createBackend(name = "rotate-me"): Promise<string> {
     const res = await postJson("/api/v1/backends", {

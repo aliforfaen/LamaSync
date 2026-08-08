@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 import type {
+  Backend,
   Conflict,
   Folder,
   Host,
@@ -12,6 +13,7 @@ import type {
   WSEvent,
 } from "@lamasync/core";
 import { api } from "../api.ts";
+import { GettingStarted } from "../components/GettingStarted.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 interface DashboardData {
@@ -21,6 +23,9 @@ interface DashboardData {
   shares: Share[];
   snapshots: ResticSnapshot[];
   operations: OperationLog[];
+  // Workstream 2: first-run checklist inputs (best-effort).
+  backends: Backend[];
+  hasAssignments: boolean;
 }
 
 function mergeEvent(prev: DashboardData, event: WSEvent): DashboardData {
@@ -154,11 +159,43 @@ export function Dashboard() {
       api.listShares(),
       api.listResticSnapshots(),
       api.listOperations({ limit: 100 }),
+      api.listBackends().catch(() => [] as Backend[]),
     ])
-      .then(([health, folders, pendingConflicts, shares, snapshots, operations]) => {
-        if (cancelled) return;
-        setData({ hosts: health.hosts ?? [], folders, pendingConflicts, shares, snapshots, operations });
-      })
+      .then(
+        async ([
+          health,
+          folders,
+          pendingConflicts,
+          shares,
+          snapshots,
+          operations,
+          backends,
+        ]) => {
+          if (cancelled) return;
+          // Workstream 2: any folder assignment anywhere means step 4 is
+          // done. Best-effort — a failure just keeps the step pending.
+          let hasAssignments = false;
+          try {
+            const perFolder = await Promise.all(
+              folders.map((f) => api.listAssignments(f.id)),
+            );
+            hasAssignments = perFolder.some((list) => list.length > 0);
+          } catch {
+            hasAssignments = false;
+          }
+          if (cancelled) return;
+          setData({
+            hosts: health.hosts ?? [],
+            folders,
+            pendingConflicts,
+            shares,
+            snapshots,
+            operations,
+            backends,
+            hasAssignments,
+          });
+        },
+      )
       .catch((err: unknown) => {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : String(err));
@@ -294,13 +331,31 @@ export function Dashboard() {
         )}
       </section>
 
+      {data && data.hosts.length > 0 ? (
+        <GettingStarted
+          hosts={data.hosts}
+          backends={data.backends}
+          folders={data.folders}
+          hasAssignments={data.hasAssignments}
+          hasOperations={data.operations.length > 0}
+        />
+      ) : null}
+
       <section className="section">
         <h2>Fleet</h2>
-        <div className="fleet-grid">
-          {!data || !data.hosts.length ? (
-            <div className="empty-row">No hosts registered yet</div>
-          ) : (
-            data.hosts.map((h) => (
+        {!data ? (
+          <div className="empty-row">Loading…</div>
+        ) : data.hosts.length === 0 ? (
+          <GettingStarted
+            hosts={data.hosts}
+            backends={data.backends}
+            folders={data.folders}
+            hasAssignments={data.hasAssignments}
+            hasOperations={data.operations.length > 0}
+          />
+        ) : (
+          <div className="fleet-grid">
+            {data.hosts.map((h) => (
               <Link className="fleet-card fleet-card-link" key={h.id} to={`/hosts/${encodeURIComponent(h.id)}`}>
                 <div className="fleet-card-head">
                   <strong>{h.hostname}</strong>
@@ -313,9 +368,9 @@ export function Dashboard() {
                   {h.updateAvailable && <span className="badge badge-update">update</span>}
                 </span>
               </Link>
-            ))
-          )}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <div className="summary-grid">

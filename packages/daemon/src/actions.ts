@@ -28,6 +28,20 @@ export interface ActionCompletion {
 const BACKUP_FOLDER_TYPES: ReadonlySet<FolderType> = new Set(["backup", "dotfile"]);
 
 /**
+ * Whether a queued-action payload asks for a dry-run sync. The daemon's
+ * `trigger_sync` handler forwards this into `runOnce(assignment, { dryRun })`
+ * → `executeAssignment({ dryRun: true })`, which makes rclone run with
+ * `--dry-run` (see `buildRcloneCommand`). Selection is unaffected — this
+ * only flips how the matched assignments are executed.
+ *
+ * Only `trigger_sync` honors this flag; `trigger_backup` currently ignores
+ * it (a dry-run backup is not wired up).
+ */
+export function isDryRunRequested(payload: Record<string, unknown> | null): boolean {
+  return payload?.["dryRun"] === true;
+}
+
+/**
  * Resolve the `trigger_sync` / `trigger_backup` action into the list of
  * assignments the daemon should run. The empty-list / unknown-folder
  * branches are caller errors that the dispatcher turns into a `failed`
@@ -40,6 +54,15 @@ const BACKUP_FOLDER_TYPES: ReadonlySet<FolderType> = new Set(["backup", "dotfile
  *                                       error (the route handler returns 404
  *                                       server-side; this client returns
  *                                       an empty list to surface "no work").
+ *   payload.dryRun === true         → `trigger_sync` only: the dispatcher
+ *                                       runs the matched assignments in
+ *                                       dry-run mode (`rclone --dry-run`),
+ *                                       so the UI can preview a sync without
+ *                                       touching files. The selection rules
+ *                                       above are unchanged; this flag only
+ *                                       affects how the executor runs them.
+ *
+ * @see isDryRunRequested — single source of truth for reading the flag.
  *
  * The `folderTypes` lookup (assignment id → Folder.type) lets the helper
  * filter by folder type when `backupOnly` is requested, per the LAMA-198

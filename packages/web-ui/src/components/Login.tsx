@@ -48,6 +48,11 @@ export function Login({ onAuthenticated }: LoginProps) {
           required
         />
         {error && <div className="error">{error}</div>}
+        <p className="muted">
+          Set on the server via <code>LAMASYNC_API_KEY</code> (docker <code>.env</code> or
+          the server config). One key for the whole fleet — the same key works on
+          every client.
+        </p>
         <button type="submit" disabled={loading || key.trim().length === 0}>
           {loading ? "Verifying…" : "Sign in"}
         </button>

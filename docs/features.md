@@ -48,6 +48,13 @@
 | LAMA-224 | Storage stats: per-backend report + folder sizes (cached), Dashboard Storage card, Folders Size column | `core/src/types.ts`, `server/src/{stats.ts,routes/stats.ts,routes/folders.ts,routes/report.ts}`, `web-ui/src/pages/{Dashboard,Folders}.tsx` |
 | LAMA-225 | Host rename: PATCH /hosts/:id (label-first, id stable), re-key cascade on re-registration, host_renamed WS + banner, inline edit | `server/src/routes/hosts.ts`, `core/src/api-client.ts`, `web-ui/src/{components/EditableHostname.tsx,pages/{Hosts,HostDetail}.tsx}`, `daemon/src/index.ts` |
 | LAMA-226 | Data Browser write ops: copy/move/rename/mkdir/upload with jobs + progress + busy guard | `core/src/{types.ts,db/schema.ts}`, `server/src/{browse-jobs.ts,routes/browse.ts}`, `web-ui/src/pages/DataBrowser.tsx` |
+| hidden-api-power | Per-folder "Sync now" + dry-run: daemon `runOnce` dryRun option, `trigger_sync` dryRun payload with `dry-run:` ack prefix, Folders/HostDetail enqueue buttons | `daemon/src/{index.ts,actions.ts}`, `web-ui/src/{pages/{Folders,HostDetail}.tsx,api.ts}` |
+| hidden-api-power | Assignment editing: inline AssignmentEditor (path/role/schedule/conflict strategy + advanced), pause/resume toggle, PATCH route extended with role/localPath/bandwidthSchedule | `web-ui/src/{components/AssignmentEditor.tsx,pages/{HostDetail,Folders}.tsx}`, `server/src/routes/folders.ts` |
+| hidden-api-power | Host delete/decommission UI (cascade confirm, navigate on success) | `web-ui/src/pages/{Hosts,HostDetail}.tsx`, `api.ts` |
+| hidden-api-power | Dotfile versions on web: expandable per-app versions, download (auth-header blob fetch) + delete | `web-ui/src/{pages/Dotfiles.tsx,api.ts}` |
+| hidden-api-power | Backend kinds `local`/`nfs`/`restic`: server-side path targets + centralized restic repo/password defaults, per-kind validation + all-kind test endpoint, rclone config gen, folder picker | `core/src/{types.ts,db/schema.ts}`, `server/src/{backends.ts,routes/{backends,config,folders}.ts}`, `web-ui/src/pages/{Backends,Folders}.tsx` |
+| hidden-api-power | Conflicts history (Pending/Resolved/All tabs, name resolution, resolution record) + Operations active-locks panel + host filter | `web-ui/src/pages/{Conflicts,Operations}.tsx`, `index.css` |
+| onboarding-pass | Concept glossary + hint components, first-run checklist on Dashboard, login hint, form/empty-state coaching, Swagger link | `web-ui/src/{concepts.ts,components/{Hint,GettingStarted,Login,Nav}.tsx,pages/{Dashboard,Folders,Dotfiles,Conflicts,Operations,HostDetail,Backends}.tsx,index.css}` |
 
 ## Known limitations
 

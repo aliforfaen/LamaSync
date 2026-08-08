@@ -48,7 +48,7 @@ export type LocalAction =
 
 export type LocalFolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
-export type LocalFolderBackend = "sftp" | "s3" | "local";
+export type LocalFolderBackend = "sftp" | "s3" | "local" | "nfs" | "restic";
 
 export type GitProvider = "git" | "gh";
 export type CacheProfileKind = "normal" | "media" | "minimal";

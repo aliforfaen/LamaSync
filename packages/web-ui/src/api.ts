@@ -7,6 +7,7 @@ import type {
   BrowseResponse,
   Conflict,
   DotfileManifest,
+  DotfileVersion,
   Folder,
   FolderAssignment,
   HealthResponse,
@@ -14,6 +15,7 @@ import type {
   HostConfig,
   NotificationChannel,
   NotificationEvent,
+  LockInfo,
   OperationLog,
   QueuedAction,
   QueuedActionType,
@@ -131,6 +133,34 @@ export function apiDelete<T = void>(path: string): Promise<T> {
   return apiFetch<T>(path, { method: "DELETE" });
 }
 
+/**
+ * Fetch a binary response (e.g. a dotfile tarball) with the auth header.
+ * A plain `<a href>` would not send `Authorization`, so callers that want
+ * to offer a download must fetch the bytes and trigger a save via an
+ * object URL.
+ */
+async function apiBlob(path: string): Promise<Blob> {
+  const key = getApiKey();
+  if (!key) {
+    notifyUnauthorized();
+    throw new ApiError(401, "missing api key");
+  }
+  const headers = new Headers();
+  headers.set("Authorization", `Bearer ${key}`);
+  const url = path.startsWith("/api/v1/")
+    ? path
+    : `/api/v1${path.startsWith("/") ? path : `/${path}`}`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    if (res.status === 401) {
+      notifyUnauthorized();
+    }
+    throw new ApiError(res.status, text);
+  }
+  return res.blob();
+}
+
 // Typed domain helpers.
 
 export const api = {
@@ -140,6 +170,8 @@ export const api = {
     apiGet<Host>(`/hosts/${encodeURIComponent(hostId)}`),
   patchHost: (hostId: string, body: { hostname: string }) =>
     apiPatch<Host>(`/hosts/${encodeURIComponent(hostId)}`, body),
+  deleteHost: (hostId: string) =>
+    apiDelete(`/hosts/${encodeURIComponent(hostId)}`),
   getConfig: (hostId: string) =>
     apiGet<HostConfig>(`/config/${encodeURIComponent(hostId)}`),
   listFolders: () => apiGet<Folder[]>("/folders"),
@@ -166,6 +198,33 @@ export const api = {
     apiDelete(
       `/folders/${encodeURIComponent(folderId)}/assign/${encodeURIComponent(hostId)}`,
     ),
+  // Fields verified against `PATCH /folders/:id/assign/:hostId`
+  // (packages/server/src/routes/folders.ts). role/localPath/
+  // bandwidthSchedule are accepted since the hidden-api-power pass;
+  // cacheProfile is one of normal/media/minimal.
+  updateAssignment: (
+    folderId: string,
+    hostId: string,
+    body: Partial<{
+      enabled: boolean;
+      syncExpr: string | null;
+      conflictStrategy: string | null;
+      timeoutSec: number | null;
+      maxRetries: number | null;
+      availableSpaceThreshold: number | null;
+      preSyncCmd: string | null;
+      postSyncCmd: string | null;
+      cacheProfile: string | null;
+      cacheMaxSize: string | null;
+      role: string | null;
+      localPath: string | null;
+      bandwidthSchedule: string | null;
+    }>,
+  ) =>
+    apiPatch<FolderAssignment>(
+      `/folders/${encodeURIComponent(folderId)}/assign/${encodeURIComponent(hostId)}`,
+      body,
+    ),
   listManifests: (hostId?: string) =>
     apiGet<DotfileManifest[]>(
       hostId
@@ -178,6 +237,27 @@ export const api = {
     apiPut<DotfileManifest>(`/dotfiles/manifests/${encodeURIComponent(id)}`, body),
   deleteManifest: (id: string) =>
     apiDelete(`/dotfiles/manifests/${encodeURIComponent(id)}`),
+  listDotfileVersions: (appName: string) =>
+    apiGet<DotfileVersion[]>(
+      `/dotfiles/${encodeURIComponent(appName)}`,
+    ),
+  deleteDotfileVersion: (appName: string, version: string) =>
+    apiDelete(
+      `/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
+    ),
+  downloadDotfileVersion: async (appName: string, version: string) => {
+    const blob = await apiBlob(
+      `/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${appName}-${version}.tar.gz`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   listOperations: (opts: {
     limit?: number;
     offset?: number;
@@ -195,6 +275,7 @@ export const api = {
     apiGet<OperationLog[]>(
       `/operations?hostId=${encodeURIComponent(hostId)}&limit=${limit}`,
     ),
+  listLocks: () => apiGet<LockInfo[]>("/operations/locks"),
   listConflicts: (status = "pending") =>
     apiGet<Conflict[]>(`/conflicts?status=${encodeURIComponent(status)}`),
   resolveConflict: (id: string, resolution: "local" | "remote" | "both") =>

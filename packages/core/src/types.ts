@@ -3,7 +3,7 @@
 export type HostStatus = "online" | "offline" | "degraded" | "unknown";
 
 export type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
-export type FolderBackend = "sftp" | "s3" | "local";
+export type FolderBackend = "sftp" | "s3" | "local" | "nfs" | "restic";
 export type S3Provider = "exoscale" | "aws" | "other";
 
 export type OperationStatus =
@@ -37,6 +37,16 @@ export interface Backend {
   hasSecret?: boolean;
   /** Write-only: accepted on create/update, never returned. */
   s3SecretAccessKey?: string | null;
+  // local / nfs-specific: server-side directory path (rclone type = local).
+  localPath?: string | null;
+  // restic-specific: centralized repository + password for the
+  // per-assignment restic execution path. The password is write-only
+  // (hasResticPassword reports presence, mirroring hasSecret).
+  resticRepository?: string | null;
+  /** True when an encrypted restic password is stored. */
+  hasResticPassword?: boolean;
+  /** Write-only: accepted on create/update, never returned. */
+  resticPassword?: string | null;
   createdAt: number;
 }
 
@@ -175,6 +185,27 @@ export interface S3FolderConfig {
   accessKeyId: string;
   secretAccessKey: string;
   region: string | null;
+}
+
+// LAMA-232/hidden-api-power: fully-resolved settings for the `local` /
+// `nfs` backend kinds — a server-side directory the server can rclone
+// against (an attached disk, or an NFS export already mounted on the
+// server). Produced server-side; never exposed on the wire.
+export interface LocalFolderConfig {
+  folderId: string;
+  backendId: string;
+  /** Absolute server-side directory (rclone type = local). */
+  localPath: string;
+}
+
+// LAMA-232/hidden-api-power: fully-resolved restic defaults. The
+// per-assignment resticRepository/resticPassword overrides keep working;
+// this backend is the default when the assignment doesn't override.
+export interface ResticBackendConfig {
+  backendId: string;
+  repository: string;
+  /** Decrypted password — callers must never log or return it. */
+  password: string;
 }
 
 export interface FolderAssignment {

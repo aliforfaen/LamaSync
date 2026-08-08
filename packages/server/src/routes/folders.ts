@@ -11,7 +11,9 @@ import {
 import { getFolderSize } from "../stats.ts";
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
-const FOLDER_BACKENDS: FolderBackend[] = ["sftp", "s3", "local"];
+// LAMA-232: local/nfs are server-side directory targets; restic folders
+// get their repository/password from the referenced restic backend.
+const FOLDER_BACKENDS: FolderBackend[] = ["sftp", "s3", "local", "nfs", "restic"];
 
 let db: Database = defaultDb;
 export function __setDb(next: Database): void {
@@ -21,7 +23,15 @@ export function __setDb(next: Database): void {
 function normalizeBackend(value: unknown): FolderBackend {
   if (typeof value === "string") {
     const lower = value.toLowerCase();
-    if (lower === "sftp" || lower === "s3" || lower === "local") return lower;
+    if (
+      lower === "sftp" ||
+      lower === "s3" ||
+      lower === "local" ||
+      lower === "nfs" ||
+      lower === "restic"
+    ) {
+      return lower;
+    }
   }
   return "sftp";
 }
@@ -42,6 +52,23 @@ function requireS3Backend(body: {
   const backend = getBackend(db, body.backendId.trim());
   if (!backend) return `backend '${body.backendId}' not found`;
   if (backend.kind !== "s3") return `backend '${backend.name}' is not an S3 backend`;
+  return null;
+}
+
+// LAMA-232: local/nfs/restic folders reference a Backend row of the
+// matching kind (server-side path target, or a centralized restic repo).
+function requireKindBackend(
+  folderKind: "local" | "nfs" | "restic",
+  body: { backendId?: unknown },
+): string | null {
+  if (typeof body.backendId !== "string" || body.backendId.trim() === "") {
+    return `Missing required ${folderKind} field: backendId`;
+  }
+  const backend = getBackend(db, body.backendId.trim());
+  if (!backend) return `backend '${body.backendId}' not found`;
+  if (backend.kind !== folderKind) {
+    return `backend '${backend.name}' is a ${backend.kind} backend, not ${folderKind}`;
+  }
   return null;
 }
 
@@ -116,7 +143,17 @@ function rowToFolder(r: FolderRow): Folder {
     provider === "git" || provider === "gh" ? provider : null;
   const backend = r.backend;
   const normalizedBackend: Folder["backend"] =
-    backend === "s3" || backend === "local" ? backend : "sftp";
+    backend === "s3" ||
+    backend === "local" ||
+    backend === "nfs" ||
+    backend === "restic"
+      ? backend
+      : "sftp";
+  const backendNeedsRef =
+    normalizedBackend === "s3" ||
+    normalizedBackend === "local" ||
+    normalizedBackend === "nfs" ||
+    normalizedBackend === "restic";
   return {
     id: r.id,
     name: r.name,
@@ -129,7 +166,7 @@ function rowToFolder(r: FolderRow): Folder {
     backend: normalizedBackend,
     // LAMA-222: S3 credentials live on the Backend row; the folder only
     // carries the reference and the bucket name. Secrets never appear here.
-    backendId: normalizedBackend === "s3" ? r.backend_id : null,
+    backendId: backendNeedsRef ? r.backend_id : null,
     s3Bucket: normalizedBackend === "s3" ? r.s3_bucket : null,
   };
 }
@@ -204,11 +241,19 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       const backend = normalizeBackend(b.backend);
       // LAMA-222: an s3 folder references a reusable Backend (credentials
       // live there) and only needs the per-folder bucket name here.
+      // LAMA-232: local/nfs/restic folders reference a matching-kind
+      // Backend (server-side path, or centralized restic repo).
       if (backend === "s3") {
         const s3Error = requireS3Backend(b);
         if (s3Error) {
           set.status = 400;
           return { error: s3Error };
+        }
+      } else if (backend === "local" || backend === "nfs" || backend === "restic") {
+        const kindError = requireKindBackend(backend, b);
+        if (kindError) {
+          set.status = 400;
+          return { error: kindError };
         }
       }
       const isEncrypted = b.encrypted === true;
@@ -229,7 +274,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       const normalizedGitProvider = b.gitProvider ?? null;
       const id = crypto.randomUUID();
       const now = Date.now();
-      const backendId = backend === "s3" ? (b.backendId ?? "").trim() : null;
+      const backendNeedsRef =
+        backend === "s3" || backend === "local" || backend === "nfs" || backend === "restic";
+      const backendId = backendNeedsRef ? (b.backendId ?? "").trim() : null;
       const s3Bucket = backend === "s3" ? (b.s3Bucket ?? "").trim() : null;
       db.run(
         "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -450,14 +497,26 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: "gitRemote is required when gitProvider is \"gh\"" };
       }
-      const existingBackend = existing.backend === "s3" || existing.backend === "local" ? existing.backend : "sftp";
+      const existingBackend =
+        existing.backend === "s3" ||
+        existing.backend === "local" ||
+        existing.backend === "nfs" ||
+        existing.backend === "restic"
+          ? existing.backend
+          : "sftp";
       const effectiveBackend = patch.backend === undefined || patch.backend === null
         ? existingBackend
         : normalizeBackend(patch.backend);
       // LAMA-222: s3 folders reference a reusable Backend; credentials are
       // never part of the folder record. Switching backend kind to/from s3
-      // requires a valid backendId when entering s3 mode.
-      const nextBackendId = effectiveBackend === "s3"
+      // requires a valid backendId when entering s3 mode. LAMA-232 extends
+      // the same rule to local/nfs/restic folders.
+      const nextBackendNeedsRef =
+        effectiveBackend === "s3" ||
+        effectiveBackend === "local" ||
+        effectiveBackend === "nfs" ||
+        effectiveBackend === "restic";
+      const nextBackendId = nextBackendNeedsRef
         ? (typeof patch.backendId === "string" && patch.backendId.trim() !== ""
             ? patch.backendId.trim()
             : existing.backend_id)
@@ -470,6 +529,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         if (s3Error) {
           set.status = 400;
           return { error: s3Error };
+        }
+      } else if (effectiveBackend === "local" || effectiveBackend === "nfs" || effectiveBackend === "restic") {
+        const kindError = requireKindBackend(effectiveBackend, { backendId: nextBackendId });
+        if (kindError) {
+          set.status = 400;
+          return { error: kindError };
         }
       }
       db.run(
@@ -747,6 +812,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         timeoutSec?: number | null;
         maxRetries?: number | null;
         availableSpaceThreshold?: number | null;
+        role?: string | null;
+        localPath?: string | null;
+        bandwidthSchedule?: string | null;
       };
       const sets: string[] = [];
       const args: (string | number | null)[] = [];
@@ -789,6 +857,18 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       if (b.availableSpaceThreshold !== undefined) {
         sets.push("available_space_threshold = ?");
         args.push(b.availableSpaceThreshold);
+      }
+      if (b.role !== undefined) {
+        sets.push("role = ?");
+        args.push(b.role);
+      }
+      if (b.localPath !== undefined) {
+        sets.push("local_path = ?");
+        args.push(b.localPath);
+      }
+      if (b.bandwidthSchedule !== undefined) {
+        sets.push("bandwidth_schedule = ?");
+        args.push(b.bandwidthSchedule);
       }
       if (sets.length === 0) {
         set.status = 400;
@@ -840,6 +920,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         timeoutSec: t.Optional(t.Union([t.Number(), t.Null()])),
         maxRetries: t.Optional(t.Union([t.Number(), t.Null()])),
         availableSpaceThreshold: t.Optional(t.Union([t.Number(), t.Null()])),
+        role: t.Optional(t.Union([t.String(), t.Null()])),
+        localPath: t.Optional(t.Union([t.String(), t.Null()])),
+        bandwidthSchedule: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Update an existing assignment",

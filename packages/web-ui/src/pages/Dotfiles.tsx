@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import type { DotfileManifest, Host } from "@lamasync/core";
+import { Fragment, useEffect, useRef, useState } from "react";
+import type { DotfileManifest, DotfileVersion, Host } from "@lamasync/core";
 import { api } from "../api.ts";
+import { HintText } from "../components/Hint.tsx";
+import { MISC_HINTS } from "../concepts.ts";
 
 const GLOBAL_HOST_ID = "_global";
 
@@ -41,6 +43,21 @@ function schedulePresetForCron(cron: string | null | undefined): string {
   return preset ? preset.value : "custom";
 }
 
+/** Human-readable byte count for the version Size column. */
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = "B";
+  for (const u of units) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = u;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
+}
+
 type Scope =
   | { kind: "all" }
   | { kind: "global" }
@@ -65,6 +82,13 @@ export function Dotfiles() {
   const [busy, setBusy] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<ManifestForm>(EMPTY_FORM);
+  // LAMA-198: expandable per-app version rows (lazy fetch). Expansion keys on
+  // the manifest id — two manifests can share an appName (global + host
+  // override) and must expand independently; the version cache itself stays
+  // keyed by appName since the tarball store is per-app.
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [versions, setVersions] = useState<Record<string, DotfileVersion[]>>({});
+  const [versionsLoading, setVersionsLoading] = useState(false);
 
   async function refresh(currentScope: Scope, requestId: number) {
     // LAMA-225 P1-8: a request-counter guard ignores stale responses.
@@ -219,6 +243,52 @@ export function Dotfiles() {
     }
   }
 
+  // LAMA-198: expand/collapse the version list for a manifest row. The
+  // version list is fetched lazily on first expand.
+  async function toggleVersions(m: DotfileManifest) {
+    if (expandedId === m.id) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(m.id);
+    if (versions[m.appName] === undefined) {
+      setVersionsLoading(true);
+      setError(null);
+      try {
+        const list = await api.listDotfileVersions(m.appName);
+        setVersions((prev) => ({ ...prev, [m.appName]: list }));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setVersionsLoading(false);
+      }
+    }
+  }
+
+  async function onDownloadVersion(appName: string, version: DotfileVersion) {
+    setError(null);
+    try {
+      await api.downloadDotfileVersion(appName, version.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function onDeleteVersion(appName: string, version: DotfileVersion) {
+    if (!confirm(`Delete dotfile version ${version.id.slice(0, 8)}?`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteDotfileVersion(appName, version.id);
+      const list = await api.listDotfileVersions(appName);
+      setVersions((prev) => ({ ...prev, [appName]: list }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function updateSchedule(
     formUpdater: (updater: (current: ManifestForm) => ManifestForm) => void,
     value: string,
@@ -266,6 +336,9 @@ export function Dotfiles() {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
+      <HintText>
+        {MISC_HINTS.dotfileManifest} {MISC_HINTS.dotfileOverride}
+      </HintText>
       {showForm && (
         <form className="form" onSubmit={onCreate}>
           <label>
@@ -446,48 +519,121 @@ export function Dotfiles() {
             <tr className="empty-row">
               <td colSpan={8}>
                 {scope.kind === "all"
-                  ? "No manifests yet"
+                  ? "No manifests yet — a manifest decides which app configs get backed up. Restoring runs from the TUI."
                   : scope.kind === "global"
                     ? "No global manifests yet"
                     : `No manifests for ${hostLabel(scope.hostId)} yet`}
               </td>
             </tr>
           ) : (
-            items.map((m) => (
-              <tr key={m.id}>
-                <td>{m.appName}</td>
-                <td className="muted">{hostLabel(m.hostId)}</td>
-                <td className="muted">{m.paths.join(", ")}</td>
-                <td className="muted">{(m.excludes ?? []).join(", ") || "—"}</td>
-                <td className="muted">{m.schedule ?? "—"}</td>
-                <td className="muted">
-                  {m.lastSyncAt ? new Date(m.lastSyncAt).toLocaleString() : "—"}
-                  {m.lastSyncDirection ? (
-                    <span className={`badge badge-${m.lastSyncDirection}`}>{m.lastSyncDirection}</span>
-                  ) : null}
-                </td>
-                <td className="muted">{hostLabel(m.originalUploaderHostId ?? "") || "—"}</td>
-                <td className="table-actions">
-                  <button
-                    type="button"
-                    className="action"
-                    onClick={() => beginEdit(m)}
-                    disabled={busy}
-                  >
-                    Edit
-                  </button>
+            items.map((m) => {
+              const expanded = expandedId === m.id;
+              const appVersions = versions[m.appName] ?? null;
+              return (
+                <Fragment key={m.id}>
+                  <tr>
+                    <td>{m.appName}</td>
+                    <td className="muted">{hostLabel(m.hostId)}</td>
+                    <td className="muted">{m.paths.join(", ")}</td>
+                    <td className="muted">{(m.excludes ?? []).join(", ") || "—"}</td>
+                    <td className="muted">{m.schedule ?? "—"}</td>
+                    <td className="muted">
+                      {m.lastSyncAt ? new Date(m.lastSyncAt).toLocaleString() : "—"}
+                      {m.lastSyncDirection ? (
+                        <span className={`badge badge-${m.lastSyncDirection}`}>{m.lastSyncDirection}</span>
+                      ) : null}
+                    </td>
+                    <td className="muted">{hostLabel(m.originalUploaderHostId ?? "") || "—"}</td>
+                    <td className="table-actions">
+                      <button
+                        type="button"
+                        className="action"
+                        onClick={() => void toggleVersions(m)}
+                        disabled={versionsLoading}
+                      >
+                        {expanded ? "Hide versions" : "Versions"}
+                      </button>
+                      <button
+                        type="button"
+                        className="action"
+                        onClick={() => beginEdit(m)}
+                        disabled={busy}
+                      >
+                        Edit
+                      </button>
 
-                  <button
-                    type="button"
-                    className="action danger"
-                    onClick={() => onDelete(m.id)}
-                    disabled={busy}
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))
+                      <button
+                        type="button"
+                        className="action danger"
+                        onClick={() => onDelete(m.id)}
+                        disabled={busy}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                  {expanded && (
+                    <tr className="dotfile-versions-row">
+                      <td colSpan={8}>
+                        <h3 className="form-title">Versions — {m.appName}</h3>
+                        {appVersions === null ? (
+                          <span className="muted">Loading versions…</span>
+                        ) : appVersions.length === 0 ? (
+                          <span className="muted">
+                            No versions yet — tarballs land here when the daemon backs up this
+                            app.
+                          </span>
+                        ) : (
+                          <table className="data">
+                            <thead>
+                              <tr>
+                                <th>Version</th>
+                                <th>Created</th>
+                                <th>Size</th>
+                                <th>Description</th>
+                                <th />
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {appVersions.map((v) => (
+                                <tr key={v.id}>
+                                  <td><code>{v.id.slice(0, 8)}</code></td>
+                                  <td className="muted">{new Date(v.timestamp).toLocaleString()}</td>
+                                  <td className="muted">{formatBytes(v.sizeBytes)}</td>
+                                  <td className="muted">{v.description ?? "—"}</td>
+                                  <td className="table-actions">
+                                    <button
+                                      type="button"
+                                      className="action"
+                                      onClick={() => void onDownloadVersion(m.appName, v)}
+                                      disabled={busy}
+                                    >
+                                      Download
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="action danger"
+                                      onClick={() => void onDeleteVersion(m.appName, v)}
+                                      disabled={busy}
+                                    >
+                                      Delete
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                        <p className="muted">
+                          Selective restore lives in the TUI — run{" "}
+                          <code>lamasync tui</code> → Dotfiles.
+                        </p>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })
           )}
         </tbody>
       </table>

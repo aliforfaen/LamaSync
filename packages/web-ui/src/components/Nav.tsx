@@ -12,8 +12,10 @@ import {
   IconConflict,
   IconDotfile,
   IconFolder,
+  IconHome,
   IconHost,
   IconNotification,
+  IconSearch,
   IconStorage,
 } from "./icons.tsx";
 
@@ -38,7 +40,7 @@ export function Nav() {
     <nav className="nav">
       <span className="brand">LamaSync</span>
       <NavLink to="/" end>
-        <IconHost /> Dashboard
+        <IconHome /> Dashboard
       </NavLink>
       <NavLink to="/hosts">
         <IconHost /> Hosts
@@ -59,11 +61,18 @@ export function Nav() {
         <IconActivity /> Operations
       </NavLink>
       <NavLink to="/data">
-        <IconStorage /> Data
+        <IconSearch /> Data
       </NavLink>
       <NavLink to="/admin">
         <IconNotification /> Admin
       </NavLink>
+      <a
+        href="/swagger"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        API docs ↗
+      </a>
       <button
         type="button"
         className="action theme-toggle"

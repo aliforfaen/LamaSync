@@ -397,6 +397,41 @@ describe("config_revision bumps (LAMA-198)", () => {
     );
     expect(getRev("b")).toBe(beforeB3 + 1);
   });
+
+  test("PATCH assignment accepts role / localPath / bandwidthSchedule", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    const folder = (await (await postJson("/api/v1/folders", { name: "x", type: "sync" })).json()) as { id: string };
+    const created = (await (await postJson(`/api/v1/folders/${folder.id}/assign`, {
+      hostId: "a",
+      role: "both",
+      localPath: "/tmp/a",
+    })).json()) as { folderId: string; hostId: string; role: string; localPath: string };
+
+    const res = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folder.id}/assign/a`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          role: "source",
+          localPath: "/mnt/data/new",
+          bandwidthSchedule: "08:00,512K 12:00,10M",
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const patched = (await res.json()) as {
+      role: string;
+      localPath: string;
+      bandwidthSchedule: string | null;
+    };
+    expect(patched.role).toBe("source");
+    expect(patched.localPath).toBe("/mnt/data/new");
+    expect(patched.bandwidthSchedule).toBe("08:00,512K 12:00,10M");
+    expect(created.folderId).toBe(folder.id);
+  });
 });
 
 describe("POST /api/v1/folders/:id/assign — host existence (LAMA-215)", () => {

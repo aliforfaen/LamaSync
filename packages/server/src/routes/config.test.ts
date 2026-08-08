@@ -519,6 +519,126 @@ describe("generateRcloneConfig — S3 backend (LAMA-105, LAMA-222)", () => {
   });
 });
 
+describe("generateRcloneConfig — local/nfs/restic backends (hidden-api-power)", () => {
+  function makeLocalFolder(
+    kind: "local" | "nfs",
+    overrides: Partial<Folder> = {},
+  ): Folder {
+    const backendId = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends
+         (id, name, kind, local_path, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [backendId, `${kind}-test`, kind, "/mnt/data", Date.now()],
+    );
+    return makeFolder({
+      id: kind === "local" ? "loc-1" : "nfs-1",
+      name: "attached-disk",
+      type: "backup",
+      backend: kind,
+      backendId,
+      ...overrides,
+    });
+  }
+
+  test("local/nfs folder emits type=local backend + alias rooted at the path", () => {
+    for (const kind of ["local", "nfs"] as const) {
+      const folder = makeLocalFolder(kind);
+      const assignment = makeAssignment({ folderId: folder.id });
+      const out = generateRcloneConfig(
+        "host-1",
+        [folder],
+        [assignment],
+        "100.100.100.1",
+        "/backups",
+      );
+      const cfg = out.rcloneConfig;
+      expect(cfg).toContain(`[lamasync-${folder.id}-backend]`);
+      expect(cfg).toMatch(
+        new RegExp(`\\[lamasync-${folder.id}-backend\\][\\s\\S]*type = local`),
+      );
+      expect(cfg).toMatch(
+        new RegExp(`\\[lamasync-${folder.id}\\][\\s\\S]*type = alias[\\s\\S]*remote = lamasync-${folder.id}-backend:/mnt/data`),
+      );
+      expect(cfg).not.toMatch(
+        new RegExp(`\\[lamasync-${folder.id}\\][\\s\\S]*type = sftp`),
+      );
+    }
+  });
+
+  test("restic default wiring fills assignment repo/password from the backend", async () => {
+    const backendId = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends
+         (id, name, kind, restic_repository, restic_password_enc, created_at)
+       VALUES (?, ?, 'restic', ?, ?, ?)`,
+      [backendId, "repo-main", "s3:backups.example.com/lamasync", encryptSecret("pw123"), Date.now()],
+    );
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    db.run(
+      `INSERT INTO folders (id, name, type, backend, backend_id) VALUES ('res-1', 'vault', 'backup', 'restic', ?)`,
+      [backendId],
+    );
+    db.run(
+      `INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path)
+       VALUES ('a1', 'res-1', 'host-1', 'source', '/tmp/vault')`,
+    );
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    const updated = body.assignments.find((a) => a.folderId === "res-1");
+    expect(updated?.resticRepository).toBe("s3:backups.example.com/lamasync");
+    expect(updated?.resticPassword).toBe("pw123");
+  });
+
+  test("per-assignment restic override beats the backend default", async () => {
+    const backendId = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends
+         (id, name, kind, restic_repository, restic_password_enc, created_at)
+       VALUES (?, ?, 'restic', ?, ?, ?)`,
+      [backendId, "repo-main", "/srv/restic", encryptSecret("default-pw"), Date.now()],
+    );
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    db.run(
+      `INSERT INTO folders (id, name, type, backend, backend_id) VALUES ('res-2', 'vault', 'backup', 'restic', ?)`,
+      [backendId],
+    );
+    db.run(
+      `INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, restic_repository, restic_password)
+       VALUES ('a2', 'res-2', 'host-1', 'source', '/tmp/vault', 's3:override.example.com/repo', 'override-pw')`,
+    );
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    const updated = body.assignments.find((a) => a.folderId === "res-2");
+    expect(updated?.resticRepository).toBe("s3:override.example.com/repo");
+    expect(updated?.resticPassword).toBe("override-pw");
+  });
+});
+
 describe("GET /api/v1/config/:hostId — dotfile manifests (LAMA-168)", () => {
   test("returns manifest excludes and schedule to the daemon", async () => {
     db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);

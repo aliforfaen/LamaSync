@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import type {
   DotfileManifest,
   FolderAssignment,
@@ -10,7 +10,10 @@ import type {
   QueuedActionType,
 } from "@lamasync/core";
 import { api } from "../api.ts";
+import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
+import { Hint } from "../components/Hint.tsx";
+import { MISC_HINTS } from "../concepts.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 interface DetailData {
@@ -23,11 +26,12 @@ interface DetailData {
 
 type ActionKind = "trigger_sync" | "trigger_backup" | "check_update" | "refresh_config";
 
-const ACTION_BUTTONS: { type: ActionKind; label: string; hotkey: string }[] = [
-  { type: "trigger_sync", label: "Trigger sync", hotkey: "S" },
-  { type: "trigger_backup", label: "Trigger backup", hotkey: "B" },
-  { type: "check_update", label: "Check update", hotkey: "U" },
-  { type: "refresh_config", label: "Refresh config", hotkey: "R" },
+// LAMA-212: no keyboard handler exists for these, so no [S][B][U][R] hints.
+const ACTION_BUTTONS: { type: ActionKind; label: string }[] = [
+  { type: "trigger_sync", label: "Trigger sync" },
+  { type: "trigger_backup", label: "Trigger backup" },
+  { type: "check_update", label: "Check update" },
+  { type: "refresh_config", label: "Refresh config" },
 ];
 
 function formatTimestamp(ts: number | null | undefined): string {
@@ -49,11 +53,18 @@ function actionStatusBadgeClass(status: QueuedAction["status"]): string {
 
 export function HostDetail() {
   const params = useParams<{ hostId: string }>();
+  const navigate = useNavigate();
   const hostId = params.hostId ?? "";
 
   const [data, setData] = useState<DetailData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<QueuedActionType | null>(null);
+  // LAMA-198: per-assignment sync/dry-run enqueue in flight (assignmentId:mode).
+  const [assignmentBusy, setAssignmentBusy] = useState<string | null>(null);
+  const [syncNote, setSyncNote] = useState<string | null>(null);
+  // Assignment editing (pause/resume + full editor).
+  const [editingAssignment, setEditingAssignment] = useState<FolderAssignment | null>(null);
+  const [deleting, setDeleting] = useState(false);
   // LAMA-225: transient banner when this host's label is renamed.
   const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
   const { event } = useWebSocket();
@@ -109,6 +120,71 @@ export function HostDetail() {
     }
   }
 
+  // LAMA-198: per-folder sync and dry-run. Dry-run runs the same assignment
+  // with `rclone --dry-run` (no file changes); the ack summary carries a
+  // `dry-run: ` prefix so the Operations log shows what happened.
+  async function onAssignmentSync(folderId: string, dryRun: boolean): Promise<void> {
+    const key = `${folderId}:${dryRun ? "dry" : "sync"}`;
+    setAssignmentBusy(key);
+    setError(null);
+    try {
+      await api.enqueueAction(hostId, {
+        type: "trigger_sync",
+        payload: dryRun ? { folderId, dryRun: true } : { folderId },
+      });
+      setSyncNote(
+        `${dryRun ? "Dry run" : "Sync"} of “${folderId}” queued — runs on the daemon within ~30 s`,
+      );
+      window.setTimeout(() => setSyncNote(null), 6000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAssignmentBusy(null);
+    }
+  }
+
+  // LAMA-198: pause/resume an assignment (enabled flag round-trips through
+  // PATCH /folders/:id/assign/:hostId).
+  async function onToggleEnabled(assignment: FolderAssignment): Promise<void> {
+    const key = `${assignment.folderId}:toggle`;
+    setAssignmentBusy(key);
+    setError(null);
+    try {
+      await api.updateAssignment(assignment.folderId, assignment.hostId, {
+        enabled: !assignment.enabled,
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAssignmentBusy(null);
+    }
+  }
+
+  // LAMA-198: decommission. Cascade is server-side (DELETE /hosts/:hostId);
+  // the daemon on that machine re-registers unless stopped/uninstalled.
+  async function onDeleteHost(): Promise<void> {
+    if (!data) return;
+    if (
+      !confirm(
+        `Delete host “${data.host.hostname}” (${data.host.id})?\n\n` +
+          "This removes its assignments, dotfile manifests, and operation history.\n" +
+          "Stop/uninstall the daemon on that machine too, or it will re-register.",
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.deleteHost(hostId);
+      navigate("/hosts");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setDeleting(false);
+    }
+  }
+
   if (!hostId) {
     return (
       <div className="page">
@@ -147,8 +223,17 @@ export function HostDetail() {
       <div className="toolbar">
         <h1>{host.hostname}</h1>
         <Link className="action" to="/hosts">← All hosts</Link>
+        <button
+          type="button"
+          className="action danger"
+          disabled={deleting}
+          onClick={() => void onDeleteHost()}
+        >
+          {deleting ? "…" : "Delete host"}
+        </button>
       </div>
       {error && <div className="error">{error}</div>}
+      {syncNote && <div className="banner">{syncNote}</div>}
       {renamedBanner ? (
         <div className="banner">
           <span>{renamedBanner}</span>
@@ -200,7 +285,9 @@ export function HostDetail() {
               <span className="badge badge-update">update available</span>
             ) : null}
           </dd>
-          <dt>Config revision</dt>
+          <dt>
+            Config revision <Hint text={MISC_HINTS.configRevision} />
+          </dt>
           <dd><code>{host.configRevision ?? 0}</code> (cached: <code>{config.host.configRevision ?? 0}</code>)</dd>
         </dl>
       </section>
@@ -216,14 +303,25 @@ export function HostDetail() {
               disabled={busy !== null}
               onClick={() => void onAction(b.type)}
             >
-              {busy === b.type ? "…" : b.label} <span className="hotkey">[{b.hotkey}]</span>
+              {busy === b.type ? "…" : b.label}
             </button>
           ))}
         </div>
+        <p className="muted">{MISC_HINTS.queuedAction}</p>
       </section>
 
       <section className="section">
         <h2>Assigned folders ({assignments.length})</h2>
+        {editingAssignment ? (
+          <AssignmentEditor
+            assignment={editingAssignment}
+            onSaved={() => {
+              setEditingAssignment(null);
+              void refresh();
+            }}
+            onCancel={() => setEditingAssignment(null)}
+          />
+        ) : null}
         {assignmentRows.length === 0 ? (
           <div className="empty-row">No folder assignments</div>
         ) : (
@@ -236,6 +334,7 @@ export function HostDetail() {
                 <th>Schedule</th>
                 <th>Role</th>
                 <th>Status</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -251,9 +350,47 @@ export function HostDetail() {
                   <td className="muted">{assignment.syncExpr ?? "—"}</td>
                   <td className="muted">{assignment.role}</td>
                   <td>
-                    <span className={`badge badge-${assignment.enabled ? "online" : "offline"}`}>
-                      {assignment.enabled ? "enabled" : "disabled"}
-                    </span>
+                    <button
+                      type="button"
+                      className="action"
+                      disabled={assignmentBusy !== null}
+                      onClick={() => void onToggleEnabled(assignment)}
+                      title={assignment.enabled ? "Pause syncing this folder" : "Resume syncing this folder"}
+                    >
+                      {assignmentBusy === `${assignment.folderId}:toggle`
+                        ? "…"
+                        : assignment.enabled
+                          ? "Pause"
+                          : "Resume"}
+                    </button>
+                  </td>
+                  <td className="table-actions">
+                    <button
+                      type="button"
+                      className="action"
+                      disabled={assignmentBusy !== null || editingAssignment !== null}
+                      onClick={() => setEditingAssignment(assignment)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="action"
+                      disabled={assignmentBusy !== null}
+                      onClick={() => void onAssignmentSync(assignment.folderId, false)}
+                      title={`Sync “${folder?.name ?? assignment.folderId}” now`}
+                    >
+                      {assignmentBusy === `${assignment.folderId}:sync` ? "…" : "Sync now"}
+                    </button>
+                    <button
+                      type="button"
+                      className="action"
+                      disabled={assignmentBusy !== null}
+                      onClick={() => void onAssignmentSync(assignment.folderId, true)}
+                      title="Dry run (rclone --dry-run, no file changes)"
+                    >
+                      {assignmentBusy === `${assignment.folderId}:dry` ? "…" : "Dry run"}
+                    </button>
                   </td>
                 </tr>
               ))}

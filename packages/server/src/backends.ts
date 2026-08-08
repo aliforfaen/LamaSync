@@ -8,6 +8,8 @@ import type { Database } from "bun:sqlite";
 import {
   type Backend,
   type BackendKind,
+  type LocalFolderConfig,
+  type ResticBackendConfig,
   type S3FolderConfig,
   type S3Provider,
 } from "@lamasync/core";
@@ -22,11 +24,14 @@ export interface BackendRow {
   s3_region: string | null;
   s3_access_key_id: string | null;
   s3_secret_key_enc: string | null;
+  local_path: string | null;
+  restic_repository: string | null;
+  restic_password_enc: string | null;
   created_at: number;
 }
 
 export const BACKEND_SELECT =
-  "SELECT id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at FROM backends";
+  "SELECT id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, local_path, restic_repository, restic_password_enc, created_at FROM backends";
 
 export function isBackendKind(value: string | null): value is BackendKind {
   return value === "s3" || value === "local" || value === "nfs" || value === "restic";
@@ -48,6 +53,10 @@ export function rowToBackend(row: BackendRow): Backend {
     s3Region: row.s3_region,
     s3AccessKeyId: row.s3_access_key_id,
     hasSecret: row.s3_secret_key_enc !== null && row.s3_secret_key_enc !== "",
+    localPath: row.local_path,
+    resticRepository: row.restic_repository,
+    hasResticPassword:
+      row.restic_password_enc !== null && row.restic_password_enc !== "",
     createdAt: row.created_at,
   };
 }
@@ -94,6 +103,72 @@ export function setBackendSecret(db: Database, backendId: string, plaintext: str
     encryptSecret(plaintext),
     backendId,
   ]);
+}
+
+/** Persist (or replace) a restic backend's password, encrypted at rest. */
+export function setBackendResticPassword(
+  db: Database,
+  backendId: string,
+  plaintext: string,
+): void {
+  db.run("UPDATE backends SET restic_password_enc = ? WHERE id = ?", [
+    encryptSecret(plaintext),
+    backendId,
+  ]);
+}
+
+/**
+ * Resolve a folder's local/nfs settings from its backendId. Returns null
+ * when the folder isn't local/nfs-typed, has no backend reference, or the
+ * referenced backend is missing or lacks a path. The resolved path is an
+ * absolute server-side directory (rclone type = local).
+ */
+export function resolveFolderLocalConfig(
+  db: Database,
+  folder: {
+    id: string;
+    backend?: string | null;
+    backendId?: string | null;
+  },
+): LocalFolderConfig | null {
+  if (folder.backend !== "local" && folder.backend !== "nfs") return null;
+  if (!folder.backendId) return null;
+  const backend = getBackend(db, folder.backendId);
+  if (!backend) return null;
+  const localPath = (backend.local_path ?? "").trim();
+  if (localPath === "") return null;
+  return {
+    folderId: folder.id,
+    backendId: backend.id,
+    localPath,
+  };
+}
+
+/**
+ * Resolve a folder's restic defaults from its restic-kind backend. The
+ * per-assignment resticRepository/resticPassword overrides keep working;
+ * this is the default when the assignment doesn't override. The password
+ * is decrypted here — callers must never log or return it.
+ */
+export function resolveFolderResticConfig(
+  db: Database,
+  folder: {
+    id: string;
+    backend?: string | null;
+    backendId?: string | null;
+  },
+): ResticBackendConfig | null {
+  if (folder.backend !== "restic" || !folder.backendId) return null;
+  const backend = getBackend(db, folder.backendId);
+  if (!backend) return null;
+  const repository = (backend.restic_repository ?? "").trim();
+  const password = decryptSecret(backend.restic_password_enc);
+  if (repository === "" || !password) return null;
+  return {
+    backendId: backend.id,
+    repository,
+    password,
+  };
 }
 
 /**

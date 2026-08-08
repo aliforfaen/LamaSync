@@ -14,6 +14,7 @@ import type {
 } from "@lamasync/core";
 import { LamaSyncApiClient, VERSION, defaultSocketPath } from "@lamasync/core";
 import {
+  isDryRunRequested,
   selectAssignmentsForSyncAction,
   summarizeConfigRefresh,
   summarizeReportForAction,
@@ -532,7 +533,10 @@ async function main(): Promise<void> {
     }
   };
 
-  const runOnce = async (assignment: FolderAssignment): Promise<OperationReport | null> => {
+  const runOnce = async (
+    assignment: FolderAssignment,
+    opts?: { dryRun?: boolean },
+  ): Promise<OperationReport | null> => {
     if (!hostConfig) {
       console.warn(`[run] no hostConfig cached; skipping folder=${assignment.folderId}`);
       return null;
@@ -587,6 +591,7 @@ async function main(): Promise<void> {
         hostId,
         configPath,
         signal: abortController.signal,
+        dryRun: opts?.dryRun === true,
       });
       console.log(
         `[run] folder=${folder.name} type=${folder.type} status=${report.status} summary=${report.summary ?? ""}`,
@@ -679,6 +684,7 @@ async function main(): Promise<void> {
             backupOnly: false,
             folderTypes,
           });
+          const dryRun = isDryRunRequested(payload);
           const folderId = typeof payload["folderId"] === "string" ? payload["folderId"] : null;
           if (folderId && targets.length === 0) {
             await ack(
@@ -695,7 +701,7 @@ async function main(): Promise<void> {
           // (each assignment also writes its own operation_log via runOnce).
           const outcomes: { status: "done" | "failed"; result: string }[] = [];
           for (const assignment of targets) {
-            const report = await runOnce(assignment);
+            const report = await runOnce(assignment, { dryRun });
             outcomes.push(
               summarizeReport(report, `synced folder=${assignment.folderId}`),
             );
@@ -704,7 +710,7 @@ async function main(): Promise<void> {
           const summary = outcomes.map((o) => o.result).join("; ");
           await ack(
             failedCount > 0 ? "failed" : "done",
-            `synced ${targets.length} folder(s): ${summary}`,
+            `${dryRun ? "dry-run: " : ""}synced ${targets.length} folder(s): ${summary}`,
           );
           return;
         }

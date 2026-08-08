@@ -165,6 +165,11 @@ CREATE TABLE IF NOT EXISTS notification_channels (
 -- LAMA-222: reusable backends. folders.backend becomes a reference to
 -- backends.id; S3 credentials live here once instead of per folder. Secrets
 -- are encrypted at rest (AES-256-GCM) in s3_secret_key_enc.
+-- LAMA-232/hidden-api-power: backend kinds local / nfs / restic. local is
+-- a server-side directory path (rclone type = local), nfs is an export
+-- already mounted on the server (also rclone type = local, but the kind
+-- documents provenance), and restic centralizes the per-assignment
+-- resticRepository/resticPassword pair (the password stays encrypted).
 CREATE TABLE IF NOT EXISTS backends (
     id                 TEXT PRIMARY KEY,
     name               TEXT NOT NULL UNIQUE,
@@ -174,6 +179,9 @@ CREATE TABLE IF NOT EXISTS backends (
     s3_region          TEXT,
     s3_access_key_id   TEXT,
     s3_secret_key_enc  TEXT,
+    local_path         TEXT,
+    restic_repository  TEXT,
+    restic_password_enc TEXT,
     created_at         INTEGER NOT NULL
 );
 
@@ -282,6 +290,9 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE hosts ADD COLUMN tailnet_ip TEXT",
   "CREATE TABLE IF NOT EXISTS notification_channels (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, enabled INTEGER DEFAULT 1, severities TEXT NOT NULL DEFAULT '[\"critical\",\"default\",\"info\"]', last_delivery_status TEXT, last_delivery_at INTEGER, created_at INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS backends (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL DEFAULT 's3', s3_provider TEXT DEFAULT 'other', s3_endpoint TEXT, s3_region TEXT, s3_access_key_id TEXT, s3_secret_key_enc TEXT, created_at INTEGER NOT NULL)",
+  "ALTER TABLE backends ADD COLUMN local_path TEXT",
+  "ALTER TABLE backends ADD COLUMN restic_repository TEXT",
+  "ALTER TABLE backends ADD COLUMN restic_password_enc TEXT",
   // LAMA-222: folders gain a backend reference. The legacy per-folder s3_*
   // columns are NOT dropped here — see LEGACY_S3_DROP_MIGRATIONS below.
   "ALTER TABLE folders ADD COLUMN backend_id TEXT",
