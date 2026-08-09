@@ -17,14 +17,16 @@
 import { createCliRenderer } from "@opentui/core";
 import type { CliRenderer } from "@opentui/core";
 import { defaultSocketPath } from "@lamasync/core";
+import { hostname as osHostname } from "os";
 
-import { buildClient } from "./api.ts";
+import { buildClient, writeClientConfig } from "./api.ts";
 import type { TuiClient } from "./api.ts";
 import { createFleetService } from "./app/fleet-service.ts";
 import type { FleetService } from "./app/fleet-service.ts";
 import { Shell } from "./app/shell.ts";
 import type { View, ViewContext, ViewSpec } from "./app/view-manager.ts";
 import { openWizard } from "./app/wizard.ts";
+import { runSetupFlow } from "./flows/setup.ts";
 
 import { ConflictsView } from "./views/conflicts.ts";
 import { DotfilesView } from "./views/dotfiles.ts";
@@ -39,7 +41,7 @@ import { LogsView } from "./views/logs.ts";
  * on user-initiated quit.
  */
 export async function bootShell(): Promise<void> {
-  const tui: TuiClient = buildClient();
+  let tui: TuiClient = buildClient();
   // LAMA-182: a parked promise alone does not keep the event loop alive, but
   // it makes `bootShell` return cleanly once the renderer tears down. The
   // renderer's `onDestroy` fires on BOTH quit paths (`q` → Shell.destroy() →
@@ -58,10 +60,27 @@ export async function bootShell(): Promise<void> {
     },
   });
 
+  // WS3 (TUI foundations): first run with no env vars and no client.toml
+  // boots into the setup flow instead of silently using localhost/dev-key.
+  // "saved" rewrites the client from the fresh file; "skipped" keeps the
+  // default client and surfaces a warning in the status bar.
+  if (tui.needsSetup) {
+    const outcome = await runSetupFlow({
+      renderer,
+      writeConfig: writeClientConfig,
+      defaultHostname: osHostname(),
+    });
+    if (outcome === "saved") {
+      tui = buildClient();
+    }
+  }
+
   const socketPath = defaultSocketPath();
 
-  const apiBaseUrl =
-    process.env.LAMASYNC_SERVER_URL ?? "http://localhost:8080";
+  // The client already resolves env vars > client.toml > defaults — use its
+  // baseUrl so the fleet socket and Fleet view dial the SAME server the
+  // first-run setup flow just wrote (previously hardcoded env ?? localhost).
+  const apiBaseUrl = tui.client.baseUrl;
   const apiKey = tui.client.apiKey;
 
   // Surface a config-parse error in the status bar without crashing the
@@ -72,7 +91,13 @@ export async function bootShell(): Promise<void> {
     kind: "info" | "error" | "success";
   } = tui.error
     ? { message: `config: ${tui.error}`, kind: "error" }
-    : { message: null, kind: "info" };
+    : tui.needsSetup
+      ? {
+          message:
+            "no credentials configured — point at a real server via LAMASYNC_SERVER_URL / LAMASYNC_API_KEY or ~/.config/lamasync/client.toml",
+          kind: "info",
+        }
+      : { message: null, kind: "info" };
 
   const fleetService: FleetService = createFleetService(apiBaseUrl, apiKey);
 
@@ -148,6 +173,11 @@ export async function bootShell(): Promise<void> {
 
   shell.start();
   renderer.start();
+  // WS3 (TUI foundations): the Fleet view only goes live once the service
+  // socket is opened. Start it right after the renderer so the header can
+  // reflect "live" on the first paint (the view also refreshes via
+  // getHealth on demand).
+  fleetService.start();
 
   // Hold the runtime alive until the renderer is destroyed. The OpenTUI
   // renderer keeps the event loop busy on its own; this promise just parks

@@ -9,6 +9,7 @@ import type {
 } from "@opentui/core";
 
 import { matchHotkey, type Hotkey } from "./keymap.ts";
+import { friendlyError } from "../friendly-error.ts";
 import type { ViewContext, ViewId, ViewSpec } from "./view-manager.ts";
 import { ViewManager } from "./view-manager.ts";
 import { wizardRegistry } from "./wizard.ts";
@@ -55,6 +56,12 @@ export class Shell {
   private readonly manager: ViewManager = new ViewManager();
   private readonly tabBar: TabSelectRenderable;
   private readonly statusText: TextRenderable;
+  // WS3 (TUI foundations): persistent key-hint line under the tab bar and
+  // the `?` help overlay (real renderables, added/removed from the layout).
+  private readonly hintText: TextRenderable;
+  private readonly helpOverlay: BoxRenderable;
+  private readonly helpText: TextRenderable;
+  private helpOpen = false;
   private readonly layout: BoxRenderable;
   private readonly rootContainer: BoxRenderable;
   private mounted = false;
@@ -84,11 +91,38 @@ export class Shell {
       }),
     ) as TabSelectRenderable;
 
+    // WS3: the key-hint line is muted, one line, under the tab bar.
+    this.hintText = instantiate(
+      this.renderer,
+      Text({ content: "[?] help   [ / ] views   [q] quit", fg: "#767676" }),
+    ) as TextRenderable;
+    this.helpText = instantiate(
+      this.renderer,
+      Text({ content: "" }),
+    ) as TextRenderable;
+    this.helpOverlay = instantiate(
+      this.renderer,
+      Box(
+        {
+          flexDirection: "column",
+          padding: 1,
+          border: true,
+          position: "absolute",
+          width: 64,
+          height: 18,
+          backgroundColor: "black",
+        },
+        Text({ content: "Help — ? or Esc to close" }),
+        this.helpText,
+      ),
+    ) as BoxRenderable;
+
     this.layout = instantiate(
       this.renderer,
       Box(
         { id: SHELL_LAYOUT_ID, flexDirection: "column", flexGrow: 1 },
         this.tabBar,
+        this.hintText,
         this.rootContainer,
         this.statusText,
       ),
@@ -159,37 +193,68 @@ export class Shell {
     const char = (e as { sequence?: string }).sequence ?? "";
     const name = e.name;
 
-    // Step 1: cycle keys. OpenTUI does not emit "leftbracket"/"rightbracket"
-    // key names — brackets arrive as printable chars — so match both.
-    if (name === "leftbracket" || char === "[") {
-      this.cycleBy(-1);
-      return true;
-    }
-    if (name === "rightbracket" || char === "]") {
-      this.cycleBy(1);
+    // Step 1 (WS3): the `?` help overlay is modal — while open, only `?` /
+    // Esc act; everything else is swallowed (and prevented, so a focused
+    // widget behind the overlay does not receive the key either).
+    if (this.helpOpen) {
+      if (char === "?" || name === "escape") {
+        this.closeHelp();
+      }
+      e.preventDefault();
       return true;
     }
 
     // Step 2: active wizard owns input. When a wizard is mounted, the runner
-    // receives the key first via Wizard.handleKey — Enter, ESC, q, and any
+    // receives the key first via Wizard.handleKey — ESC, q, and any
     // step-level onKey handlers run there. ESC cancels through onCancel as a
-    // fallback when the runner's handleKey declines the event.
+    // fallback when the runner's handleKey declines the event. A declined
+    // key falls through to the focused widget inside the wizard (e.g. typing
+    // into an Input) — never to views or global nav behind the modal.
     if (wizardRegistry.size > 0) {
       const last = [...wizardRegistry.values()].at(-1);
-      if (last?.handleKey?.(e) === true) return true;
+      if (last?.handleKey?.(e) === true) {
+        e.preventDefault();
+        return true;
+      }
       if (name === "escape") {
         last?.onCancel?.();
+        e.preventDefault();
+        return true;
+      }
+      return false;
+    }
+
+    // Step 3: cycle keys. OpenTUI does not emit "leftbracket"/"rightbracket"
+    // key names — brackets arrive as printable chars — so match both. While
+    // a text Input owns focus the brackets are literal text, not navigation.
+    if (!this.hasInputFocus()) {
+      if (name === "leftbracket" || char === "[") {
+        this.cycleBy(-1);
+        e.preventDefault();
+        return true;
+      }
+      if (name === "rightbracket" || char === "]") {
+        this.cycleBy(1);
+        e.preventDefault();
         return true;
       }
     }
 
-    // Step 3: quit.
+    // Step 4 (WS3): open the `?` help overlay (only with no wizard mounted
+    // and no text Input focused — otherwise `?` is literal input text).
+    if ((char === "?" || name === "questionmark") && !this.hasInputFocus()) {
+      this.openHelp();
+      e.preventDefault();
+      return true;
+    }
+
+    // Step 5: quit.
     if ((char === "q" || char === "Q") && !this.hasInputFocus()) {
       this.destroy();
       return true;
     }
 
-    // Step 4: view-local dispatch.
+    // Step 6: view-local dispatch.
     const active = this.manager.active();
     if (active.handleKey?.(e) === true) return true;
     const matched: Hotkey | undefined = matchHotkey(
@@ -199,15 +264,20 @@ export class Shell {
     );
     if (matched) {
       void Promise.resolve(matched.run()).catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.setStatus(msg, "error");
+        this.setStatus(friendlyError(err), "error");
       });
       return true;
     }
 
-    // Step 5: numeric tab shortcuts. Runs after view-local dispatch so a
+    // Step 7: numeric tab shortcuts. Runs after view-local dispatch so a
     // view's own digit hotkeys (Local's 1/2/3) take precedence while active.
-    if (char.length === 1 && char >= "1" && char <= "9") {
+    // Digits are literal text while a text Input owns focus.
+    if (
+      !this.hasInputFocus() &&
+      char.length === 1 &&
+      char >= "1" &&
+      char <= "9"
+    ) {
       const index = Number.parseInt(char, 10) - 1;
       const specs = this.manager.all();
       if (index >= 0 && index < specs.length) {
@@ -223,6 +293,32 @@ export class Shell {
     const prefix =
       kind === "error" ? "[!] " : kind === "success" ? "[ok] " : "[i] ";
     this.statusText.content = `${prefix}${text}`;
+  }
+
+  private openHelp(): void {
+    const active = this.manager.active();
+    const viewLines = (active?.hotkeys ?? [])
+      .map((h) => `[${h.key}] ${h.label}`)
+      .join("\n");
+    const lines = [
+      "Global keys",
+      "[ / ]  cycle views",
+      "1-6    jump to tab",
+      "?      toggle help",
+      "q      quit",
+      "Esc    cancel wizard / close help",
+      "",
+      `Active view — ${active?.title ?? "?"}`,
+      viewLines.length > 0 ? viewLines : "(no view hotkeys)",
+    ].join("\n");
+    this.helpText.content = lines;
+    this.layout.add(this.helpOverlay);
+    this.helpOpen = true;
+  }
+
+  private closeHelp(): void {
+    this.layout.remove(this.helpOverlay.id);
+    this.helpOpen = false;
   }
 
   private cycleBy(delta: number): void {
@@ -244,11 +340,12 @@ export class Shell {
   /**
    * Heuristic: if a focused OpenTUI Input or Textarea is on the active path,
    * suppress `q` so the user can type it. The manager does not own the
-   * focused renderable; the shell asks the renderer for its focused node.
+   * focused renderable; the shell asks the renderer for its focused node
+   * (`currentFocusedRenderable` — OpenTUI 0.1.107).
    */
   private hasInputFocus(): boolean {
-    const focused = (this.renderer as { focusedRenderable?: unknown })
-      .focusedRenderable;
+    const focused = (this.renderer as { currentFocusedRenderable?: unknown })
+      .currentFocusedRenderable;
     if (focused === null || focused === undefined) return false;
     const type = (focused as { constructor?: { name?: string } }).constructor
       ?.name;

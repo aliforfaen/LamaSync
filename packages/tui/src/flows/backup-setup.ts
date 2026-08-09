@@ -23,6 +23,7 @@ import type { Renderable } from "@opentui/core";
 import type { FolderType } from "@lamasync/core";
 
 import { SCHEDULE_PRESETS } from "../app/schedule-presets.ts";
+import { validateCronExpression } from "../app/cron.ts";
 import type { Wizard, WizardStep } from "../app/wizard.ts";
 import { WizardRunner } from "../app/wizard.ts";
 import type { ViewContext } from "../app/view-manager.ts";
@@ -37,21 +38,29 @@ function inputStep(args: {
   prompt: string;
   placeholder: string;
   runner: WizardRunner;
+  /** Optional custom validator — default is the non-empty check. */
+  validate?: (value: string) => string | null;
 }): WizardStep {
   return {
     title: args.title,
     render: (state) => {
       const initial = String(state[args.field] ?? "");
-      const input = Input({
-        placeholder: args.placeholder,
-      }) as unknown as Renderable & {
+      // Real renderable, not a factory proxy — see setup.ts inputStep for
+      // the full rationale (proxy property reads break once mounted; Enter
+      // arrives as an "enter" event carrying the current text).
+      const input = args.runner.realizeNode(
+        Input({
+          placeholder: args.placeholder,
+        }),
+      ) as unknown as Renderable & {
         value: string;
-        onSubmit: (event: unknown) => void;
+        on: (event: string, handler: (...params: unknown[]) => void) => void;
       };
       input.value = initial;
-      input.onSubmit = () => {
-        args.runner.setField(args.field, input.value.trim());
-      };
+      input.on("enter", (value: unknown) => {
+        args.runner.setField(args.field, String(value ?? "").trim());
+        args.runner.next();
+      });
       return Box(
         { flexDirection: "column", gap: 1 },
         Text({ content: args.prompt }),
@@ -60,7 +69,8 @@ function inputStep(args: {
     },
     validate: (state) => {
       const v = String(state[args.field] ?? "").trim();
-      return v.length > 0 ? null : `${args.field} required`;
+      if (v.length === 0) return `${args.field} is required`;
+      return args.validate?.(v) ?? null;
     },
   };
 }
@@ -81,18 +91,22 @@ function selectStep(args: {
         0,
         args.options.findIndex((o) => o.value === initial),
       );
-      const select = Select({
-        options: [...args.options],
-        showDescription: true,
-        flexGrow: 1,
-        selectedIndex: initialIdx,
-      }) as unknown as Renderable & {
+      const select = args.runner.realizeNode(
+        Select({
+          options: [...args.options],
+          showDescription: true,
+          flexGrow: 1,
+          selectedIndex: initialIdx,
+        }),
+      ) as unknown as Renderable & {
         on: (event: string, handler: (...params: unknown[]) => void) => void;
       };
       select.on("itemSelected", (_idx: unknown, option: unknown) => {
         const opt = option as { value: string };
         args.runner.setField(args.field, opt.value);
         args.onPick?.(opt.value);
+        // Enter on a Select both picks and advances ("[Enter next]").
+        args.runner.next();
       });
       return Box(
         { flexDirection: "column", gap: 1 },
@@ -105,10 +119,19 @@ function selectStep(args: {
   };
 }
 
-function confirmStep(title: string): WizardStep {
+function confirmStep(title: string, runner: WizardRunner): WizardStep {
   return {
     title,
     render: (state) => summaryRenderable(state),
+    // No focusable widget on this step — Enter applies (runner.next() on
+    // the last step fires onFinish).
+    onKey: (name, char) => {
+      if (name === "return" || name === "enter" || char === "\r") {
+        runner.next();
+        return true;
+      }
+      return false;
+    },
   };
 }
 
@@ -154,16 +177,20 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
     title: CRON_TITLE,
     render: (state) => {
       const initial = String(state["schedule"] ?? "");
-      const input = Input({
-        placeholder: "0 * * * *  |  @reboot  |  @hourly",
-      }) as unknown as Renderable & {
+      const input = runner.realizeNode(
+        Input({
+          placeholder: "0 * * * *  |  @reboot  |  @hourly",
+        }),
+      ) as unknown as Renderable & {
         value: string;
-        onSubmit: (event: unknown) => void;
+        on: (event: string, handler: (...params: unknown[]) => void) => void;
       };
       input.value = initial;
-      input.onSubmit = () => {
-        runner.setField("schedule", input.value.trim());
-      };
+      // "enter" event, not onSubmit — see inputStep above.
+      input.on("enter", (value: unknown) => {
+        runner.setField("schedule", String(value ?? "").trim());
+        runner.next();
+      });
       return Box(
         { flexDirection: "column", gap: 1 },
         Text({ content: "Enter a cron expression." }),
@@ -171,9 +198,7 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
       ) as unknown as Renderable;
     },
     validate: (state) =>
-      String(state["schedule"] ?? "").trim().length > 0
-        ? null
-        : "cron expression required",
+      validateCronExpression(String(state["schedule"] ?? "").trim()),
   };
 
   const steps: WizardStep[] = [
@@ -200,6 +225,10 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
       prompt: "Local path on this host.",
       placeholder: "/home/user/LamaFiles",
       runner,
+      validate: (value) =>
+        value.startsWith("/")
+          ? null
+          : "localPath must be an absolute path (starts with /)",
     }),
     selectStep({
       title: "Role on this host",
@@ -245,7 +274,7 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
         }
       },
     }),
-    confirmStep("Confirm"),
+    confirmStep("Confirm", runner),
   ];
 
   // Swap the runner's step list with the fully-wired one.

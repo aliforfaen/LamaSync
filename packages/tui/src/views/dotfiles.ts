@@ -17,6 +17,7 @@ import {
 } from "@opentui/core";
 import type {
   BoxRenderable,
+  CliRenderer,
   KeyEvent,
   Renderable,
   RenderContext,
@@ -33,6 +34,7 @@ import type {
 } from "@lamasync/core";
 
 import { hotkeyFooter, pageShell, realize, swapChildren } from "../app/widgets.ts";
+import { friendlyError } from "../friendly-error.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import { matchHotkey } from "../app/keymap.ts";
 import type {
@@ -167,11 +169,15 @@ export class DotfilesView implements View {
   private ctx: ViewContext | null = null;
   private loadId = 0;
   private rootCtx: RenderContext | null = null;
+  private readonly renderer: CliRenderer | null;
+  /** Focused extract-step Input, blurred before the next body swap. */
+  private activeInput: { focus?: () => void; blur?: () => void } | null = null;
 
   readonly container: Renderable;
 
 
   constructor(opts: { ctx: ViewContext; rootCtx?: RenderContext }) {
+    this.renderer = opts.ctx.renderer ?? null;
     this.bodyBox = realize<BoxRenderable>(
       opts.ctx.renderer,
       Box({ flexDirection: "column", flexGrow: 1 }),
@@ -291,8 +297,7 @@ export class DotfilesView implements View {
       }
     } catch (err) {
       if (loadId !== this.loadId) return;
-      this.state.loadError =
-        err instanceof Error ? err.message : String(err);
+      this.state.loadError = friendlyError(err);
       this.state.manifests = [];
       this.state.apps = [];
     }
@@ -314,8 +319,7 @@ export class DotfilesView implements View {
     } catch (err) {
       if (loadId !== this.loadId) return;
       this.state.versions = [];
-      this.state.loadError =
-        err instanceof Error ? err.message : String(err);
+      this.state.loadError = friendlyError(err);
     }
     this.renderBody();
   }
@@ -489,8 +493,45 @@ export class DotfilesView implements View {
   // ---------------------------------------------------------------------------
 
   private renderBody(): void {
+    // Blur the outgoing step's Input before swapping it out: removal does
+    // not unsubscribe key handlers (OpenTUI 0.1.107 onRemove is a no-op),
+    // so a detached Input would keep eating keys for the next step.
+    this.activeInput?.blur?.();
+    this.activeInput = null;
     const children: VNode[] = this.renderForStep();
     swapChildren(this.bodyBox, children);
+    // Nothing auto-focuses newly-added renderables — the extract steps'
+    // Input registered itself via mountStepInput; focus it now it's live.
+    // (Cast: renderForStep re-assigns the field, which TS can't track past
+    // the null assignment above.)
+    (this.activeInput as { focus?: () => void } | null)?.focus?.();
+  }
+
+  /**
+   * Build an extract-step Input as a REAL renderable with focus tracking.
+   * Enter arrives as an "enter" event carrying the current text — the
+   * `onSubmit` option is Textarea-only and never fires on Input (OpenTUI
+   * 0.1.107), and a bare factory proxy's `input.value` reads break once
+   * mounted, so handlers take the emitted value instead.
+   */
+  private mountStepInput(opts: {
+    placeholder: string;
+    value: string;
+    onEnter: (value: string) => void;
+  }): Renderable {
+    const input = realize<Renderable>(
+      this.renderer,
+      Input({ placeholder: opts.placeholder }),
+    ) as unknown as Renderable & {
+      value: string;
+      on: (event: string, handler: (...params: unknown[]) => void) => void;
+      focus: () => void;
+      blur: () => void;
+    };
+    input.value = opts.value;
+    input.on("enter", (value: unknown) => opts.onEnter(String(value ?? "")));
+    this.activeInput = input;
+    return input;
   }
 
   private renderForStep(): VNode[] {
@@ -527,7 +568,7 @@ export class DotfilesView implements View {
     }
     const rows: AppRow[] = [
       {
-        name: "🔄 Setup (restore all apps)",
+        name: "Setup (restore all apps)",
         description: "fresh-install restore",
         value: SETUP_KEY,
       },
@@ -620,12 +661,12 @@ export class DotfilesView implements View {
   }
 
   private renderExtractStep(): VNode[] {
-    const input = Input({
+    const input = this.mountStepInput({
       placeholder: "Target directory (absolute path)",
       value: this.state.extractTarget,
-      onSubmit: () => {
+      onEnter: (value) => {
         if (!this.state.version) return;
-        this.state.extractTarget = input.value;
+        this.state.extractTarget = value;
         this.state.step = "subpaths";
         this.renderBody();
       },
@@ -637,18 +678,18 @@ export class DotfilesView implements View {
           "Enter target directory and press Enter. Use / to restore to original absolute paths.",
       }),
       Text({ content: "Press Esc to cancel." }),
-      input,
+      input as unknown as VNode,
     ];
   }
 
   private renderSubpathsStep(): VNode[] {
-    const input = Input({
+    const input = this.mountStepInput({
       placeholder: "Subpaths to extract, comma-separated (empty = all)",
       value: this.state.extractSubpaths,
-      onSubmit: () => {
+      onEnter: (value) => {
         if (!this.state.version) return;
-        this.state.extractSubpaths = input.value;
-        const subpaths = input.value
+        this.state.extractSubpaths = value;
+        const subpaths = value
           .split(",")
           .map((s) => s.trim())
           .filter((s) => s.length > 0);
@@ -668,7 +709,7 @@ export class DotfilesView implements View {
           "Enter subpaths (e.g. agents/,settings.json) or leave empty for all.",
       }),
       Text({ content: "Press Esc to cancel." }),
-      input,
+      input as unknown as VNode,
     ];
   }
 

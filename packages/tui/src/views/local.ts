@@ -25,6 +25,7 @@ import type {
   ViewContext,
   ViewId,
 } from "../app/view-manager.ts";
+import { friendlyError } from "../friendly-error.ts";
 import { createBackupSetupWizard } from "../flows/backup-setup.ts";
 import {
   requestSwitchMount,
@@ -348,7 +349,7 @@ export class LocalView implements View {
       this.folders = [];
       this.renderBody();
       this.setStatus(
-        `refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+        `refresh failed: ${friendlyError(err)}`,
         "error",
       );
     }
@@ -370,7 +371,7 @@ export class LocalView implements View {
       );
     } catch (err) {
       this.setStatus(
-        `sync-all failed: ${err instanceof Error ? err.message : String(err)}`,
+        `sync-all failed: ${friendlyError(err)}`,
         "error",
       );
     }
@@ -453,17 +454,20 @@ export class LocalView implements View {
       "info",
     );
     try {
-      const data =
-        target === "mount"
-          ? await requestSwitchMount(folder.id)
-          : await requestSwitchSync(folder.id);
+      // WS3: the daemon's raw JSON response is noise in the status bar —
+      // surface the outcome, not the payload.
+      if (target === "mount") {
+        await requestSwitchMount(folder.id);
+      } else {
+        await requestSwitchSync(folder.id);
+      }
       this.setStatus(
-        `switch-type ok: ${folder.name} -> ${target} (${JSON.stringify(data)})`,
+        `switched ${folder.name} to ${target === "mount" ? "mount" : "sync"}`,
         "success",
       );
     } catch (err) {
       this.setStatus(
-        `switch-type failed: ${err instanceof Error ? err.message : String(err)}`,
+        `switch-type failed: ${friendlyError(err)}`,
         "error",
       );
     }

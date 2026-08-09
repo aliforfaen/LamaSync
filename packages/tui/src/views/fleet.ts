@@ -18,6 +18,7 @@ import {
   statusBox,
   swapChildren,
 } from "../app/widgets.ts";
+import { friendlyError } from "../friendly-error.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import type {
   View,
@@ -238,7 +239,9 @@ export class FleetView implements View {
     const status = this.service.status;
     const now = Date.now();
 
-    const titleText: VNode = Text({ content: `Fleet — ${status === "live" ? "live" : "polling"}` });
+    const titleText: VNode = Text({
+      content: `Fleet — ${status === "live" ? "live" : "offline"}`,
+    });
     const countText: VNode = Text({
       content: `${hosts.length} host(s) known`,
     });
@@ -309,7 +312,7 @@ export class FleetView implements View {
     } catch (err) {
       if (loadId !== this.loadId) return;
       this.setStatus(
-        `refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+        `refresh failed: ${friendlyError(err, { serverUrl: this.serverUrl })}`,
         "error",
       );
     } finally {

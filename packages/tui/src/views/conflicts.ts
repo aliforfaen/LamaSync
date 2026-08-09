@@ -19,7 +19,8 @@ import type {
 } from "@lamasync/core";
 
 import { matchHotkey, type Hotkey } from "../app/keymap.ts";
-import { realize, swapChildren } from "../app/widgets.ts";
+import { hotkeyFooter, realize, swapChildren } from "../app/widgets.ts";
+import { friendlyError } from "../friendly-error.ts";
 import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
 
 /**
@@ -115,7 +116,8 @@ export class ConflictsView implements View {
         { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
         Text({ content: "Conflicts" }),
         Text({ content: "Loading pending conflicts…" }),
-        Text({ content: "Press Esc or q to return to menu." }),
+        Text({ content: "" }),
+        hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
       ),
     );
   }
@@ -146,11 +148,6 @@ export class ConflictsView implements View {
 
     if (name === "escape") {
       this.cancel();
-      return true;
-    }
-    if (char === "q") {
-      // Mirror the pre-unification "return to menu" key. Shell handles
-      // navigation, so just bail out of focus here.
       return true;
     }
 
@@ -198,7 +195,7 @@ export class ConflictsView implements View {
     } catch (err) {
       if (this.state.loadId !== myLoad) return;
       this.state.loading = false;
-      this.state.error = err instanceof Error ? err.message : String(err);
+      this.state.error = friendlyError(err);
     }
     this.renderContent();
   }
@@ -239,7 +236,7 @@ export class ConflictsView implements View {
       this.state.conflicts = this.state.conflicts.filter((c) => c.id !== id);
       ctx.setStatus(`conflict ${id} resolved (${resolution})`, "success");
     } catch (err) {
-      this.state.error = err instanceof Error ? err.message : String(err);
+      this.state.error = friendlyError(err);
       ctx.setStatus(`resolve failed: ${this.state.error}`, "error");
     } finally {
       this.state.resolving.delete(id);
@@ -265,7 +262,6 @@ export class ConflictsView implements View {
       this.replaceRoot([
         Text({ content: "Conflicts" }),
         Text({ content: "Loading pending conflicts…" }),
-        Text({ content: "Press Esc or q to return to menu." }),
       ]);
       return;
     }
@@ -273,7 +269,6 @@ export class ConflictsView implements View {
       this.replaceRoot([
         Text({ content: "Conflicts" }),
         Text({ content: `[!] ${error}` }),
-        Text({ content: "Press Esc or q to return." }),
       ]);
       return;
     }
@@ -281,7 +276,6 @@ export class ConflictsView implements View {
       this.replaceRoot([
         Text({ content: "Conflicts" }),
         Text({ content: "No pending conflicts." }),
-        Text({ content: "Press Esc or q to return." }),
       ]);
       return;
     }
@@ -297,7 +291,6 @@ export class ConflictsView implements View {
     this.replaceRoot([
       Text({ content: "Conflicts" }),
       Text({ content: `${conflicts.length} pending conflict(s). Use ↑/↓ to move.` }),
-      Text({ content: "[l] keep local  [r] keep remote  [b] keep both  [x] cancel" }),
       Text({ content: confirmLine }),
       Text({ content: "" }),
       this.selectNode,
@@ -305,10 +298,16 @@ export class ConflictsView implements View {
   }
 
   private replaceRoot(children: ReadonlyArray<VNode | Renderable>): void {
-    // Replace children of the outer container — the Box is the renderable
-    // the ViewManager holds a reference to via `container`. We mutate its
-    // children directly to avoid rebuilding the whole tree.
-    swapChildren(this.container, children);
+    // The hotkey footer is the single source of key hints, appended on
+    // every refresh (WS3). Replace children of the outer container — the
+    // Box is the renderable the ViewManager holds a reference to via
+    // `container`. We mutate its children directly to avoid rebuilding the
+    // whole tree.
+    swapChildren(this.container, [
+      ...children,
+      Text({ content: "" }),
+      hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
+    ]);
   }
 }
 

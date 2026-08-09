@@ -11,6 +11,7 @@ import type { LamaSyncApiClient, OperationLog } from "@lamasync/core";
 
 import { matchHotkey, type Hotkey, type KeyEvent } from "../app/keymap.ts";
 import { realize, swapChildren } from "../app/widgets.ts";
+import { friendlyError } from "../friendly-error.ts";
 import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
 
 /**
@@ -44,14 +45,6 @@ export interface RenderLogsOpts {
 const PAGE_SIZE = 50;
 const STATUS_CYCLE: LogsStatus[] = ["all", "success", "failed", "conflict"];
 
-const HOTKEYS: Array<{ key: string; label: string; action: LogsAction }> = [
-  { key: "r", label: "refresh", action: "refresh" },
-  { key: "n", label: "next", action: "next" },
-  { key: "p", label: "prev", action: "prev" },
-  { key: "f", label: "filter", action: "filter" },
-  { key: "q", label: "quit", action: "quit" },
-];
-
 function statusLine(entry: OperationLog): string {
   const time = new Date(entry.timestamp).toISOString();
   const summary = entry.summary ?? "";
@@ -81,7 +74,12 @@ export function renderLogs(opts: RenderLogsOpts): VNode {
     Text({ content: "" }),
     body,
     Text({ content: "" }),
-    hotkeyFooter(),
+    hotkeyFooter([
+      { key: "r", label: "refresh" },
+      { key: "n", label: "next page" },
+      { key: "p", label: "prev page" },
+      { key: "f", label: "filter" },
+    ]),
   );
 }
 
@@ -102,10 +100,10 @@ function renderEntries(entries: OperationLog[]): VNode {
   );
 }
 
-function hotkeyFooter(): VNode {
+function hotkeyFooter(items: ReadonlyArray<{ key: string; label: string }>): VNode {
   const cells: VNode[] = [];
-  for (const hk of HOTKEYS) {
-    cells.push(Text({ content: `[${hk.key}] ${hk.label}` }));
+  for (const item of items) {
+    cells.push(Text({ content: `[${item.key}] ${item.label}` }));
   }
   return Box({ flexDirection: "row", gap: 1 }, ...cells);
 }
@@ -206,7 +204,7 @@ export class LogsView implements View {
         Text({ content: "" }),
         this.scrollBox,
         Text({ content: "" }),
-        hotkeyFooter(),
+        hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
       ),
     );
     // The header Box is a real renderable (LAMA-181); the ViewManager flips
@@ -273,7 +271,7 @@ export class LogsView implements View {
     } catch (err) {
       if (this.state.loadId !== myLoad) return;
       this.state.loading = false;
-      this.state.error = err instanceof Error ? err.message : String(err);
+      this.state.error = friendlyError(err);
       ctx.setStatus(`logs: ${this.state.error}`, "error");
     }
     this.renderBody();

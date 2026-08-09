@@ -43,16 +43,22 @@ function inputStep(args: {
     title: args.title,
     render: (state) => {
       const initial = String(state[args.field] ?? "");
-      const input = Input({
-        placeholder: args.placeholder,
-      }) as unknown as Renderable & {
+      // Real renderable, not a factory proxy — see setup.ts inputStep for
+      // the full rationale (proxy property reads break once mounted; Enter
+      // arrives as an "enter" event carrying the current text).
+      const input = args.runner.realizeNode(
+        Input({
+          placeholder: args.placeholder,
+        }),
+      ) as unknown as Renderable & {
         value: string;
-        onSubmit: (event: unknown) => void;
+        on: (event: string, handler: (...params: unknown[]) => void) => void;
       };
       input.value = initial;
-      input.onSubmit = () => {
-        args.runner.setField(args.field, input.value.trim());
-      };
+      input.on("enter", (value: unknown) => {
+        args.runner.setField(args.field, String(value ?? "").trim());
+        args.runner.next();
+      });
       return Box(
         { flexDirection: "column", gap: 1 },
         Text({ content: args.prompt }),
@@ -92,17 +98,21 @@ function hostSelectStep(args: {
       ];
       const initial = String(state["hostId"] ?? "_global");
       const initialIdx = Math.max(0, options.findIndex((o) => o.value === initial));
-      const select = Select({
-        options,
-        showDescription: true,
-        flexGrow: 1,
-        selectedIndex: initialIdx,
-      }) as unknown as Renderable & {
+      const select = args.runner.realizeNode(
+        Select({
+          options,
+          showDescription: true,
+          flexGrow: 1,
+          selectedIndex: initialIdx,
+        }),
+      ) as unknown as Renderable & {
         on: (event: string, handler: (...params: unknown[]) => void) => void;
       };
       select.on("itemSelected", (_idx: unknown, option: unknown) => {
         const opt = option as { value: string };
         args.runner.setField("hostId", opt.value);
+        // Enter on a Select both picks and advances ("[Enter next]").
+        args.runner.next();
       });
       return Box(
         { flexDirection: "column", gap: 1 },
@@ -114,6 +124,17 @@ function hostSelectStep(args: {
       const failed = Boolean(state["_hostFetchFailed"]);
       if (failed) return null; // default to _global
       return String(state["hostId"] ?? "").length > 0 ? null : "host required";
+    },
+    // The fetch-failed branch renders no focusable widget, so Enter must be
+    // handled here. When the Select rendered, it consumes Enter itself —
+    // handling it here too would advance before the selection lands.
+    onKey: (name, char, state) => {
+      if (!state["_hostFetchFailed"]) return false;
+      if (name === "return" || name === "enter" || char === "\r") {
+        args.runner.next();
+        return true;
+      }
+      return false;
     },
   };
 }
@@ -134,18 +155,22 @@ function selectStep(args: {
         0,
         args.options.findIndex((o) => o.value === initial),
       );
-      const select = Select({
-        options: [...args.options],
-        showDescription: true,
-        flexGrow: 1,
-        selectedIndex: initialIdx,
-      }) as unknown as Renderable & {
+      const select = args.runner.realizeNode(
+        Select({
+          options: [...args.options],
+          showDescription: true,
+          flexGrow: 1,
+          selectedIndex: initialIdx,
+        }),
+      ) as unknown as Renderable & {
         on: (event: string, handler: (...params: unknown[]) => void) => void;
       };
       select.on("itemSelected", (_idx: unknown, option: unknown) => {
         const opt = option as { value: string };
         args.runner.setField(args.field, opt.value);
         args.onPick?.(opt.value);
+        // Enter on a Select both picks and advances ("[Enter next]").
+        args.runner.next();
       });
       return Box(
         { flexDirection: "column", gap: 1 },
@@ -158,10 +183,19 @@ function selectStep(args: {
   };
 }
 
-function confirmStep(title: string): WizardStep {
+function confirmStep(title: string, runner: WizardRunner): WizardStep {
   return {
     title,
     render: (state) => summaryRenderable(state),
+    // No focusable widget on this step — Enter applies (runner.next() on
+    // the last step fires onFinish).
+    onKey: (name, char) => {
+      if (name === "return" || name === "enter" || char === "\r") {
+        runner.next();
+        return true;
+      }
+      return false;
+    },
   };
 }
 
@@ -230,16 +264,20 @@ export function createDotfileManifestWizard(opts: { ctx: ViewContext }): Wizard 
     title: CRON_TITLE,
     render: (state) => {
       const initial = String(state["schedule"] ?? "");
-      const input = Input({
-        placeholder: "0 * * * *  |  @reboot  |  @hourly",
-      }) as unknown as Renderable & {
+      const input = runner.realizeNode(
+        Input({
+          placeholder: "0 * * * *  |  @reboot  |  @hourly",
+        }),
+      ) as unknown as Renderable & {
         value: string;
-        onSubmit: (event: unknown) => void;
+        on: (event: string, handler: (...params: unknown[]) => void) => void;
       };
       input.value = initial;
-      input.onSubmit = () => {
-        runner.setField("schedule", input.value.trim());
-      };
+      // "enter" event, not onSubmit — see inputStep above.
+      input.on("enter", (value: unknown) => {
+        runner.setField("schedule", String(value ?? "").trim());
+        runner.next();
+      });
       return Box(
         { flexDirection: "column", gap: 1 },
         Text({ content: "Enter a cron expression." }),
@@ -317,7 +355,7 @@ export function createDotfileManifestWizard(opts: { ctx: ViewContext }): Wizard 
       runner,
       required: false,
     }),
-    confirmStep("Confirm"),
+    confirmStep("Confirm", runner),
   ];
 
   (runner as unknown as { steps: ReadonlyArray<WizardStep> }).steps = steps;

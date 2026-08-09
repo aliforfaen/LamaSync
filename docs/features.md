@@ -55,6 +55,7 @@
 | hidden-api-power | Backend kinds `local`/`nfs`/`restic`: server-side path targets + centralized restic repo/password defaults, per-kind validation + all-kind test endpoint, rclone config gen, folder picker | `core/src/{types.ts,db/schema.ts}`, `server/src/{backends.ts,routes/{backends,config,folders}.ts}`, `web-ui/src/pages/{Backends,Folders}.tsx` |
 | hidden-api-power | Conflicts history (Pending/Resolved/All tabs, name resolution, resolution record) + Operations active-locks panel + host filter | `web-ui/src/pages/{Conflicts,Operations}.tsx`, `index.css` |
 | onboarding-pass | Concept glossary + hint components, first-run checklist on Dashboard, login hint, form/empty-state coaching, Swagger link | `web-ui/src/{concepts.ts,components/{Hint,GettingStarted,Login,Nav}.tsx,pages/{Dashboard,Folders,Dotfiles,Conflicts,Operations,HostDetail,Backends}.tsx,index.css}` |
+| tui-foundations | TUI first-run setup flow (client.toml writer, no silent localhost/dev-key defaults), `?` help overlay + global key hints + per-view hotkey footers, friendlyError() at catch sites, Fleet live status (fleetService.start + socket error listeners), `q`-quit fix on Conflicts, Logs footer single-source, wizard validation (absolute localPath, cron sanity) + emoji cleanup | `tui/src/{api.ts,boot.ts,friendly-error.ts,flows/{setup,backup-setup}.ts,app/{shell,cron,fleet-service}.ts,views/{conflicts,logs,local,fleet,dotfiles}.ts}` |
 
 ## Known limitations
 

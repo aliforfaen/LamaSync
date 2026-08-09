@@ -98,13 +98,16 @@ export function createFleetService(
   const hosts = new Map<string, FleetHost>();
   let socket: WebSocket | null = null;
   let closed = false;
+  // WS3 (TUI foundations): `live` requires an actual open socket — the
+  // constructor succeeding is not enough. Error/close flip it back.
+  let alive = false;
 
   return {
     get hosts(): ReadonlyArray<FleetHost> {
       return [...hosts.values()];
     },
     get status(): "live" | "offline" {
-      return socket === null ? "offline" : "live";
+      return socket !== null && alive ? "live" : "offline";
     },
     start(): void {
       if (closed || socket !== null || WS === null) return;
@@ -112,8 +115,18 @@ export function createFleetService(
         socket = new WS(url, protocols) as WebSocket;
       } catch {
         socket = null;
+        alive = false;
         return;
       }
+      socket.addEventListener("open", () => {
+        alive = true;
+      });
+      socket.addEventListener("error", () => {
+        alive = false;
+      });
+      socket.addEventListener("close", () => {
+        alive = false;
+      });
       socket.addEventListener("message", (event: MessageEvent) => {
         const data = parseMessageData(event.data);
         if (data === null) return;
@@ -128,6 +141,7 @@ export function createFleetService(
       closed = true;
       socket?.close();
       socket = null;
+      alive = false;
     },
   };
 }

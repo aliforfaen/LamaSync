@@ -1,5 +1,5 @@
 import { Box, Text } from "@opentui/core";
-import type { CliRenderer, KeyEvent, Renderable } from "@opentui/core";
+import type { CliRenderer, KeyEvent, Renderable, VNode } from "@opentui/core";
 
 import { realize } from "./widgets.ts";
 
@@ -128,8 +128,10 @@ export class WizardRunner {
   private idx = 0;
   private overlayHost: Renderable | null = null;
   private finished = false;
+  private readonly renderer: CliRenderer | null;
 
   private currentBodyChild: Renderable | null = null;
+  private focusedStepWidget: { blur?: () => void } | null = null;
 
   private currentError: string | null = null;
 
@@ -142,6 +144,7 @@ export class WizardRunner {
     this.id = opts.id;
     this.title = opts.title;
     this.steps = opts.steps;
+    this.renderer = opts.renderer ?? null;
 
     const renderer = opts.renderer ?? null;
     this.scratchHost = realize<Renderable>(
@@ -232,6 +235,18 @@ export class WizardRunner {
       ...after,
     ];
     this.renderCurrentStep();
+  }
+
+  /**
+   * Instantiate a step-body widget VNode into a real renderable on the
+   * runner's renderer (LAMA-181). Step render functions MUST use this for
+   * widgets they keep a reference to (Input / Select): a bare factory proxy
+   * attaches listeners to — and reads values from — an uninitialized
+   * template instance, not the mounted renderable (verified OpenTUI
+   * 0.1.107: property reads on the proxy throw once mounted).
+   */
+  realizeNode(vnode: VNode): Renderable {
+    return realize<Renderable>(this.renderer, vnode);
   }
 
   /**
@@ -346,7 +361,9 @@ export class WizardRunner {
    * return to decide whether to drop the event.
    *
    * The runner never handles `Enter` — that belongs to the focused widget
-   * (Select / Input) inside the step.
+   * (Select / Input) inside the step. And when a text widget inside the step
+   * owns focus, every non-ESC key is left to it: without that guard, typing
+   * "q" into an API-key field would cancel the wizard.
    */
   handleKey(e: KeyEvent): boolean {
     const step = this.steps[this.idx];
@@ -357,6 +374,8 @@ export class WizardRunner {
       (raw.length === 1 ? raw : sequence.length === 1 ? sequence : "").toLowerCase();
 
     if (step?.onKey?.(name, char, this.state)) return true;
+
+    if (name !== "escape" && this.hasFocusedTextInput()) return false;
 
     if (name === "escape") {
       if (this.idx === 0) {
@@ -371,6 +390,21 @@ export class WizardRunner {
       return true;
     }
     return false;
+  }
+
+  /**
+   * True when the renderer's focused renderable is a text-editing widget
+   * (Input / Textarea). No renderer (pure state-machine tests) → false.
+   */
+  private hasFocusedTextInput(): boolean {
+    if (!this.renderer) return false;
+    const focused = (
+      this.renderer as { currentFocusedRenderable?: unknown }
+    ).currentFocusedRenderable;
+    if (focused === null || focused === undefined) return false;
+    const type = (focused as { constructor?: { name?: string } }).constructor
+      ?.name;
+    return type === "InputRenderable" || type === "TextareaRenderable";
   }
 
   // -- internal ------------------------------------------------------------
@@ -398,22 +432,75 @@ export class WizardRunner {
     (this.headerText as unknown as { content: string }).content = this.headerLabel();
 
     // Replace the body child using our own tracker rather than asking the
-    // body host. This keeps the runner safe both on real renderables and on
-    // uninstantiated VNode proxies in renderer-less tests, whose
-    // getChildren() does not return a real child array.
+    // body host. The tracker holds the REAL mounted child (step render
+    // returns are realized below): removing by a VNode proxy's id silently
+    // no-ops and the old step body stays mounted, still eating keys.
     if (this.currentBodyChild) {
+      // Blur before removal: OpenTUI 0.1.107 `onRemove` is a no-op, so a
+      // removed-but-focused Input would keep its keypress subscription and
+      // consume keys for the next step.
+      this.focusedStepWidget?.blur?.();
+      this.focusedStepWidget = null;
       this.bodyHost.remove(this.currentBodyChild.id);
       this.currentBodyChild = null;
     }
     const rendered = step.render?.(this.state);
     if (rendered) {
-      this.bodyHost.add(rendered);
-      this.currentBodyChild = rendered;
+      const mounted = realize<Renderable>(
+        this.renderer,
+        rendered as unknown as VNode,
+      );
+      this.bodyHost.add(mounted);
+      this.currentBodyChild = mounted;
+      // Nothing in OpenTUI auto-focuses newly-added renderables — without
+      // this the step's Input/Select never receives keystrokes at all.
+      this.focusFirstStepWidget();
     }
     this.setError(null);
   }
 
+  /**
+   * Focus the first focusable widget inside the freshly-rendered step body
+   * so keyboard input lands in it without a mouse click. Walks the body
+   * host's REAL children (`getChildren()`), not the step's render return —
+   * that may be an uninstantiated VNode proxy whose child list is empty.
+   * No-op without a renderer (pure state-machine tests) or on text-only
+   * steps (Confirm), whose Enter is handled by the step's own `onKey`.
+   */
+  private focusFirstStepWidget(): void {
+    if (!this.renderer) return;
+    const host = this.bodyHost as unknown as {
+      getChildren?: () => Renderable[];
+    };
+    const top = typeof host.getChildren === "function" ? host.getChildren() : [];
+    const walk = (node: Renderable): boolean => {
+      const n = node as unknown as {
+        focusable?: boolean;
+        focus?: () => void;
+        blur?: () => void;
+        getChildren?: () => Renderable[];
+      };
+      if (n.focusable && typeof n.focus === "function") {
+        n.focus();
+        this.focusedStepWidget = n;
+        return true;
+      }
+      const children = typeof n.getChildren === "function" ? n.getChildren() : [];
+      for (const child of children) {
+        if (walk(child)) return true;
+      }
+      return false;
+    };
+    for (const child of top) {
+      if (walk(child)) return;
+    }
+  }
+
   private detachModal(): void {
+    // Same reason as in renderCurrentStep: removal does not blur, and a
+    // focused widget inside the modal would stay subscribed after close.
+    this.focusedStepWidget?.blur?.();
+    this.focusedStepWidget = null;
     if (this.overlayHost) {
       this.overlayHost.remove(this.modal.id);
     } else {
