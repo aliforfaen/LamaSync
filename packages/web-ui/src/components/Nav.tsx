@@ -79,9 +79,10 @@ export function Nav() {
         type="button"
         className="action theme-toggle"
         onClick={cycleTheme}
-        aria-label="Toggle theme"
+        aria-label={`Theme: ${LABELS[theme]} (click to cycle)`}
+        title={`Theme: ${LABELS[theme]} — click to switch to ${LABELS[ORDER[(ORDER.indexOf(theme) + 1) % ORDER.length]]}`}
       >
-        {LABELS[theme]}
+        Theme: {LABELS[theme]}
       </button>
       <button
         type="button"

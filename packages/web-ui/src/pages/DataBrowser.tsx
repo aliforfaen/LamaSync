@@ -231,13 +231,23 @@ function RefBrowser({
   const [loading, setLoading] = useState(true);
   const [bump, setBump] = useState(0);
 
+  // Phase 1 (WS6): key effects on primitives (kind/path/folderId) instead of
+  // the `ref` object, and stabilize reload. Without this, a parent that
+  // passes a fresh `browseRef` literal on every render cancels every fetch
+  // before `setLoading(false)` lands → skeleton sticks forever.
+  const refKind = ref.kind;
+  const refPath = ref.path;
+  const refFolderId = ref.kind === "s3" ? ref.folderId : undefined;
+
+  const reload = useCallback(() => setBump((n) => n + 1), []);
+
   useEffect(() => {
     let cancelled = false;
     setError(null);
     setLoading(true);
-    const load = ref.kind === "s3"
-      ? api.browseS3(ref.folderId ?? "", ref.path)
-      : api.browseLocal(ref.path);
+    const load = refKind === "s3"
+      ? api.browseS3(refFolderId ?? "", refPath)
+      : api.browseLocal(refPath);
     load
       .then((res) => {
         if (!cancelled) {
@@ -254,16 +264,25 @@ function RefBrowser({
     return () => {
       cancelled = true;
     };
-  }, [ref, bump]);
+  }, [refKind, refPath, refFolderId, bump]);
 
+  // Report context upward only when the ref signature actually changes; the
+  // caller's identity may churn every render even when the value doesn't.
+  const lastReportedRef = useRef<BrowseRef | null>(null);
   useEffect(() => {
-    onContext({
-      ref,
-      reload: () => setBump((n) => n + 1),
-    });
-  }, [ref, onContext]);
+    const prev = lastReportedRef.current;
+    if (
+      prev === null ||
+      prev.kind !== refKind ||
+      prev.path !== refPath ||
+      (prev.kind === "s3" && prev.folderId !== refFolderId)
+    ) {
+      lastReportedRef.current = { kind: refKind, path: refPath, ...(refKind === "s3" ? { folderId: refFolderId } : {}) };
+      onContext({ ref: lastReportedRef.current, reload });
+    }
+  }, [refKind, refPath, refFolderId, onContext, reload]);
 
-  const navigate = (path: string) => onContext({ ref: { ...ref, path }, reload: () => setBump((n) => n + 1) });
+  const navigate = (path: string) => onContext({ ref: { ...ref, path }, reload });
 
   return (
     <div className="browser-tab">
@@ -449,6 +468,19 @@ export function DataBrowser() {
       // polling is best-effort
     }
   }, []);
+
+  // Phase 1 (WS6): stable identity for the inline literal + callbacks that
+  // were re-created on every parent render, which fed an effect-identity
+  // loop in <RefBrowser> (cancelled every fetch → skeleton stuck).
+  const localBrowseRef = useMemo<BrowseRef>(() => ({ kind: "local", path: "" }), []);
+  const reportLocalContext = useCallback(
+    (ctx: TabContext) => setContext((prev) => ({ ...prev, local: ctx })),
+    [],
+  );
+  const reportS3Context = useCallback(
+    (ctx: TabContext) => setContext((prev) => ({ ...prev, s3: ctx })),
+    [],
+  );
 
   useEffect(() => {
     void refreshJobs();
@@ -721,15 +753,15 @@ export function DataBrowser() {
 
       {tab === "local" && (
         <RefBrowser
-          browseRef={{ kind: "local", path: "" }}
-          onContext={(ctx) => setContext((prev) => ({ ...prev, local: ctx }))}
+          browseRef={localBrowseRef}
+          onContext={reportLocalContext}
           selection={selection}
           onToggleSelect={toggleSelect}
           onRename={onRename}
           onDownload={onDownload}
         />
       )}
-      {tab === "s3" && <S3Browser onContext={(ctx) => setContext((prev) => ({ ...prev, s3: ctx }))} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} />}
+      {tab === "s3" && <S3Browser onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} />}
       {tab === "restic" && <ResticBrowser />}
 
       {picker && (
@@ -862,8 +894,12 @@ function S3Browser({
 
   useEffect(() => {
     if (!state) return;
-    onContext({ ref: { kind: "s3", folderId: state.folderId, path: state.path }, reload: () => setBump((n) => n + 1) });
-  }, [state, onContext]);
+    const { folderId, path } = state;
+    onContext({ ref: { kind: "s3", folderId, path }, reload: () => setBump((n) => n + 1) });
+    // Phase 1 (WS6): depend on the primitive ref fields so a parent
+    // re-render that supplies a fresh `onContext` identity does not
+    // re-fire this effect in a loop.
+  }, [state?.folderId, state?.path, onContext]);
 
   if (!state) {
     return <div className="browser-tab">{error ? <div className="error">{error}</div> : <div className="empty-row">No S3 folders configured</div>}</div>;

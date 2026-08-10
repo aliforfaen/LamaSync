@@ -4,6 +4,7 @@ import type { Host } from "@lamasync/core";
 import { api } from "../api.ts";
 import { AddHostGuide } from "../components/AddHostGuide.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
+import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 function formatTimestamp(ts: number | null | undefined): string {
@@ -67,6 +68,7 @@ export function Hosts() {
   // LAMA-225: transient banner on host.renamed WebSocket events.
   const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingHost, setDeletingHost] = useState<Host | null>(null);
   const { event } = useWebSocket();
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -107,15 +109,13 @@ export function Hosts() {
   // dotfile manifests, and history — the daemon on that machine will just
   // re-register unless it's stopped/uninstalled first.
   async function onDelete(h: Host): Promise<void> {
-    if (
-      !confirm(
-        `Delete host “${h.hostname}” (${h.id})?\n\n` +
-          "This removes its assignments, dotfile manifests, and operation history.\n" +
-          "Stop/uninstall the daemon on that machine too, or it will re-register.",
-      )
-    ) {
-      return;
-    }
+    setDeletingHost(h);
+  }
+
+  async function confirmDeleteHost(): Promise<void> {
+    if (!deletingHost) return;
+    const h = deletingHost;
+    setDeletingHost(null);
     setDeletingId(h.id);
     setError(null);
     try {
@@ -212,6 +212,26 @@ export function Hosts() {
             </Link>
           ))}
         </div>
+      )}
+
+      {deletingHost && (
+        <ConfirmDialog
+          title="Delete host"
+          danger
+          confirmLabel="Delete"
+          message={
+            <>
+              Delete host “{deletingHost.hostname}” ({deletingHost.id})?
+              <br />
+              <br />
+              This removes its assignments, dotfile manifests, and operation
+              history. Stop/uninstall the daemon on that machine too, or it
+              will re-register.
+            </>
+          }
+          onConfirm={() => void confirmDeleteHost()}
+          onCancel={() => setDeletingHost(null)}
+        />
       )}
     </div>
   );

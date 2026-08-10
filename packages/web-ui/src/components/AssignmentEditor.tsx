@@ -9,6 +9,7 @@ import type { FolderAssignment } from "@lamasync/core";
 import { api } from "../api.ts";
 // Workstream 2: hint copy lives in the shared glossary now.
 import { CONFLICT_STRATEGY_HINTS, ROLE_HINTS } from "../concepts.ts";
+import { validateCronExpression } from "../cron.ts";
 
 const SCHEDULE_PRESETS: { label: string; value: string; cron: string }[] = [
   { label: "Custom", value: "custom", cron: "" },
@@ -71,15 +72,29 @@ function stateFromAssignment(a: FolderAssignment): EditorState {
 
 interface Props {
   assignment: FolderAssignment;
+  // WS6 P4: optional display names so callers can show "Edit assignment —
+  // Documents on homelab" instead of raw UUIDs. Both fall back to the
+  // id if absent, so this stays a non-breaking add for any future caller.
+  folderName?: string;
+  hostName?: string;
   onSaved: () => void;
   onCancel: () => void;
 }
 
-export function AssignmentEditor({ assignment, onSaved, onCancel }: Props) {
+export function AssignmentEditor({ assignment, folderName, hostName, onSaved, onCancel }: Props) {
   const initial = stateFromAssignment(assignment);
   const [state, setState] = useState<EditorState>(initial);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // WS6 P3: live cron validation — same pattern as the Folders assign form.
+  // Empty stays valid (optional schedule); presets (`@reboot`/`@login`/etc.)
+  // are accepted by the validator as-is, so a preset-selected state never
+  // raises the error.
+  const [cronError, setCronError] = useState<string | null>(
+    state.schedulePreset === "custom" && state.syncExpr.trim() !== ""
+      ? validateCronExpression(state.syncExpr)
+      : null,
+  );
 
   const set = (patch: Partial<EditorState>) => setState((s) => ({ ...s, ...patch }));
 
@@ -87,14 +102,32 @@ export function AssignmentEditor({ assignment, onSaved, onCancel }: Props) {
     const preset = SCHEDULE_PRESETS.find((p) => p.value === value);
     if (preset && value !== "custom") {
       set({ schedulePreset: value, syncExpr: preset.cron });
+      setCronError(null);
     } else {
       set({ schedulePreset: "custom", syncExpr: "" });
+      setCronError(null);
     }
+  }
+
+  function setCron(value: string) {
+    set({ syncExpr: value });
+    setCronError(value.trim() === "" ? null : validateCronExpression(value));
   }
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    // WS6 P3: block save while the cron expression is invalid. Empty is
+    // allowed (matches the Folders assign form: the schedule is optional
+    // and the daemon falls back to its default). Presets short-circuit to
+    // a known-good expression.
+    if (state.schedulePreset === "custom" && state.syncExpr.trim() !== "") {
+      const err = validateCronExpression(state.syncExpr);
+      if (err) {
+        setCronError(err);
+        return;
+      }
+    }
     const body: Record<string, unknown> = {};
 
     const numeric = [
@@ -156,7 +189,7 @@ export function AssignmentEditor({ assignment, onSaved, onCancel }: Props) {
   return (
     <form className="form assignment-editor" onSubmit={onSave}>
       <h2 className="form-title">
-        Edit assignment — {assignment.folderId} on {assignment.hostId}
+        Edit assignment — {folderName ?? assignment.folderId} on {hostName ?? assignment.hostId}
       </h2>
       {error && <div className="error">{error}</div>}
 
@@ -200,8 +233,14 @@ export function AssignmentEditor({ assignment, onSaved, onCancel }: Props) {
           <input
             placeholder="*/15 * * * *"
             value={state.syncExpr}
-            onChange={(e) => set({ syncExpr: e.target.value })}
+            onChange={(e) => setCron(e.target.value)}
+            aria-invalid={cronError !== null}
           />
+          <span className="muted">
+            Cron expression, e.g. <code>0 * * * *</code> = every hour. Leave
+            empty to use the daemon's default schedule.
+          </span>
+          {cronError && <div className="error">{cronError}</div>}
         </label>
       )}
 

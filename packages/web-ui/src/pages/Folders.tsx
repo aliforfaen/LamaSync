@@ -5,6 +5,7 @@ import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { HintText } from "../components/Hint.tsx";
+import { ConfirmDialog } from "../components/Modal.tsx";
 import {
   BACKEND_KIND_HINTS,
   FOLDER_TYPE_HINTS,
@@ -179,6 +180,8 @@ export function Folders() {
   const [assignCronError, setAssignCronError] = useState<string | null>(null);
   // Assignment editing (reuses AssignmentEditor from HostDetail).
   const [editingAssignment, setEditingAssignment] = useState<FolderAssignment | null>(null);
+  const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null);
+  const [unassign, setUnassign] = useState<{ folderId: string; hostId: string } | null>(null);
 
   async function refresh() {
     setError(null);
@@ -275,7 +278,13 @@ export function Folders() {
   }
 
   async function onDelete(id: string) {
-    if (!confirm("Delete this folder and all its assignments?")) return;
+    setDeletingFolderId(id);
+  }
+
+  async function confirmDeleteFolder(): Promise<void> {
+    if (!deletingFolderId) return;
+    const id = deletingFolderId;
+    setDeletingFolderId(null);
     setBusy(true);
     try {
       await api.deleteFolder(id);
@@ -330,8 +339,14 @@ export function Folders() {
     }
   }
 
-  async function onUnassign(folderId: string, hostId: string) {
-    if (!confirm(`Unassign this folder from ${hostId}?`)) return;
+  function onUnassign(folderId: string, hostId: string) {
+    setUnassign({ folderId, hostId });
+  }
+
+  async function confirmUnassign(): Promise<void> {
+    if (!unassign) return;
+    const { folderId, hostId } = unassign;
+    setUnassign(null);
     setBusy(true);
     setError(null);
     try {
@@ -653,6 +668,7 @@ export function Folders() {
       {editingAssignment ? (
         <AssignmentEditor
           assignment={editingAssignment}
+          folderName={items?.find((i) => i.assignments.some((a) => a.id === editingAssignment.id))?.folder.name}
           onSaved={() => {
             setEditingAssignment(null);
             void refresh();
@@ -791,6 +807,28 @@ export function Folders() {
           )}
         </tbody>
       </table>
+
+      {deletingFolderId && (
+        <ConfirmDialog
+          title="Delete folder"
+          danger
+          confirmLabel="Delete"
+          message="Delete this folder and all its assignments?"
+          onConfirm={() => void confirmDeleteFolder()}
+          onCancel={() => setDeletingFolderId(null)}
+        />
+      )}
+
+      {unassign && (
+        <ConfirmDialog
+          title="Unassign folder"
+          danger
+          confirmLabel="Unassign"
+          message={`Unassign this folder from ${unassign.hostId}?`}
+          onConfirm={() => void confirmUnassign()}
+          onCancel={() => setUnassign(null)}
+        />
+      )}
     </div>
   );
 }

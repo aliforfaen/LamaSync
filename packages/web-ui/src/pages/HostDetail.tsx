@@ -15,6 +15,7 @@ import { EditableHostname } from "../components/EditableHostname.tsx";
 import { Hint } from "../components/Hint.tsx";
 import { MISC_HINTS } from "../concepts.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
+import { ConfirmDialog } from "../components/Modal.tsx";
 
 interface DetailData {
   host: Host;
@@ -65,6 +66,7 @@ export function HostDetail() {
   // Assignment editing (pause/resume + full editor).
   const [editingAssignment, setEditingAssignment] = useState<FolderAssignment | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   // LAMA-225: transient banner when this host's label is renamed.
   const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
   const { event } = useWebSocket();
@@ -168,17 +170,14 @@ export function HostDetail() {
 
   // LAMA-198: decommission. Cascade is server-side (DELETE /hosts/:hostId);
   // the daemon on that machine re-registers unless stopped/uninstalled.
-  async function onDeleteHost(): Promise<void> {
+  function onDeleteHost(): void {
     if (!data) return;
-    if (
-      !confirm(
-        `Delete host “${data.host.hostname}” (${data.host.id})?\n\n` +
-          "This removes its assignments, dotfile manifests, and operation history.\n" +
-          "Stop/uninstall the daemon on that machine too, or it will re-register.",
-      )
-    ) {
-      return;
-    }
+    setConfirmDelete(true);
+  }
+
+  async function runDeleteHost(): Promise<void> {
+    if (!data) return;
+    setConfirmDelete(false);
     setDeleting(true);
     setError(null);
     try {
@@ -232,7 +231,7 @@ export function HostDetail() {
           type="button"
           className="action danger"
           disabled={deleting}
-          onClick={() => void onDeleteHost()}
+          onClick={() => onDeleteHost()}
         >
           {deleting ? "…" : "Delete host"}
         </button>
@@ -320,6 +319,8 @@ export function HostDetail() {
         {editingAssignment ? (
           <AssignmentEditor
             assignment={editingAssignment}
+            folderName={folderById.get(editingAssignment.folderId)?.name}
+            hostName={data?.host.hostname}
             onSaved={() => {
               setEditingAssignment(null);
               void refresh();
@@ -502,6 +503,26 @@ export function HostDetail() {
           <pre className="rclone-config">{config.rcloneConfig}</pre>
         </details>
       </section>
+
+      {confirmDelete && data && (
+        <ConfirmDialog
+          title="Delete host"
+          danger
+          confirmLabel="Delete"
+          message={
+            <>
+              Delete host “{data.host.hostname}” ({data.host.id})?
+              <br />
+              <br />
+              This removes its assignments, dotfile manifests, and operation
+              history. Stop/uninstall the daemon on that machine too, or it
+              will re-register.
+            </>
+          }
+          onConfirm={() => void runDeleteHost()}
+          onCancel={() => setConfirmDelete(false)}
+        />
+      )}
     </div>
   );
 }

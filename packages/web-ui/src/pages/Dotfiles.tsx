@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import type { DotfileManifest, DotfileVersion, Host } from "@lamasync/core";
 import { api } from "../api.ts";
 import { HintText } from "../components/Hint.tsx";
+import { ConfirmDialog } from "../components/Modal.tsx";
 import { MISC_HINTS } from "../concepts.ts";
 
 const GLOBAL_HOST_ID = "_global";
@@ -89,6 +90,8 @@ export function Dotfiles() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [versions, setVersions] = useState<Record<string, DotfileVersion[]>>({});
   const [versionsLoading, setVersionsLoading] = useState(false);
+  const [deletingManifestId, setDeletingManifestId] = useState<string | null>(null);
+  const [deletingVersion, setDeletingVersion] = useState<{ appName: string; version: DotfileVersion } | null>(null);
 
   async function refresh(currentScope: Scope, requestId: number) {
     // LAMA-225 P1-8: a request-counter guard ignores stale responses.
@@ -230,8 +233,14 @@ export function Dotfiles() {
     }
   }
 
-  async function onDelete(id: string) {
-    if (!confirm("Delete this manifest and all its versions?")) return;
+  function onDelete(id: string) {
+    setDeletingManifestId(id);
+  }
+
+  async function confirmDeleteManifest(): Promise<void> {
+    if (!deletingManifestId) return;
+    const id = deletingManifestId;
+    setDeletingManifestId(null);
     setBusy(true);
     try {
       await api.deleteManifest(id);
@@ -274,8 +283,14 @@ export function Dotfiles() {
     }
   }
 
-  async function onDeleteVersion(appName: string, version: DotfileVersion) {
-    if (!confirm(`Delete dotfile version ${version.id.slice(0, 8)}?`)) return;
+  function onDeleteVersion(appName: string, version: DotfileVersion) {
+    setDeletingVersion({ appName, version });
+  }
+
+  async function confirmDeleteVersion(): Promise<void> {
+    if (!deletingVersion) return;
+    const { appName, version } = deletingVersion;
+    setDeletingVersion(null);
     setBusy(true);
     setError(null);
     try {
@@ -637,6 +652,28 @@ export function Dotfiles() {
           )}
         </tbody>
       </table>
+
+      {deletingManifestId && (
+        <ConfirmDialog
+          title="Delete manifest"
+          danger
+          confirmLabel="Delete"
+          message="Delete this manifest and all its versions?"
+          onConfirm={() => void confirmDeleteManifest()}
+          onCancel={() => setDeletingManifestId(null)}
+        />
+      )}
+
+      {deletingVersion && (
+        <ConfirmDialog
+          title="Delete dotfile version"
+          danger
+          confirmLabel="Delete"
+          message={`Delete dotfile version ${deletingVersion.version.id.slice(0, 8)}?`}
+          onConfirm={() => void confirmDeleteVersion()}
+          onCancel={() => setDeletingVersion(null)}
+        />
+      )}
     </div>
   );
 }

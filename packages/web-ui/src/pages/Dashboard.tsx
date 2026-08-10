@@ -148,6 +148,15 @@ export function Dashboard() {
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
 
+  // WS6 P4: resolve folder ids to display names for the needs-attention
+  // conflict list. Memoized so the map is rebuilt only when the folders
+  // list changes; unknown ids fall back to the raw id.
+  const folderNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const f of data?.folders ?? []) m.set(f.id, f.name);
+    return m;
+  }, [data?.folders]);
+
   useEffect(() => {
     if (typeof localStorage === "undefined") return;
     localStorage.setItem(LAST_VISIT_KEY, String(Date.now()));
@@ -293,7 +302,9 @@ export function Dashboard() {
               <ul>
                 {data?.pendingConflicts.slice(0, 3).map((c) => (
                   <li key={c.id} title={formatTimestamp(c.createdAt)}>
-                    <span className="attention-entry-text">{c.folderId}</span>
+                    <span className="attention-entry-text">
+                      {folderNameById.get(c.folderId) ?? c.folderId}
+                    </span>
                     <span className="attention-entry-time">
                       {formatTimeAgo(c.createdAt)}
                     </span>

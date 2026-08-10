@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { Conflict, Folder, Host } from "@lamasync/core";
 import { api } from "../api.ts";
+import { ConfirmDialog } from "../components/Modal.tsx";
 
 type Resolution = "local" | "remote" | "both";
 
@@ -25,6 +26,7 @@ export function Conflicts() {
   const [tab, setTab] = useState<ConflictTab>("pending");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pending, setPending] = useState<{ id: string; resolution: Resolution; message: string } | null>(null);
 
   async function refresh() {
     setError(null);
@@ -46,6 +48,16 @@ export function Conflicts() {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  function requestResolve(id: string, resolution: Resolution) {
+    const message =
+      resolution === "local"
+        ? "Resolve conflict using the local version?"
+        : resolution === "remote"
+          ? "Resolve conflict using the remote version?"
+          : "Resolve conflict by keeping both versions?";
+    setPending({ id, resolution, message });
+  }
 
   async function onResolve(id: string, resolution: Resolution) {
     setBusy(id);
@@ -157,11 +169,7 @@ export function Conflicts() {
                         type="button"
                         className="action"
                         disabled={busy === c.id}
-                        onClick={() => {
-                          if (confirm("Resolve conflict using the local version?")) {
-                            onResolve(c.id, "local");
-                          }
-                        }}
+                        onClick={() => requestResolve(c.id, "local")}
                       >
                         Local
                       </button>
@@ -170,11 +178,7 @@ export function Conflicts() {
                         type="button"
                         className="action"
                         disabled={busy === c.id}
-                        onClick={() => {
-                          if (confirm("Resolve conflict using the remote version?")) {
-                            onResolve(c.id, "remote");
-                          }
-                        }}
+                        onClick={() => requestResolve(c.id, "remote")}
                       >
                         Remote
                       </button>
@@ -183,11 +187,7 @@ export function Conflicts() {
                         type="button"
                         className="action"
                         disabled={busy === c.id}
-                        onClick={() => {
-                          if (confirm("Resolve conflict by keeping both versions?")) {
-                            onResolve(c.id, "both");
-                          }
-                        }}
+                        onClick={() => requestResolve(c.id, "both")}
                       >
                         Both
                       </button>
@@ -201,6 +201,19 @@ export function Conflicts() {
           )}
         </tbody>
       </table>
+
+      {pending && (
+        <ConfirmDialog
+          title="Resolve conflict"
+          message={pending.message}
+          onConfirm={() => {
+            const p = pending;
+            setPending(null);
+            void onResolve(p.id, p.resolution);
+          }}
+          onCancel={() => setPending(null)}
+        />
+      )}
     </div>
   );
 }
