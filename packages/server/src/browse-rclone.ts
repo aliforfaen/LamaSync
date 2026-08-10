@@ -121,12 +121,12 @@ export function buildRcloneConfig(input: BuildConfigInput): string {
 }
 
 export interface BuildArgvInput {
-  operation: "copyto" | "moveto" | "mkdir" | "delete" | "size";
+  operation: "copyto" | "moveto" | "mkdir" | "delete" | "deletefile" | "purge" | "cat" | "size";
   /** rclone config path on disk (caller writes the temp file). */
   configPath: string;
   /**
    * For copyto/moveto: srcRemote + srcPath (joined as `srcRemote:srcPath`).
-   * For mkdir/delete/size: the single remote:path (src side).
+   * For mkdir/delete/deletefile/purge/size: the single remote:path (src side).
    */
   srcRemote: string;
   srcPath: string;
@@ -159,6 +159,9 @@ export function buildRcloneArgv(input: BuildArgvInput): string[] {
   } else if (
     input.operation === "mkdir" ||
     input.operation === "delete" ||
+    input.operation === "deletefile" ||
+    input.operation === "purge" ||
+    input.operation === "cat" ||
     input.operation === "size"
   ) {
     argv.push(`${input.srcRemote}:${input.srcPath}`);

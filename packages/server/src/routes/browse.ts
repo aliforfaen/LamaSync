@@ -8,8 +8,10 @@ import { resolveBrowsePath, statEntry, validateBrowseInput } from "../browse-pat
 import { listS3Objects, S3ListObjectsError } from "../s3-list.ts";
 import { resolveFolderS3Config } from "../backends.ts";
 import {
+  downloadBrowseFile,
   listBrowseJobs,
   startBrowseCopyMove,
+  startBrowseDelete,
   startBrowseMkdir,
   startBrowseRename,
   startBrowseUpload,
@@ -407,6 +409,75 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
           201: { description: "Job started" },
           400: { description: "Invalid input" },
           409: { description: "Destination busy" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/browse/delete",
+    async ({ body, set }) => {
+      const { ref, names } = body;
+      try {
+        const result = await startBrowseDelete(activeDb, ref, names, sourceLabel(ref));
+        if (result.busy) {
+          set.status = 409;
+          return { error: "destination busy — another operation is writing there" };
+        }
+        set.status = 201;
+        return result.job;
+      } catch (error) {
+        return scrubWriteError(set, error, "delete");
+      }
+    },
+    {
+      body: t.Object({
+        ref: browseRefSchema,
+        names: t.Array(t.String()),
+      }),
+      detail: {
+        summary: "Delete entries (files + directories) from a browse path",
+        tags: ["Data Browser"],
+        responses: {
+          201: { description: "Job started" },
+          400: { description: "Invalid input" },
+          409: { description: "Destination busy" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/browse/download",
+    async ({ body, set }) => {
+      const { ref, name } = body;
+      if (!name) {
+        set.status = 400;
+        return { error: "name is required" };
+      }
+      try {
+        const outcome = await downloadBrowseFile(activeDb, ref, name);
+        if (!outcome.ok) {
+          set.status = outcome.status;
+          return { error: outcome.error };
+        }
+        return outcome.data;
+      } catch (error) {
+        return scrubWriteError(set, error, "download");
+      }
+    },
+    {
+      body: t.Object({
+        ref: browseRefSchema,
+        name: t.String(),
+      }),
+      detail: {
+        summary: "Download a file (base64, <= 64 MiB) from a browse path",
+        tags: ["Data Browser"],
+        responses: {
+          200: { description: "File content (base64)" },
+          400: { description: "Invalid input, directory, or over the 64 MiB cap" },
+          404: { description: "Entry not found" },
           401: { description: "Unauthorized" },
         },
       },

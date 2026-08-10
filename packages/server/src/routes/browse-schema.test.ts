@@ -107,4 +107,12 @@ describe("write-op schemas reject unknown kind values (LAMA-226 P1-9)", () => {
     });
     expect(res.status).toBe(422);
   });
+
+  test("/browse/delete rejects kind: 'webdav'", async () => {
+    const res = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "webdav", path: "src" },
+      names: ["a"],
+    });
+    expect(res.status).toBe(422);
+  });
 });

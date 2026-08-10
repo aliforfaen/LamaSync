@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Elysia } from "elysia";
 import { initDb } from "@lamasync/core";
 import type { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { browseRoutes, __setDb, __setListS3Impl } from "./browse.ts";
@@ -133,6 +133,106 @@ describe("GET /api/v1/browse/local", () => {
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "path is not a directory" });
+  });
+});
+
+describe("POST /api/v1/browse/download", () => {
+  test("round-trips a local file's bytes", async () => {
+    mkdirSync(join(dataDir, "docs"));
+    const original = Buffer.from([0, 1, 2, 254, 255, 10, 13, 0, 65]);
+    writeFileSync(join(dataDir, "docs", "blob.bin"), original);
+
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: { kind: "local", path: "docs" }, name: "blob.bin" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { name: string; content: string };
+    expect(body.name).toBe("blob.bin");
+    expect(Buffer.from(body.content, "base64")).toEqual(original);
+  });
+
+  test("rejects directories", async () => {
+    mkdirSync(join(dataDir, "docs"));
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: { kind: "local", path: "" }, name: "docs" }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("cannot download a directory");
+  });
+
+  test("returns 404 for a missing entry", async () => {
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: { kind: "local", path: "" }, name: "nope.txt" }),
+      }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("rejects traversal names", async () => {
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: { kind: "local", path: "" }, name: "../etc/passwd" }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("download failed");
+  });
+
+  test("over-cap file names the 64 MiB limit", async () => {
+    // 64 MiB + 1 byte — slightly over so the cap check trips.
+    const big = Buffer.alloc(64 * 1024 * 1024 + 1, 0x61);
+    writeFileSync(join(dataDir, "big.bin"), big);
+
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: { kind: "local", path: "" }, name: "big.bin" }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("64 MiB");
+  });
+
+  test("refuses a symlink that escapes the backup root", async () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), "lamasync-outside-"));
+    writeFileSync(join(outsideDir, "secret.txt"), "top secret");
+    symlinkSync(join(outsideDir, "secret.txt"), join(dataDir, "escape.txt"));
+
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: { kind: "local", path: "" }, name: "escape.txt" }),
+      }),
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("entry not found");
+
+    rmSync(outsideDir, { recursive: true, force: true });
   });
 });
 

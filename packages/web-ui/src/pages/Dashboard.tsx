@@ -141,6 +141,9 @@ export function Dashboard() {
   // LAMA-224: storage report (server-side 5-min cache; refresh button bypasses).
   const [storage, setStorage] = useState<StorageReport | null>(null);
   const [storageBusy, setStorageBusy] = useState(false);
+  // UX workstream 4: a failed storage fetch surfaces an inline hint instead
+  // of being silently swallowed.
+  const [storageError, setStorageError] = useState<string | null>(null);
   // LAMA-203: captured once; highlights are computed against the previous
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
@@ -204,10 +207,14 @@ export function Dashboard() {
     api
       .storageReport()
       .then((report) => {
-        if (!cancelled) setStorage(report);
+        if (!cancelled) {
+          setStorage(report);
+          setStorageError(null);
+        }
       })
-      .catch(() => {
-        // storage is a nice-to-have; don't fail the dashboard over it
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setStorageError(err instanceof Error ? err.message : String(err));
       });
     return () => {
       cancelled = true;
@@ -255,8 +262,9 @@ export function Dashboard() {
     setError(null);
     try {
       setStorage(await api.storageReport(true));
+      setStorageError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setStorageError(err instanceof Error ? err.message : String(err));
     } finally {
       setStorageBusy(false);
     }
@@ -395,9 +403,21 @@ export function Dashboard() {
           </button>
         </div>
         {!storage ? (
-          <div className="empty-row">Loading storage report…</div>
+          <div className="empty-row">
+            {storageError ? (
+              <span className="error">
+                Storage report unavailable — {storageError}
+              </span>
+            ) : (
+              "Loading storage report…"
+            )}
+          </div>
         ) : (
-          <table className="data">
+          <>
+            {storageError && (
+              <div className="error">Storage refresh failed — {storageError}</div>
+            )}
+            <table className="data">
             <thead>
               <tr>
                 <th>Source</th>
@@ -440,6 +460,7 @@ export function Dashboard() {
               </tr>
             </tbody>
           </table>
+          </>
         )}
       </section>
 

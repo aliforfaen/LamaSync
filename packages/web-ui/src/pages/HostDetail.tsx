@@ -98,14 +98,17 @@ export function HostDetail() {
 
   const assignments = data?.config.assignments ?? [];
   const folders = data?.config.folders ?? [];
+  const folderById = useMemo(
+    () => new Map(folders.map((f) => [f.id, f])),
+    [folders],
+  );
 
   const assignmentRows = useMemo(() => {
-    const folderById = new Map(folders.map((f) => [f.id, f]));
     return assignments.map((a) => ({
       assignment: a,
       folder: folderById.get(a.folderId) ?? null,
     }));
-  }, [assignments, folders]);
+  }, [assignments, folderById]);
 
   async function onAction(type: ActionKind): Promise<void> {
     setBusy(type);
@@ -133,7 +136,9 @@ export function HostDetail() {
         payload: dryRun ? { folderId, dryRun: true } : { folderId },
       });
       setSyncNote(
-        `${dryRun ? "Dry run" : "Sync"} of “${folderId}” queued — runs on the daemon within ~30 s`,
+        `${dryRun ? "Dry run" : "Sync"} of “${
+          folderById.get(folderId)?.name ?? folderId
+        }” queued — runs on the daemon within ~30 s`,
       );
       window.setTimeout(() => setSyncNote(null), 6000);
     } catch (err) {
@@ -340,7 +345,15 @@ export function HostDetail() {
             <tbody>
               {assignmentRows.map(({ assignment, folder }) => (
                 <tr key={assignment.id}>
-                  <td>{folder ? folder.name : assignment.folderId}</td>
+                  <td>
+                    {folder ? folder.name : assignment.folderId}{" "}
+                    <Link
+                      className="action"
+                      to={`/operations?folderId=${encodeURIComponent(assignment.folderId)}`}
+                    >
+                      History
+                    </Link>
+                  </td>
                   <td>
                     <span className="badge badge-unknown">
                       {folder?.type ?? "—"}

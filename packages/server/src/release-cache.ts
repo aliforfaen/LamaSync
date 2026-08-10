@@ -11,19 +11,7 @@
 // `null`.
 
 import { VERSION } from "@lamasync/core";
-
-export interface ReleaseAssetView {
-  name: string;
-  downloadUrl: string;
-  size: number;
-}
-
-export interface ReleaseInfo {
-  tag: string;
-  version: string;
-  publishedAt: string;
-  assets: ReleaseAssetView[];
-}
+import type { ReleaseAssetView, ReleaseInfo } from "@lamasync/core";
 
 const GITHUB_API =
   "https://api.github.com/repos/aliforfaen/LamaSync/releases/latest";

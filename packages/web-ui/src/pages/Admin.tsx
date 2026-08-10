@@ -5,6 +5,7 @@ import type {
   NotificationSeverity,
 } from "@lamasync/core";
 import { api } from "../api.ts";
+import { ConfirmDialog } from "../components/Modal.tsx";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SEVERITY_LEVELS: NotificationSeverity[] = ["critical", "default", "info"];
@@ -36,11 +37,51 @@ interface ChannelTestResult {
   delivered: boolean;
 }
 
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || bytes < 0) return "—";
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+// Local copy of core's `isNewer` (packages/core/src/version-compare.ts):
+// importing it from the core barrel would pull `initDb`/`bun:sqlite` into
+// the web bundle, which Vite cannot resolve. Kept in lock-step with the
+// core implementation — numeric triple compare, tolerates a leading v/V.
+function isNewer(current: string, candidate: string): boolean {
+  const cur = parseSemver(current);
+  const can = parseSemver(candidate);
+  if (!cur || !can) return false;
+  for (let i = 0; i < 3; i++) {
+    if (can[i]! > cur[i]!) return true;
+    if (can[i]! < cur[i]!) return false;
+  }
+  return false;
+}
+
+function parseSemver(v: string): [number, number, number] | null {
+  const stripped = v.trim().replace(/^[vV]/, "");
+  const m = stripped.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  const nums = [m[1], m[2], m[3]].map((s) => Number.parseInt(s!, 10));
+  if (nums.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  return nums as [number, number, number];
+}
+
 export function Admin() {
   const [days, setDays] = useState("30");
   const [pruneResult, setPruneResult] = useState<string | null>(null);
   const [pruneError, setPruneError] = useState<string | null>(null);
   const [pruneBusy, setPruneBusy] = useState(false);
+  // UX workstream 4: prune requires explicit confirmation (destructive).
+  const [pruneConfirmDays, setPruneConfirmDays] = useState<number | null>(null);
+  const [deleteChannel, setDeleteChannel] = useState<NotificationChannel | null>(null);
   const [notifications, setNotifications] = useState<NotificationEvent[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [notificationBusy, setNotificationBusy] = useState(false);
@@ -69,6 +110,11 @@ export function Admin() {
     "info",
   ]);
   const [addBusy, setAddBusy] = useState(false);
+  // UX workstream 4: Server block (version / DB size / update badge).
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [dbSizeBytes, setDbSizeBytes] = useState<number | null>(null);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [serverInfoError, setServerInfoError] = useState<string | null>(null);
 
   async function refreshNotifications(): Promise<void> {
     setNotificationsLoading(true);
@@ -96,21 +142,41 @@ export function Admin() {
   useEffect(() => {
     void refreshNotifications();
     void refreshChannels();
+    // UX workstream 4: server self-description + latest release.
+    void Promise.all([api.health().catch(() => null), api.latestRelease().catch(() => null)])
+      .then(([health, release]) => {
+        if (health) {
+          setServerVersion(health.serverVersion);
+          setDbSizeBytes(health.dbSizeBytes);
+        }
+        if (release) setLatestVersion(release.version);
+        setServerInfoError(null);
+      })
+      .catch((err: unknown) => {
+        setServerInfoError(err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const parsed = Number.parseInt(days, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setPruneError("days must be a non-negative integer");
+      return;
+    }
+    // UX workstream 4: never fire destructive prune without confirmation.
+    setPruneConfirmDays(parsed);
+  }
+
+  async function runPrune(parsed: number): Promise<void> {
+    setPruneConfirmDays(null);
     setPruneBusy(true);
     setPruneError(null);
     setPruneResult(null);
     try {
-      const parsed = Number.parseInt(days, 10);
-      if (!Number.isFinite(parsed) || parsed < 0) {
-        throw new Error("days must be a non-negative integer");
-      }
       const res = await api.pruneOperations(parsed * DAY_MS);
       setPruneResult(
-        `Deleted ${res.deleted} operation_log entries older than ${days} day(s)`,
+        `Deleted ${res.deleted} operation_log entries older than ${parsed} day(s)`,
       );
     } catch (err) {
       setPruneError(err instanceof Error ? err.message : String(err));
@@ -220,7 +286,13 @@ export function Admin() {
   }
 
   async function onDeleteChannel(channel: NotificationChannel): Promise<void> {
-    if (!window.confirm(`Delete channel "${channel.name}"?`)) return;
+    setDeleteChannel(channel);
+  }
+
+  async function confirmDeleteChannel(): Promise<void> {
+    if (!deleteChannel) return;
+    const channel = deleteChannel;
+    setDeleteChannel(null);
     try {
       await api.deleteNotificationChannel(channel.id);
       setChannels((current) => current.filter((c) => c.id !== channel.id));
@@ -270,6 +342,40 @@ export function Admin() {
       <div className="toolbar">
         <h1>Admin</h1>
       </div>
+
+      <section className="section">
+        <h2>Server</h2>
+        {serverInfoError ? (
+          <div className="error">{serverInfoError}</div>
+        ) : (
+          <table className="data">
+            <tbody>
+              <tr>
+                <td className="muted">Server version</td>
+                <td>
+                  <code>{serverVersion ?? "—"}</code>
+                  {serverVersion && latestVersion && isNewer(serverVersion, latestVersion) ? (
+                    <span className="badge badge-success">update available</span>
+                  ) : null}
+                </td>
+              </tr>
+              <tr>
+                <td className="muted">Database size</td>
+                <td>{formatBytes(dbSizeBytes)}</td>
+              </tr>
+              <tr>
+                <td className="muted">Latest release</td>
+                <td>
+                  <code>{latestVersion ?? "—"}</code>
+                  {serverVersion && latestVersion && isNewer(serverVersion, latestVersion) ? (
+                    <span className="muted">— newer than this server</span>
+                  ) : null}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </section>
 
       <section className="section">
         <h2>Operation log retention</h2>
@@ -600,6 +706,27 @@ export function Admin() {
           </tbody>
         </table>
       </section>
+
+      {pruneConfirmDays !== null && (
+        <ConfirmDialog
+          title="Prune operations"
+          danger
+          confirmLabel="Delete logs"
+          message={`This deletes every operation_log entry older than ${pruneConfirmDays} day(s) permanently. This cannot be undone.`}
+          onConfirm={() => void runPrune(pruneConfirmDays)}
+          onCancel={() => setPruneConfirmDays(null)}
+        />
+      )}
+      {deleteChannel && (
+        <ConfirmDialog
+          title="Delete channel"
+          danger
+          confirmLabel="Delete"
+          message={`Delete channel "${deleteChannel.name}"? Notifications to it will stop immediately.`}
+          onConfirm={() => void confirmDeleteChannel()}
+          onCancel={() => setDeleteChannel(null)}
+        />
+      )}
     </div>
   );
 }

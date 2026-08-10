@@ -1,30 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { Host } from "@lamasync/core";
-import { api, ApiError } from "../api.ts";
+import { api, errorText } from "../api.ts";
 
 interface EditableHostnameProps {
   host: Host;
   /** Called after a successful rename so the parent can refetch. */
   onRenamed: () => void;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function errorText(err: unknown): string {
-  if (err instanceof ApiError) {
-    try {
-      const parsed: unknown = JSON.parse(err.body);
-      if (isRecord(parsed) && typeof parsed.error === "string") {
-        return parsed.error;
-      }
-    } catch {
-      // body was not JSON; fall through to the raw body
-    }
-    return err.body;
-  }
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

@@ -7,6 +7,13 @@ import { reconcileStuckBrowseJobs } from "./browse-jobs.ts";
 
 const dataDir = process.env.LAMASYNC_DATA_DIR ?? "/data";
 
+/** Absolute path of the on-disk SQLite database file. Used by /health to
+ *  report `dbSizeBytes` (the file may not exist yet when the DB is the
+ *  in-memory test fallback — callers must handle stat failures). */
+export function dbFilePath(): string {
+  return join(dataDir, "lamasync.db");
+}
+
 let _db: Database | null = null;
 
 /**

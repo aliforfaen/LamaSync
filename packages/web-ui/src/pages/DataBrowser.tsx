@@ -6,9 +6,12 @@ import type {
   BrowseRef,
   BrowseResponse,
   Folder,
+  Host,
+  ResticRestoreJob,
   ResticSnapshot,
 } from "@lamasync/core";
 import { api } from "../api.ts";
+import { ConfirmDialog, PromptDialog } from "../components/Modal.tsx";
 import { IconFolder, IconStorage } from "../components/icons.tsx";
 
 type Tab = "local" | "s3" | "restic";
@@ -89,11 +92,14 @@ interface EntriesTableProps {
   selection?: Set<string>;
   onToggleSelect?: (name: string) => void;
   onRename?: (name: string) => void;
+  // UX workstream 4: per-file download.
+  onDownload?: (name: string) => void;
 }
 
-function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename }: EntriesTableProps) {
+function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename, onDownload }: EntriesTableProps) {
   const parent = parentPath(path);
   const selectable = Boolean(selection && onToggleSelect);
+  const hasActions = Boolean(onRename || onDownload);
   const sorted = useMemo(() => {
     const entries = response?.entries ?? [];
     const dirs = entries.filter((e) => e.type === "dir");
@@ -119,13 +125,13 @@ function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onTog
           <th>Size</th>
           <th>Modified</th>
           {ownerLabel && <th>{ownerLabel}</th>}
-          {onRename && <th />}
+          {hasActions && <th />}
         </tr>
       </thead>
       <tbody>
         {parent !== null && (
           <tr className="browser-parent">
-            <td colSpan={selectable ? 6 : onRename ? 6 : ownerLabel ? 5 : 4}>
+            <td colSpan={selectable ? 6 : hasActions ? 6 : ownerLabel ? 5 : 4}>
               <button type="button" className="action" onClick={() => onNavigate(parent === "" ? "" : `${parent}/`)}>
                 ../ parent
               </button>
@@ -165,11 +171,22 @@ function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onTog
                 {entry.folderId ? <span className="muted">{entry.folderId}</span> : "—"}
               </td>
             )}
-            {onRename && (
+            {hasActions && (
               <td>
-                <button type="button" className="action" onClick={() => onRename(entry.name)}>
-                  Rename
-                </button>
+                {onDownload && entry.type === "file" && (
+                  <button
+                    type="button"
+                    className="action"
+                    onClick={() => onDownload(entry.name)}
+                  >
+                    Download
+                  </button>
+                )}
+                {onRename && (
+                  <button type="button" className="action" onClick={() => onRename(entry.name)}>
+                    Rename
+                  </button>
+                )}
               </td>
             )}
           </tr>
@@ -188,12 +205,14 @@ function RefBrowser({
   selection,
   onToggleSelect,
   onRename,
+  onDownload,
 }: {
   browseRef: BrowseRef;
   onContext: (ctx: TabContext) => void;
   selection?: Set<string>;
   onToggleSelect?: (name: string) => void;
   onRename?: (name: string) => void;
+  onDownload?: (name: string) => void;
 }) {
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -238,6 +257,7 @@ function RefBrowser({
         selection={selection}
         onToggleSelect={onToggleSelect}
         onRename={onRename}
+        onDownload={onDownload}
       />
     </div>
   );
@@ -382,6 +402,18 @@ export function DataBrowser() {
   });
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [picker, setPicker] = useState<PickerState | null>(null);
+  // UX workstream 4: styled dialogs replace native prompt/confirm.
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [deleteTargets, setDeleteTargets] = useState<string[] | null>(null);
+  const [overwrite, setOverwrite] = useState<{
+    mode: "copy" | "move";
+    source: BrowseRef;
+    destination: BrowseRef;
+    names: string[];
+    conflicts: string[];
+  } | null>(null);
+  const [uploadConfirm, setUploadConfirm] = useState<File | null>(null);
   const [jobs, setJobs] = useState<BrowseJob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -417,18 +449,26 @@ export function DataBrowser() {
   }
 
   function onRename(name: string): void {
-    const to = window.prompt(`Rename '${name}' to:`, name);
-    if (!to || to === name || !current) return;
+    setRenameTarget(name);
+  }
+
+  function confirmRename(to: string): void {
+    if (!renameTarget || !current || to === renameTarget) return;
+    setRenameTarget(null);
     setError(null);
     void api
-      .browseRename(current.ref, name, to)
+      .browseRename(current.ref, renameTarget, to)
       .then(() => current.reload())
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 
   function onMkdir(): void {
-    const name = window.prompt("New directory name:", "");
-    if (!name || !current) return;
+    setMkdirOpen(true);
+  }
+
+  function confirmMkdir(name: string): void {
+    if (!current) return;
+    setMkdirOpen(false);
     setError(null);
     void api
       .browseMkdir(current.ref, name)
@@ -436,8 +476,29 @@ export function DataBrowser() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 
+  function onDownload(name: string): void {
+    if (!current) return;
+    setError(null);
+    void api
+      .browseDownload(current.ref, name)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }
+
   function onUpload(file: File | undefined): void {
     if (!file || !current) return;
+    // UX workstream 4: confirm overwrite when a same-named entry already
+    // exists at the current path.
+    void entryExists(current.ref, file.name).then((exists) => {
+      if (exists) {
+        setUploadConfirm(file);
+        return;
+      }
+      uploadFile(file);
+    });
+  }
+
+  function uploadFile(file: File): void {
+    if (!current) return;
     const reader = new FileReader();
     reader.onload = () => {
       const base64 = String(reader.result ?? "").split(",").pop() ?? "";
@@ -450,6 +511,36 @@ export function DataBrowser() {
     reader.readAsDataURL(file);
   }
 
+  /** Resolve whether an entry with this name exists at a ref's path. */
+  async function entryExists(ref: BrowseRef, name: string): Promise<boolean> {
+    try {
+      const listing =
+        ref.kind === "s3"
+          ? await api.browseS3(ref.folderId ?? "", ref.path)
+          : await api.browseLocal(ref.path);
+      return listing.entries.some((e) => e.name === name);
+    } catch {
+      // Listing failed (unreachable backend etc.) — do not block the op.
+      return false;
+    }
+  }
+
+  async function listExistingNames(
+    ref: BrowseRef,
+    names: string[],
+  ): Promise<string[]> {
+    try {
+      const listing =
+        ref.kind === "s3"
+          ? await api.browseS3(ref.folderId ?? "", ref.path)
+          : await api.browseLocal(ref.path);
+      const present = new Set(listing.entries.map((e) => e.name));
+      return names.filter((n) => present.has(n));
+    } catch {
+      return [];
+    }
+  }
+
   function openPicker(mode: "copy" | "move"): void {
     if (!current || selection.size === 0) return;
     setPicker({
@@ -459,14 +550,53 @@ export function DataBrowser() {
     });
   }
 
-  function onPickDestination(destination: BrowseRef): void {
+  function onDeleteSelected(): void {
+    if (!current || selection.size === 0) return;
+    setDeleteTargets([...selection]);
+  }
+
+  function confirmDelete(): void {
+    if (!current || !deleteTargets) return;
+    const names = deleteTargets;
+    setDeleteTargets(null);
+    setSelection(new Set());
+    setError(null);
+    void api
+      .browseDelete(current.ref, names)
+      .then(() => {
+        if (current) current.reload();
+        void refreshJobs();
+      })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }
+
+  async function onPickDestination(destination: BrowseRef): Promise<void> {
     if (!picker) return;
-    const call =
-      picker.mode === "copy"
-        ? api.browseCopy(picker.source, destination, picker.names)
-        : api.browseMove(picker.source, destination, picker.names);
+    const mode = picker.mode;
+    const source = picker.source;
+    const names = picker.names;
     setPicker(null);
     setSelection(new Set());
+    // UX workstream 4: confirm overwrite when a same-named entry exists at
+    // the destination (move and copy both clobber).
+    const conflicts = await listExistingNames(destination, names);
+    if (conflicts.length > 0) {
+      setOverwrite({ mode, source, destination, names, conflicts });
+      return;
+    }
+    runBrowseOp(mode, source, destination, names);
+  }
+
+  function runBrowseOp(
+    mode: "copy" | "move",
+    source: BrowseRef,
+    destination: BrowseRef,
+    names: string[],
+  ): void {
+    const call =
+      mode === "copy"
+        ? api.browseCopy(source, destination, names)
+        : api.browseMove(source, destination, names);
     setError(null);
     void call
       .then(() => {
@@ -527,6 +657,14 @@ export function DataBrowser() {
           >
             Move to…
           </button>
+          <button
+            type="button"
+            className="action danger"
+            disabled={selection.size === 0}
+            onClick={onDeleteSelected}
+          >
+            Delete
+          </button>
           <button type="button" className="action" onClick={onMkdir}>
             New folder
           </button>
@@ -564,9 +702,10 @@ export function DataBrowser() {
           selection={selection}
           onToggleSelect={toggleSelect}
           onRename={onRename}
+          onDownload={onDownload}
         />
       )}
-      {tab === "s3" && <S3Browser onContext={(ctx) => setContext((prev) => ({ ...prev, s3: ctx }))} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} />}
+      {tab === "s3" && <S3Browser onContext={(ctx) => setContext((prev) => ({ ...prev, s3: ctx }))} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} />}
       {tab === "restic" && <ResticBrowser />}
 
       {picker && (
@@ -574,6 +713,82 @@ export function DataBrowser() {
           state={picker}
           onClose={() => setPicker(null)}
           onPick={onPickDestination}
+        />
+      )}
+
+      {renameTarget && current && (
+        <PromptDialog
+          title="Rename"
+          message={`Rename '${renameTarget}' to:`}
+          initialValue={renameTarget}
+          confirmLabel="Rename"
+          onConfirm={confirmRename}
+          onCancel={() => setRenameTarget(null)}
+        />
+      )}
+      {mkdirOpen && current && (
+        <PromptDialog
+          title="New directory"
+          message="Enter a name for the new directory."
+          confirmLabel="Create"
+          onConfirm={confirmMkdir}
+          onCancel={() => setMkdirOpen(false)}
+        />
+      )}
+      {deleteTargets && current && (
+        <ConfirmDialog
+          title="Delete entries"
+          danger
+          confirmLabel="Delete"
+          message={
+            <p className="muted">
+              Delete {deleteTargets.length} entr
+              {deleteTargets.length === 1 ? "y" : "ies"} permanently?{" "}
+              <code>{deleteTargets.join(", ")}</code>
+            </p>
+          }
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteTargets(null)}
+        />
+      )}
+      {overwrite && (
+        <ConfirmDialog
+          title={`Overwrite at destination`}
+          danger
+          confirmLabel="Overwrite"
+          message={
+            <p className="muted">
+              The destination already contains{" "}
+              <code>{overwrite.conflicts.join(", ")}</code>.{" "}
+              {overwrite.mode === "move" ? "Moving" : "Copying"} will
+              overwrite these entr{overwrite.conflicts.length === 1 ? "y" : "ies"}.
+            </p>
+          }
+          onConfirm={() => {
+            const pending = overwrite;
+            setOverwrite(null);
+            runBrowseOp(pending.mode, pending.source, pending.destination, pending.names);
+          }}
+          onCancel={() => setOverwrite(null)}
+        />
+      )}
+      {uploadConfirm && current && (
+        <ConfirmDialog
+          title="Overwrite file"
+          danger
+          confirmLabel="Overwrite"
+          message={
+            <p className="muted">
+              <code>{uploadConfirm.name}</code> already exists at this path.
+              Upload will overwrite it.
+            </p>
+          }
+          onConfirm={() => {
+            const file = uploadConfirm;
+            setUploadConfirm(null);
+            uploadFile(file);
+          }}
+          onCancel={() => setUploadConfirm(null)}
         />
       )}
 
@@ -587,11 +802,13 @@ function S3Browser({
   selection,
   onToggleSelect,
   onRename,
+  onDownload,
 }: {
   onContext: (ctx: TabContext) => void;
   selection?: Set<string>;
   onToggleSelect?: (name: string) => void;
   onRename?: (name: string) => void;
+  onDownload?: (name: string) => void;
 }) {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [state, setState] = useState<S3PickerState | null>(null);
@@ -656,6 +873,7 @@ function S3Browser({
         selection={selection}
         onToggleSelect={onToggleSelect}
         onRename={onRename}
+        onDownload={onDownload}
       />
     </div>
   );
@@ -664,6 +882,19 @@ function S3Browser({
 function ResticBrowser() {
   const [snapshots, setSnapshots] = useState<ResticSnapshot[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // UX workstream 4: whole-snapshot restore with optional include patterns.
+  const [restoreTarget, setRestoreTarget] = useState<ResticSnapshot | null>(null);
+  const [jobs, setJobs] = useState<ResticRestoreJob[]>([]);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+
+  async function loadJobs(): Promise<void> {
+    try {
+      setJobs(await api.listResticRestoreJobs());
+      setJobsError(null);
+    } catch (err) {
+      setJobsError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -680,6 +911,14 @@ function ResticBrowser() {
     };
   }, []);
 
+  // Poll restore jobs while this tab is mounted; the server broadcasts
+  // `restic_restore` events, but polling keeps this page self-sufficient.
+  useEffect(() => {
+    void loadJobs();
+    const interval = setInterval(() => void loadJobs(), 2000);
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <div className="browser-tab">
       {error && <div className="error">{error}</div>}
@@ -692,12 +931,17 @@ function ResticBrowser() {
             <th>Time</th>
             <th>Paths</th>
             <th>Size</th>
+            <th />
           </tr>
         </thead>
         <tbody>
           {snapshots.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={6}>No restic snapshots recorded</td>
+              <td colSpan={7}>
+                No restic snapshots recorded — backups run on a schedule from
+                the Folders page, and each completed run records a snapshot
+                here.
+              </td>
             </tr>
           ) : (
             snapshots.map((s) => (
@@ -710,11 +954,189 @@ function ResticBrowser() {
                 <td>{formatTimestamp(s.timestamp)}</td>
                 <td>{s.paths.join(", ")}</td>
                 <td>{formatBytes(s.sizeBytes ?? 0)}</td>
+                <td>
+                  <button
+                    type="button"
+                    className="action"
+                    onClick={() => setRestoreTarget(s)}
+                  >
+                    Restore…
+                  </button>
+                </td>
               </tr>
             ))
           )}
         </tbody>
       </table>
+
+      <div className="section">
+        <h2>Restore jobs</h2>
+        {jobsError && <div className="error">{jobsError}</div>}
+        {jobs.length === 0 ? (
+          <div className="empty-row">
+            No restore jobs — restore a snapshot above to queue one for the
+            target host's daemon.
+          </div>
+        ) : (
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Snapshot</th>
+                <th>Target host</th>
+                <th>Target path</th>
+                <th>Created</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.map((job) => (
+                <tr key={job.id}>
+                  <td>
+                    <span className={`badge badge-${job.status}`}>{job.status}</span>
+                  </td>
+                  <td>
+                    <code>{job.snapshotId}</code>
+                  </td>
+                  <td className="muted">{job.targetHostId}</td>
+                  <td className="muted"><code>{job.targetPath}</code></td>
+                  <td className="muted">{formatTimestamp(job.createdAt)}</td>
+                  <td className="muted">{job.error ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {restoreTarget && (
+        <RestoreModal
+          snapshot={restoreTarget}
+          onClose={() => setRestoreTarget(null)}
+          onCreated={() => void loadJobs()}
+        />
+      )}
+    </div>
+  );
+}
+
+function RestoreModal({
+  snapshot,
+  onClose,
+  onCreated,
+}: {
+  snapshot: ResticSnapshot;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [hosts, setHosts] = useState<Host[]>([]);
+  const [targetHostId, setTargetHostId] = useState("");
+  const [targetPath, setTargetPath] = useState("");
+  const [includeText, setIncludeText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .health()
+      .then((health) => {
+        if (!cancelled) {
+          const online = health.hosts.filter((h) => h.status === "online");
+          setHosts(online);
+          if (online.length > 0) setTargetHostId(online[0].id);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function submit(): void {
+    if (!targetHostId) return;
+    const include = includeText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    setBusy(true);
+    setError(null);
+    void api
+      .createResticRestore({
+        snapshotId: snapshot.snapshotId,
+        folderId: snapshot.folderId,
+        targetHostId,
+        targetPath: targetPath.trim() || (snapshot.paths[0] ?? "/"),
+        include,
+      })
+      .then(() => {
+        onCreated();
+        onClose();
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+        setBusy(false);
+      });
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h2>Restore snapshot</h2>
+        <p className="muted">
+          Snapshot <code>{snapshot.snapshotId}</code> of folder{" "}
+          <code>{snapshot.folderId}</code> will be restored by the target
+          host's daemon.
+        </p>
+        {error && <div className="error">{error}</div>}
+        <label className="form-field">
+          Target host
+          <select
+            value={targetHostId}
+            onChange={(e) => setTargetHostId(e.target.value)}
+          >
+            <option value="">Select a host…</option>
+            {hosts.map((h) => (
+              <option key={h.id} value={h.id}>
+                {h.hostname}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="form-field">
+          Target path
+          <input
+            type="text"
+            value={targetPath}
+            onChange={(e) => setTargetPath(e.target.value)}
+            placeholder={snapshot.paths[0] ?? "/restore"}
+          />
+        </label>
+        <label className="form-field">
+          Include patterns (optional, one per line)
+          <textarea
+            value={includeText}
+            onChange={(e) => setIncludeText(e.target.value)}
+            placeholder={"*.conf\n.ssh/"}
+            rows={3}
+          />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="action" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="action primary"
+            disabled={busy || !targetHostId}
+            onClick={submit}
+          >
+            {busy ? "Queuing…" : "Restore"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

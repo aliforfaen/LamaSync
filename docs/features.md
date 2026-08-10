@@ -56,6 +56,12 @@
 | hidden-api-power | Conflicts history (Pending/Resolved/All tabs, name resolution, resolution record) + Operations active-locks panel + host filter | `web-ui/src/pages/{Conflicts,Operations}.tsx`, `index.css` |
 | onboarding-pass | Concept glossary + hint components, first-run checklist on Dashboard, login hint, form/empty-state coaching, Swagger link | `web-ui/src/{concepts.ts,components/{Hint,GettingStarted,Login,Nav}.tsx,pages/{Dashboard,Folders,Dotfiles,Conflicts,Operations,HostDetail,Backends}.tsx,index.css}` |
 | tui-foundations | TUI first-run setup flow (client.toml writer, no silent localhost/dev-key defaults), `?` help overlay + global key hints + per-view hotkey footers, friendlyError() at catch sites, Fleet live status (fleetService.start + socket error listeners), `q`-quit fix on Conflicts, Logs footer single-source, wizard validation (absolute localPath, cron sanity) + emoji cleanup | `tui/src/{api.ts,boot.ts,friendly-error.ts,flows/{setup,backup-setup}.ts,app/{shell,cron,fleet-service}.ts,views/{conflicts,logs,local,fleet,dotfiles}.ts}` |
+| remaining-features | Per-folder sync history: Operations page folder filter + `?folderId=`/`?hostId=` deep links from Folders/HostDetail History buttons | `web-ui/src/pages/{Operations,Folders,HostDetail}.tsx`, `web-ui/src/api.ts` |
+| remaining-features | Restic restore UI: restore modal + jobs panel (2s polling) on the DataBrowser restic tab | `web-ui/src/pages/DataBrowser.tsx`, `web-ui/src/api.ts` |
+| remaining-features | Data Browser delete + download: job-based `POST /browse/delete` (deletefile/purge), base64 `POST /browse/download` (64 MiB cap, realpath containment) | `server/src/{browse-jobs.ts,routes/browse.ts}`, `web-ui/src/pages/DataBrowser.tsx` |
+| remaining-features | Shared `Modal`/`ConfirmDialog`/`PromptDialog` replacing all window.prompt/confirm; prune + overwrite confirmations | `web-ui/src/components/Modal.tsx`, `web-ui/src/pages/{Admin,DataBrowser}.tsx` |
+| remaining-features | Admin Server block: `GET /health` extended with serverVersion + dbSizeBytes, latest-release check with update badge | `server/src/routes/health.ts`, `server/src/db.ts`, `web-ui/src/pages/Admin.tsx` |
+| remaining-features | Validation sweep: shared cron validator on Folders, backend endpoint/bucket/path checks, centralized ApiError envelope parsing; Dashboard storage error surfaced, Login remember-me, sync-note name resolution | `web-ui/src/{cron.ts,api.ts,pages/*}` |
 
 ## Known limitations
 

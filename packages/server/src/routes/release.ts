@@ -4,7 +4,8 @@
 // expects. The fetch is cached in release-cache.ts (~1h TTL) so per-
 // request fan-out is bounded.
 import { Elysia } from "elysia";
-import { getCachedLatestRelease, type ReleaseInfo } from "../release-cache.ts";
+import type { ReleaseInfo } from "@lamasync/core";
+import { getCachedLatestRelease } from "../release-cache.ts";
 
 export const releaseRoutes = new Elysia({ prefix: "/api/v1" }).get(
   "/release/latest",

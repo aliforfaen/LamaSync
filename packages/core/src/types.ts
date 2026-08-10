@@ -336,6 +336,25 @@ export interface HealthResponse {
   hostCount: number;
   onlineCount: number;
   hosts: Host[];
+  // UX workstream 4: server self-description for the Admin page.
+  serverVersion: string;
+  dbSizeBytes: number | null;
+}
+
+// UX workstream 4: shape of `GET /api/v1/release/latest` (the server proxies
+// the GitHub latest release; shared so the web UI can render the Admin
+// update badge without importing server-only code).
+export interface ReleaseAssetView {
+  name: string;
+  downloadUrl: string;
+  size: number;
+}
+
+export interface ReleaseInfo {
+  tag: string;
+  version: string;
+  publishedAt: string;
+  assets: ReleaseAssetView[];
 }
 
 export interface HostConfig {
@@ -479,7 +498,13 @@ export interface FolderSize {
 // starts, updated as entries complete (progress_bytes/total_bytes count
 // entries when rclone byte-level stats are unavailable), and written to
 // operation_log once terminal for the audit trail.
-export type BrowseJobOperation = "copy" | "move" | "upload" | "rename" | "mkdir";
+export type BrowseJobOperation =
+  | "copy"
+  | "move"
+  | "upload"
+  | "rename"
+  | "mkdir"
+  | "delete";
 export type BrowseJobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
 
 export interface BrowseJob {

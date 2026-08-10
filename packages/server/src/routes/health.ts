@@ -1,6 +1,12 @@
 import { Elysia } from "elysia";
-import { isNewer, type Host, type HostStatus } from "@lamasync/core";
-import { db } from "../db.ts";
+import { statSync } from "node:fs";
+import {
+  VERSION,
+  isNewer,
+  type Host,
+  type HostStatus,
+} from "@lamasync/core";
+import { db, dbFilePath } from "../db.ts";
 import { getCachedLatestVersion } from "../release-cache.ts";
 
 interface HostRow {
@@ -44,11 +50,21 @@ export const healthRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const latestVersion = await getCachedLatestVersion();
     const hosts = rows.map((row) => rowToHost(row, latestVersion));
     const onlineCount = hosts.filter((h) => h.status === "online").length;
+    // UX workstream 4: server self-description for the Admin page. The DB
+    // size stat is best-effort (in-memory test DBs have no backing file).
+    let dbSizeBytes: number | null = null;
+    try {
+      dbSizeBytes = statSync(dbFilePath()).size;
+    } catch {
+      dbSizeBytes = null;
+    }
     return {
       status: "ok" as const,
       hostCount: hosts.length,
       onlineCount,
       hosts,
+      serverVersion: VERSION,
+      dbSizeBytes,
     };
   },
   {

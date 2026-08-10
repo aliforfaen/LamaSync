@@ -10,6 +10,9 @@ export function Login({ onAuthenticated }: LoginProps) {
   const [key, setKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // UX workstream 4: unchecked (default) keeps the key in sessionStorage;
+  // checked persists it to localStorage so new tabs stay signed in.
+  const [remember, setRemember] = useState(false);
   const navigate = useNavigate();
 
   async function onSubmit(e: React.FormEvent) {
@@ -17,7 +20,7 @@ export function Login({ onAuthenticated }: LoginProps) {
     setError(null);
     setLoading(true);
     try {
-      setApiKey(key.trim());
+      setApiKey(key.trim(), remember);
       await apiGet("/health");
       navigate("/");
       onAuthenticated();
@@ -48,6 +51,14 @@ export function Login({ onAuthenticated }: LoginProps) {
           required
         />
         {error && <div className="error">{error}</div>}
+        <label className="login-remember">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+          />{" "}
+          Remember this device (keep me signed in)
+        </label>
         <p className="muted">
           Set on the server via <code>LAMASYNC_API_KEY</code> (docker <code>.env</code> or
           the server config). One key for the whole fleet — the same key works on

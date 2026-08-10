@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
+import { useSearchParams } from "react-router-dom";
+import type { Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
 
 const PAGE_SIZE = 50;
@@ -20,12 +21,17 @@ function formatTimestamp(ts: number | null | undefined): string {
 }
 
 export function Operations() {
+  const [searchParams] = useSearchParams();
   const [items, setItems] = useState<OperationLog[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<OperationStatus | "">("");
-  // LAMA-198: host filter + read-only active-locks panel.
+  // LAMA-198: host filter + read-only active-locks panel. UX workstream 4:
+  // folder filter + ?folderId=/?hostId= URL preselect so History links on
+  // folder rows land pre-filtered.
   const [hosts, setHosts] = useState<Host[]>([]);
   const [hostFilter, setHostFilter] = useState("");
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderFilter, setFolderFilter] = useState("");
   const [locks, setLocks] = useState<LockInfo[] | null>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -33,12 +39,14 @@ export function Operations() {
 
   async function loadLocks(): Promise<void> {
     try {
-      const [lockList, hostList] = await Promise.all([
+      const [lockList, hostList, folderList] = await Promise.all([
         api.listLocks(),
         api.listHosts().catch(() => [] as Host[]),
+        api.listFolders().catch(() => [] as Folder[]),
       ]);
       setLocks(lockList);
       setHosts(hostList);
+      setFolders(folderList);
     } catch {
       // Locks are best-effort; a failure must not break the log view.
       setLocks([]);
@@ -49,6 +57,7 @@ export function Operations() {
     nextOffset: number,
     nextStatus: OperationStatus | "",
     nextHost: string,
+    nextFolder: string,
   ): Promise<void> {
     setBusy(true);
     setError(null);
@@ -60,6 +69,7 @@ export function Operations() {
         offset: nextOffset,
         status: nextStatus || undefined,
         hostId: nextHost || undefined,
+        folderId: nextFolder || undefined,
       });
       setItems(rows.slice(0, PAGE_SIZE));
       setHasMore(rows.length > PAGE_SIZE);
@@ -72,28 +82,45 @@ export function Operations() {
   }
 
   useEffect(() => {
-    void load(0, "", "");
+    // UX workstream 4: read ?folderId=/?hostId= once so History links land
+    // pre-filtered.
+    const folderId = searchParams.get("folderId") ?? "";
+    const hostId = searchParams.get("hostId") ?? "";
+    setFolderFilter(folderId);
+    setHostFilter(hostId);
+    void load(0, "", hostId, folderId);
     void loadLocks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function onStatusChange(e: React.ChangeEvent<HTMLSelectElement>): void {
     const value = e.target.value as OperationStatus | "";
     setStatus(value);
-    void load(0, value, hostFilter);
+    void load(0, value, hostFilter, folderFilter);
   }
 
   function onHostFilterChange(e: React.ChangeEvent<HTMLSelectElement>): void {
     const value = e.target.value;
     setHostFilter(value);
-    void load(0, status, value);
+    void load(0, status, value, folderFilter);
+  }
+
+  function onFolderFilterChange(e: React.ChangeEvent<HTMLSelectElement>): void {
+    const value = e.target.value;
+    setFolderFilter(value);
+    void load(0, status, hostFilter, value);
   }
 
   function nextPage(): void {
-    void load(offset + PAGE_SIZE, status, hostFilter);
+    void load(offset + PAGE_SIZE, status, hostFilter, folderFilter);
   }
 
   function prevPage(): void {
-    void load(Math.max(0, offset - PAGE_SIZE), status, hostFilter);
+    void load(Math.max(0, offset - PAGE_SIZE), status, hostFilter, folderFilter);
+  }
+
+  function folderLabel(id: string): string {
+    return folders.find((f) => f.id === id)?.name ?? id;
   }
 
   function lockLabel(hostId: string): string {
@@ -128,11 +155,22 @@ export function Operations() {
             ))}
           </select>
         </label>
+        <label className="scope-filter">
+          Folder
+          <select value={folderFilter} onChange={onFolderFilterChange}>
+            <option value="">All folders</option>
+            {folders.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <button
           type="button"
           className="action"
           onClick={() => {
-            void load(offset, status, hostFilter);
+            void load(offset, status, hostFilter, folderFilter);
             void loadLocks();
           }}
           disabled={busy}
@@ -176,6 +214,7 @@ export function Operations() {
           <tr>
             <th>Time</th>
             <th>Host</th>
+            <th>Folder</th>
             <th>Operation</th>
             <th>Status</th>
             <th>Summary</th>
@@ -184,11 +223,11 @@ export function Operations() {
         <tbody>
           {!items ? (
             <tr className="empty-row">
-              <td colSpan={5}>Loading…</td>
+              <td colSpan={6}>Loading…</td>
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={5}>
+              <td colSpan={6}>
                 {status
                   ? `No ${status} operations`
                   : "No operations yet — every sync and backup the daemons run is logged here."}
@@ -199,6 +238,7 @@ export function Operations() {
               <tr key={String(op.id)}>
                 <td>{formatTimestamp(op.timestamp)}</td>
                 <td className="muted">{op.hostId}</td>
+                <td className="muted">{op.folderId ? folderLabel(op.folderId) : "—"}</td>
                 <td>{op.operation}</td>
                 <td>
                   <span className={`badge badge-${op.status}`}>{op.status}</span>

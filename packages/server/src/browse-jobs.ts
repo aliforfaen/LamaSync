@@ -7,19 +7,21 @@
 // two operators can't write to the same target simultaneously.
 
 import type { Database } from "bun:sqlite";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type {
   BrowseJob,
   BrowseJobOperation,
   BrowseRef,
   Folder,
+  S3FolderConfig,
 } from "@lamasync/core";
 import { broadcast } from "./ws.ts";
 import { resolveFolderS3Config, getBackend } from "./backends.ts";
 import { decryptSecret } from "./crypto.ts";
 import { invalidateFolderSize, invalidateStorageReport } from "./stats.ts";
-import { validateBrowseInput } from "./browse-paths.ts";
+import { resolveBrowsePath, statEntry, validateBrowseInput } from "./browse-paths.ts";
+import { listS3Objects } from "./s3-list.ts";
 import {
   buildRcloneArgv,
   buildRcloneConfig,
@@ -85,6 +87,7 @@ function jobOperation(value: string): BrowseJobOperation | null {
     case "upload":
     case "rename":
     case "mkdir":
+    case "delete":
       return value;
     default:
       return null;
@@ -209,6 +212,25 @@ async function runRclone(
   return { stdout, stderr, code };
 }
 
+/**
+ * Binary variant of runRclone for the download path: `rclone cat` emits raw
+ * bytes and `Response.text()` would corrupt non-UTF8 files, so the stdout
+ * is captured as a Buffer here.
+ */
+async function runRcloneBinary(
+  argv: string[],
+  opts: { cwd?: string } = {},
+): Promise<{ stdout: Buffer; stderr: string; code: number }> {
+  const finalOpts = opts.cwd !== undefined ? opts : { ...opts, cwd: process.env.LAMASYNC_BACKUP_DIR ?? "/backups" };
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", ...finalOpts });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).arrayBuffer(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout: Buffer.from(stdout), stderr, code };
+}
+
 interface ResolvedFolder {
   folder: Folder;
   bucket: string;
@@ -268,7 +290,10 @@ function resolveS3(db: Database, ref: BrowseRef): ResolvedFolder {
 }
 
 function assertSafePath(path: string, name: string): void {
-  if (!validateBrowseInput(`${path}/${name}`)) {
+  // Root path ("") must not produce a leading slash — validateBrowseInput
+  // rejects absolute paths, so "/name" would falsely fail.
+  const combined = path === "" ? name : `${path}/${name}`;
+  if (!validateBrowseInput(combined)) {
     throw new Error(`unsafe path for ${name}`);
   }
 }
@@ -600,6 +625,162 @@ export async function startBrowseRename(
   return job;
 }
 
+/**
+ * Delete entries (files + directories, recursive) from a browse ref. Mirrors
+ * copy/move: one rclone step per entry — `deletefile` for files, `purge` for
+ * directories (the two rclone ops that match the browser's file/dir split;
+ * `delete --rmdirs` would silently skip non-empty directories). The entry
+ * type is resolved server-side: local via a stat, s3 via a prefix listing.
+ */
+export async function startBrowseDelete(
+  db: Database,
+  ref: BrowseRef,
+  names: string[],
+  hostId: string,
+): Promise<StartBrowseJobResult> {
+  if (names.length === 0) throw new Error("no entries selected");
+  for (const name of names) assertSafePath(ref.path, name);
+
+  const dKey = destKey(ref);
+  const sKey = `${dKey}|${names.join(",")}`;
+  if (activeDestinations.has(dKey) || activeSources.has(sKey)) {
+    const job = insertFailedJob(db, "delete", sKey, dKey, "destination busy — another operation is writing there");
+    return { job, busy: true };
+  }
+  const pendingDest = db
+    .query<{ id: string }, [string]>(
+      `SELECT id FROM browse_jobs WHERE destination = ? AND status IN ('pending','running') LIMIT 1`,
+    )
+    .get(dKey);
+  if (pendingDest) {
+    const job = insertFailedJob(db, "delete", sKey, dKey, "destination busy — another operation is writing there");
+    return { job, busy: true };
+  }
+  const pendingSrc = db
+    .query<{ id: string }, [string]>(
+      `SELECT id FROM browse_jobs WHERE source = ? AND status IN ('pending','running') LIMIT 1`,
+    )
+    .get(sKey);
+  if (pendingSrc) {
+    const job = insertFailedJob(db, "delete", sKey, dKey, "destination busy — another operation is writing there");
+    return { job, busy: true };
+  }
+
+  activeDestinations.add(dKey);
+  activeSources.add(sKey);
+  const now = Date.now();
+  const job: BrowseJob = {
+    id: crypto.randomUUID(),
+    operation: "delete",
+    source: sKey,
+    destination: dKey,
+    status: "running",
+    error: null,
+    progressBytes: 0,
+    totalBytes: names.length,
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.run(
+    `INSERT INTO browse_jobs (id, operation, source, destination, status, error, progress_bytes, total_bytes, created_at, updated_at)
+     VALUES (?, 'delete', ?, ?, 'running', NULL, 0, ?, ?, ?)`,
+    [job.id, job.source, job.destination, names.length, now, now],
+  );
+  emit(db, job);
+
+  let bucket: string | null = null;
+  try {
+    if (ref.kind === "s3") bucket = resolveS3(db, ref).bucket;
+  } catch (error) {
+    activeDestinations.delete(dKey);
+    activeSources.delete(sKey);
+    const msg = error instanceof Error ? error.message : String(error);
+    job.status = "failed";
+    job.error = msg;
+    job.updatedAt = Date.now();
+    writeJob(db, job);
+    emit(db, job);
+    return { job, busy: false };
+  }
+
+  void (async () => {
+    try {
+      const config = buildJobConfig(db, ref, ref);
+      await withTempRcloneConfig(config, async (configPath) => {
+        let completed = 0;
+        for (const name of names) {
+          const type = await resolveEntryType(db, ref, name);
+          const op = type === "dir" ? "purge" : "deletefile";
+          const argvInput: BuildArgvInput = {
+            operation: op,
+            configPath,
+            srcRemote: "src",
+            srcPath: remotePath(ref, name, bucket ?? undefined),
+            timeout: "30s",
+          };
+          const result = await runRclone(buildRcloneArgv(argvInput));
+          if (result.code !== 0) {
+            throw rcloneFailure(op, result);
+          }
+          completed += 1;
+          job.progressBytes = completed;
+          job.updatedAt = Date.now();
+          writeJob(db, job);
+          emit(db, job);
+        }
+      });
+      job.status = "done";
+      job.updatedAt = Date.now();
+      writeJob(db, job);
+      emit(db, job);
+      appendOperationLog(db, job, hostId);
+      invalidateStorageReport();
+      if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(ref.folderId);
+    } catch (error) {
+      job.status = "failed";
+      job.error = error instanceof Error ? error.message : String(error);
+      job.updatedAt = Date.now();
+      writeJob(db, job);
+      emit(db, job);
+      appendOperationLog(db, job, hostId);
+    } finally {
+      activeDestinations.delete(dKey);
+      activeSources.delete(sKey);
+    }
+  })();
+
+  return { job, busy: false };
+}
+
+/** Resolve whether a named entry is a file or directory on its backend. */
+async function resolveEntryType(
+  db: Database,
+  ref: BrowseRef,
+  name: string,
+): Promise<"dir" | "file"> {
+  if (ref.kind === "local") {
+    const cwd = process.env.LAMASYNC_BACKUP_DIR ?? "/backups";
+    const stat = statEntry(join(cwd, ref.path, name));
+    if (!stat) throw new Error(`entry not found: ${name}`);
+    return stat.type;
+  }
+  const s3 = resolveS3(db, ref);
+  const config: S3FolderConfig = {
+    folderId: s3.folder.id,
+    backendId: s3.folder.backendId ?? "",
+    provider: s3.provider,
+    endpoint: s3.endpoint,
+    bucket: s3.bucket,
+    accessKeyId: s3.accessKeyId,
+    secretAccessKey: s3.secretAccessKey,
+    region: s3.region,
+  };
+  const listing = await listS3Objects(config, ref.path, 1000);
+  const entry = listing.entries.find((e) => e.name === name);
+  if (!entry) throw new Error(`entry not found: ${name}`);
+  return entry.type;
+}
+
 /** Create a directory at the ref's current path. */
 export async function startBrowseMkdir(
   db: Database,
@@ -815,6 +996,109 @@ export async function startBrowseUpload(
   return job;
 }
 
+export interface DownloadResult {
+  name: string;
+  content: string; // base64
+}
+
+export type DownloadOutcome =
+  | { ok: true; data: DownloadResult }
+  | { ok: false; status: number; error: string };
+
+const MAX_BROWSE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Read a single file from a browse ref and return it base64-encoded.
+ * Mirrors the upload cap: files at or under 64 MiB decode/return whole;
+ * larger files fail with the limit named in the error. Local refs are read
+ * straight off disk; s3 refs stream through `rclone cat`.
+ */
+export async function downloadBrowseFile(
+  db: Database,
+  ref: BrowseRef,
+  name: string,
+): Promise<DownloadOutcome> {
+  assertSafePath(ref.path, name);
+
+  if (ref.kind === "local") {
+    const cwd = process.env.LAMASYNC_BACKUP_DIR ?? "/backups";
+    const rel = ref.path ? `${ref.path}/${name}` : name;
+    // realpath containment: a symlink inside the backup root that points
+    // outside it must not be followed (same guard as the listing route).
+    let target: string;
+    try {
+      const resolved = resolveBrowsePath(cwd, rel);
+      if (resolved === null) {
+        return { ok: false, status: 404, error: "entry not found" };
+      }
+      target = resolved;
+    } catch {
+      return { ok: false, status: 500, error: "failed to read entry" };
+    }
+    const stat = statEntry(target);
+    if (stat === null) {
+      // Vanished between resolve and stat (TOCTOU race).
+      return { ok: false, status: 404, error: "entry not found" };
+    }
+    if (stat.type === "dir") {
+      return { ok: false, status: 400, error: "cannot download a directory" };
+    }
+    if (stat.size > MAX_BROWSE_BYTES) {
+      return {
+        ok: false,
+        status: 400,
+        error: `file is ${stat.size} bytes; download limit is 64 MiB`,
+      };
+    }
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(target);
+    } catch {
+      return { ok: false, status: 500, error: "failed to read entry" };
+    }
+    return { ok: true, data: { name, content: bytes.toString("base64") } };
+  }
+
+  // s3: `rclone cat` the object; the buffer is bounded by the same cap.
+  let bucket: string;
+  try {
+    bucket = resolveS3(db, ref).bucket;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { ok: false, status: 400, error: msg };
+  }
+  const config = buildJobConfig(db, ref, ref);
+  try {
+    return await withTempRcloneConfig(config, async (configPath) => {
+      const argvInput: BuildArgvInput = {
+        operation: "cat",
+        configPath,
+        srcRemote: "src",
+        srcPath: remotePath(ref, name, bucket),
+        timeout: "60s",
+      };
+      const result = await runRcloneBinary(buildRcloneArgv(argvInput));
+      if (result.code !== 0) {
+        throw rcloneFailure("cat", result);
+      }
+      if (result.stdout.length > MAX_BROWSE_BYTES) {
+        return {
+          ok: false,
+          status: 400,
+          error: `file is ${result.stdout.length} bytes; download limit is 64 MiB`,
+        } as const;
+      }
+      return {
+        ok: true,
+        data: { name, content: result.stdout.toString("base64") },
+      } as const;
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { ok: false, status: 400, error: msg };
+  }
+}
+
 export function listBrowseJobs(db: Database, limit = 50): BrowseJob[] {
   const rows = db
     .query<BrowseJobRow, [number]>(
@@ -898,8 +1182,7 @@ function buildJobConfig(db: Database, src: BrowseRef, dst: BrowseRef): string {
   return buildRcloneConfig({ src: srcSection, dst: dstSection });
 }
 
-// Re-exported for tests (statSync unused in prod path but handy for the
-// move-source existence check).
+// Exported for tests.
 export function __jobExists(db: Database, id: string): boolean {
   return db
     .query<{ id: string }, [string]>("SELECT id FROM browse_jobs WHERE id = ?")

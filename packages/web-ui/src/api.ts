@@ -18,8 +18,10 @@ import type {
   LockInfo,
   OperationLog,
   QueuedAction,
+  ResticRestoreJob,
   QueuedActionType,
   ResticSnapshot,
+  ReleaseInfo,
   Share,
   StorageReport,
   FolderSize,
@@ -28,22 +30,37 @@ import type {
 } from "@lamasync/core";
 
 const API_KEY_STORAGE = "lamasync_api_key";
+const API_KEY_PERSIST_STORAGE = "lamasync_api_key_persist";
 
+// UX workstream 4: "remember me" moves the key to localStorage (survives
+// tab/browser restarts); otherwise it lives in sessionStorage only. Reading
+// prefers the session copy so an explicit non-remembered login wins over a
+// stale remembered key.
 export function getApiKey(): string | null {
-  const v = sessionStorage.getItem(API_KEY_STORAGE);
-  return v && v.length > 0 ? v : null;
+  const session = sessionStorage.getItem(API_KEY_STORAGE);
+  if (session && session.length > 0) return session;
+  const persisted = localStorage.getItem(API_KEY_PERSIST_STORAGE);
+  return persisted && persisted.length > 0 ? persisted : null;
 }
 
-export function setApiKey(key: string): void {
+export function setApiKey(key: string, persist = false): void {
   if (key.length === 0) {
     sessionStorage.removeItem(API_KEY_STORAGE);
+    localStorage.removeItem(API_KEY_PERSIST_STORAGE);
     return;
   }
-  sessionStorage.setItem(API_KEY_STORAGE, key);
+  if (persist) {
+    localStorage.setItem(API_KEY_PERSIST_STORAGE, key);
+    sessionStorage.removeItem(API_KEY_STORAGE);
+  } else {
+    sessionStorage.setItem(API_KEY_STORAGE, key);
+    localStorage.removeItem(API_KEY_PERSIST_STORAGE);
+  }
 }
 
 export function clearApiKey(): void {
   sessionStorage.removeItem(API_KEY_STORAGE);
+  localStorage.removeItem(API_KEY_PERSIST_STORAGE);
 }
 
 /** Fired on `window` when the server rejects the stored API key. */
@@ -63,10 +80,37 @@ class ApiError extends Error {
   status: number;
   body: string;
   constructor(status: number, body: string) {
-    super(`API error ${status}: ${body}`);
+    // UX workstream 4: server errors use the `{ error }` envelope — prefer
+    // it over the raw body so every page's `err.message` renders the clean
+    // message without per-page parsing. Non-JSON bodies keep the full text.
+    super(extractEnvelopeError(body) ?? `API error ${status}: ${body}`);
     this.status = status;
     this.body = body;
   }
+}
+
+/** Pull the `error` field out of a server `{ error: string }` envelope. */
+function extractEnvelopeError(body: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const error = (parsed as Record<string, unknown>).error;
+      if (typeof error === "string" && error.length > 0) return error;
+    }
+  } catch {
+    // not JSON — fall through
+  }
+  return null;
+}
+
+/**
+ * Shared error-to-string for UI catch sites. ApiError renders the server's
+ * `{ error }` envelope (already baked into `message` by the constructor);
+ * anything else falls back to `Error.message`.
+ */
+export function errorText(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  return err instanceof Error ? err.message : String(err);
 }
 
 export async function apiFetch<T = unknown>(
@@ -165,6 +209,7 @@ async function apiBlob(path: string): Promise<Blob> {
 
 export const api = {
   health: () => apiGet<HealthResponse>("/health"),
+  latestRelease: () => apiGet<ReleaseInfo>("/release/latest"),
   listHosts: () => apiGet<Host[]>("/hosts"),
   getHost: (hostId: string) =>
     apiGet<Host>(`/hosts/${encodeURIComponent(hostId)}`),
@@ -263,12 +308,14 @@ export const api = {
     offset?: number;
     status?: string;
     hostId?: string;
+    folderId?: string;
   } = {}) => {
     const qs = new URLSearchParams();
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
     if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
     if (opts.status) qs.set("status", opts.status);
     if (opts.hostId) qs.set("hostId", opts.hostId);
+    if (opts.folderId) qs.set("folderId", opts.folderId);
     return apiGet<OperationLog[]>(`/operations?${qs.toString()}`);
   },
   listOperationsForHost: (hostId: string, limit = 50) =>
@@ -291,11 +338,39 @@ export const api = {
     return apiGet<BrowseResponse>(`/browse/s3${qs}`);
   },
   browseRestic: () => apiGet<ResticSnapshot[]>("/browse/restic"),
+  // UX workstream 4: restic restore jobs (server routes already exist).
+  listResticRestoreJobs: () => apiGet<ResticRestoreJob[]>("/restic/restore"),
+  createResticRestore: (opts: {
+    snapshotId: string;
+    folderId: string;
+    targetHostId: string;
+    targetPath: string;
+    include?: string[];
+  }) => apiPost<ResticRestoreJob>("/restic/restore", opts),
   // LAMA-226: Data Browser write operations.
   browseCopy: (source: BrowseRef, destination: BrowseRef, names: string[]) =>
     apiPost<BrowseJob>("/browse/copy", { source, destination, names }),
   browseMove: (source: BrowseRef, destination: BrowseRef, names: string[]) =>
     apiPost<BrowseJob>("/browse/move", { source, destination, names }),
+  browseDelete: (ref: BrowseRef, names: string[]) =>
+    apiPost<BrowseJob>("/browse/delete", { ref, names }),
+  browseDownload: async (ref: BrowseRef, name: string) => {
+    const data = await apiPost<{ name: string; content: string }>(
+      "/browse/download",
+      { ref, name },
+    );
+    const binary = atob(data.content);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes]));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = data.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   browseRename: (ref: BrowseRef, from: string, to: string) =>
     apiPost<BrowseJob>("/browse/rename", { ref, from, to }),
   browseMkdir: (ref: BrowseRef, name: string) =>

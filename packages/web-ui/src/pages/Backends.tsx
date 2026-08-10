@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Backend, S3Provider } from "@lamasync/core";
-import { api, ApiError } from "../api.ts";
+import { api, errorText } from "../api.ts";
+import { ConfirmDialog } from "../components/Modal.tsx";
 import { BACKEND_KIND_HINTS } from "../concepts.ts";
 
 const PROVIDERS: Array<{ value: S3Provider; label: string }> = [
@@ -41,23 +42,6 @@ const EMPTY_FORM: FormState = {
   resticPassword: "",
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function errorText(err: unknown): string {
-  if (err instanceof ApiError) {
-    try {
-      const parsed: unknown = JSON.parse(err.body);
-      if (isRecord(parsed) && typeof parsed.error === "string") return parsed.error;
-    } catch {
-      // not JSON; fall through
-    }
-    return err.body;
-  }
-  return err instanceof Error ? err.message : String(err);
-}
-
 function backendToForm(b: Backend): FormState {
   return {
     name: b.name,
@@ -73,6 +57,35 @@ function backendToForm(b: Backend): FormState {
   };
 }
 
+/**
+ * UX workstream 4: client-side checks that mirror the server's validation
+ * (endpoint URL, absolute server path, required restic repo) so bad input is
+ * caught before a round-trip. Returns the first error message or null.
+ */
+function validateForm(form: FormState): string | null {
+  if (form.name.trim() === "") return "name is required";
+  if (form.kind === "s3") {
+    const endpoint = form.s3Endpoint.trim();
+    if (endpoint === "") return "s3 endpoint is required";
+    if (/\s/.test(endpoint)) return "s3 endpoint must not contain spaces";
+    // Bare hostnames are accepted (placeholder suggests both forms); a
+    // scheme, when present, must be http or https.
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(endpoint)) {
+      if (!/^https?:\/\//.test(endpoint)) {
+        return "s3 endpoint must use http(s) — got an unsupported scheme";
+      }
+    }
+    if (form.s3AccessKeyId.trim() === "") return "s3 access key id is required";
+  } else if (form.kind === "local" || form.kind === "nfs") {
+    if (!form.localPath.trim().startsWith("/")) {
+      return "server path must be an absolute path (starts with /)";
+    }
+  } else if (form.kind === "restic") {
+    if (form.resticRepository.trim() === "") return "restic repository is required";
+  }
+  return null;
+}
+
 export function Backends() {
   const [items, setItems] = useState<BackendRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,6 +97,8 @@ export function Backends() {
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [showResticPassword, setShowResticPassword] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // UX workstream 4: styled delete confirmation.
+  const [deleteTarget, setDeleteTarget] = useState<BackendRow | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
@@ -105,6 +120,12 @@ export function Backends() {
   async function onSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     if (busy) return;
+    // UX workstream 4: client-side validation before the round-trip.
+    const validationError = validateForm(form);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -155,12 +176,13 @@ export function Backends() {
   }
 
   async function onDelete(b: BackendRow): Promise<void> {
-    const used = b.folderCount ?? 0;
-    const msg =
-      used > 0
-        ? `Delete backend '${b.name}'? It is used by ${used} folder(s) — the server will refuse.`
-        : `Delete backend '${b.name}'?`;
-    if (!window.confirm(msg)) return;
+    setDeleteTarget(b);
+  }
+
+  async function confirmDelete(): Promise<void> {
+    if (!deleteTarget) return;
+    const b = deleteTarget;
+    setDeleteTarget(null);
     try {
       await api.deleteBackend(b.id);
       setNotice(`Backend '${b.name}' deleted`);
@@ -481,6 +503,21 @@ export function Backends() {
           </table>
         )}
       </section>
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Delete backend"
+          danger
+          confirmLabel="Delete"
+          message={`Delete backend "${deleteTarget.name}"?${
+            (deleteTarget.folderCount ?? 0) > 0
+              ? ` It is used by ${deleteTarget.folderCount} folder(s) — the server will refuse while it is.`
+              : ""
+          }`}
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
   );
 }

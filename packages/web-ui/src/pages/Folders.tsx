@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { api } from "../api.ts";
+import { validateCronExpression } from "../cron.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { HintText } from "../components/Hint.tsx";
 import {
@@ -17,6 +19,25 @@ interface FolderWithAssignments {
 type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
 type AssignRole = "source" | "target" | "both";
+
+// Mirrors the Dotfiles page + AssignmentEditor presets so the assign form
+// offers the same schedule shortcuts.
+const SCHEDULE_PRESETS: { label: string; value: string; cron: string }[] = [
+  { label: "Custom", value: "custom", cron: "" },
+  { label: "Every hour", value: "hourly", cron: "0 * * * *" },
+  { label: "Every 6 hours", value: "6h", cron: "0 */6 * * *" },
+  { label: "Daily", value: "daily", cron: "0 0 * * *" },
+  { label: "Weekly", value: "weekly", cron: "0 0 * * 0" },
+  { label: "Monthly", value: "monthly", cron: "0 0 1 * *" },
+  { label: "On boot", value: "@reboot", cron: "@reboot" },
+  { label: "On login", value: "@login", cron: "@login" },
+];
+
+function schedulePresetForCron(cron: string | null | undefined): string {
+  if (!cron) return "custom";
+  const preset = SCHEDULE_PRESETS.find((p) => p.cron === cron);
+  return preset ? preset.value : "custom";
+}
 
 interface AssignForm {
   hostId: string;
@@ -105,6 +126,15 @@ function buildCreateBody(form: FolderForm): Record<string, unknown> {
   return body;
 }
 
+/** UX workstream 4: client-side folder validation (S3 bucket required). */
+function validateFolderForm(form: FolderForm): string | null {
+  if (form.backend === "s3") {
+    if (form.s3Bucket.trim() === "") return "s3 bucket name is required";
+    if (form.backendId.trim() === "") return "pick an S3 backend for this folder";
+  }
+  return null;
+}
+
 function buildUpdateBody(form: FolderForm): Record<string, unknown> {
   const body: Record<string, unknown> = {
     name: form.name.trim(),
@@ -145,6 +175,8 @@ export function Folders() {
   });
   // LAMA-198: transient "queued" note after a per-assignment Sync now.
   const [syncNote, setSyncNote] = useState<string | null>(null);
+  // UX workstream 4: inline cron validation on the assign form.
+  const [assignCronError, setAssignCronError] = useState<string | null>(null);
   // Assignment editing (reuses AssignmentEditor from HostDetail).
   const [editingAssignment, setEditingAssignment] = useState<FolderAssignment | null>(null);
 
@@ -197,6 +229,11 @@ export function Folders() {
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
+    const validationError = validateFolderForm(form);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -219,6 +256,11 @@ export function Folders() {
   async function onEdit(e: React.FormEvent) {
     e.preventDefault();
     if (!editingId) return;
+    const validationError = validateFolderForm(editForm);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -260,6 +302,16 @@ export function Folders() {
   async function onAssign(e: React.FormEvent) {
     e.preventDefault();
     if (!assigningFolder || !assignForm.hostId) return;
+    // UX workstream 4: validate cron client-side before the round-trip.
+    const cron = assignForm.syncExpr.trim();
+    if (cron) {
+      const cronError = validateCronExpression(cron);
+      if (cronError) {
+        setAssignCronError(cronError);
+        return;
+      }
+    }
+    setAssignCronError(null);
     setBusy(true);
     setError(null);
     try {
@@ -267,7 +319,7 @@ export function Folders() {
         hostId: assignForm.hostId,
         role: assignForm.role,
         localPath: assignForm.localPath.trim(),
-        syncExpr: assignForm.syncExpr.trim() || null,
+        syncExpr: cron || null,
       });
       setAssigningFolder(null);
       await refresh();
@@ -303,8 +355,12 @@ export function Folders() {
         type: "trigger_sync",
         payload: { folderId },
       });
+      // UX workstream 4: resolve ids to display names in the note.
+      const folderName =
+        items?.find((i) => i.folder.id === folderId)?.folder.name ?? folderId;
+      const hostName = hosts.find((h) => h.id === hostId)?.hostname ?? hostId;
       setSyncNote(
-        `Sync of “${folderId}” queued on ${hostId} — runs on the daemon within ~30 s`,
+        `Sync of “${folderName}” queued on ${hostName} — runs on the daemon within ~30 s`,
       );
       window.setTimeout(() => setSyncNote(null), 6000);
     } catch (err) {
@@ -528,15 +584,34 @@ export function Folders() {
             </label>
             <label>
               Schedule (cron, optional)
+              <select
+                value={schedulePresetForCron(assignForm.syncExpr)}
+                onChange={(e) => {
+                  const preset = SCHEDULE_PRESETS.find((p) => p.value === e.target.value);
+                  setAssignForm({ ...assignForm, syncExpr: preset ? preset.cron : assignForm.syncExpr });
+                  setAssignCronError(null);
+                }}
+              >
+                {SCHEDULE_PRESETS.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Custom cron (optional)
               <input
                 placeholder="*/15 * * * *"
                 value={assignForm.syncExpr}
-                onChange={(e) => setAssignForm({ ...assignForm, syncExpr: e.target.value })}
+                onChange={(e) => {
+                  setAssignForm({ ...assignForm, syncExpr: e.target.value });
+                  setAssignCronError(null);
+                }}
               />
               <HintText>
                 Cron expression, e.g. <code>0 * * * *</code> = every hour. Leave
                 empty to sync on the daemon's default schedule.
               </HintText>
+              {assignCronError && <div className="error">{assignCronError}</div>}
             </label>
           </>
         )}
@@ -684,6 +759,12 @@ export function Folders() {
                   >
                     Assign
                   </button>
+                  <Link
+                    className="action"
+                    to={`/operations?folderId=${encodeURIComponent(folder.id)}`}
+                  >
+                    History
+                  </Link>
                   <button
                     type="button"
                     className="action"

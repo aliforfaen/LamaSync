@@ -209,6 +209,59 @@ e2e("POST /api/v1/browse/upload", () => {
   });
 });
 
+e2e("POST /api/v1/browse/delete", () => {
+  test("deletes a file; the source is gone afterwards", async () => {
+    const res = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "src" },
+      names: ["hello.txt"],
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as BrowseJob;
+    const terminal = await waitForJob(job.id);
+    expect(terminal.status).toBe("done");
+    expect(existsSync(join(root, "src", "hello.txt"))).toBe(false);
+  });
+
+  test("purges a directory recursively", async () => {
+    const res = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "src" },
+      names: ["dir"],
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as BrowseJob;
+    const terminal = await waitForJob(job.id);
+    expect(terminal.status).toBe("done");
+    expect(existsSync(join(root, "src", "dir"))).toBe(false);
+    expect(existsSync(join(root, "src"))).toBe(true);
+  });
+
+  test("rejects unsafe names", async () => {
+    const res = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "src" },
+      names: ["../../escape"],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("delete appends an operation_log row", async () => {
+    await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "src" },
+      names: ["hello.txt"],
+    });
+    const row = db
+      .query<{ id: string }, []>("SELECT id FROM browse_jobs ORDER BY created_at DESC LIMIT 1")
+      .get();
+    await waitForJob(row!.id);
+    const log = db
+      .query<{ operation: string; status: string }, []>(
+        "SELECT operation, status FROM operation_log WHERE operation = 'browse_delete'",
+      )
+      .get();
+    expect(log).toBeTruthy();
+    expect(log?.status).toBe("success");
+  });
+});
+
 e2e("GET /api/v1/browse/jobs", () => {
   test("lists recent jobs newest-first", async () => {
     await postJson("/api/v1/browse/mkdir", { ref: { kind: "local", path: "dst" }, name: "a" });
