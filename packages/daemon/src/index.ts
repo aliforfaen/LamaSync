@@ -58,7 +58,7 @@ import {
   waitForMountUnitActive,
   writeMountUnit,
 } from "./systemd.ts";
-import { downloadAndReplace, fetchLatestRelease, isNewer } from "./self-update.ts";
+import { downloadAndReplace, fetchLatestRelease, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CONFIG_REFRESH_MS = 5 * 60 * 1000;
@@ -1127,7 +1127,9 @@ if (import.meta.main) {
         );
         process.exit(1);
       }
-      const target = process.argv[1] ?? "lamasyncd";
+      // argv[1] is the bunfs virtual path in compiled binaries — resolve
+      // the real on-disk binary or the rename target doesn't exist.
+      const target = resolveSelfBinaryPath();
       const ok = await downloadAndReplace(asset.downloadUrl, target);
       if (!ok) {
         console.error("lamasyncd --update: download/replace failed");

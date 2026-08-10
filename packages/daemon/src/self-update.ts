@@ -2,7 +2,8 @@
 // replaces the running binary. Best-effort: never throws — callers can
 // surface `false` / `null` to the user without try/catch.
 import { chmod, rename, unlink } from "fs/promises";
-import { join } from "path";
+import { readlinkSync } from "fs";
+import { basename, join } from "path";
 import { tmpdir } from "os";
 import { VERSION } from "@lamasync/core";
 
@@ -110,6 +111,36 @@ function parseSemver(v: string): [number, number, number] | null {
   const nums = [m[1], m[2], m[3]].map((s) => Number.parseInt(s!, 10));
   if (nums.some((n) => !Number.isFinite(n) || n < 0)) return null;
   return nums as [number, number, number];
+}
+
+/**
+ * Resolve the on-disk path of the running daemon binary. In a
+ * `bun build --compile` binary `process.argv[1]` is the virtual bunfs
+ * entrypoint (`/$bunfs/...`) — renaming over it fails with ENOENT, so the
+ * self-update silently could never succeed from a compiled install.
+ * `process.execPath` is the real compiled binary on disk. When running
+ * uncompiled under bun/node (dev), `execPath` is the runtime itself — skip
+ * it so `--update` can never clobber the toolchain. `/proc/self/exe` is
+ * the Linux last resort.
+ */
+export function resolveSelfBinaryPath(
+  execPath: string = process.execPath,
+  argv1: string | undefined = process.argv[1],
+): string {
+  for (const candidate of [execPath, argv1]) {
+    if (!candidate || candidate.startsWith("/$bunfs")) continue;
+    const base = basename(candidate);
+    if (base === "bun" || base === "node") continue;
+    return candidate;
+  }
+  try {
+    const real = readlinkSync("/proc/self/exe");
+    const base = basename(real);
+    if (base !== "bun" && base !== "node") return real;
+  } catch {
+    // no /proc (non-Linux) — fall through to the bare name
+  }
+  return "lamasyncd";
 }
 
 /**

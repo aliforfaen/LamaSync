@@ -1,5 +1,30 @@
 import { describe, expect, test } from "bun:test";
-import { fetchLatestRelease, isNewer } from "./self-update.ts";
+import { fetchLatestRelease, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
+
+describe("resolveSelfBinaryPath", () => {
+  test("prefers a real execPath over the bunfs virtual argv[1]", () => {
+    // The compiled-binary case: argv[1] is the bunfs entrypoint and
+    // renaming over it fails with ENOENT (v0.3.0 self-update bug).
+    expect(resolveSelfBinaryPath("/home/u/.local/bin/lamasyncd", "/$bunfs/root/lamasyncd")).toBe(
+      "/home/u/.local/bin/lamasyncd",
+    );
+  });
+
+  test("falls back to argv[1] when execPath is the bun runtime (dev mode)", () => {
+    expect(resolveSelfBinaryPath("/usr/bin/bun", "packages/daemon/src/index.ts")).toBe(
+      "packages/daemon/src/index.ts",
+    );
+    expect(resolveSelfBinaryPath("/usr/bin/node", "/opt/lamasync/lamasyncd")).toBe(
+      "/opt/lamasync/lamasyncd",
+    );
+  });
+
+  test("never returns a bunfs or runtime path", () => {
+    const result = resolveSelfBinaryPath("/$bunfs/root/lamasyncd", "/$bunfs/root/lamasyncd");
+    expect(result.startsWith("/$bunfs")).toBe(false);
+    expect(["bun", "node"]).not.toContain(result.split("/").pop());
+  });
+});
 
 describe("isNewer", () => {
   test("strictly newer returns true", () => {
