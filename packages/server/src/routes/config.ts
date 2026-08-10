@@ -466,7 +466,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const { hostId } = params;
     const host = activeDb
       .query<HostRow, [string]>(
-        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip FROM hosts WHERE id = ?",
+        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, config_revision FROM hosts WHERE id = ?",
       )
       .get(hostId);
     if (!host) {

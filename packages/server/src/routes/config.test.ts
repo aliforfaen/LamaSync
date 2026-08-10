@@ -640,6 +640,29 @@ describe("generateRcloneConfig — local/nfs/restic backends (hidden-api-power)"
 });
 
 describe("GET /api/v1/config/:hostId — dotfile manifests (LAMA-168)", () => {
+  test("host payload carries the real configRevision (daemon drift check)", async () => {
+    // Regression: the target-host SELECT used to omit config_revision, so
+    // the response always emitted 0 and every daemon re-pulled its full
+    // config on every heartbeat ("revision drift (cached=0 server=N)").
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    db.run(`UPDATE hosts SET config_revision = 5 WHERE id = 'host-1'`);
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    expect(body.host.configRevision).toBe(5);
+  });
+
   test("returns manifest excludes and schedule to the daemon", async () => {
     db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
     db.run(
