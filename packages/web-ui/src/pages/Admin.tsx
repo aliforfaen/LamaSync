@@ -490,8 +490,8 @@ export function Admin() {
           </thead>
           <tbody>
             {channelsLoading && channels.length === 0 ? (
-              <tr className="empty-row">
-                <td colSpan={7}>Loading channels…</td>
+              <tr aria-busy="true">
+                <td colSpan={7}><div className="skel skel-line" /></td>
               </tr>
             ) : channels.length === 0 ? (
               <tr className="empty-row">
@@ -666,8 +666,8 @@ export function Admin() {
           </thead>
           <tbody>
             {notificationsLoading && notifications.length === 0 ? (
-              <tr className="empty-row">
-                <td colSpan={5}>Loading notifications…</td>
+              <tr aria-busy="true">
+                <td colSpan={5}><div className="skel skel-line" /></td>
               </tr>
             ) : notifications.length === 0 ? (
               <tr className="empty-row">

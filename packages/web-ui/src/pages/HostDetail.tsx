@@ -265,7 +265,7 @@ export function HostDetail() {
           <dt>Host ID</dt>
           <dd><code>{host.id}</code></dd>
           <dt>Last seen</dt>
-          <dd>{formatTimestamp(host.lastSeen)}</dd>
+          <dd className="mono">{formatTimestamp(host.lastSeen)}</dd>
           {/* LAMA-223: tailnet is the primary address; LAN IP is fallback info. */}
           <dt>Tailnet IP</dt>
           <dd>
@@ -285,7 +285,7 @@ export function HostDetail() {
           </dd>
           <dt>Daemon version</dt>
           <dd>
-            v{host.version ?? "—"}
+            <code>v{host.version ?? "—"}</code>
             {host.updateAvailable ? (
               <span className="badge badge-update">update available</span>
             ) : null}
@@ -446,7 +446,7 @@ export function HostDetail() {
             <tbody>
               {operations.map((op) => (
                 <tr key={String(op.id)}>
-                  <td>{formatTimestamp(op.timestamp)}</td>
+                  <td className="mono">{formatTimestamp(op.timestamp)}</td>
                   <td>{op.operation}</td>
                   <td>
                     <span className={`badge badge-${op.status}`}>{op.status}</span>
@@ -484,9 +484,9 @@ export function HostDetail() {
                       {a.status}
                     </span>
                   </td>
-                  <td className="muted">{formatTimestamp(a.createdAt)}</td>
-                  <td className="muted">{formatTimestamp(a.takenAt)}</td>
-                  <td className="muted">{formatTimestamp(a.completedAt)}</td>
+                  <td className="mono muted">{formatTimestamp(a.createdAt)}</td>
+                  <td className="mono muted">{formatTimestamp(a.takenAt)}</td>
+                  <td className="mono muted">{formatTimestamp(a.completedAt)}</td>
                   <td className="muted">{a.result ?? "—"}</td>
                 </tr>
               ))}

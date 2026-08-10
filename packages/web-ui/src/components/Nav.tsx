@@ -38,7 +38,9 @@ export function Nav() {
 
   return (
     <nav className="nav">
-      <span className="brand">LamaSync</span>
+      <span className="brand">
+        LAMA<span className="brand-accent">SYNC</span>
+      </span>
       <NavLink to="/" end>
         <IconHome /> Dashboard
       </NavLink>

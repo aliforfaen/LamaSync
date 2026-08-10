@@ -512,8 +512,8 @@ export function Dotfiles() {
         </thead>
         <tbody>
           {!items ? (
-            <tr className="empty-row">
-              <td colSpan={8}>Loading…</td>
+            <tr aria-busy="true">
+              <td colSpan={8}><div className="skel skel-line" /></td>
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
@@ -577,7 +577,7 @@ export function Dotfiles() {
                       <td colSpan={8}>
                         <h3 className="form-title">Versions — {m.appName}</h3>
                         {appVersions === null ? (
-                          <span className="muted">Loading versions…</span>
+                          <span className="skel skel-line" aria-busy="true" />
                         ) : appVersions.length === 0 ? (
                           <span className="muted">
                             No versions yet — tarballs land here when the daemon backs up this

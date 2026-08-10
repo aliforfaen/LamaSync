@@ -403,7 +403,7 @@ export function Backends() {
       <section className="section">
         <h2>Configured backends</h2>
         {!items ? (
-          <div className="empty-row">Loading…</div>
+          <div className="skel skel-line" aria-busy="true" />
         ) : items.length === 0 ? (
           <div className="empty-row">
             No backends yet. Create one above, then point S3 folders at it —

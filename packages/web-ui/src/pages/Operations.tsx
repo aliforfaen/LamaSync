@@ -183,7 +183,7 @@ export function Operations() {
       <section className="section">
         <h2>Active locks</h2>
         {locks === null ? (
-          <div className="empty-row">Loading…</div>
+          <div className="skel skel-line" aria-busy="true" />
         ) : locks.length === 0 ? (
           <div className="empty-row">No active folder locks</div>
         ) : (
@@ -201,8 +201,8 @@ export function Operations() {
                 <tr key={`${lock.folderId}:${lock.lockedBy}`}>
                   <td><code>{lock.folderId}</code></td>
                   <td className="muted">{lockLabel(lock.lockedBy)}</td>
-                  <td className="muted">{formatTimestamp(lock.lockedAt)}</td>
-                  <td className="muted">{Math.round(lock.lockTtl / 60)} min</td>
+                  <td className="mono muted">{formatTimestamp(lock.lockedAt)}</td>
+                  <td className="num mono muted">{Math.round(lock.lockTtl / 60)} min</td>
                 </tr>
               ))}
             </tbody>
@@ -222,8 +222,8 @@ export function Operations() {
         </thead>
         <tbody>
           {!items ? (
-            <tr className="empty-row">
-              <td colSpan={6}>Loading…</td>
+            <tr aria-busy="true">
+              <td colSpan={6}><div className="skel skel-line" /></td>
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
@@ -236,8 +236,8 @@ export function Operations() {
           ) : (
             items.map((op) => (
               <tr key={String(op.id)}>
-                <td>{formatTimestamp(op.timestamp)}</td>
-                <td className="muted">{op.hostId}</td>
+                <td className="mono">{formatTimestamp(op.timestamp)}</td>
+                <td className="mono muted">{op.hostId}</td>
                 <td className="muted">{op.folderId ? folderLabel(op.folderId) : "—"}</td>
                 <td>{op.operation}</td>
                 <td>

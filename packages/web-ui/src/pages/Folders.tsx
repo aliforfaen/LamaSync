@@ -675,8 +675,8 @@ export function Folders() {
         </thead>
         <tbody>
           {!items ? (
-            <tr className="empty-row">
-              <td colSpan={7}>Loading…</td>
+            <tr aria-busy="true">
+              <td colSpan={7}><div className="skel skel-line" /></td>
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
@@ -694,7 +694,7 @@ export function Folders() {
                 <td>
                   {folder.backend ?? "sftp"}
                   {folder.backend === "s3" && folder.backendId ? (
-                    <span className="muted"> / {folder.backendId.slice(0, 8)}</span>
+                    <span className="mono muted"> / {folder.backendId.slice(0, 8)}</span>
                   ) : null}
                 </td>
                 <td className="muted">
@@ -713,8 +713,10 @@ export function Folders() {
                     <ul className="assignment-list">
                       {assignments.map((assignment) => (
                         <li key={assignment.id}>
-                          <strong>{assignment.hostId}</strong>
-                          <span>{assignment.role} · {assignment.localPath}</span>
+                          <strong className="mono">{assignment.hostId}</strong>
+                          <span>
+                            {assignment.role} · <span className="mono">{assignment.localPath}</span>
+                          </span>
                           <button
                             type="button"
                             className="action"
@@ -747,7 +749,7 @@ export function Folders() {
                     </ul>
                   )}
                 </td>
-                <td className="muted">
+                <td className="mono muted">
                   {folder.createdAt ? new Date(folder.createdAt).toLocaleString() : "—"}
                 </td>
                 <td className="table-actions">

@@ -106,8 +106,8 @@ export function Conflicts() {
         </thead>
         <tbody>
           {!items ? (
-            <tr className="empty-row">
-              <td colSpan={tab !== "pending" ? 8 : 7}>Loading…</td>
+            <tr aria-busy="true">
+              <td colSpan={tab !== "pending" ? 8 : 7}><div className="skel skel-line" /></td>
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">

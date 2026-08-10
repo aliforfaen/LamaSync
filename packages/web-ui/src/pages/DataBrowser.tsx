@@ -85,6 +85,8 @@ function Breadcrumbs({
 
 interface EntriesTableProps {
   response: BrowseResponse | null;
+  // WS5 P4: true while a listing fetch is in flight (drives skeleton rows).
+  loading: boolean;
   path: string;
   onNavigate: (path: string) => void;
   ownerLabel?: string;
@@ -96,7 +98,7 @@ interface EntriesTableProps {
   onDownload?: (name: string) => void;
 }
 
-function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename, onDownload }: EntriesTableProps) {
+function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename, onDownload }: EntriesTableProps) {
   const parent = parentPath(path);
   const selectable = Boolean(selection && onToggleSelect);
   const hasActions = Boolean(onRename || onDownload);
@@ -110,7 +112,17 @@ function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onTog
     ];
   }, [response?.entries]);
 
-  if (!response) return null;
+  if (!response) {
+    if (!loading) return null;
+    return (
+      <div className="browser-skel" aria-busy="true">
+        <div className="skel skel-line" />
+        <div className="skel skel-line" />
+        <div className="skel skel-line" />
+        <div className="skel skel-line" />
+      </div>
+    );
+  }
   if (response.entries.length === 0) {
     return <div className="empty-row">This directory is empty</div>;
   }
@@ -164,11 +176,11 @@ function EntriesTable({ response, path, onNavigate, ownerLabel, selection, onTog
               )}
             </td>
             <td>{entry.type === "dir" ? "directory" : "file"}</td>
-            <td>{formatBytes(entry.size)}</td>
-            <td>{formatTimestamp(entry.mtime)}</td>
+            <td className="num mono">{formatBytes(entry.size)}</td>
+            <td className="mono">{formatTimestamp(entry.mtime)}</td>
             {ownerLabel && (
               <td>
-                {entry.folderId ? <span className="muted">{entry.folderId}</span> : "—"}
+                {entry.folderId ? <span className="mono muted">{entry.folderId}</span> : "—"}
               </td>
             )}
             {hasActions && (
@@ -216,20 +228,28 @@ function RefBrowser({
 }) {
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [bump, setBump] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    setLoading(true);
     const load = ref.kind === "s3"
       ? api.browseS3(ref.folderId ?? "", ref.path)
       : api.browseLocal(ref.path);
     load
       .then((res) => {
-        if (!cancelled) setData(res);
+        if (!cancelled) {
+          setData(res);
+          setLoading(false);
+        }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          setLoading(false);
+          setError(err instanceof Error ? err.message : String(err));
+        }
       });
     return () => {
       cancelled = true;
@@ -251,6 +271,7 @@ function RefBrowser({
       {error && <div className="error">{error}</div>}
       <EntriesTable
         response={data}
+        loading={loading}
         path={ref.path}
         onNavigate={navigate}
         ownerLabel={ref.kind === "s3" ? "Folder" : undefined}
@@ -376,9 +397,9 @@ function JobsPanel({ jobs }: { jobs: BrowseJob[] }) {
               </td>
               <td className="muted">{job.source}</td>
               <td className="muted">{job.destination}</td>
-              <td className="muted">
+              <td className="mono num">
                 {job.totalBytes !== null
-                  ? `${job.progressBytes ?? 0}/${job.totalBytes}`
+                  ? `${formatBytes(job.progressBytes ?? 0)} / ${formatBytes(job.totalBytes)}`
                   : "—"}
               </td>
               <td>
@@ -453,8 +474,11 @@ export function DataBrowser() {
   }
 
   function confirmRename(to: string): void {
-    if (!renameTarget || !current || to === renameTarget) return;
+    if (!renameTarget || !current) return;
+    // WS5 P5: an unchanged name is a no-op — still close the dialog so it
+    // doesn't sit open with no visible effect.
     setRenameTarget(null);
+    if (to === renameTarget) return;
     setError(null);
     void api
       .browseRename(current.ref, renameTarget, to)

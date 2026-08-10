@@ -159,7 +159,11 @@ export function Hosts() {
       {(showGuide || (items !== null && items.length === 0)) && <AddHostGuide />}
 
       {!items ? (
-        <div className="empty-row">Loading…</div>
+        <div className="host-list" aria-busy="true">
+          <div className="skel skel-card" />
+          <div className="skel skel-card" />
+          <div className="skel skel-card" />
+        </div>
       ) : items.length === 0 ? (
         <div className="empty-row">No hosts registered yet</div>
       ) : (

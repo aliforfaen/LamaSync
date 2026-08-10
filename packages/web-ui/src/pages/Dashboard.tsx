@@ -274,7 +274,12 @@ export function Dashboard() {
     <div className="page">
       <div className="toolbar">
         <h1>Command Center</h1>
-        <span className="muted">WS: {wsState}</span>
+        <span
+          className={`ws-pill ws-${wsState}`}
+          title="WebSocket connection status"
+        >
+          <span className="ws-dot" aria-hidden="true" /> {wsState}
+        </span>
       </div>
       {error && <div className="error">{error}</div>}
 
@@ -352,7 +357,12 @@ export function Dashboard() {
       <section className="section">
         <h2>Fleet</h2>
         {!data ? (
-          <div className="empty-row">Loading…</div>
+          <div className="fleet-grid" aria-busy="true">
+            <div className="skel skel-card" />
+            <div className="skel skel-card" />
+            <div className="skel skel-card" />
+            <div className="skel skel-card" />
+          </div>
         ) : data.hosts.length === 0 ? (
           <GettingStarted
             hosts={data.hosts}
@@ -409,7 +419,7 @@ export function Dashboard() {
                 Storage report unavailable — {storageError}
               </span>
             ) : (
-              "Loading storage report…"
+              <div className="skel skel-line" aria-busy="true" />
             )}
           </div>
         ) : (
@@ -452,7 +462,7 @@ export function Dashboard() {
                   <strong>Total</strong>
                 </td>
                 <td />
-                <td>
+                <td className="num mono">
                   <strong>{formatBytes(storage.totalBytes)}</strong>
                 </td>
                 <td />

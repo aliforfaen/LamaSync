@@ -2,51 +2,61 @@
 
 :root,
 [data-theme="dark"] {
-  /* background / surface */
-  --bg: #0f1115;
-  --surface: #161a22;
-  --surface-elevated: #1c2030;
+  /* background / surface — near-black with a cool bias (ops-console) */
+  --bg: #0a0d12;
+  --surface: #10141c;
+  --surface-elevated: #151b27;
 
   /* borders */
-  --border: #232838;
-  --border-strong: #2a3041;
+  --border: #1b2231;
+  --border-strong: #262f42;
 
   /* text */
-  --text: #e6e8ec;
-  --text-dim: #c0c5cf;
-  --text-muted: #8c92a1;
-  --text-muted-rgb: 140, 146, 161;
-  --text-strong: #ffffff;
+  --text: #e5e8ee;
+  --text-dim: #b9c0cd;
+  --text-muted: #7f8799;
+  --text-muted-rgb: 127, 135, 153;
+  --text-strong: #f7f9fc;
   --text-on-accent: #ffffff;
 
-  /* semantic accents */
+  /* semantic accents — terminal-flavored status colors */
   --accent-info: #7cb6ff;
   --accent-info-rgb: 79, 124, 255;
-  --accent-info-bg: rgba(var(--accent-info-rgb), 0.2);
+  --accent-info-bg: rgba(var(--accent-info-rgb), 0.22);
   /* LAMA-206: deeper blue for filled primary buttons — white text on
      --accent-info-rgb is only 3.71:1 (below WCAG AA 4.5:1); this is 4.94:1. */
   --accent-primary-rgb: 59, 101, 235;
+  --accent-primary: rgb(var(--accent-primary-rgb));
 
-  --accent-ok: #6fcf97;
-  --accent-ok-rgb: 46, 160, 67;
+  --accent-ok: #4ade80;
+  --accent-ok-rgb: 74, 222, 128;
   --accent-ok-bg: rgba(var(--accent-ok-rgb), 0.2);
 
-  --accent-warn: #ffc869;
-  --accent-warn-rgb: 255, 183, 0;
+  --accent-warn: #fbbf24;
+  --accent-warn-rgb: 251, 191, 36;
   --accent-warn-bg: rgba(var(--accent-warn-rgb), 0.2);
 
-  --accent-critical: #ff8a9c;
-  --accent-critical-rgb: 207, 102, 121;
-  --accent-critical-bg: rgba(var(--accent-critical-rgb), 0.18);
-  --accent-critical-border: rgba(var(--accent-critical-rgb), 0.4);
+  --accent-critical: #f87171;
+  --accent-critical-rgb: 248, 113, 113;
+  --accent-critical-bg: rgba(var(--accent-critical-rgb), 0.2);
+  --accent-critical-border: rgba(var(--accent-critical-rgb), 0.45);
 
   --accent-storage: #a78bfa;
   --accent-sync: #2dd4bf;
 
   --color-error: #ff8585;
 
+  /* focus ring (shared :focus-visible below) */
+  --focus-ring: rgba(var(--accent-info-rgb), 0.5);
+
+  /* elevation + backdrop (modal) */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.5);
+  --backdrop: rgba(0, 0, 0, 0.55);
+
   /* spacing */
   --space-1: 0.25rem;
+  --space-1-5: 0.375rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
@@ -62,6 +72,7 @@
 
   /* typography */
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --font-size-xs: 0.7rem;
   --font-size-sm: 0.75rem;
   --font-size-md: 0.85rem;
@@ -69,24 +80,30 @@
   --font-size-lg: 1rem;
   --font-size-xl: 1.25rem;
   --font-size-2xl: 1.6rem;
+  --font-size-mono-xs: 0.68rem;
+  --font-size-mono-sm: 0.75rem;
+  --font-size-mono-md: 0.82rem;
   --line-height-base: 1.5;
 
   /* muted badge background */
-  --muted-bg: rgba(var(--text-muted-rgb), 0.18);
+  --muted-bg: rgba(var(--text-muted-rgb), 0.2);
+
+  /* badge outline (WS5 P3) */
+  --badge-border: rgba(var(--text-muted-rgb), 0.35);
 }
 
 [data-theme="light"] {
-  --bg: #f6f7f9;
+  --bg: #f5f6f8;
   --surface: #ffffff;
-  --surface-elevated: #f1f3f6;
+  --surface-elevated: #eef1f5;
 
   --border: #d7dbe4;
-  --border-strong: #b8bfcc;
+  --border-strong: #b4bccb;
 
-  --text: #1a1d23;
-  --text-dim: #4a4f5a;
-  --text-muted: #6f7683;
-  --text-muted-rgb: 111, 118, 131;
+  --text: #171a20;
+  --text-dim: #464c58;
+  --text-muted: #69717f;
+  --text-muted-rgb: 105, 113, 127;
   --text-strong: #000000;
   --text-on-accent: #ffffff;
 
@@ -95,13 +112,14 @@
   --accent-info-bg: rgba(var(--accent-info-rgb), 0.12);
   /* filled primary buttons; white text is 5.17:1 (WCAG AA pass) */
   --accent-primary-rgb: 37, 99, 235;
+  --accent-primary: rgb(var(--accent-primary-rgb));
 
-  --accent-ok: #15803d;
+  --accent-ok: #166534;
   --accent-ok-rgb: 22, 163, 74;
   --accent-ok-bg: rgba(var(--accent-ok-rgb), 0.12);
 
-  --accent-warn: #a16207;
-  --accent-warn-rgb: 202, 138, 4;
+  --accent-warn: #92400e;
+  --accent-warn-rgb: 217, 119, 6;
   --accent-warn-bg: rgba(var(--accent-warn-rgb), 0.12);
 
   --accent-critical: #b91c1c;
@@ -114,11 +132,30 @@
 
   --color-error: #c62828;
 
+  /* focus ring (shared :focus-visible below) */
+  --focus-ring: rgba(var(--accent-info-rgb), 0.55);
+
+  /* elevation + backdrop (modal) */
+  --shadow-sm: 0 1px 2px rgba(15, 18, 26, 0.08);
+  --shadow-lg: 0 10px 28px rgba(15, 18, 26, 0.18);
+  --backdrop: rgba(15, 18, 26, 0.35);
+
   --muted-bg: rgba(var(--text-muted-rgb), 0.12);
+
+  /* badge outline (WS5 P3) */
+  --badge-border: rgba(var(--text-muted-rgb), 0.3);
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* WS5 P1: single shared focus treatment for keyboard interaction. Specific
+   widget-level :focus rules (login input, browser select) are aligned to
+   var(--focus-ring) in later phases. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 html,
@@ -158,6 +195,21 @@ a:hover {
   vertical-align: -0.125em;
 }
 
+/* WS5 P2: machine-shaped data — paths, ids, timestamps, byte counts,
+   cron expressions, rclone output. Use `.mono` in TSX where no semantic
+   class exists; bare `code` gets the same treatment for free. */
+code,
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-sm);
+}
+
+/* Right-aligned numeric table cells (sizes, object counts). */
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .nav {
   display: flex;
   /* LAMA-205: wrap instead of clip when the row runs out of width (the nav
@@ -178,9 +230,82 @@ a:hover {
   flex-shrink: 0;
 }
 
+/* WS5 P5: wordmark — mono, tracked, two-tone; keep the layout role. */
 .nav .brand {
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--font-size-base);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-strong);
   margin-right: auto;
+}
+
+.brand-accent {
+  color: var(--accent-sync);
+}
+
+/* WS5 P5: theme toggle reads as console chrome, not a plain action. */
+button.action.theme-toggle {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.3rem 0.6rem;
+}
+
+/* WS5 P5: WS connection status pill (replaces raw `WS: state` text). */
+.ws-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--badge-border);
+}
+.ws-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.ws-open {
+  color: var(--accent-ok);
+  background: var(--accent-ok-bg);
+}
+.ws-connecting {
+  color: var(--accent-warn);
+  background: var(--accent-warn-bg);
+}
+.ws-closed {
+  color: var(--accent-critical);
+  background: var(--accent-critical-bg);
+}
+
+/* WS5 P5: thin token-colored scrollbars for the console look. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .nav a {
@@ -233,11 +358,6 @@ a:hover {
   font-size: var(--font-size-base);
 }
 
-.login-card input:focus {
-  outline: 2px solid rgb(var(--accent-info-rgb));
-  outline-offset: 1px;
-}
-
 .login-card button {
   background: rgb(var(--accent-primary-rgb));
   color: var(--text-on-accent);
@@ -263,11 +383,25 @@ a:hover {
 
 .login-remember input {
   width: auto;
+  min-height: auto;
 }
 
 .error {
   color: var(--color-error);
   font-size: var(--font-size-md);
+  background: var(--accent-critical-bg);
+  border: 1px solid var(--accent-critical-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+/* Error text rendered inside an empty state stays bare text. */
+.empty-row .error {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
 }
 
 .attention-grid, .fleet-grid {
@@ -281,10 +415,15 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--space-3);
+  box-shadow: var(--shadow-sm);
 }
 .attention-item { display: flex; flex-direction: column; gap: var(--space-2); }
 .attention-item > div:first-child, .fleet-card-head { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
-.attention-active { border-color: var(--accent-warn); }
+/* WS5 P3: attention states read at a glance — amber tint + outline. */
+.attention-active {
+  border-color: var(--accent-warn);
+  background: var(--accent-warn-bg);
+}
 .attention-count { color: var(--accent-warn); font-size: var(--font-size-xl); font-weight: 700; }
 .attention-detail { color: var(--text-dim); font-size: var(--font-size-sm); }
 .attention-detail ul { margin: 0; padding-left: var(--space-4); }
@@ -312,8 +451,15 @@ a:hover {
 .fleet-card { display: flex; flex-direction: column; gap: var(--space-2); }
 .quick-actions { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
 .quick-actions h2 { width: 100%; }
-a.action, .attention-link { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); background: var(--surface); }
-.attention-link { display: inline-block; margin-top: auto; text-align: center; color: var(--accent-info); text-decoration: none; }
+/* WS5 P3: anchors that act as buttons share the action family defined in the
+   button.action block; this rule keeps only the attention-link layout bits. */
+.attention-link {
+  display: inline-block;
+  margin-top: auto;
+  text-align: center;
+  color: var(--accent-info);
+  text-decoration: none;
+}
 
 .summary-grid {
   display: grid;
@@ -330,6 +476,7 @@ a.action, .attention-link { border: 1px solid var(--border-strong); border-radiu
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  box-shadow: var(--shadow-sm);
 }
 
 .summary-card .label {
@@ -352,7 +499,8 @@ a.action, .attention-link { border: 1px solid var(--border-strong); border-radiu
   margin: 0 0 var(--space-2) 0;
   font-size: var(--font-size-lg);
   font-weight: 600;
-  color: var(--text-dim);
+  color: var(--text);
+  letter-spacing: 0.02em;
 }
 
 table.data {
@@ -367,17 +515,19 @@ table.data {
 table.data th,
 table.data td {
   text-align: left;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1-5) var(--space-2);
   border-bottom: 1px solid var(--border);
 }
 
 table.data th {
   background: var(--surface-elevated);
-  color: var(--text-dim);
-  font-weight: 500;
+  color: var(--text-muted);
+  font-weight: 600;
   font-size: var(--font-size-sm);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
 }
 
 table.data tbody tr:last-child td {
@@ -387,18 +537,23 @@ table.data tbody tr:last-child td {
 .empty-row, .empty-row td {
   text-align: center;
   color: var(--text-muted);
-  padding: var(--space-4);
-  font-style: italic;
+  padding: var(--space-5);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-sm);
+  font-style: normal;
 }
 
 .badge {
   display: inline-block;
-  padding: 0.1rem 0.45rem;
+  padding: 0.08rem 0.5rem;
   border-radius: var(--radius-full);
-  font-size: var(--font-size-xs);
-  font-weight: 500;
+  border: 1px solid var(--badge-border);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
 }
 
 .badge-online {
@@ -486,7 +641,8 @@ table.data tbody tr:last-child td {
   border-radius: var(--radius-sm);
   background: var(--accent-info-bg);
   color: var(--accent-info);
-  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -496,35 +652,63 @@ table.data tbody tr:last-child td {
   color: var(--text-muted);
 }
 
-button.action {
-  background: var(--border);
-  color: var(--text);
+button.action,
+a.action {
+  background: var(--surface-elevated);
   border: 1px solid var(--border-strong);
+  color: var(--text);
   padding: 0.4rem 0.7rem;
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: var(--font-size-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-button.action:hover {
+button.action:hover,
+a.action:hover {
   background: var(--border-strong);
+  border-color: var(--text-muted);
+  color: var(--text-strong);
+  text-decoration: none;
+}
+
+button.action:active {
+  transform: translateY(1px);
 }
 
 button.action.primary {
-  background: rgb(var(--accent-primary-rgb));
-  border-color: rgb(var(--accent-primary-rgb));
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--text-on-accent);
+}
+
+button.action.primary:hover {
+  background: rgb(var(--accent-info-rgb));
+  border-color: rgb(var(--accent-info-rgb));
   color: var(--text-on-accent);
 }
 
 button.action.danger {
   background: var(--accent-critical-bg);
-  border-color: var(--accent-critical-border);
+  border-color: var(--accent-critical);
   color: var(--accent-critical);
 }
 
+button.action.danger:hover {
+  background: rgba(var(--accent-critical-rgb), 0.35);
+  border-color: var(--accent-critical);
+  color: var(--accent-critical);
+}
+
+/* Busy/disabled: clearly not-interactive but still legible — reads
+   "working, hold on" instead of just dimming the label. */
 button.action:disabled {
-  opacity: 0.5;
+  opacity: 0.55;
+  filter: saturate(0.5);
   cursor: not-allowed;
+  transform: none;
 }
 
 .form {
@@ -556,16 +740,32 @@ button.action:disabled {
   flex: 1 1 240px;
 }
 
-.form input,
+/* WS5 P3: shared control styling — consistent height + terminal focus ring.
+   Text inputs only; checkboxes/radios keep native sizing. */
+.form input:not([type="checkbox"]):not([type="radio"]),
 .form select,
-.form textarea {
+.form textarea,
+.browser-select,
+.modal input,
+.login-card input {
   background: var(--bg);
   border: 1px solid var(--border-strong);
   color: var(--text);
-  padding: 0.45rem 0.6rem;
+  padding: 0.4rem 0.55rem;
   border-radius: var(--radius-sm);
   font-family: inherit;
   font-size: var(--font-size-md);
+  min-height: 2rem;
+}
+
+.form input:not([type="checkbox"]):not([type="radio"]):focus,
+.form select:focus,
+.form textarea:focus,
+.browser-select:focus,
+.modal input:focus,
+.login-card input:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .form .actions {
@@ -617,7 +817,44 @@ button.action:disabled {
 
 .toolbar h1 {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: var(--font-size-xl);
+  letter-spacing: 0.01em;
+}
+
+/* --- WS5 P4: skeleton loading blocks ---
+   Pulse animation over token-colored blocks; prefers-reduced-motion falls
+   back to static blocks. Used while pages fetch instead of "Loading…" text. */
+.skel {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-elevated);
+  border-radius: var(--radius-sm);
+}
+.skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(var(--text-muted-rgb), 0.12),
+    transparent
+  );
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skel-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+.skel-line { height: 0.9rem; }
+.skel-card { height: 6rem; border-radius: var(--radius-md); }
+.browser-skel {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel::after { animation: none; }
 }
 
 /* --- Host list / detail (LAMA-198) --- */
@@ -637,6 +874,7 @@ button.action:disabled {
   flex-direction: column;
   gap: var(--space-2);
   color: var(--text);
+  box-shadow: var(--shadow-sm);
 }
 
 .host-card:hover {
@@ -736,8 +974,8 @@ button.action:disabled {
   border-radius: var(--radius-sm);
   padding: var(--space-3);
   margin-top: var(--space-2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-sm);
   white-space: pre-wrap;
   overflow-x: auto;
   color: var(--text);
@@ -796,12 +1034,6 @@ button.action:disabled {
 }
 
 .browser-select {
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  color: var(--text);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  font-family: inherit;
   font-size: var(--font-size-base);
   min-width: 240px;
 }
@@ -818,7 +1050,7 @@ button.action:disabled {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -829,6 +1061,7 @@ button.action:disabled {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
   padding: var(--space-4);
   max-width: 640px;
   width: 90%;
@@ -839,15 +1072,16 @@ button.action:disabled {
   gap: var(--space-3);
 }
 
+.modal h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
 .modal-actions {
   display: flex;
   gap: var(--space-2);
   justify-content: flex-end;
-}
-
-.browser-select:focus {
-  outline: 2px solid rgb(var(--accent-info-rgb));
-  outline-offset: 1px;
 }
 
 .browser-dir-name,
@@ -923,8 +1157,8 @@ button.action:disabled {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--space-2) var(--space-3);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-sm);
   white-space: pre-wrap;
   overflow-x: auto;
   color: var(--text);
@@ -1004,8 +1238,8 @@ button.action:disabled {
   line-height: 1;
 }
 
-/* Status tabs (Conflicts page, hidden-api-power). Minimal segmented
-   control; deliberately not part of the visual-redesign workstream. */
+/* Status tabs (Conflicts page). Segmented control aligned with the WS5
+   console language: mono micro-labels, accent-tinted active state. */
 .tabs {
   display: inline-flex;
   gap: var(--space-1, 0.25rem);
@@ -1018,18 +1252,22 @@ button.action:disabled {
   border: none;
   background: transparent;
   color: var(--text-dim);
-  padding: 0.25rem 0.75rem;
+  padding: 0.3rem 0.75rem;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 .tab:hover {
   color: var(--text);
 }
 .tab-active,
 .tab-active:hover {
-  color: var(--text);
-  background: var(--accent, var(--border-strong));
+  color: var(--accent-info);
+  background: var(--accent-info-bg);
 }
 
 /* Inline glossary hint badge (workstream 2). */
