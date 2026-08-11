@@ -186,6 +186,9 @@ export function Folders() {
   // sibling "Versions" pattern in Dotfiles.tsx. Per-assignment actions live
   // in the expanded sub-row, so the main table row height stays constant.
   const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
+  // LAMA-235: host filter in the Folders view — mirrors the "Scope"
+  // selector on the Dotfiles page. null = all hosts.
+  const [hostFilter, setHostFilter] = useState<string | null>(null);
 
   async function refresh() {
     setError(null);
@@ -233,6 +236,15 @@ export function Folders() {
   useEffect(() => {
     refresh();
   }, []);
+
+  // LAMA-235: when the selected host disappears from the host list (or the
+  // filter narrows to nothing), don't leave a stale filter behind.
+  const hostLabel = (id: string) => hosts.find((h) => h.id === id)?.hostname ?? id;
+  const filteredItems = (items ?? []).filter(({ assignments }) =>
+    hostFilter === null
+      ? true
+      : assignments.some((a) => a.hostId === hostFilter),
+  );
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -660,7 +672,52 @@ export function Folders() {
     <div className="page">
       <div className="toolbar">
         <h1>Folders</h1>
-        <button type="button" className="action primary" onClick={() => setShowForm((s) => !s)}>
+        <label className="scope-filter" title="Show only folders assigned to a specific host">
+          Host
+          <select
+            value={hostFilter ?? "__all__"}
+            onChange={(e) => {
+              const v = e.target.value;
+              const next = v === "__all__" ? null : v;
+              setHostFilter(next);
+              // LAMA-240: collapse an expanded row the new filter hides.
+              if (next !== null) {
+                setExpandedFolderId((cur) => {
+                  if (cur === null) return null;
+                  const folder = items?.find((i) => i.folder.id === cur);
+                  return folder &&
+                    folder.assignments.some((a) => a.hostId === next)
+                    ? cur
+                    : null;
+                });
+              }
+            }}
+          >
+            <option value="__all__">All hosts</option>
+            {hosts.map((h) => (
+              <option key={h.id} value={h.id}>
+                {h.hostname}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="action primary"
+          onClick={() => {
+            // LAMA-241: preselect the first configured backend instead of
+            // the credential-less sftp default.
+            if (!showForm) {
+              const first = backends[0];
+              setForm(
+                first
+                  ? { ...DEFAULT_FORM, backend: first.kind, backendId: first.id }
+                  : DEFAULT_FORM,
+              );
+            }
+            setShowForm((s) => !s);
+          }}
+        >
           {showForm ? "Cancel" : "New folder"}
         </button>
       </div>
@@ -713,16 +770,18 @@ export function Folders() {
             <tr aria-busy="true">
               <td colSpan={7}><div className="skel skel-line" /></td>
             </tr>
-          ) : items.length === 0 ? (
+          ) : filteredItems.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={7}>No folders yet — create one, then assign it to a host to start syncing.</td>
+              <td colSpan={7}>
+                {hostFilter
+                  ? `No folders assigned to ${hostLabel(hostFilter)} yet.`
+                  : "No folders yet — create one, then assign it to a host to start syncing."}
+              </td>
             </tr>
           ) : (
-            items.map(({ folder, assignments }) => {
+            filteredItems.map(({ folder, assignments }) => {
               const size = sizes[folder.id];
               const isExpanded = expandedFolderId === folder.id;
-              const hostLabel = (id: string) =>
-                hosts.find((h) => h.id === id)?.hostname ?? id;
               return (
               <Fragment key={folder.id}>
               <tr className={isExpanded ? "folder-row folder-row-expanded" : "folder-row"}>

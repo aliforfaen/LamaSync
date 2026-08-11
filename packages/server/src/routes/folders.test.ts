@@ -32,12 +32,13 @@ function insertBackend(opts: {
   s3Bucket?: string;
   s3AccessKeyId?: string;
   s3SecretAccessKey?: string;
+  localPath?: string;
 }): { id: string; name: string; kind: string } {
   const id = crypto.randomUUID();
   db.run(
     `INSERT INTO backends
-       (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
-     VALUES (?, ?, ?, 'other', ?, NULL, ?, ?, ?)`,
+       (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, local_path, created_at)
+     VALUES (?, ?, ?, 'other', ?, NULL, ?, ?, ?, ?)`,
     [
       id,
       opts.name,
@@ -45,6 +46,7 @@ function insertBackend(opts: {
       opts.s3Endpoint ?? null,
       opts.s3AccessKeyId ?? null,
       opts.s3SecretAccessKey ? encryptSecret(opts.s3SecretAccessKey) : null,
+      opts.localPath ?? null,
       Date.now(),
     ],
   );
@@ -68,6 +70,11 @@ beforeEach(() => {
   // config-revision.ts holds its own activeDb; point it at the test DB
   // so folder create/update/delete bumps land in the same in-memory store.
   __setConfigRevisionDb(db);
+  // LAMA-241: bare folder creates default to the first existing backend;
+  // seed one so the legacy tests that omit `backend` keep working (and the
+  // defaulting path is exercised implicitly). Tests that need a specific
+  // "first" backend (or none at all) clear the table first.
+  insertBackend({ name: "__seed__", kind: "local", localPath: "/srv/seed" });
   app = new Elysia().use(getAuthPlugin()).use(foldersRoutes);
 });
 
@@ -145,14 +152,22 @@ describe("POST /api/v1/folders — backend validation (LAMA-105, LAMA-222)", () 
     expect(JSON.stringify(body)).not.toContain("EXO_SECRET");
   });
 
-  test("default backend is sftp when not provided", async () => {
+  test("defaults to the first existing backend when backend is omitted (LAMA-241)", async () => {
+    // The seeded local backend is cleared so this test's backend is first.
+    db.run("DELETE FROM backends");
+    const backend = insertBackend({
+      name: "first-backend",
+      kind: "local",
+      localPath: "/srv/data",
+    });
     const res = await postJson("/api/v1/folders", {
       name: "legacy",
       type: "sync",
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.backend).toBe("sftp");
+    expect(body.backend).toBe("local");
+    expect(body.backendId).toBe(backend.id);
   });
 
   test("s3 bucket is required", async () => {
@@ -201,6 +216,10 @@ describe("PUT /api/v1/folders/:id — backend updates (LAMA-105, LAMA-222)", () 
     const created = await postJson("/api/v1/folders", {
       name: "flip",
       type: "sync",
+      // explicit sftp keeps backend_id NULL so the s3 switch can't reuse
+      // an unrelated backend reference (LAMA-241 defaulting changed bare
+      // creates to pick the first existing backend).
+      backend: "sftp",
     });
     const { id } = (await created.json()) as { id: string };
 
@@ -467,4 +486,58 @@ describe("POST /api/v1/folders/:id/assign — host existence (LAMA-215)", () => 
     const body = (await res.json()) as { hostId: string };
     expect(body.hostId).toBe("real-host");
   });
+});
+
+describe("POST /api/v1/folders — default backend (LAMA-241)", () => {
+  test("defaults an s3 first backend and still requires the bucket", async () => {
+    db.run("DELETE FROM backends");
+    insertBackend({
+      name: "only-s3",
+      s3Endpoint: "sos-at-vie-1.exo.io",
+      s3Bucket: "unused",
+      s3AccessKeyId: "EXO_KEY",
+      s3SecretAccessKey: "EXO_SECRET",
+    });
+    // No bucket given → the defaulted s3 backend still needs one.
+    const res = await postJson("/api/v1/folders", {
+      name: "defaulted-s3-no-bucket",
+      type: "sync",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("s3Bucket");
+  });
+
+  test("400 when no backend exists to default to", async () => {
+    db.run("DELETE FROM backends");
+    const res = await postJson("/api/v1/folders", {
+      name: "no-backend-folder",
+      type: "sync",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("no backends configured");
+  });
+
+  test("explicit sftp backend is still honored (legacy inline backend)", async () => {
+    const res = await postJson("/api/v1/folders", {
+      name: "legacy-sftp",
+      type: "sync",
+      backend: "sftp",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { backend?: string | null };
+    expect(body.backend).toBe("sftp");
+  });
+});
+
+describe("PUT/PATCH/DELETE /api/v1/assignments/:id — 405 guidance (LAMA-241)", () => {
+  for (const method of ["PUT", "PATCH", "DELETE"] as const) {
+    test(`${method} returns 405 pointing at the folder+host route`, async () => {
+      const res = await app.handle(
+        request(`/api/v1/assignments/any-id`, { method, body: JSON.stringify({}) }),
+      );
+      expect(res.status).toBe(405);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("/folders/:folderId/assign/:hostId");
+    });
+  }
 });

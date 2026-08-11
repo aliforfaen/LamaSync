@@ -1,20 +1,24 @@
 import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
-import { readdirSync, statSync } from "fs";
 import { db as defaultDb } from "../db.ts";
 import type { Backend, BackendKind, S3Provider } from "@lamasync/core";
 import {
   BACKEND_SELECT,
   type BackendRow,
+  getBackend,
   isBackendKind,
   isS3Provider,
   rowToBackend,
   setBackendResticPassword,
   setBackendSecret,
 } from "../backends.ts";
+import {
+  testLocalDirectory,
+  testResticRepository,
+  testS3Connection,
+} from "../backend-test.ts";
 import { encryptSecret, decryptSecret } from "../crypto.ts";
 import { bumpConfigRevision } from "../config-revision.ts";
-import { withTempRcloneConfig } from "../temp-rclone-config.ts";
 
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
@@ -47,6 +51,29 @@ function validateS3Settings(
 function normalizeRegion(provider: S3Provider, region: string | null | undefined): string | null {
   if (provider === "exoscale") return "other-v2-signature";
   return region?.trim() || null;
+}
+
+/**
+ * LAMA-238: resolve write-only fields (s3 secret, restic password) for the
+ * draft connection test. The form value wins when provided; otherwise the
+ * stored ciphertext of the referenced backend is decrypted, so an edit that
+ * leaves the secret untouched still tests the real config.
+ */
+export function resolveDraftWriteSecrets(
+  providedSecret: string,
+  providedPassword: string,
+  stored: BackendRow | null,
+): { secret: string; password: string } {
+  return {
+    secret:
+      providedSecret !== ""
+        ? providedSecret
+        : (stored ? decryptSecret(stored.s3_secret_key_enc) ?? "" : ""),
+    password:
+      providedPassword !== ""
+        ? providedPassword
+        : (stored ? decryptSecret(stored.restic_password_enc) ?? "" : ""),
+  };
 }
 
 /** How many folders currently reference this backend (for the delete guard
@@ -431,6 +458,119 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
     },
   )
   .post(
+    "/backends/test",
+    async ({ body, set }) => {
+      // LAMA-238: connection test for a backend DRAFT — the values from the
+      // "Add backend" / "Edit backend" form before anything is persisted.
+      // Write-only fields (s3 secret, restic password) fall back to the
+      // stored value when `backendId` points at an existing backend, so an
+      // edit that leaves the secret untouched still tests the real config.
+      const b = body as {
+        kind?: unknown;
+        backendId?: unknown;
+        s3Provider?: unknown;
+        s3Endpoint?: unknown;
+        s3Region?: unknown;
+        s3AccessKeyId?: unknown;
+        s3SecretAccessKey?: unknown;
+        localPath?: unknown;
+        resticRepository?: unknown;
+        resticPassword?: unknown;
+      };
+      const kind: BackendKind = isBackendKind(typeof b.kind === "string" ? b.kind : null)
+        ? (b.kind as BackendKind)
+        : "s3";
+      const provider: S3Provider = isS3Provider(typeof b.s3Provider === "string" ? b.s3Provider : null)
+        ? (b.s3Provider as S3Provider)
+        : "other";
+      const endpoint = typeof b.s3Endpoint === "string" ? b.s3Endpoint.trim() : "";
+      const accessKeyId = typeof b.s3AccessKeyId === "string" ? b.s3AccessKeyId.trim() : "";
+      const secret = typeof b.s3SecretAccessKey === "string" ? b.s3SecretAccessKey : "";
+      const region = normalizeRegion(provider, typeof b.s3Region === "string" ? b.s3Region : null);
+      const localPath = typeof b.localPath === "string" ? b.localPath.trim() : "";
+      const resticRepository =
+        typeof b.resticRepository === "string" ? b.resticRepository.trim() : "";
+      const resticPassword = typeof b.resticPassword === "string" ? b.resticPassword : "";
+      const stored =
+        typeof b.backendId === "string" && b.backendId.trim() !== ""
+          ? getBackend(activeDb, b.backendId.trim())
+          : null;
+      const { secret: effectiveSecret, password: effectivePassword } =
+        resolveDraftWriteSecrets(secret, resticPassword, stored);
+
+      if (kind === "s3") {
+        if (endpoint === "" || accessKeyId === "" || effectiveSecret === "") {
+          set.status = 400;
+          return {
+            error: "S3 backends require s3Endpoint, s3AccessKeyId and s3SecretAccessKey",
+          };
+        }
+        const providerError = validateS3Settings(kind, provider, endpoint, region);
+        if (providerError) {
+          set.status = 400;
+          return { error: providerError };
+        }
+        const outcome = await testS3Connection({
+          provider,
+          accessKeyId,
+          secretAccessKey: effectiveSecret,
+          endpoint,
+          region,
+        });
+        if (!outcome.ok) set.status = 502;
+        return outcome;
+      }
+      if (kind === "local" || kind === "nfs") {
+        if (localPath === "") {
+          set.status = 400;
+          return { error: `${kind} backends require localPath` };
+        }
+        if (!localPath.startsWith("/")) {
+          set.status = 400;
+          return { error: `${kind} localPath must be an absolute path (starting with /)` };
+        }
+        const outcome = testLocalDirectory(localPath);
+        if (!outcome.ok) set.status = 502;
+        return outcome;
+      }
+      if (kind === "restic") {
+        if (resticRepository === "" || effectivePassword === "") {
+          set.status = 400;
+          return { error: "restic backends require resticRepository and resticPassword" };
+        }
+        const outcome = await testResticRepository(resticRepository, effectivePassword);
+        if (!outcome.ok) set.status = 502;
+        return outcome;
+      }
+      set.status = 400;
+      return { error: `connection test is not supported for kind '${kind}'` };
+    },
+    {
+      body: t.Object({
+        kind: t.Optional(t.String()),
+        backendId: t.Optional(t.String()),
+        s3Provider: t.Optional(t.String()),
+        s3Endpoint: t.Optional(t.String()),
+        s3Region: t.Optional(t.String()),
+        s3AccessKeyId: t.Optional(t.String()),
+        s3SecretAccessKey: t.Optional(t.String()),
+        localPath: t.Optional(t.String()),
+        resticRepository: t.Optional(t.String()),
+        resticPassword: t.Optional(t.String()),
+      }),
+      detail: {
+        summary: "Test an unsaved backend configuration (create/edit form)",
+        tags: ["Backends"],
+        responses: {
+          200: { description: "Connection ok" },
+          400: { description: "Invalid configuration for testing" },
+          502: { description: "rclone/restic reported an error" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
     "/backends/:backendId/test",
     async ({ params, set }) => {
       const existing = activeDb
@@ -446,41 +586,15 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
           set.status = 400;
           return { error: "backend has no stored secret" };
         }
-        // Cheap connectivity check: `rclone lsd <remote>:` against a temp
-        // config built from the backend row, 5s timeout.
-        const config = [
-          `[test]`,
-          `type = s3`,
-          `provider = ${existing.s3_provider === "aws" ? "AWS" : "Other"}`,
-          `env_auth = false`,
-          `access_key_id = ${existing.s3_access_key_id ?? ""}`,
-          `secret_access_key = ${secret}`,
-          `endpoint = ${existing.s3_endpoint ?? ""}`,
-          ...(existing.s3_region ? [`region = ${existing.s3_region}`] : []),
-        ].join("\n");
-        // LAMA-226 P1-6: drop the secret into a private 0600 temp dir and
-        // remove it on both the happy and error paths via the shared helper.
-        // Concurrent calls no longer clobber each other because each gets a
-        // unique directory (the previous `/tmp/lamasync-backend-test-${id}.conf`
-        // name collided under load and used 0644 perms by default).
-        const result = await withTempRcloneConfig(config, async (configPath) => {
-          const proc = Bun.spawn(
-            ["rclone", "lsd", "test:", "--config", configPath, "--timeout", "5s"],
-            { stdout: "pipe", stderr: "pipe" },
-          );
-          const [stdout, stderr, code] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-            proc.exited,
-          ]);
-          return { stdout, stderr, code };
+        const outcome = await testS3Connection({
+          provider: existing.s3_provider ?? "other",
+          accessKeyId: existing.s3_access_key_id ?? "",
+          secretAccessKey: secret,
+          endpoint: existing.s3_endpoint ?? "",
+          region: existing.s3_region ?? null,
         });
-        if (result.code === 0) {
-          return { ok: true, detail: "connection ok" };
-        }
-        const detail = result.stderr.trim().split("\n").pop() ?? "unknown rclone error";
-        set.status = 502;
-        return { ok: false, detail };
+        if (!outcome.ok) set.status = 502;
+        return outcome;
       }
       if (existing.kind === "local" || existing.kind === "nfs") {
         const path = (existing.local_path ?? "").trim();
@@ -488,18 +602,9 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
           set.status = 400;
           return { error: "backend has no local path configured" };
         }
-        try {
-          const st = statSync(path);
-          if (!st.isDirectory()) {
-            set.status = 502;
-            return { ok: false, detail: `path exists but is not a directory: ${path}` };
-          }
-          readdirSync(path);
-          return { ok: true, detail: `readable directory: ${path}` };
-        } catch (err) {
-          set.status = 502;
-          return { ok: false, detail: err instanceof Error ? err.message : String(err) };
-        }
+        const outcome = testLocalDirectory(path);
+        if (!outcome.ok) set.status = 502;
+        return outcome;
       }
       if (existing.kind === "restic") {
         const repository = (existing.restic_repository ?? "").trim();
@@ -508,39 +613,9 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
           set.status = 400;
           return { error: "restic backend is missing repository or password" };
         }
-        try {
-          const proc = Bun.spawn(
-            ["restic", "snapshots", "--json", "-r", repository],
-            {
-              // Never put the password on the command line — it lands in
-              // the process list otherwise.
-              env: { ...process.env, RESTIC_PASSWORD: password },
-              stdout: "pipe",
-              stderr: "pipe",
-            },
-          );
-          const [stdout, stderr, code] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-            proc.exited,
-          ]);
-          if (code === 0) {
-            let count = 0;
-            try {
-              const parsed: unknown = JSON.parse(stdout.trim() === "" ? "[]" : stdout);
-              if (Array.isArray(parsed)) count = parsed.length;
-            } catch {
-              // exit 0 with unparseable stdout still means reachable.
-            }
-            return { ok: true, detail: `repository ok (${count} snapshot(s))` };
-          }
-          const detail = stderr.trim().split("\n").pop() ?? "unknown restic error";
-          set.status = 502;
-          return { ok: false, detail };
-        } catch (err) {
-          set.status = 502;
-          return { ok: false, detail: err instanceof Error ? err.message : String(err) };
-        }
+        const outcome = await testResticRepository(repository, password);
+        if (!outcome.ok) set.status = 502;
+        return outcome;
       }
       set.status = 400;
       return { error: `connection test is not supported for kind '${existing.kind}'` };

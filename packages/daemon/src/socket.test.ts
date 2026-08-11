@@ -161,6 +161,7 @@ describe("dispatch — sync helpers", () => {
       }),
       onSyncRequest: (folderId: string) => {
         requested = folderId;
+        return true;
       },
     };
     const data = await (dispatch as unknown as (
@@ -169,6 +170,69 @@ describe("dispatch — sync helpers", () => {
     ) => Promise<unknown>)({ cmd: "sync", folderId: "f1" }, opts);
     expect(requested).toBe("f1");
     expect(data).toEqual({ started: true, folderId: "f1" });
+  });
+
+  test("sync accepts the `folder` alias (LAMA-241)", async () => {
+    let requested = "";
+    const opts = {
+      socketPath: "/tmp/x",
+      getState: () => ({
+        localHostname: "host1",
+        assignments: [],
+        operations: [],
+      }),
+      onSyncRequest: (folderId: string) => {
+        requested = folderId;
+        return true;
+      },
+    };
+    const data = await (dispatch as unknown as (
+      c: unknown,
+      o: unknown,
+    ) => Promise<unknown>)({ cmd: "sync", folder: "norheim-fish" }, opts);
+    expect(requested).toBe("norheim-fish");
+    expect(data).toEqual({ started: true, folderId: "norheim-fish" });
+  });
+
+  test("sync without a folder identifier errors (LAMA-241)", async () => {
+    let called = false;
+    const opts = {
+      socketPath: "/tmp/x",
+      getState: () => ({
+        localHostname: "host1",
+        assignments: [],
+        operations: [],
+      }),
+      onSyncRequest: () => {
+        called = true;
+        return true;
+      },
+    };
+    await expect(
+      (dispatch as unknown as (c: unknown, o: unknown) => Promise<unknown>)(
+        { cmd: "sync" },
+        opts,
+      ),
+    ).rejects.toThrow("sync requires folderId (or folder)");
+    expect(called).toBe(false);
+  });
+
+  test("sync for an unknown folder errors instead of started:true (LAMA-241)", async () => {
+    const opts = {
+      socketPath: "/tmp/x",
+      getState: () => ({
+        localHostname: "host1",
+        assignments: [],
+        operations: [],
+      }),
+      onSyncRequest: () => false,
+    };
+    await expect(
+      (dispatch as unknown as (c: unknown, o: unknown) => Promise<unknown>)(
+        { cmd: "sync", folder: "norheim-fish" },
+        opts,
+      ),
+    ).rejects.toThrow("folder not found: norheim-fish");
   });
 
   test("sync-all fires onSyncAllRequest and returns started shape", async () => {

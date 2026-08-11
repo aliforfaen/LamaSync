@@ -10,7 +10,7 @@ process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "actions-test-key
 process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-actions-test-data";
 
 const { getAuthPlugin } = await import("../auth.ts");
-const { __setDb, actionsRoutes } = (await import("./actions.ts")) as typeof import("./actions.ts");
+const { __setDb, actionsRoutes, reapStaleTakenActions } = (await import("./actions.ts")) as typeof import("./actions.ts");
 
 let db: Database;
 let app: { handle(request: Request): Response | Promise<Response> };
@@ -248,5 +248,83 @@ describe("GET /api/v1/hosts/:hostId/actions — history", () => {
     const done = await get("/api/v1/hosts/host-a/actions?status=done");
     expect((await pending.json()) as Array<unknown>).toHaveLength(1);
     expect((await done.json()) as Array<unknown>).toHaveLength(1);
+  });
+});
+describe("LAMA-232 — orphaned 'taken' action reclaim", () => {
+  async function enqueueAndTake(type = "check_update"): Promise<string> {
+    const created = await postJson("/api/v1/hosts/host-a/actions", { type });
+    const { id } = (await created.json()) as { id: string };
+    const claimed = await get(`/api/v1/actions/pending?hostId=host-a`);
+    expect(claimed.status).toBe(200);
+    return id;
+  }
+
+  test("reapStaleTakenActions flips old taken rows back to pending", async () => {
+    const id = await enqueueAndTake();
+    // Backdate the claim so it looks orphaned (> STALE_TAKEN_MS).
+    db.run("UPDATE queued_actions SET taken_at = ? WHERE id = ?", [
+      Date.now() - 11 * 60_000,
+      id,
+    ]);
+    const reaped = reapStaleTakenActions(db);
+    expect(reaped).toBe(1);
+    const row = db
+      .query<{ status: string; taken_at: number | null }, [string]>(
+        "SELECT status, taken_at FROM queued_actions WHERE id = ?",
+      )
+      .get(id);
+    expect(row?.status).toBe("pending");
+    expect(row?.taken_at).toBeNull();
+  });
+
+  test("GET /actions/pending reaps stale taken actions before claiming", async () => {
+    const id = await enqueueAndTake();
+    db.run("UPDATE queued_actions SET taken_at = ? WHERE id = ?", [
+      Date.now() - 11 * 60_000,
+      id,
+    ]);
+    const res = await get(`/api/v1/actions/pending?hostId=host-a`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{ id: string; status: string }>;
+    expect(body.some((a) => a.id === id && a.status === "taken")).toBe(true);
+  });
+
+  test("freshly taken actions are not reaped by the pending sweep", async () => {
+    await enqueueAndTake();
+    const res = await get(`/api/v1/actions/pending?hostId=host-a`);
+    const body = (await res.json()) as unknown[];
+    expect(body).toHaveLength(0);
+  });
+
+  test("GET /actions/taken returns the host's taken actions (boot reclaim)", async () => {
+    const id = await enqueueAndTake();
+    const res = await get(`/api/v1/actions/taken?hostId=host-a`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{ id: string; hostId: string }>;
+    expect(body).toHaveLength(1);
+    expect(body[0]?.id).toBe(id);
+  });
+
+  test("GET /actions/taken is scoped to the host and excludes completed", async () => {
+    const idA = await enqueueAndTake();
+    // host-b also has a taken action.
+    await postJson("/api/v1/hosts/host-b/actions", { type: "check_update" });
+    await get(`/api/v1/actions/pending?hostId=host-b`);
+    // host-a completes its action.
+    const done = await postJson(`/api/v1/actions/${idA}/complete`, {
+      status: "done",
+      result: "ok",
+    });
+    expect(done.status).toBe(200);
+    const resA = await get(`/api/v1/actions/taken?hostId=host-a`);
+    expect((await resA.json()) as unknown[]).toHaveLength(0);
+    const resB = await get(`/api/v1/actions/taken?hostId=host-b`);
+    expect((await resB.json()) as unknown[]).toHaveLength(1);
+  });
+
+  test("GET /actions/taken 4xx when hostId is missing", async () => {
+    const res = await get(`/api/v1/actions/taken`);
+    // Elysia returns 422 for query-validator failures (same as pending).
+    expect(res.status).toBeGreaterThanOrEqual(400);
   });
 });

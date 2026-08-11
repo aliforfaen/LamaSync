@@ -26,6 +26,11 @@ const ACTION_TYPES: QueuedActionType[] = [
 const PENDING_TAKE_LIMIT = 10;
 const ACTION_HISTORY_LIMIT = 50;
 const ACTION_HISTORY_MAX_LIMIT = 200;
+// LAMA-232: an action claimed by a daemon that died before acking is stuck
+// in 'taken' forever. Sweeps flip taken rows older than this back to
+// 'pending' so the next poll re-claims them. Long syncs legitimately take
+// minutes, so 10 min is a safe distance from any in-flight execution.
+const STALE_TAKEN_MS = 10 * 60_000;
 
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
@@ -81,6 +86,23 @@ function isActionType(value: unknown): value is QueuedActionType {
 
 function isCompletionStatus(value: unknown): value is "done" | "failed" {
   return value === "done" || value === "failed";
+}
+
+/**
+ * LAMA-232: flip 'taken' actions older than STALE_TAKEN_MS back to
+ * 'pending' (clearing taken_at) so a daemon that died mid-execution
+ * doesn't orphan them forever. Called on every daemon poll; the next poll
+ * re-claims and re-executes the survivors.
+ */
+export function reapStaleTakenActions(database: Database): number {
+  const cutoff = Date.now() - STALE_TAKEN_MS;
+  const result = database.run(
+    `UPDATE queued_actions
+       SET status = 'pending', taken_at = NULL
+       WHERE status = 'taken' AND taken_at IS NOT NULL AND taken_at < ?`,
+    [cutoff],
+  );
+  return Number(result.changes ?? 0);
 }
 
 export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
@@ -175,6 +197,9 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
       // mark them taken, then return the full rows. Bun SQLite is sync, so
       // a transaction here is mostly for the "no other writer sneaks in
       // between SELECT and UPDATE" guarantee.
+      // LAMA-232: first reap stale 'taken' rows (a daemon that died before
+      // acking) so they are re-claimed by this poll instead of orphaned.
+      reapStaleTakenActions(activeDb);
       const ids = activeDb.transaction(() => {
         const pendingRows = activeDb
           .query<{ id: string }, [string, number]>(
@@ -216,6 +241,41 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Actions"],
         responses: {
           200: { description: "Taken actions" },
+          400: { description: "Missing hostId" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .get(
+    "/actions/taken",
+    ({ query, set }) => {
+      // LAMA-232: boot-time reclaim. A freshly booted daemon has no
+      // in-flight work, so every 'taken' action for the host was orphaned
+      // by the previous incarnation — return them all and let the daemon
+      // re-execute + ack. The periodic reaper (inside /actions/pending)
+      // covers the "daemon alive but execution silently died" case.
+      const { hostId } = query as { hostId?: string };
+      if (!hostId) {
+        set.status = 400;
+        return { error: "hostId is required" };
+      }
+      const rows = activeDb
+        .query<ActionRow, [string]>(
+          `${ACTION_SELECT}
+           WHERE host_id = ? AND status = 'taken'
+           ORDER BY created_at ASC`,
+        )
+        .all(hostId);
+      return rows.map(rowToAction);
+    },
+    {
+      query: t.Object({ hostId: t.String() }),
+      detail: {
+        summary: "Return all 'taken' actions for a host (daemon boot reclaim)",
+        tags: ["Actions"],
+        responses: {
+          200: { description: "Taken actions for the host" },
           400: { description: "Missing hostId" },
           401: { description: "Unauthorized" },
         },

@@ -208,6 +208,16 @@ export class LamaSyncApiClient {
     );
   }
 
+  // LAMA-232: boot-time reclaim. Returns every 'taken' action for the host
+  // — orphaned by a daemon incarnation that died before acking. Safe to
+  // re-execute only from a freshly booted daemon (no in-flight work).
+  listTakenActions(hostId: string): Promise<QueuedAction[]> {
+    return this.request<QueuedAction[]>(
+      "GET",
+      `/api/v1/actions/taken?hostId=${encodeURIComponent(hostId)}`,
+    );
+  }
+
   completeAction(
     id: string,
     body: { status: "done" | "failed"; result?: string | null },
@@ -668,6 +678,29 @@ export class LamaSyncApiClient {
     return this.request<{ ok: boolean; detail?: string }>(
       "POST",
       `/api/v1/backends/${encodeURIComponent(backendId)}/test`,
+    );
+  }
+
+  // LAMA-238: connection test for an UNSAVED backend config (the create /
+  // edit form). Write-only fields (s3 secret, restic password) fall back to
+  // the stored values when `backendId` references an existing backend.
+  testBackendDraft(body: {
+    kind?: string;
+    backendId?: string;
+    s3Provider?: string;
+    s3Endpoint?: string;
+    s3Region?: string;
+    s3AccessKeyId?: string;
+    s3SecretAccessKey?: string;
+    localPath?: string;
+    resticRepository?: string;
+    resticPassword?: string;
+  }): Promise<{ ok: boolean; detail?: string }> {
+    return this.request<{ ok: boolean; detail?: string }>(
+      "POST",
+      "/api/v1/backends/test",
+      JSON.stringify(body),
+      "application/json",
     );
   }
 

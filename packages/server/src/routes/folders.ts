@@ -238,19 +238,46 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: `Invalid folder type: ${type}` };
       }
-      const backend = normalizeBackend(b.backend);
+      // LAMA-241: when the caller omits `backend` entirely, default to the
+      // first existing backend instead of the credential-less sftp fallback
+      // (which always failed with a handshake error). An explicit `sftp` is
+      // still honored for legacy inline-backend folders.
+      const explicitBackend =
+        typeof b.backend === "string" && b.backend.trim() !== ""
+          ? normalizeBackend(b.backend)
+          : null;
+      let backend = explicitBackend;
+      let resolvedBackendId =
+        typeof b.backendId === "string" ? b.backendId.trim() : "";
+      if (backend === null) {
+        const first = db
+          .query<{ id: string; kind: string }, []>(
+            "SELECT id, kind FROM backends ORDER BY created_at ASC LIMIT 1",
+          )
+          .get();
+        if (first) {
+          backend = normalizeBackend(first.kind);
+          resolvedBackendId = first.id;
+        } else {
+          set.status = 400;
+          return {
+            error: "no backends configured; create a backend first or specify backend",
+          };
+        }
+      }
+      const bWithDefault = { ...b, backendId: resolvedBackendId };
       // LAMA-222: an s3 folder references a reusable Backend (credentials
       // live there) and only needs the per-folder bucket name here.
       // LAMA-232: local/nfs/restic folders reference a matching-kind
       // Backend (server-side path, or centralized restic repo).
       if (backend === "s3") {
-        const s3Error = requireS3Backend(b);
+        const s3Error = requireS3Backend(bWithDefault);
         if (s3Error) {
           set.status = 400;
           return { error: s3Error };
         }
       } else if (backend === "local" || backend === "nfs" || backend === "restic") {
-        const kindError = requireKindBackend(backend, b);
+        const kindError = requireKindBackend(backend, bWithDefault);
         if (kindError) {
           set.status = 400;
           return { error: kindError };
@@ -276,7 +303,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       const now = Date.now();
       const backendNeedsRef =
         backend === "s3" || backend === "local" || backend === "nfs" || backend === "restic";
-      const backendId = backendNeedsRef ? (b.backendId ?? "").trim() : null;
+      const backendId = backendNeedsRef ? resolvedBackendId : null;
       const s3Bucket = backend === "s3" ? (b.s3Bucket ?? "").trim() : null;
       db.run(
         "INSERT INTO folders (id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -933,6 +960,61 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           404: { description: "Assignment not found" },
           401: { description: "Unauthorized" },
         },
+      },
+    },
+  )
+  // LAMA-241: assignments are addressed by (folderId, hostId), not by a
+  // global assignment id. These never-existed-by-id routes returned a bare
+  // `not_found` that cost the operator a Swagger detour; a 405 with the
+  // real path is actionable instead.
+  .put(
+    "/assignments/:id",
+    ({ set }) => {
+      set.status = 405;
+      return {
+        error: "assignments are addressed by folder+host; use PATCH /api/v1/folders/:folderId/assign/:hostId",
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      detail: {
+        summary: "405 — use PATCH /folders/:folderId/assign/:hostId",
+        tags: ["Folders"],
+        responses: { 405: { description: "Method not allowed — wrong path shape" } },
+      },
+    },
+  )
+  .patch(
+    "/assignments/:id",
+    ({ set }) => {
+      set.status = 405;
+      return {
+        error: "assignments are addressed by folder+host; use PATCH /api/v1/folders/:folderId/assign/:hostId",
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      detail: {
+        summary: "405 — use PATCH /folders/:folderId/assign/:hostId",
+        tags: ["Folders"],
+        responses: { 405: { description: "Method not allowed — wrong path shape" } },
+      },
+    },
+  )
+  .delete(
+    "/assignments/:id",
+    ({ set }) => {
+      set.status = 405;
+      return {
+        error: "assignments are addressed by folder+host; use DELETE /api/v1/folders/:folderId/assign/:hostId",
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      detail: {
+        summary: "405 — use DELETE /folders/:folderId/assign/:hostId",
+        tags: ["Folders"],
+        responses: { 405: { description: "Method not allowed — wrong path shape" } },
       },
     },
   );

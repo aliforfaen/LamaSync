@@ -4,14 +4,22 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Elysia } from "elysia";
 import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "backends-test-key";
 process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-backends-test-data";
 process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "backends-test-secret-key-0123456789abcdef";
 
 const { getAuthPlugin } = await import("../auth.ts");
-const { __setDb, backendsRoutes } = (await import("./backends.ts")) as unknown as {
+const { __setDb, backendsRoutes, resolveDraftWriteSecrets } = (await import("./backends.ts")) as unknown as {
   __setDb: (db: Database) => void;
   backendsRoutes: Elysia;
+  resolveDraftWriteSecrets: (
+    providedSecret: string,
+    providedPassword: string,
+    stored: { s3_secret_key_enc: string | null; restic_password_enc: string | null } | null,
+  ) => { secret: string; password: string };
 };
 const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as unknown as {
   __setDb: (db: Database) => void;
@@ -476,5 +484,120 @@ describe("legacy s3_* → backends lift (LAMA-222 migration)", () => {
       .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM backends")
       .get();
     expect(count?.c).toBe(1);
+  });
+});
+
+describe("POST /api/v1/backends/test — draft connection test (LAMA-238)", () => {
+  test("routes to the draft handler, not :backendId/test, for a local path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lamasync-draft-test-"));
+    try {
+      const res = await postJson("/api/v1/backends/test", {
+        kind: "local",
+        localPath: dir,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { ok: boolean; detail?: string };
+      expect(body.ok).toBe(true);
+      expect(body.detail).toContain("readable directory");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("502 when the local path does not exist", async () => {
+    const res = await postJson("/api/v1/backends/test", {
+      kind: "local",
+      localPath: "/nonexistent/lamasync-draft-test-path",
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { ok: boolean; detail?: string };
+    expect(body.ok).toBe(false);
+    expect(body.detail).toBeTruthy();
+  });
+
+  test("rejects a non-absolute local path", async () => {
+    const res = await postJson("/api/v1/backends/test", {
+      kind: "local",
+      localPath: "relative/path",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("400 when an s3 draft has no secret and no stored backend to fall back to", async () => {
+    const res = await postJson("/api/v1/backends/test", {
+      kind: "s3",
+      s3Endpoint: "s3.example.com",
+      s3AccessKeyId: "K",
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toHaveProperty("error");
+  });
+
+  test("rejects an Exoscale endpoint that does not match sos-ZONE.exo.io", async () => {
+    const res = await postJson("/api/v1/backends/test", {
+      kind: "s3",
+      s3Provider: "exoscale",
+      s3Endpoint: "https://example.com",
+      s3AccessKeyId: "K",
+      s3SecretAccessKey: "S",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("400 when a restic draft is missing the password", async () => {
+    const res = await postJson("/api/v1/backends/test", {
+      kind: "restic",
+      resticRepository: "s3:example.com/bucket",
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/v1/backends/test — s3 connectivity (LAMA-238, hermetic)", () => {
+  test("s3RcloneConfig builds the config with provider mapping, secret and region", async () => {
+    const { s3RcloneConfig } = await import("../backend-test.ts");
+    const config = s3RcloneConfig({
+      provider: "aws",
+      accessKeyId: "AK",
+      secretAccessKey: "SK",
+      endpoint: "s3.example.com",
+      region: "us-east-1",
+    });
+    expect(config).toContain("provider = AWS");
+    expect(config).toContain("access_key_id = AK");
+    expect(config).toContain("secret_access_key = SK");
+    expect(config).toContain("region = us-east-1");
+  });
+
+  test("draft write-only fields fall back to the stored ciphertext", async () => {
+    const created = await postJson("/api/v1/backends", {
+      name: "fallback-secret",
+      kind: "s3",
+      s3Provider: "other",
+      s3Endpoint: "s3.example.com",
+      s3AccessKeyId: "K",
+      s3SecretAccessKey: "STORED_SECRET",
+    });
+    expect(created.status).toBe(201);
+    const row = db
+      .query<{ s3_secret_key_enc: string | null; restic_password_enc: string | null }, []>(
+        "SELECT s3_secret_key_enc, restic_password_enc FROM backends LIMIT 1",
+      )
+      .get();
+    expect(row).not.toBeNull();
+    // Blank form secret → decrypted stored value; provided values win.
+    expect(resolveDraftWriteSecrets("", "", row)).toEqual({
+      secret: "STORED_SECRET",
+      password: "",
+    });
+    expect(resolveDraftWriteSecrets("NEW_SECRET", "NEW_PW", row)).toEqual({
+      secret: "NEW_SECRET",
+      password: "NEW_PW",
+    });
+    // No stored backend → empty (the route 400s on the missing secret).
+    expect(resolveDraftWriteSecrets("", "", null)).toEqual({
+      secret: "",
+      password: "",
+    });
   });
 });

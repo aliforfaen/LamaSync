@@ -21,7 +21,7 @@ import {
   summarizeReportForAction,
   summarizeUpdateCheck,
 } from "./actions.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, missingAssignmentPaths } from "./config.ts";
 import { CACHE_PATH, loadCache, saveCache } from "./config-cache.ts";
 import { executeAssignment, executeResticRestore } from "./executor.ts";
 import { Scheduler } from "./scheduler.ts";
@@ -495,6 +495,7 @@ async function main(): Promise<void> {
       console.log(
         `[config] refreshed host=${hostId} assignments=${cfg.assignments.length}`,
       );
+      warnMissingLocalPaths();
       scheduler.refresh();
       adoptExistingMountUnits(() => cfg.assignments);
       return true;
@@ -638,6 +639,34 @@ async function main(): Promise<void> {
   const recordRevision = (cfg: HostConfig | null): void => {
     if (!cfg) return;
     lastSeenRevision = cfg.host.configRevision ?? 0;
+  };
+
+  // LAMA-241: a local path that doesn't exist yet is a normal pre-first-use
+  // state (a tool hasn't run), but the first sync fails with an rclone exit
+  // 3 that looks like a real fault. Warn once per path while it stays
+  // missing, and re-warn if it disappears again after appearing — bounded,
+  // no per-refresh spam.
+  const warnedMissingPaths = new Set<string>();
+  const warnMissingLocalPaths = (): void => {
+    const assignments = hostConfig?.assignments ?? [];
+    const missing = missingAssignmentPaths(assignments, (folderId) =>
+      hostConfig?.folders.find((f) => f.id === folderId)?.name ?? null,
+    );
+    const current = new Set(
+      missing.map((m) => `${m.folderId}:${m.localPath}`),
+    );
+    for (const m of missing) {
+      const key = `${m.folderId}:${m.localPath}`;
+      if (!warnedMissingPaths.has(key)) {
+        console.warn(
+          `[config] folder=${m.folderName} local path missing, waiting for first use: ${m.localPath}`,
+        );
+        warnedMissingPaths.add(key);
+      }
+    }
+    for (const key of warnedMissingPaths) {
+      if (!current.has(key)) warnedMissingPaths.delete(key);
+    }
   };
 
   // LAMA-198: the daemon's view of an action's final outcome. The
@@ -853,8 +882,34 @@ async function main(): Promise<void> {
     recordRevision(hostConfig);
   } else {
     recordRevision(hostConfig);
+    // LAMA-241: surface missing local paths right after boot even when the
+    // config came from the cache (no refresh has happened yet).
+    warnMissingLocalPaths();
     scheduler.start();
   }
+
+  // LAMA-232: actions the previous daemon incarnation claimed but never
+  // acked are stuck in 'taken'. A freshly booted daemon has no in-flight
+  // work, so reclaiming and re-executing them is safe. The server's
+  // periodic reaper (inside GET /actions/pending) covers the case where a
+  // running daemon's execution silently died.
+  try {
+    const orphaned = await client.listTakenActions(hostId);
+    if (orphaned.length > 0) {
+      console.log(
+        `[action] reclaiming ${orphaned.length} orphaned taken action(s) at boot`,
+      );
+      for (const action of orphaned) {
+        await executeAction(action);
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[action] boot reclaim failed: ${msg}`);
+  }
+  // LAMA-232: drain the queue immediately instead of waiting for the first
+  // 30 s poll tick.
+  void pollActions();
   // One-shot update check on startup. Never throws — just logs.
   try {
     const latest = await fetchLatestRelease();
@@ -947,11 +1002,15 @@ async function main(): Promise<void> {
           (a) => a.folderId === folderId,
         );
         if (!assignment) {
+          // LAMA-241: report failure back to the socket client instead of
+          // silently succeeding — `{"cmd":"sync","folder":"..."}` used to
+          // return started:true with a log-only error.
           console.warn(`[socket] sync requested for unknown folder=${folderId} after refresh`);
-          return;
+          return false;
         }
       }
       void runOnce(assignment);
+      return true;
     },
     onSyncAllRequest: async () => {
       let assignments = hostConfig?.assignments ?? [];

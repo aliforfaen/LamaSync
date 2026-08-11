@@ -36,7 +36,9 @@ export interface SocketState {
 export interface StartSocketOptions {
   socketPath: string;
   getState: () => SocketState;
-  onSyncRequest?: (folderId: string) => void | Promise<void>;
+  /** @returns true when the folder was found and the sync was queued; false
+   *  when the folder isn't assigned to this host (LAMA-241). */
+  onSyncRequest?: (folderId: string) => boolean | Promise<boolean>;
   onSyncAllRequest?: () => void | Promise<void>;
 }
 
@@ -44,7 +46,10 @@ type Command =
   | { cmd: "status" }
   | { cmd: "list-folders" }
   | { cmd: "list-ops" }
-  | { cmd: "sync"; folderId: string }
+  // LAMA-241: `folder` is accepted as an alias for `folderId` — the manual
+  // socket protocol used `{"cmd":"sync","folder":"..."}` and the daemon
+  // silently ignored it (returning started:true for an unknown folder).
+  | { cmd: "sync"; folderId?: string; folder?: string }
   | { cmd: "sync-all" }
   | { cmd: "switch-to-mount"; folderId: string }
   | { cmd: "switch-to-sync"; folderId: string };
@@ -195,8 +200,19 @@ export async function dispatch(cmd: Command, opts: StartSocketOptions): Promise<
     case "list-ops":
       return state.operations;
     case "sync": {
-      if (opts.onSyncRequest) opts.onSyncRequest(cmd.folderId);
-      return { started: true, folderId: cmd.folderId };
+      // LAMA-241: accept the `folder` alias, require an identifier, and
+      // surface an error instead of silently returning started:true.
+      const folderId = cmd.folderId ?? cmd.folder;
+      if (!folderId) {
+        throw new Error("sync requires folderId (or folder)");
+      }
+      if (opts.onSyncRequest) {
+        const found = await opts.onSyncRequest(folderId);
+        if (!found) {
+          throw new Error(`folder not found: ${folderId}`);
+        }
+      }
+      return { started: true, folderId };
     }
     case "sync-all": {
       if (opts.onSyncAllRequest) opts.onSyncAllRequest();

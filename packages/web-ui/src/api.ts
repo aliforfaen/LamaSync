@@ -390,6 +390,21 @@ export const api = {
     apiDelete(`/backends/${encodeURIComponent(id)}`),
   testBackend: (id: string) =>
     apiPost<{ ok: boolean; detail?: string }>(`/backends/${encodeURIComponent(id)}/test`),
+  // LAMA-238: connection test for an unsaved backend config (create/edit
+  // form). Write-only fields fall back to the stored values server-side
+  // when backendId references an existing backend.
+  testBackendDraft: (body: {
+    kind?: string;
+    backendId?: string;
+    s3Provider?: string;
+    s3Endpoint?: string;
+    s3Region?: string;
+    s3AccessKeyId?: string;
+    s3SecretAccessKey?: string;
+    localPath?: string;
+    resticRepository?: string;
+    resticPassword?: string;
+  }) => apiPost<{ ok: boolean; detail?: string }>("/backends/test", body),
   // LAMA-224: storage statistics.
   storageReport: (refresh = false) =>
     apiGet<StorageReport>(`/stats/storage${refresh ? "?refresh=1" : ""}`),

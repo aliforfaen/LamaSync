@@ -94,6 +94,12 @@ export function Backends() {
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, string>>({});
+  // LAMA-238: in-form connection test for an unsaved backend config.
+  const [formTesting, setFormTesting] = useState(false);
+  const [formTestResult, setFormTestResult] = useState<{
+    ok: boolean;
+    detail?: string;
+  } | null>(null);
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [showResticPassword, setShowResticPassword] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -160,6 +166,7 @@ export function Backends() {
       }
       setForm(EMPTY_FORM);
       setEditingId(null);
+      setFormTestResult(null);
       await refresh();
     } catch (err) {
       setError(errorText(err));
@@ -168,11 +175,67 @@ export function Backends() {
     }
   }
 
+  // LAMA-238: test the form's current values against the server without
+  // saving. Write-only fields fall back to the stored secret/password when
+  // editing an existing backend, so an edit that leaves them untouched
+  // still exercises the real config.
+  async function onTestForm(): Promise<void> {
+    if (busy || formTesting) return;
+    const validationError = validateForm(form);
+    if (validationError) {
+      setError(validationError);
+      setFormTestResult(null);
+      return;
+    }
+    // The browser only enforces `required` on submit, not on a plain
+    // button click — mirror the server's create-side checks here.
+    if (!editingId && form.kind === "s3" && form.s3SecretAccessKey.trim() === "") {
+      setError("s3 secret access key is required");
+      setFormTestResult(null);
+      return;
+    }
+    if (!editingId && form.kind === "restic" && form.resticPassword.trim() === "") {
+      setError("restic password is required");
+      setFormTestResult(null);
+      return;
+    }
+    setFormTesting(true);
+    setError(null);
+    setFormTestResult(null);
+    try {
+      const res = await api.testBackendDraft({
+        kind: form.kind,
+        backendId: editingId ?? undefined,
+        s3Provider: form.s3Provider,
+        s3Endpoint: form.s3Endpoint,
+        s3Region: form.s3Region,
+        s3AccessKeyId: form.s3AccessKeyId,
+        s3SecretAccessKey: form.s3SecretAccessKey || undefined,
+        localPath: form.localPath || undefined,
+        resticRepository: form.resticRepository || undefined,
+        resticPassword: form.resticPassword || undefined,
+      });
+      setFormTestResult(res);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setFormTesting(false);
+    }
+  }
+
   function startEdit(b: BackendRow): void {
     setEditingId(b.id);
     setForm(backendToForm(b));
     setError(null);
+    setFormTestResult(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function cancelEdit(): void {
+    setForm(EMPTY_FORM);
+    setEditingId(null);
+    setError(null);
+    setFormTestResult(null);
   }
 
   async function onDelete(b: BackendRow): Promise<void> {
@@ -303,14 +366,7 @@ export function Backends() {
                 {editingId ? (
                   <label>
                     &nbsp;
-                    <button
-                      type="button"
-                      className="action"
-                      onClick={() => {
-                        setForm(EMPTY_FORM);
-                        setEditingId(null);
-                      }}
-                    >
+                    <button type="button" className="action" onClick={cancelEdit}>
                       Cancel edit
                     </button>
                   </label>
@@ -331,14 +387,7 @@ export function Backends() {
                 </label>
                 <label>
                   &nbsp;
-                  <button
-                    type="button"
-                    className="action"
-                    onClick={() => {
-                      setForm(EMPTY_FORM);
-                      setEditingId(null);
-                    }}
-                  >
+                  <button type="button" className="action" onClick={cancelEdit}>
                     Cancel edit
                   </button>
                 </label>
@@ -394,9 +443,29 @@ export function Backends() {
               {form.kind} backends are reserved for future use — no extra fields yet.
             </p>
           )}
-          <button type="submit" className="action primary" disabled={busy}>
-            {busy ? "Saving…" : editingId ? "Save changes" : "Create backend"}
-          </button>
+          <div className="form-row actions-row">
+            <button type="submit" className="action primary" disabled={busy || formTesting}>
+              {busy ? "Saving…" : editingId ? "Save changes" : "Create backend"}
+            </button>
+            <button
+              type="button"
+              className="action"
+              disabled={busy || formTesting}
+              onClick={() => void onTestForm()}
+              title="Check connectivity against the server before saving"
+            >
+              {formTesting ? "Testing…" : "Test connection"}
+            </button>
+          </div>
+          {formTestResult ? (
+            <div
+              className={formTestResult.ok ? "all-quiet" : "error"}
+              role={formTestResult.ok ? "status" : "alert"}
+            >
+              {formTestResult.ok ? "✓ " : "✗ "}
+              {formTestResult.detail ?? (formTestResult.ok ? "connection ok" : "connection failed")}
+            </div>
+          ) : null}
         </form>
       </section>
 
