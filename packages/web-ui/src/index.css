@@ -992,6 +992,92 @@ button.action:disabled {
   text-decoration: none;
 }
 
+/* LAMA-240: folders table — chevron toggle, fixed column widths, and a
+   per-assignment sub-table that mirrors Dotfiles.tsx's versions pattern. */
+.data.data-folders {
+  table-layout: fixed;
+}
+
+.data.data-folders th,
+.data.data-folders td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.data.data-folders .assignment-summary {
+  white-space: nowrap;
+}
+
+.folder-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.folder-expand-toggle:hover {
+  color: var(--text-strong);
+}
+
+.folder-expand-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.folder-expand-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-md);
+  flex-shrink: 0;
+}
+
+.folder-row-expanded .folder-expand-chevron {
+  color: var(--accent-info);
+}
+
+.folder-expanded-row > td {
+  background: var(--surface-elevated);
+  padding: var(--space-3) var(--space-4);
+}
+
+.data.data-nested {
+  margin: 0;
+  table-layout: fixed;
+}
+
+.data.data-nested th,
+.data.data-nested td {
+  padding: var(--space-1) var(--space-2);
+}
+
+.assignment-local-path {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assignment-schedule {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* --- Data Browser (LAMA-202) --- */
 
 .browser-tabs {
@@ -1173,16 +1259,6 @@ button.action:disabled {
   font-size: var(--font-size-base, 1rem);
 }
 
-.unassign-btn {
-  padding: 0 0.45rem;
-  line-height: 1.4;
-}
-
-.assignment-list li {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
 
 
 /* LAMA-225: hostname inline edit + host-renamed banner */

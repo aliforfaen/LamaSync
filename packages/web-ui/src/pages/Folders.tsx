@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -182,6 +182,10 @@ export function Folders() {
   const [editingAssignment, setEditingAssignment] = useState<FolderAssignment | null>(null);
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null);
   const [unassign, setUnassign] = useState<{ folderId: string; hostId: string } | null>(null);
+  // LAMA-240: a single folder row may be expanded at a time — matching the
+  // sibling "Versions" pattern in Dotfiles.tsx. Per-assignment actions live
+  // in the expanded sub-row, so the main table row height stays constant.
+  const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
 
   async function refresh() {
     setError(null);
@@ -288,6 +292,9 @@ export function Folders() {
     setBusy(true);
     try {
       await api.deleteFolder(id);
+      // LAMA-240: clear stale expansion state so a future folder id reuse
+      // can't resurrect a phantom expanded row.
+      if (expandedFolderId === id) setExpandedFolderId(null);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -677,7 +684,19 @@ export function Folders() {
         />
       ) : null}
 
-      <table className="data">
+      <table className="data data-folders">
+        <colgroup>
+          {/* LAMA-240: pinned widths so the row geometry stays stable when
+              the assignments cell grows or shrinks. The Actions column is
+              fixed so the 4 right-side buttons always fit on one line. */}
+          <col style={{ width: "20%" }} />
+          <col style={{ width: "7%" }} />
+          <col style={{ width: "9%" }} />
+          <col style={{ width: "7%" }} />
+          <col style={{ width: "14%" }} />
+          <col style={{ width: "12%" }} />
+          <col style={{ width: "12rem" }} />
+        </colgroup>
         <thead>
           <tr>
             <th>Name</th>
@@ -701,9 +720,32 @@ export function Folders() {
           ) : (
             items.map(({ folder, assignments }) => {
               const size = sizes[folder.id];
+              const isExpanded = expandedFolderId === folder.id;
+              const hostLabel = (id: string) =>
+                hosts.find((h) => h.id === id)?.hostname ?? id;
               return (
-              <tr key={folder.id}>
-                <td>{folder.name}</td>
+              <Fragment key={folder.id}>
+              <tr className={isExpanded ? "folder-row folder-row-expanded" : "folder-row"}>
+                <td>
+                  <button
+                    type="button"
+                    className="folder-expand-toggle"
+                    aria-expanded={isExpanded}
+                    aria-label={
+                      isExpanded
+                        ? `Hide ${assignments.length} assignment(s) for ${folder.name}`
+                        : `Show ${assignments.length} assignment(s) for ${folder.name}`
+                    }
+                    onClick={() =>
+                      setExpandedFolderId(isExpanded ? null : folder.id)
+                    }
+                  >
+                    <span className="folder-expand-chevron" aria-hidden="true">
+                      {isExpanded ? "▾" : "▸"}
+                    </span>
+                    {folder.name}
+                  </button>
+                </td>
                 <td>
                   <span className="badge badge-unknown">{folder.type}</span>
                 </td>
@@ -722,48 +764,10 @@ export function Folders() {
                     "…"
                   )}
                 </td>
-                <td>
-                  {assignments.length === 0 ? (
-                    <span className="muted">—</span>
-                  ) : (
-                    <ul className="assignment-list">
-                      {assignments.map((assignment) => (
-                        <li key={assignment.id}>
-                          <strong className="mono">{assignment.hostId}</strong>
-                          <span>
-                            {assignment.role} · <span className="mono">{assignment.localPath}</span>
-                          </span>
-                          <button
-                            type="button"
-                            className="action"
-                            title={`Edit assignment on ${assignment.hostId}`}
-                            onClick={() => setEditingAssignment(assignment)}
-                            disabled={busy || editingAssignment !== null}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            className="action"
-                            title={`Sync “${folder.name}” now on ${assignment.hostId}`}
-                            onClick={() => onSyncNow(folder.id, assignment.hostId)}
-                            disabled={busy}
-                          >
-                            Sync now
-                          </button>
-                          <button
-                            type="button"
-                            className="action danger unassign-btn"
-                            title={`Unassign from ${assignment.hostId}`}
-                            onClick={() => onUnassign(folder.id, assignment.hostId)}
-                            disabled={busy}
-                          >
-                            ×
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                <td className="muted assignment-summary">
+                  {assignments.length === 0
+                    ? "—"
+                    : `${assignments.length} host${assignments.length === 1 ? "" : "s"}`}
                 </td>
                 <td className="mono muted">
                   {folder.createdAt ? new Date(folder.createdAt).toLocaleString() : "—"}
@@ -802,6 +806,79 @@ export function Folders() {
                   </button>
                 </td>
               </tr>
+              {isExpanded ? (
+                <tr className="folder-expanded-row">
+                  <td colSpan={7}>
+                    {assignments.length === 0 ? (
+                      <p className="muted">
+                        No assignments yet — pick a host from the “Assign” button above.
+                      </p>
+                    ) : (
+                      <table className="data data-nested">
+                        <thead>
+                          <tr>
+                            <th>Host</th>
+                            <th>Role</th>
+                            <th>Local path</th>
+                            <th>Schedule</th>
+                            <th />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {assignments.map((assignment) => (
+                            <tr key={assignment.id}>
+                              <td>{hostLabel(assignment.hostId)}</td>
+                              <td>
+                                <span className="badge badge-unknown">{assignment.role}</span>
+                              </td>
+                              <td>
+                                <code
+                                  className="assignment-local-path"
+                                  title={assignment.localPath}
+                                >
+                                  {assignment.localPath}
+                                </code>
+                              </td>
+                              <td className="mono muted assignment-schedule">
+                                {assignment.syncExpr ?? "—"}
+                              </td>
+                              <td className="table-actions">
+                                <button
+                                  type="button"
+                                  className="action"
+                                  onClick={() => setEditingAssignment(assignment)}
+                                  disabled={busy || editingAssignment !== null}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="action"
+                                  onClick={() =>
+                                    onSyncNow(folder.id, assignment.hostId)
+                                  }
+                                  disabled={busy}
+                                >
+                                  Sync now
+                                </button>
+                                <button
+                                  type="button"
+                                  className="action danger"
+                                  onClick={() => onUnassign(folder.id, assignment.hostId)}
+                                  disabled={busy}
+                                >
+                                  Unassign
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </td>
+                </tr>
+              ) : null}
+              </Fragment>
               );
             })
           )}
