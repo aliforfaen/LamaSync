@@ -142,9 +142,11 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 
 ## Version and release
 
-- **Version source of truth**: root `package.json` `version` field (currently `0.2.3`).
+- **Version source of truth**: root `package.json` `version` field (currently `0.3.1`).
 - **Generated constant**: `scripts/gen-version.ts` writes `packages/core/src/version.ts`, which is re-exported from `@lamasync/core`.
-- **All four binaries** support `--version` and `-V`.
-  (`lamasync-server`, `lamasyncd`, `lamasync-tui`, plus the bundled web UI at `GET /`)
+- **All three standalone binaries** support `--version` and `-V`:
+  `lamasync-server`, `lamasyncd`, `lamasync-tui`. The web UI is bundled
+  inside `lamasync-server` (built with `--loader .html:text`) and served
+  from `GET /`; it has no separate version flag.
 - **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.
 - **Self-update**: daemon checks GitHub Releases on startup and supports `lamasyncd --check-update` / `lamasyncd --update`. The server proxies release info at `GET /api/v1/release/latest`. A standalone `curl | bash` updater lives in `packaging/install/update.sh`.
