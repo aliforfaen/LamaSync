@@ -313,16 +313,38 @@ Usage: lamasync dotfiles list [--host <id>] [--json]
 Lists dotfile manifests. `--host _global` is the global default; an actual
 host id is host-specific.
 
-## `lamasync dotfiles manifests`
+## `lamasync dotfiles manifests list`
 
 ```
-Usage: lamasync dotfiles manifests list|create|delete
+Usage: lamasync dotfiles manifests list [flags]
 
-  list    [--host <id>] [--json]
-  create  --app-name NAME --paths p1,p2 [--host _global|<id>]
-          [--excludes e1,e2] [--schedule '<cron>'] [--instructions '<text>']
-  delete  <id>  --yes
+  --host <id>    filter by host (omit for _global)
+  --json         machine-readable JSON output
 ```
+
+## `lamasync dotfiles manifests create`
+
+```
+Usage: lamasync dotfiles manifests create --app-name NAME --paths p1,p2 [flags]
+
+  --app-name <name>        app name (required)
+  --paths <p1,p2>          comma-separated paths (required)
+  --host <id|_global>      target host (default: _global)
+  --excludes <e1,e2>       comma-separated exclude globs
+  --schedule '<cron>'      sync schedule
+  --instructions '<text>'  operator notes
+  --json
+```
+
+## `lamasync dotfiles manifests delete`
+
+```
+Usage: lamasync dotfiles manifests delete <id> [--yes]
+
+  --yes, -y    skip the confirmation prompt (required non-interactively)
+```
+
+DESTRUCTIVE (safety rule 5) — cascades to all versions of the manifest.
 
 ## `lamasync dotfiles upload`
 

@@ -872,3 +872,26 @@ function walkTree(words: string[]): WalkResult | null {
   if (node.help) return { help: node.help, consumed };
   return null;
 }
+
+/** Every full invocation path the dispatch tree accepts — leaves and
+ *  intermediate groups alike (e.g. "folders", "folders list",
+ *  "dotfiles manifests", "dotfiles manifests create"). The drift check
+ *  (`scripts/check-skill-drift.ts`) imports this so it doesn't have to
+ *  scrape the binary's top-level `Commands:` section, which never lists
+ *  children of nested groups (e.g. `dotfiles manifests list|create|delete`
+ *  is invisible to the top-level help). */
+export function listInvocations(): string[] {
+  const out: string[] = [];
+  const walk = (
+    node: Record<string, DispatchEntry>,
+    prefix: string[],
+  ): void => {
+    for (const [key, entry] of Object.entries(node)) {
+      const path = [...prefix, key];
+      out.push(path.join(" "));
+      if (entry.subcommands) walk(entry.subcommands, path);
+    }
+  };
+  walk(DISPATCH_TREE, []);
+  return out;
+}

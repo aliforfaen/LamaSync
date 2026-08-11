@@ -24,6 +24,8 @@ import { spawnSync } from "bun";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, relative, resolve } from "path";
 
+import { listInvocations } from "../packages/tui/src/cli/dispatch.ts";
+
 const ROOT = resolve(import.meta.dir, "..");
 const REPO = ROOT;
 const AGENT_SKILL_DIR = join(REPO, "packages/agent-skill");
@@ -185,12 +187,12 @@ function parseCliDocs(md: string): CliCommand[] {
  *  the compiled Bun binary the print path is the same `process.stdout.write`
  *  branch we exercise here.
  *
- *  The top-level help's "Commands:" section enumerates every full
- *  invocation (`folders list`, `local mount <id>`, `sync [folderId]`, …),
- *  so the invocation set is derived from live help output — no hard-coded
- *  subcommand tree to drift. Group heads (`folders`, `browse`, …) are
- *  added too, and `perCmd` is keyed by the FULL invocation ("folders
- *  create"), never by head token. */
+ *  The invocation set is seeded from the dispatch walker (source of truth,
+ *  covers every leaf AND every nested-group path), then enriched with
+ *  anything the binary's top-level "Commands:" section advertises that
+ *  isn't in the tree yet. `perCmd` always carries the actual --help text
+ *  for each invocation, fetched by running `<inv> --help` against the
+ *  binary (or its source fallback). */
 function dumpCliHelp(): { invocations: Set<string>; perCmd: Map<string, string> } {
   const invocations = new Set<string>();
   const perCmd = new Map<string, string>();
@@ -198,6 +200,11 @@ function dumpCliHelp(): { invocations: Set<string>; perCmd: Map<string, string> 
 
   const top = helpFor([]);
   perCmd.set("", top);
+
+  // Source-of-truth: every path the dispatch tree accepts, including the
+  // leaves of nested groups (e.g. `dotfiles manifests list|create|delete`)
+  // that the top-level `Commands:` section never enumerates.
+  for (const inv of listInvocations()) invocations.add(inv);
 
   // Parse the "Commands:" section: each row is `<invocation-spec>  <description>`
   // separated by a run of 2+ spaces. The invocation is the spec's leading
@@ -230,6 +237,13 @@ function dumpCliHelp(): { invocations: Set<string>; perCmd: Map<string, string> 
       invocations.add(head);
       perCmd.set(head, helpFor([head]));
     }
+  }
+
+  // Fetch per-invocation --help for any path the dispatch walker found but
+  // the top-level Commands: section didn't (depth-3 leaves).
+  for (const inv of invocations) {
+    if (inv === "") continue;
+    if (!perCmd.has(inv)) perCmd.set(inv, helpFor(inv.split(" ")));
   }
   return { invocations, perCmd };
 }
