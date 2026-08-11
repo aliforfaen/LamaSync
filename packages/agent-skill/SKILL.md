@@ -1,0 +1,105 @@
+---
+name: lamasync
+description: Operate a LamaSync fleet — manage folders, hosts, backends, sync triggers, and operation history. Use when the task touches `lamasync`, `lamasyncd`, sync fleet, rclone fleet, backup host, `register host`, `add folder`, `set up backup`, `check for update`, `snapshot`, `lamasync 401`, or `lamasync auth failed`. CLI-first; the REST/WS API is the documented escape hatch.
+---
+
+# lamasync
+
+## What it is
+
+LamaSync is a personal sync-fleet system: one `lamasync-server` (the control
+plane, REST + WebSocket + Swagger + SQLite) and a lightweight `lamasyncd`
+daemon per host that runs `rclone` for syncs, backups, and mounts. Auth is a
+single pre-shared API key — the *only* trust boundary. The tailnet provides
+transport encryption; the API key is the gate.
+
+## Decision tree
+
+1. **Need to talk to the fleet from any agent (including yourself)?** Use
+   the CLI. Run `lamasync <command> --help` first; the full reference lives
+   in `reference/cli.md`. **Always run `lamasync doctor` first on a fresh
+   host** to check auth discovery, server reachability, and version drift.
+2. **Need an operation the CLI doesn't express?** Read
+   `reference/api.md`; if it isn't there either, do *not* hand-roll curl or
+   the Unix-socket protocol. Stop and ask a human — that gap is a bug.
+3. **Need to install this host as a client?** The skill `lamasync-client.md`
+   covers prereqs, the install script, and day-2 daemon usage.
+4. **Need to do something destructive (delete folder, force restore, prune
+   ops, rotate key, stop mounts)?** That is safety rule 5 below: confirm
+   intent with the operator first, then pass `--yes` if the command asks.
+
+All commands take `--json` for machine output and obey a stable exit code
+contract (see `reference/cli.md`): `0` ok, `1` runtime, `2` usage error,
+`3` auth failure (401/403), `4` server unreachable.
+
+## Auth discovery order
+
+The CLI and the daemon use the same precedence chain. `--server` and
+`--api-key` flags on the command line win, then `LAMASYNC_SERVER_URL` and
+`LAMASYNC_API_KEY` env vars, then `~/.config/lamasync/client.toml` (written
+by `packaging/install/install.sh`). On a daemon host that already runs
+`lamasyncd`, the config file is always present — an agent needs zero setup.
+
+The API key is **always masked** in any output:
+`lamasync_…xxxx` (first 8 + last 4 characters).
+
+## Safety — the six rules (summary)
+
+The full, verbatim contract lives in `reference/safety.md`. The rules are:
+
+1. **API trust, no users.** The pre-shared API key is the *only* trust
+   boundary; no users, roles, or sessions. If a task seems to need per-user
+   authz, escalate to a human.
+2. **Never invoke `rclone` directly.** All transfers go through the daemon
+   executor, which owns locks and writes the operation report.
+3. **Prefer the WebSocket** for live state; don't poll `GET /operations` in
+   a tight loop.
+4. **Mask the API key** — never log, print, or commit it; always
+   `lamasync_…xxxx` in examples, diagnostics, and step descriptions.
+5. **Mutations need intent.** Reads are free. Writes (and destructive
+   commands) need explicit user intent — confirm before delete folder,
+   force restore, rotate key, stop mounts, prune logs.
+6. **Never invent local state.** If the CLI can't express it, stop and
+   ask; do not hand-edit `config.toml`, the SQLite DB, or rclone configs.
+
+## Layout
+
+```
+packages/agent-skill/
+  SKILL.md                  this file (trigger + decision tree + safety summary)
+  reference/
+    cli.md                  full `lamasync` subcommand reference (Phase A)
+    api.md                  REST + WebSocket reference; defers to /swagger/json
+    recipes.md              set up a backup, add a sync folder, fix 401s,
+                            trigger + verify a sync, restore a snapshot,
+                            resolve a conflict
+    troubleshooting.md      heartbeat missing, mount stuck, stale lock,
+                            update failures
+    safety.md               the six safety rules, verbatim
+  lamasync-client.md        unchanged; stays a separate onboarding skill
+```
+
+Installed to `~/.agents/skills/lamasync/` (SKILL.md + reference/). Global
+user scope — never committed to a consuming repo.
+
+## Trigger phrases
+
+This skill should match the language an operator naturally types when
+working with the fleet:
+
+- `lamasync`, `lamasyncd`
+- `sync fleet`, `rclone fleet`, `backup host`
+- `register host`, `add folder`, `set up backup`
+- `check for update`, `snapshot`, `lamasync 401`,
+  `lamasync auth failed`
+
+If the user is asking something about the Web UI / Management pages rather
+than the CLI / API, the doc URLs in the Web UI itself are usually enough —
+prefer them unless the user is in a headless / scripted context.
+
+## See also
+
+- `lamasync-client.md` — install and operate this host as a LamaSync
+  client (prereqs, install script, registration).
+- `README.md` in the repo root, `ARCHITECTURE.md` for system design and
+  DB schema (if you can read the repo).

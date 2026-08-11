@@ -20,8 +20,9 @@ export interface ReleaseInfo {
   assets: ReleaseAsset[];
 }
 
-const GITHUB_API =
-  "https://api.github.com/repos/aliforfaen/LamaSync/releases/latest";
+const GITHUB_API_BASE =
+  "https://api.github.com/repos/aliforfaen/LamaSync/releases";
+const GITHUB_API = `${GITHUB_API_BASE}/latest`;
 
 interface GithubAsset {
   name: string;
@@ -41,8 +42,23 @@ interface GithubRelease {
  * "no update info" uniformly with "fetch failed".
  */
 export async function fetchLatestRelease(): Promise<ReleaseInfo | null> {
+  return fetchRelease(GITHUB_API);
+}
+
+/**
+ * Fetch the release for a specific tag (e.g. "v0.3.1"). Used by the skill
+ * updater, which must match the release to the locally-running binary's
+ * version — NOT the latest release — so a daemon one version behind can
+ * still refresh its skill bundle. Same null-on-any-failure contract as
+ * fetchLatestRelease.
+ */
+export async function fetchReleaseByTag(tag: string): Promise<ReleaseInfo | null> {
+  return fetchRelease(`${GITHUB_API_BASE}/tags/${encodeURIComponent(tag)}`);
+}
+
+async function fetchRelease(url: string): Promise<ReleaseInfo | null> {
   try {
-    const res = await fetch(GITHUB_API, {
+    const res = await fetch(url, {
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": `lamasyncd/${VERSION}`,
@@ -83,7 +99,7 @@ export async function fetchLatestRelease(): Promise<ReleaseInfo | null> {
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[update] fetchLatestRelease failed: ${msg}`);
+    console.warn(`[update] fetchRelease failed: ${msg}`);
     return null;
   }
 }

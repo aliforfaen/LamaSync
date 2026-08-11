@@ -11,15 +11,19 @@ Everything is written in **TypeScript** running on **Bun**.
 Bun workspace with five packages under `packages/`:
 - `core` — shared types, DB schema, TOML config, API client
 - `server` — Elysia REST + WebSocket + Swagger + auth
-- `daemon` — client sync daemon (heartbeat, rclone, mounts, scheduler, Unix socket)
-- `tui` — OpenTUI tabbed shell (6 views, guided wizards, CLI fallback)
+- `daemon` — client sync daemon (heartbeat, rclone, mounts, scheduler, Unix socket, `--update skill`)
+- `tui` — OpenTUI tabbed shell (6 views, guided wizards) AND the LAMA-229 CLI (`packages/tui/src/cli/`)
 - `web-ui` — React SPA embedded in the server binary
+- `agent-skill` — globally-installed two-tier agent-skill bundle (SKILL.md + reference/)
 
 **Onboarding as a user, not a developer?** If your task is to install and
 run LamaSync as a client on your host (rather than hack on this repo), read
 `packages/agent-skill/lamasync-client.md` first — it has the production
 server URL, prereqs, install steps, and verification. Server API operations:
-`packages/agent-skill/lamasync-server.md`.
+`packages/agent-skill/SKILL.md` (the CLI-first two-tier bundle — start with
+`SKILL.md`, then `reference/cli.md` for the full `lamasync` subcommand
+reference; `reference/api.md` is the REST/WS escape hatch). The legacy
+`lamasync-server.md` content has been folded into `reference/api.md`.
 
 Full annotated tree: `docs/repository-layout.md`. System design & DB schema:
 `ARCHITECTURE.md`. Feature history by LAMA issue: `docs/features.md`.
@@ -70,6 +74,7 @@ API endpoints and TUI views, release process): `docs/development.md`.
 - **Pre-shared API key** — no user management; tailnet provides transport encryption.
 - **OpenTUI** — native rendering with CLI fallback via `LAMASYNC_NO_TUI=1` (`packages/tui/src/index.ts`).
 - **TUI unification (LAMA-173)** — single `Shell` dispatches keys in this order: active wizard → view `handleKey` → view `hotkeys()` → global tab/quit/cycle.
+- **Agent surface (LAMA-227)** — the `lamasync` binary is BOTH the TUI shell AND a non-interactive subcommand CLI (LAMA-229). Any positional argv routes to CLI dispatch (`packages/tui/src/cli/dispatch.ts`); bare invocation + TTY still boots the TUI; bare invocation + `LAMASYNC_NO_TUI=1` keeps the legacy CLI fallback. The REST/WS API is the documented escape hatch when the CLI can't express the operation (LAMA-230 + LAMA-231 fill the full CRUD surface here). The install pipeline persists a skill-install preference in `~/.lamasync/install-state.json`; `lamasyncd --update skill` refreshes the skill bundle in lockstep with the binary version.
 
 ## Version and release
 

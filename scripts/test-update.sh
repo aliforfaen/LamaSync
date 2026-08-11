@@ -51,6 +51,17 @@ chmod +x "$TEST_DIR/lamasync-tui"
 # Copy updater script.
 cp "$ROOT/packaging/install/update.sh" "$TEST_DIR/update.sh"
 
+# Fake skill bundle asset for the new release (LAMA-230): update.sh
+# refreshes ~/.agents/skills/lamasync/ when the persisted install-state
+# preference opted in.
+SKILL_STAGE="$TEST_DIR/skill-stage"
+mkdir -p "$SKILL_STAGE/lamasync-skill-99.99.99/reference"
+echo "# test skill" > "$SKILL_STAGE/lamasync-skill-99.99.99/SKILL.md"
+echo "99.99.99" > "$SKILL_STAGE/lamasync-skill-99.99.99/VERSION"
+tar -czf "$TEST_DIR/lamasync-skill-99.99.99.tar.gz" \
+  -C "$SKILL_STAGE" "lamasync-skill-99.99.99"
+rm -rf "$SKILL_STAGE"
+
 # Mock GitHub releases API JSON.
 cat > "$TEST_DIR/releases.json" <<'EOF'
 {"tag_name":"v99.99.99","published_at":"2026-01-01T00:00:00Z","assets":[]}
@@ -104,8 +115,10 @@ docker run --rm \
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null
-    apt-get install -y -qq curl >/dev/null
-    mkdir -p /root/.local/bin
+    apt-get install -y -qq curl python3 >/dev/null
+    mkdir -p /root/.local/bin /root/.lamasync
+    # LAMA-230: persisted skill preference (install.sh would write this).
+    printf '{\"install_skill\": true}\n' > /root/.lamasync/install-state.json
     echo '[client] Installing old lamasyncd from test server...'
     curl -fsSL http://$SERVER_NAME/lamasyncd-old -o /root/.local/bin/lamasyncd
     chmod +x /root/.local/bin/lamasyncd
@@ -118,6 +131,9 @@ docker run --rm \
     /root/.local/bin/lamasync-tui --version
     /root/.local/bin/lamasyncd --version | grep -q '99.99.99'
     /root/.local/bin/lamasync-tui --version | grep -q '99.99.99'
+    # LAMA-230: the skill refresh must have run per the persisted preference.
+    test -f /root/.agents/skills/lamasync/SKILL.md
+    grep -q '99.99.99' /root/.agents/skills/lamasync/VERSION
     echo '[client] Update checks passed.'
   "
 

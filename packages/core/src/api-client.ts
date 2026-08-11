@@ -1,5 +1,6 @@
 import type {
   Backend,
+  BrowseJob,
   BrowseResponse,
   Conflict,
   ConflictResolution,
@@ -11,6 +12,8 @@ import type {
   HealthResponse,
   Host,
   HostConfig,
+  NotificationChannel,
+  NotificationEvent,
   OperationLog,
   OperationReport,
   QueuedAction,
@@ -60,6 +63,14 @@ export interface LamaSyncApiClientOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxRetries?: number;
+}
+
+/** Response shape of POST /api/v1/notifications/test when a channelId is
+ *  given (per-channel delivery result; see LAMA-221). */
+export interface NotificationChannelTestResult {
+  channelId: string;
+  delivered: boolean;
+  status: "success" | "failed";
 }
 
 export class LamaSyncApiClient {
@@ -473,7 +484,42 @@ export class LamaSyncApiClient {
   }
 
   pruneOperations(olderThanMs: number): Promise<{ deleted: number; olderThanMs: number }> {
-    return this.request("POST", `/api/v1/admin/prune?olderThanMs=${olderThanMs}`);
+    return this.request<{ deleted: number; olderThanMs: number }>(
+      "POST",
+      `/api/v1/admin/prune?olderThanMs=${olderThanMs}`,
+    );
+  }
+
+  renameHost(hostId: string, hostname: string): Promise<Host> {
+    return this.request<Host>(
+      "PATCH",
+      `/api/v1/hosts/${encodeURIComponent(hostId)}`,
+      JSON.stringify({ hostname }),
+      "application/json",
+    );
+  }
+
+  listNotifications(): Promise<NotificationEvent[]> {
+    return this.request<NotificationEvent[]>("GET", "/api/v1/notifications");
+  }
+
+  listNotificationChannels(): Promise<NotificationChannel[]> {
+    return this.request<NotificationChannel[]>("GET", "/api/v1/notifications/channels");
+  }
+
+  // LAMA-231: exercise the notification pipeline. With a channelId the
+  // server delivers through ONLY that channel and answers with a
+  // NotificationChannelTestResult; without one it records a test event and
+  // fans out to every configured channel (201 → NotificationEvent).
+  testNotification(
+    channelId?: string,
+  ): Promise<NotificationEvent | NotificationChannelTestResult> {
+    return this.request<NotificationEvent | NotificationChannelTestResult>(
+      "POST",
+      "/api/v1/notifications/test",
+      channelId ? JSON.stringify({ channelId }) : null,
+      channelId ? "application/json" : undefined,
+    );
   }
 
   deleteHost(hostId: string): Promise<void> {
@@ -557,6 +603,10 @@ export class LamaSyncApiClient {
     return this.request<ResticSnapshot[]>("GET", "/api/v1/browse/restic");
   }
 
+  browseJobs(): Promise<BrowseJob[]> {
+    return this.request<BrowseJob[]>("GET", "/api/v1/browse/jobs");
+  }
+
   // LAMA-222: reusable backends (S3 credentials stored once, referenced by
   // folders via backendId). Secrets are write-only; responses expose
   // `hasSecret` instead of the value.
@@ -576,6 +626,9 @@ export class LamaSyncApiClient {
     s3Region?: string;
     s3AccessKeyId?: string;
     s3SecretAccessKey?: string;
+    localPath?: string;
+    resticRepository?: string;
+    resticPassword?: string;
   }): Promise<Backend> {
     return this.request<Backend>(
       "POST",
@@ -594,6 +647,9 @@ export class LamaSyncApiClient {
       s3Region?: string;
       s3AccessKeyId?: string;
       s3SecretAccessKey?: string;
+      localPath?: string;
+      resticRepository?: string;
+      resticPassword?: string;
     },
   ): Promise<Backend> {
     return this.request<Backend>(

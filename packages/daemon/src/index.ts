@@ -13,6 +13,7 @@ import type {
   ResticRestoreJob,
 } from "@lamasync/core";
 import { LamaSyncApiClient, VERSION, defaultSocketPath } from "@lamasync/core";
+import { locateSkillAsset, SKILL_DIR, downloadSkillBundle, readInstalledSkillVersion } from "./skill-update.ts";
 import {
   isDryRunRequested,
   selectAssignmentsForSyncAction,
@@ -1093,6 +1094,10 @@ if (import.meta.main) {
         console.error("lamasyncd --check-update: unable to reach GitHub");
         process.exit(1);
       }
+      const skillVersion = readInstalledSkillVersion();
+      console.log(
+        `agent skill: ${skillVersion ? `v${skillVersion}` : "not installed"} (${SKILL_DIR})`,
+      );
       if (isNewer(VERSION, latest.version)) {
         console.log(
           `update available: current=v${VERSION} latest=${latest.tag} (published ${latest.publishedAt})`,
@@ -1104,6 +1109,37 @@ if (import.meta.main) {
     })().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`lamasyncd --check-update failed: ${msg}`);
+      process.exit(1);
+    });
+  } else if (process.argv.includes("--update") && process.argv.includes("skill")) {
+    // --update skill flag (LAMA-230): refresh ~/.agents/skills/lamasync/ from
+    // the GitHub release whose version matches the local binary. Cross-version
+    // drift is rejected on purpose — the skill ships lockstep with the binary.
+    (async () => {
+      const located = await locateSkillAsset();
+      if (!located) {
+        console.error(
+          `lamasyncd --update skill: no lamasync-skill-${VERSION}.tar.gz in release v${VERSION}`,
+        );
+        process.exit(1);
+      }
+      const asset = located.release.assets.find((a) => a.name === located.assetName);
+      if (!asset) {
+        console.error(`lamasyncd --update skill: release missing ${located.assetName}`);
+        process.exit(1);
+      }
+      const ok = await downloadSkillBundle(asset.downloadUrl);
+      if (!ok) {
+        console.error("lamasyncd --update skill: download/extract failed");
+        process.exit(1);
+      }
+      console.log(
+        `lamasyncd --update skill: refreshed ${SKILL_DIR} to ${located.assetName} (release ${located.release.tag})`,
+      );
+      process.exit(0);
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`lamasyncd --update skill failed: ${msg}`);
       process.exit(1);
     });
   } else if (process.argv.includes("--update")) {

@@ -31,6 +31,8 @@ Options:
   --binary-dir DIR    Directory holding the installed binaries
                       (default: ~/.local/bin)
   --yes               Skip the "press enter to continue" confirmation
+  --no-skill          Skip the agent-skill refresh even if the install-time
+                      preference opted in (default-on, opt-out)
   --help              Show this help
 
 Environment:
@@ -45,10 +47,12 @@ EOF
 }
 
 ASSUME_YES=0
+NO_SKILL=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary-dir) BINARY_DIR="$2"; shift 2 ;;
     --yes|-y)     ASSUME_YES=1; shift ;;
+    --no-skill)   NO_SKILL=1; shift ;;
     --help|-h)    usage 0 ;;
     *)            echo "Unknown argument: $1" >&2; usage 1 ;;
   esac
@@ -196,6 +200,41 @@ fi
 echo "==> Updated lamasyncd to ${LATEST_VERSION}."
 if [[ "${TUI_DOWNLOADED}" -eq 1 ]]; then
   echo "==> Updated lamasync-tui to ${LATEST_VERSION}."
+fi
+
+# LAMA-230: refresh the agent-skill bundle too, when the install-time
+# preference asked for it. The state file is written by install.sh.
+INSTALL_STATE_FILE="${HOME}/.lamasync/install-state.json"
+SKILL_PREF=""
+if [[ -f "${INSTALL_STATE_FILE}" ]] && command -v python3 >/dev/null 2>&1; then
+  SKILL_PREF="$(python3 -c "
+import json,sys
+try:
+    with open('${INSTALL_STATE_FILE}') as f:
+        s = json.load(f)
+    print('y' if s.get('install_skill') else 'n')
+except Exception:
+    print('n')
+" 2>/dev/null || echo 'n')"
+fi
+if [[ "${SKILL_PREF}" == "y" ]] && [[ "${NO_SKILL}" -eq 0 ]]; then
+  SKILL_TAR="${TMP_DIR}/lamasync-skill-${LATEST_VERSION}.tar.gz"
+  echo "==> Refreshing agent skill (~/.agents/skills/lamasync/)"
+  if curl -fsSL -o "${SKILL_TAR}" "${INSTALL_BASE_URL}/lamasync-skill-${LATEST_VERSION}.tar.gz"; then
+    SKILL_STAGE="$(mktemp -d -t lamasync-skill-stage.XXXXXX)"
+    if tar -xzf "${SKILL_TAR}" -C "${SKILL_STAGE}" 2>/dev/null; then
+      SKILL_DIR_SRC="$(find "${SKILL_STAGE}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+      if [[ -n "${SKILL_DIR_SRC}" ]]; then
+        mkdir -p "${HOME}/.agents/skills"
+        rm -rf "${HOME}/.agents/skills/lamasync"
+        mv "${SKILL_DIR_SRC}" "${HOME}/.agents/skills/lamasync"
+        echo "    Skill refreshed."
+      fi
+    fi
+    rm -rf "${SKILL_STAGE}"
+  else
+    echo "    (skill asset not present in this release; skipping)" >&2
+  fi
 fi
 
 # Hint: restart the systemd unit if it's running.

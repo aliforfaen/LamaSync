@@ -32,6 +32,9 @@ jobs:
       - name: Test
         run: bun test
 
+      - name: Drift-check the agent skill (LAMA-230)
+        run: bun run scripts/check-skill-drift.ts
+
   build:
     name: build
     runs-on: ubuntu-latest
@@ -46,6 +49,9 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Build the agent-skill bundle (LAMA-230)
+        run: bash packaging/build-skill-tarball.sh dist
 
       - name: Upload server binary
         uses: actions/upload-artifact@v4
@@ -66,6 +72,13 @@ jobs:
         with:
           name: lamasync-tui
           path: packages/tui/dist/lamasync-tui
+          if-no-files-found: error
+
+      - name: Upload skill bundle (LAMA-230)
+        uses: actions/upload-artifact@v4
+        with:
+          name: lamasync-skill
+          path: dist/lamasync-skill-*.tar.gz
           if-no-files-found: error
 
   release:
@@ -94,8 +107,14 @@ jobs:
           name: lamasync-tui
           path: dist/lamasync-tui
 
+      - name: Download skill bundle (LAMA-230)
+        uses: actions/download-artifact@v4
+        with:
+          name: lamasync-skill
+          path: dist/lamasync-skill
+
       - name: Make binaries executable
-        run: chmod +x dist/lamasync-server/lamasync-server dist/lamasyncd/lamasyncd dist/lamasync-tui/lamasync-tui
+        run: chmod +x dist/lamasync-server/lamasync-server dist/lamasyncd/lamasyncd dist/lamasync-tui/lamasync-tui dist/lamasync-skill/lamasync-skill-*.tar.gz
 
       - name: Stage updater script
         run: cp packaging/install/update.sh dist/update.sh
@@ -107,6 +126,7 @@ jobs:
             dist/lamasync-server/lamasync-server
             dist/lamasyncd/lamasyncd
             dist/lamasync-tui/lamasync-tui
+            dist/lamasync-skill/lamasync-skill-*.tar.gz
             dist/update.sh
           generate_release_notes: true
 

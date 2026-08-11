@@ -35,6 +35,9 @@ mkdir -p "$TEST_DIR"
 cp "$ROOT/packages/daemon/dist/lamasyncd" "$TEST_DIR/lamasyncd"
 cp "$ROOT/packages/tui/dist/lamasync-tui" "$TEST_DIR/lamasync-tui"
 cp "$ROOT/packaging/install/install.sh" "$TEST_DIR/install.sh"
+# LAMA-230: the install script fetches lamasync-skill-<version>.tar.gz
+# when the skill install is opted in (--with-tui defaults it to yes).
+bash "$ROOT/packaging/build-skill-tarball.sh" "$TEST_DIR" >/dev/null
 
 echo "[docker] Creating network ${NETWORK}..."
 docker network rm "$NETWORK" >/dev/null 2>&1 || true
@@ -83,6 +86,10 @@ docker run --rm \
     # falls back to /root/.lamasync/lamasync.sock.
     grep -q 'LAMASYNC_SOCKET_PATH=/root/.lamasync/lamasync.sock' ~/.config/systemd/user/lamasyncd.service
     grep -q 'ReadWritePaths=.*%h/.lamasync' ~/.config/systemd/user/lamasyncd.service
+    # LAMA-230: the agent skill bundle must have landed alongside the binary.
+    test -f ~/.agents/skills/lamasync/SKILL.md
+    test -f ~/.agents/skills/lamasync/VERSION
+    test -d ~/.agents/skills/lamasync/reference
     echo '[client] All install checks passed.'
   "
 

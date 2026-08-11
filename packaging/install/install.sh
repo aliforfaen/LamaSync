@@ -43,6 +43,7 @@ HOSTNAME_VAL="$(hostname)"
 WITH_TUI=0
 CHECK_ONLY=0
 PRINT_VERSION=0
+ASSUME_YES=0
 
 ASSET_DAEMON="lamasyncd"
 ASSET_TUI="lamasync-tui"
@@ -109,6 +110,7 @@ Options:
   --with-tui          Also install the lamasync-tui binary to BINARY_DIR
   --binary-dir DIR    Install binaries into DIR (default: ~/.local/bin)
   --check             Only check for updates; never write to disk
+  --yes, -y           Skip prompts (default skill install when --with-tui)
   --version           Print installer version (0.2.1) and exit
   -h, --help          Show this help
 
@@ -127,6 +129,7 @@ while [[ $# -gt 0 ]]; do
     --with-tui)    WITH_TUI=1; shift ;;
     --binary-dir)  BINARY_DIR="$2"; shift 2 ;;
     --check)       CHECK_ONLY=1; shift ;;
+    --yes|-y)      ASSUME_YES=1; shift ;;
     --version)     PRINT_VERSION=1; shift ;;
     -h|--help)     usage 0 ;;
     *)             echo "Unknown argument: $1" >&2; usage 1 ;;
@@ -259,6 +262,93 @@ else
   echo "systemctl not available; start manually: ${BINARY_DIR}/lamasyncd" >&2
 fi
 
+# LAMA-230: agent-skill install (SKILL.md + reference/) into
+# ~/.agents/skills/lamasync/. The decision is persisted in
+# ~/.lamasync/install-state.json so update.sh / \`--update skill\` can
+# refresh without re-prompting. The asset URL mirrors the binary path.
+install_skill_asset() {
+  local asset_url="$1"
+  local tmp_tar
+  tmp_tar="$(mktemp -t lamasync-skill.XXXXXX.tar.gz)"
+  if ! curl -fsSL -o "${tmp_tar}" "${asset_url}"; then
+    rm -f "${tmp_tar}"
+    return 1
+  fi
+  local stage_dir
+  stage_dir="$(mktemp -d -t lamasync-skill-stage.XXXXXX)"
+  if ! tar -xzf "${tmp_tar}" -C "${stage_dir}"; then
+    rm -f "${tmp_tar}"
+    rm -rf "${stage_dir}"
+    return 1
+  fi
+  rm -f "${tmp_tar}"
+  local extracted
+  extracted="$(find "${stage_dir}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  if [[ -z "${extracted}" ]]; then
+    rm -rf "${stage_dir}"
+    return 1
+  fi
+  mkdir -p "${HOME}/.agents/skills"
+  rm -rf "${HOME}/.agents/skills/lamasync"
+  mv "${extracted}" "${HOME}/.agents/skills/lamasync"
+  rm -rf "${stage_dir}"
+  return 0
+}
+
+INSTALL_STATE_DIR="${HOME}/.lamasync"
+INSTALL_STATE_FILE="${INSTALL_STATE_DIR}/install-state.json"
+mkdir -p "${INSTALL_STATE_DIR}"
+
+INSTALL_SKILL="n"
+if [[ "${ASSUME_YES}" -eq 1 ]]; then
+  INSTALL_SKILL="y"
+elif [[ "${WITH_TUI}" -eq 1 ]]; then
+  # When the operator asked for the TUI companion, they're signaling
+  # "I want the agent-friendly stack" — default the skill to yes too.
+  INSTALL_SKILL="y"
+elif [[ -t 0 ]]; then
+  read -r -p "Install the LamaSync agent skill to ~/.agents? [Y/n] " REPLY_SKILL || true
+  case "${REPLY_SKILL:-y}" in
+    [Nn]|[Nn][Oo]) INSTALL_SKILL="n" ;;
+    *)             INSTALL_SKILL="y" ;;
+  esac
+fi
+
+# Persist the choice (best-effort; missing python3 is OK).
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c "
+import json, time
+state_path = '${INSTALL_STATE_FILE}'
+state = {}
+try:
+    with open(state_path) as f:
+        state = json.load(f) or {}
+except Exception:
+    state = {}
+state['install_skill'] = '${INSTALL_SKILL}' == 'y'
+state['updated_at'] = int(time.time())
+state['version'] = '${INSTALLED_VERSION}'
+with open(state_path, 'w') as f:
+    json.dump(state, f, indent=2)
+import os
+os.chmod(state_path, 0o600)
+" || true
+fi
+
+SKILL_ASSET="lamasync-skill-${INSTALLED_VERSION}.tar.gz"
+SKILL_INSTALL_BASE_URL="${LAMASYNC_INSTALL_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
+SKILL_URL="${SKILL_INSTALL_BASE_URL}/${SKILL_ASSET}"
+
+if [[ "${INSTALL_SKILL}" == "y" ]]; then
+  echo "==> Installing agent skill to ~/.agents/skills/lamasync/"
+  if install_skill_asset "${SKILL_URL}"; then
+    echo "    Skill installed (version ${INSTALLED_VERSION})."
+  else
+    echo "Warning: failed to fetch ${SKILL_URL}; skill bundle not installed." >&2
+    echo "    Retry later with: ${BINARY_DIR}/lamasyncd --update skill" >&2
+  fi
+fi
+
 if [[ ":${PATH}:" != *":${BINARY_DIR}:"* ]]; then
   echo "    (Add ${BINARY_DIR} to your PATH to run lamasyncd/lamasync-tui from anywhere)"
 fi
@@ -270,6 +360,12 @@ if [[ "${WITH_TUI}" -eq 1 ]]; then
   echo "    TUI:    ${BINARY_DIR}/lamasync-tui"
 fi
 echo "    Socket: ${SOCKET_PATH}"
+if [[ "${INSTALL_SKILL:-n}" == "y" ]]; then
+  echo "    Skill:  ~/.agents/skills/lamasync/"
+fi
 echo ""
 echo "==> Hint: future updates can be applied without re-running this script:"
 echo "    ${BINARY_DIR}/lamasyncd --update"
+if [[ "${INSTALL_SKILL:-n}" == "y" ]]; then
+  echo "    ${BINARY_DIR}/lamasyncd --update skill   # refresh the agent skill"
+fi
