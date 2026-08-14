@@ -65,6 +65,7 @@ import {
   writeMountUnit,
 } from "./systemd.ts";
 import { downloadAndReplace, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
+import { DAEMON_KNOWN_FLAGS, daemonUsage } from "./usage.ts";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CONFIG_REFRESH_MS = 5 * 60 * 1000;
@@ -1149,11 +1150,37 @@ function parseMountArg(argv: readonly string[]): string | null {
   }
   return null;
 }
-// --version flag
+// LAMA-242: --help / -h print, --version print, and unknown-flag guard.
+// Comes before the operational dispatch (--check-update / --update /
+// --update skill / --mount) so a typo never silently boots the daemon.
 if (import.meta.main) {
-  if (process.argv.includes("--version") || process.argv.includes("-V")) {
+  const args = process.argv.slice(2);
+
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(daemonUsage());
+    process.exit(0);
+  }
+
+  if (args.includes("--version") || args.includes("-V")) {
     console.log(`lamasyncd ${VERSION}`);
     process.exit(0);
+  }
+
+  // Unknown-flag guard: reject any `-`-prefixed token that isn't a known
+  // flag. `--mount=<id>` is a token-shaped flag with an inline value; let it
+  // through the prefix exception so `--mount=foo` doesn't trip the guard.
+  // Bare positionals (the `skill` after `--update`, the `<folderId>` after
+  // `--mount`) don't start with `-` so they're not flagged here either.
+  if (
+    args.some(
+      (a) =>
+        a.startsWith("-") &&
+        !a.startsWith("--mount=") &&
+        !DAEMON_KNOWN_FLAGS.has(a),
+    )
+  ) {
+    console.error(daemonUsage());
+    process.exit(2);
   }
 
   // --check-update flag: print latest release vs current, exit. Routed

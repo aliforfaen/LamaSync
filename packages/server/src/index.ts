@@ -23,6 +23,7 @@ import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts"
 import { db } from "./db.ts";
 import { VERSION, type ErrorResponse } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
+import { SERVER_KNOWN_FLAGS, serverUsage } from "./usage.ts";
 
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
 
@@ -38,6 +39,24 @@ const retentionMs = retentionDays * 24 * 60 * 60 * 1000;
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(`lamasync-server ${VERSION}`);
   process.exit(0);
+}
+
+// LAMA-242: --help / -h print and unknown-flag guard. Comes right after the
+// --version check so a typo never silently boots a long-running HTTP server.
+{
+  const args = process.argv.slice(2);
+
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(serverUsage());
+    process.exit(0);
+  }
+
+  if (
+    args.some((a) => a.startsWith("-") && !SERVER_KNOWN_FLAGS.has(a))
+  ) {
+    console.error(serverUsage());
+    process.exit(2);
+  }
 }
 
 
