@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
-import { effectiveFolderType } from "@lamasync/core";
+import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";

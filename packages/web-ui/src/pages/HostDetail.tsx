@@ -9,7 +9,7 @@ import type {
   QueuedAction,
   QueuedActionType,
 } from "@lamasync/core";
-import { effectiveFolderType } from "@lamasync/core";
+import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
