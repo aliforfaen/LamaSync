@@ -3,6 +3,17 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Current status (as of 2026-08-14)
+
+- **LAMA-243 — GitHub update-check throttle + server proxy (implemented + pushed)**: root cause of the 2026-08-13 `cachy` incident — a corrupt `client.toml` crash-looped the daemon, and the per-start `--check-update` hit `api.github.com` directly ~600× in ~1h45m, exhausting the 60 req/hr unauthenticated limit (403). Fixes, all landed:
+  - **Server proxy routing**: the daemon no longer talks to api.github.com for release metadata — added `LamaSyncApiClient.getLatestRelease()` (GET `/api/v1/release/latest`, the already ~1h-cached server endpoint) and switched every `fetchLatestRelease()` call site (`check_update` action, startup one-shot, `--check-update`, `--update`) to it.
+  - **Persisted cooldown**: new `daemon/src/update-check.ts` — `~/.config/lamasync/update-state.json` with a 15-min `lastCheckAt`, written *before* the network call so a crash mid-check still leaves the cooldown in place. A 10s crash loop now fires ≤ ~4 checks/hour.
+  - **systemd start-limit**: the generated daemon unit sets `StartLimitIntervalSec=300` + `StartLimitBurst=8` so a hard crash loop stops after 8 failures/5 min.
+  - **Optional GitHub token**: `release-cache.ts` sends `Authorization: Bearer $LAMASYNC_GITHUB_TOKEN` when set (5000 req/hr), server-side only. Web UI admin field deliberately deferred — env var is enough; the app shouldn't need a token at all.
+  - Tests: `tsc --noEmit` clean; **549 pass / 1 skip / 0 fail** (added `update-check.test.ts` + StartLimit assertion).
+- **Backlog housekeeping (this session)**: the 2026-08-11 UI-touch batch (`0a6fd43`, LAMA-238/235/241/232) was shipped in code + docs but never pushed to `origin/master` and never reflected in Multica. Pushed now; flipped LAMA-238 / LAMA-235 / LAMA-232 / LAMA-241 to **done**. LAMA-239 (mount-vs-sync override) remains `backlog` (a real feature, not a touch). LAMA-242 (`--help`/`-h` for `lamasyncd` + `lamasync-server`) still open — the `lamasync` CLI already has help from LAMA-229.
+- Daemon-side fixes (0a6fd43 batch + LAMA-243) reach the fleet on the next release tag; the prod server picks up the server-side changes on the nightly master pull.
+
 ## Current status (as of 2026-08-11)
 
 - **UI touch + bug-fix batch (LAMA-238 / LAMA-235 / LAMA-241 / LAMA-232)** — all four shipped in one pass; **LAMA-239 (per-host mount-vs-sync override) deliberately deferred** to its own session (it's a real feature — DB migration + daemon mount lifecycle + UI — not a small touch). Details:

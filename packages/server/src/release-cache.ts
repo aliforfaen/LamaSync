@@ -40,10 +40,15 @@ let inflight: Promise<CacheEntry | null> | null = null;
 async function fetchOnce(): Promise<CacheEntry | null> {
   let upstream: Response;
   try {
+    // Optional GitHub token (env LAMASYNC_GITHUB_TOKEN, LAMA-243) raises the
+    // unauthenticated 60 req/hr per-IP limit to 5000 req/hr. Purely optional:
+    // the ~1h TTL cache keeps us far below 60/hr in normal operation.
+    const githubToken = process.env.LAMASYNC_GITHUB_TOKEN;
     upstream = await fetch(GITHUB_API, {
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": `lamasync-server/${VERSION}`,
+        ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
       },
       // Don't let a hung upstream stall request handlers on a cold cache.
       signal: AbortSignal.timeout(5000),

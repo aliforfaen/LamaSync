@@ -88,4 +88,10 @@ describe("daemonServiceTemplate", () => {
       "Environment=LAMASYNC_SOCKET_PATH=/var/run/lamasync.sock",
     );
   });
+
+  test("bounds the crash loop with StartLimit (LAMA-243)", () => {
+    const content = daemonServiceTemplate();
+    expect(content).toContain("StartLimitIntervalSec=300");
+    expect(content).toContain("StartLimitBurst=8");
+  });
 });

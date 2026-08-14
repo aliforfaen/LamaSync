@@ -23,6 +23,11 @@ import {
 } from "./actions.ts";
 import { loadConfig, missingAssignmentPaths } from "./config.ts";
 import { CACHE_PATH, loadCache, saveCache } from "./config-cache.ts";
+import {
+  UPDATE_CHECK_COOLDOWN_MS,
+  markUpdateCheckAttempted,
+  withinUpdateCooldown,
+} from "./update-check.ts";
 import { executeAssignment, executeResticRestore } from "./executor.ts";
 import { Scheduler } from "./scheduler.ts";
 import {
@@ -59,7 +64,7 @@ import {
   waitForMountUnitActive,
   writeMountUnit,
 } from "./systemd.ts";
-import { downloadAndReplace, fetchLatestRelease, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
+import { downloadAndReplace, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CONFIG_REFRESH_MS = 5 * 60 * 1000;
@@ -778,9 +783,9 @@ async function main(): Promise<void> {
           return;
         }
         case "check_update": {
-          const latest = await fetchLatestRelease();
+          const latest = await client.getLatestRelease();
           if (!latest) {
-            await ack("failed", "could not reach GitHub Releases");
+            await ack("failed", "could not reach the release proxy");
             return;
           }
           const outcome = summarizeUpdateCheck(VERSION, latest.version);
@@ -910,13 +915,19 @@ async function main(): Promise<void> {
   // LAMA-232: drain the queue immediately instead of waiting for the first
   // 30 s poll tick.
   void pollActions();
-  // One-shot update check on startup. Never throws — just logs.
+  // One-shot update check on startup. Never throws — just logs. Routed
+  // through the server's cached release proxy (LAMA-243) and gated by the
+  // persisted cooldown so a crash loop can't re-fire it every restart.
   try {
-    const latest = await fetchLatestRelease();
-    if (latest && isNewer(VERSION, latest.version)) {
-      console.log(
-        `[update] newer release available: ${latest.tag} (current: v${VERSION})`,
-      );
+    const now = Date.now();
+    if (!withinUpdateCooldown(now)) {
+      markUpdateCheckAttempted(now);
+      const latest = await client.getLatestRelease();
+      if (latest && isNewer(VERSION, latest.version)) {
+        console.log(
+          `[update] newer release available: ${latest.tag} (current: v${VERSION})`,
+        );
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1145,12 +1156,24 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // --check-update flag: print latest release vs current, exit.
+  // --check-update flag: print latest release vs current, exit. Routed
+  // through the server's cached release proxy (LAMA-243) and gated by the
+  // persisted cooldown so a crash loop can't re-fire it every restart.
   if (process.argv.includes("--check-update")) {
     (async () => {
-      const latest = await fetchLatestRelease();
+      const config = loadConfig();
+      const client = new LamaSyncApiClient(config.serverUrl, config.apiKey);
+      const now = Date.now();
+      if (withinUpdateCooldown(now)) {
+        console.log(
+          `lamasyncd --check-update: skipped (cooldown, last check < ${Math.round(UPDATE_CHECK_COOLDOWN_MS / 60000)}m ago)`,
+        );
+        process.exit(0);
+      }
+      markUpdateCheckAttempted(now);
+      const latest = await client.getLatestRelease();
       if (!latest) {
-        console.error("lamasyncd --check-update: unable to reach GitHub");
+        console.error("lamasyncd --check-update: unable to reach the release proxy");
         process.exit(1);
       }
       const skillVersion = readInstalledSkillVersion();
@@ -1202,11 +1225,14 @@ if (import.meta.main) {
       process.exit(1);
     });
   } else if (process.argv.includes("--update")) {
-    // --update flag: fetch latest, pick the matching asset, replace this binary.
+    // --update flag: fetch latest (via the server's release proxy), pick the
+    // matching asset, replace this binary.
     (async () => {
-      const latest = await fetchLatestRelease();
+      const config = loadConfig();
+      const client = new LamaSyncApiClient(config.serverUrl, config.apiKey);
+      const latest = await client.getLatestRelease();
       if (!latest) {
-        console.error("lamasyncd --update: unable to reach GitHub");
+        console.error("lamasyncd --update: unable to reach the release proxy");
         process.exit(1);
       }
       if (!isNewer(VERSION, latest.version)) {

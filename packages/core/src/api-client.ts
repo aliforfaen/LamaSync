@@ -18,6 +18,7 @@ import type {
   OperationReport,
   QueuedAction,
   QueuedActionType,
+  ReleaseInfo,
   ResticRestoreJob,
   ResticSnapshot,
   Share,
@@ -159,6 +160,18 @@ export class LamaSyncApiClient {
   // Health & config
   getHealth(): Promise<HealthResponse> {
     return this.request<HealthResponse>("GET", "/api/v1/health");
+  }
+
+  // LAMA-243: latest release info via the server's cached proxy, so the
+  // daemon never talks to api.github.com directly. Best-effort: any failure
+  // (502 upstream unreachable, auth, network) collapses to `null`, matching
+  // the self-update module's null-on-failure contract. Callers log as needed.
+  async getLatestRelease(): Promise<ReleaseInfo | null> {
+    try {
+      return await this.request<ReleaseInfo>("GET", "/api/v1/release/latest");
+    } catch {
+      return null;
+    }
   }
 
   registerHost(host: {
