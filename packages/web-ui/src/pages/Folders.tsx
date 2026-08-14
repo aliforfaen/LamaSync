@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
+import { effectiveFolderType } from "@lamasync/core";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
@@ -732,6 +733,9 @@ export function Folders() {
       {editingAssignment ? (
         <AssignmentEditor
           assignment={editingAssignment}
+          // LAMA-239: pass the folder so the editor can gate the Mode
+          // dropdown on folder.type ∈ {sync, mount}.
+          folder={items?.find((i) => i.assignments.some((a) => a.id === editingAssignment.id))?.folder}
           folderName={items?.find((i) => i.assignments.some((a) => a.id === editingAssignment.id))?.folder.name}
           onSaved={() => {
             setEditingAssignment(null);
@@ -880,11 +884,23 @@ export function Folders() {
                             <th>Role</th>
                             <th>Local path</th>
                             <th>Schedule</th>
+                            {/* LAMA-239: per-host effective-mode badge.
+                                Hidden for non-sync/mount folders where
+                                the override is meaningless. */}
+                            <th>Mode</th>
                             <th />
                           </tr>
                         </thead>
                         <tbody>
-                          {assignments.map((assignment) => (
+                          {assignments.map((assignment) => {
+                            // LAMA-239: compute the effective mode for
+                            // this host + folder pair. The badge stays
+                            // empty for backup/dotfile/git folders (the
+                            // override is ignored there).
+                            const effectiveMode = (folder.type === "sync" || folder.type === "mount")
+                              ? effectiveFolderType(folder, assignment)
+                              : null;
+                            return (
                             <tr key={assignment.id}>
                               <td>{hostLabel(assignment.hostId)}</td>
                               <td>
@@ -900,6 +916,18 @@ export function Folders() {
                               </td>
                               <td className="mono muted assignment-schedule">
                                 {assignment.syncExpr ?? "—"}
+                              </td>
+                              <td>
+                                {effectiveMode ? (
+                                  <span className="badge badge-unknown">
+                                    {effectiveMode}
+                                    {assignment.mode && assignment.mode !== "inherit"
+                                      ? ` (override)`
+                                      : ""}
+                                  </span>
+                                ) : (
+                                  <span className="muted">—</span>
+                                )}
                               </td>
                               <td className="table-actions">
                                 <button
@@ -930,7 +958,8 @@ export function Folders() {
                                 </button>
                               </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     )}

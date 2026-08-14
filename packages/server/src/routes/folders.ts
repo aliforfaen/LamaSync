@@ -2,7 +2,8 @@ import { Elysia, t } from "elysia";
 import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
-import type { Folder, FolderAssignment, FolderBackend, FolderType } from "@lamasync/core";
+import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderType } from "@lamasync/core";
+import { normalizeAssignmentMode } from "@lamasync/core";
 import { getBackend } from "../backends.ts";
 import {
   bumpConfigRevision,
@@ -122,6 +123,9 @@ interface AssignmentRow {
   remote_name: string | null;
   sync_expr: string | null;
   enabled: number;
+  // LAMA-239: per-host override. Default "inherit" matches the schema NOT
+  // NULL DEFAULT; older rows pre-migration may have NULL.
+  mode: string | null;
   conflict_strategy: string | null;
   pre_sync_cmd: string | null;
   post_sync_cmd: string | null;
@@ -181,6 +185,11 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     remoteName: r.remote_name,
     syncExpr: r.sync_expr,
     enabled: r.enabled === 1,
+    // LAMA-239: belt-and-braces default for rows pre-dating the migration
+    // (column has NOT NULL DEFAULT, so post-migration rows never hit this).
+    mode: r.mode === "sync" || r.mode === "mount" || r.mode === "inherit"
+      ? r.mode
+      : "inherit",
     conflictStrategy: (r.conflict_strategy as FolderAssignment["conflictStrategy"]) ?? null,
     preSyncCmd: r.pre_sync_cmd,
     postSyncCmd: r.post_sync_cmd,
@@ -400,7 +409,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       const rows = db
         .query<AssignmentRow, [string]>(
           `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
-                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                  mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password
            FROM folder_assignments WHERE folder_id = ?`,
@@ -684,6 +693,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         remoteName?: string | null;
         syncExpr?: string | null;
         enabled?: boolean;
+        // LAMA-239: per-host mount/sync override. Omitted → "inherit".
+        mode?: AssignmentMode;
         conflictStrategy?: string | null;
         preSyncCmd?: string | null;
         postSyncCmd?: string | null;
@@ -709,10 +720,10 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       db.run(
         `INSERT INTO folder_assignments
            (id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
-            conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+            mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
             timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
             cache_profile, cache_max_size, restic_repository, restic_password)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           params.id,
@@ -722,6 +733,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           b.remoteName ?? null,
           b.syncExpr ?? null,
           b.enabled === false ? 0 : 1,
+          // LAMA-239: default "inherit" preserves today's behavior.
+          normalizeAssignmentMode(b.mode),
           b.conflictStrategy ?? null,
           b.preSyncCmd ?? null,
           b.postSyncCmd ?? null,
@@ -740,7 +753,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       const row = db
         .query<AssignmentRow, [string]>(
           `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
-                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                  mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password
            FROM folder_assignments WHERE id = ?`,
@@ -764,6 +777,15 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         remoteName: t.Optional(t.Union([t.String(), t.Null()])),
         syncExpr: t.Optional(t.Union([t.String(), t.Null()])),
         enabled: t.Optional(t.Boolean()),
+        // LAMA-239: per-host sync/mount override.
+        mode: t.Optional(
+          t.Union([
+            t.Literal("inherit"),
+            t.Literal("sync"),
+            t.Literal("mount"),
+            t.Null(),
+          ]),
+        ),
         conflictStrategy: t.Optional(t.Union([t.String(), t.Null()])),
         preSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
         postSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
@@ -833,6 +855,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         cacheMaxSize?: string | null;
         syncExpr?: string | null;
         enabled?: boolean;
+        // LAMA-239: per-host sync/mount override. Setting it to null on the
+        // wire resets to "inherit".
+        mode?: AssignmentMode | null;
         preSyncCmd?: string | null;
         postSyncCmd?: string | null;
         conflictStrategy?: string | null;
@@ -860,6 +885,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       if (b.enabled !== undefined) {
         sets.push("enabled = ?");
         args.push(b.enabled ? 1 : 0);
+      }
+      if (b.mode !== undefined) {
+        sets.push("mode = ?");
+        // null → "inherit" (the wire-reset semantic). Anything else runs
+        // through the narrower so an invalid string can't reach the column.
+        args.push(b.mode === null ? "inherit" : normalizeAssignmentMode(b.mode));
       }
       if (b.preSyncCmd !== undefined) {
         sets.push("pre_sync_cmd = ?");
@@ -913,7 +944,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       const row = db
         .query<AssignmentRow, [string, string]>(
           `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
-                  conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                  mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password
            FROM folder_assignments WHERE folder_id = ? AND host_id = ?`,
@@ -941,6 +972,16 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         cacheMaxSize: t.Optional(t.Union([t.String(), t.Null()])),
         syncExpr: t.Optional(t.Union([t.String(), t.Null()])),
         enabled: t.Optional(t.Boolean()),
+        // LAMA-239: per-host sync/mount override. null on the wire resets
+        // the override to "inherit".
+        mode: t.Optional(
+          t.Union([
+            t.Literal("inherit"),
+            t.Literal("sync"),
+            t.Literal("mount"),
+            t.Null(),
+          ]),
+        ),
         preSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
         postSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
         conflictStrategy: t.Optional(t.Union([t.String(), t.Null()])),

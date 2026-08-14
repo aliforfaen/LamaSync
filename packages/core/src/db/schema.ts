@@ -35,6 +35,13 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     remote_name         TEXT,
     sync_expr           TEXT,
     enabled             INTEGER DEFAULT 1,
+    -- LAMA-239: per-host override ("inherit" | "sync" | "mount"). Default
+    -- is "inherit" so existing assignments reproduce today's behavior
+    -- exactly (a mount folder stays mounted everywhere, a sync folder
+    -- stays synced everywhere). The override is only honored when the
+    -- folder's type is sync or mount - see effectiveFolderType in
+    -- ./effective-type.ts.
+    mode                TEXT NOT NULL DEFAULT 'inherit',
     conflict_strategy   TEXT,
     pre_sync_cmd        TEXT,
     post_sync_cmd       TEXT,
@@ -297,6 +304,10 @@ export const MIGRATIONS: string[] = [
   // columns are NOT dropped here — see LEGACY_S3_DROP_MIGRATIONS below.
   "ALTER TABLE folders ADD COLUMN backend_id TEXT",
   "CREATE TABLE IF NOT EXISTS browse_jobs (id TEXT PRIMARY KEY, operation TEXT NOT NULL, source TEXT NOT NULL, destination TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, progress_bytes INTEGER, total_bytes INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+  // LAMA-239: per-host sync/mount override. Default "inherit" reproduces
+  // today's behavior so existing assignments (and existing dev databases)
+  // need no migration other than this ADD COLUMN.
+  "ALTER TABLE folder_assignments ADD COLUMN mode TEXT NOT NULL DEFAULT 'inherit'",
 ];
 
 /**

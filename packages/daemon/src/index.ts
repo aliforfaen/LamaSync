@@ -12,7 +12,7 @@ import type {
   QueuedActionStatus,
   ResticRestoreJob,
 } from "@lamasync/core";
-import { LamaSyncApiClient, VERSION, defaultSocketPath } from "@lamasync/core";
+import { LamaSyncApiClient, VERSION, defaultSocketPath, effectiveFolderType } from "@lamasync/core";
 import { locateSkillAsset, SKILL_DIR, downloadSkillBundle, readInstalledSkillVersion } from "./skill-update.ts";
 import {
   isDryRunRequested,
@@ -92,6 +92,9 @@ export function getLocalLanIp(): string | null {
 }
 
 export interface SwitchContext {
+  // LAMA-239: the host id is needed so the switch can flip THIS host's
+  // per-assignment `mode` (instead of the folder-level type).
+  hostId: string;
   acquireLock: (folderId: string) => Promise<LockAcquireResult>;
   releaseLock: (folderId: string, status: string, summary?: string) => Promise<void>;
   getHostConfig: () => HostConfig | null;
@@ -106,7 +109,15 @@ export interface SwitchContext {
   }) => Promise<unknown>;
   stopMount: (folderId: string) => Promise<void>;
   getRemoteName: (remoteName: string | null | undefined, folderId: string) => string;
-  updateFolderType: (folderId: string, type: "sync" | "mount") => Promise<unknown>;
+  // LAMA-239: per-host mode setter (replaces the global folder.type setter
+  // the LAMA-238-era switch used). updateAssignmentMode is hosted on the
+  // existing API client as `client.updateAssignment(folderId, hostId,
+  // { mode })`.
+  updateAssignmentMode: (
+    folderId: string,
+    hostId: string,
+    mode: "sync" | "mount",
+  ) => Promise<unknown>;
 }
 
 let switchCtx: SwitchContext | null = null;
@@ -236,8 +247,14 @@ export async function switchToMount(folderId: string): Promise<SwitchResult> {
   if (!folder || !assignment) {
     return { ok: false, error: `folder=${folderId} not found in host config` };
   }
-  if (folder.type !== "sync") {
-    return { ok: false, error: `folder=${folderId} type=${folder.type}; expected sync` };
+  // LAMA-239: gate on the EFFECTIVE type — the folder-level type alone
+  // isn't enough when a per-host override flips the meaning for this
+  // host. A `sync` folder with this host's mode = "sync" still goes
+  // through the final-sync → trash → mount dance; a `mount` folder with
+  // mode = "inherit" already mounts and the switch is a no-op error.
+  const effective = effectiveFolderType(folder, assignment);
+  if (effective !== "sync") {
+    return { ok: false, error: `folder=${folderId} effective=${effective}; expected sync` };
   }
 
   const lockResult = await ctx.acquireLock(folderId);
@@ -290,7 +307,10 @@ export async function switchToMount(folderId: string): Promise<SwitchResult> {
   await ctx.releaseLock(folderId, "success", "switched to mount");
 
   try {
-    await ctx.updateFolderType(folderId, "mount");
+    // LAMA-239: per-host mode setter (replaces the global
+    // updateFolderType). Reconcile on the next refresh will keep the
+    // mount up if this daemon restarts.
+    await ctx.updateAssignmentMode(folderId, ctx.hostId, "mount");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: true, trashDir, error: `mount is up but server update failed: ${msg}` };
@@ -310,8 +330,13 @@ export async function switchToSync(folderId: string): Promise<SwitchResult> {
   if (!folder || !assignment) {
     return { ok: false, error: `folder=${folderId} not found in host config` };
   }
-  if (folder.type !== "mount") {
-    return { ok: false, error: `folder=${folderId} type=${folder.type}; expected mount` };
+  // LAMA-239: gate on the EFFECTIVE type, not folder.type. The web UI
+  // may have set this host's mode to "mount" without changing the
+  // folder-level type — the switch still has work to do (stop the mount
+  // + initial sync + reset the override) for that host.
+  const effective = effectiveFolderType(folder, assignment);
+  if (effective !== "mount") {
+    return { ok: false, error: `folder=${folderId} effective=${effective}; expected mount` };
   }
 
   const lockResult = await ctx.acquireLock(folderId);
@@ -342,7 +367,13 @@ export async function switchToSync(folderId: string): Promise<SwitchResult> {
   await ctx.releaseLock(folderId, "success", "switched to sync");
 
   try {
-    await ctx.updateFolderType(folderId, "sync");
+    // LAMA-239: per-host mode setter. Resetting mode to "sync" (rather
+    // than "inherit") is the explicit switch semantic — the host
+    // requested sync, so its mode stays "sync" until an operator changes
+    // it back. If the folder-level type is "sync" too, "inherit" and
+    // "sync" produce the same effective behavior, but "sync" keeps the
+    // intent visible on the assignment.
+    await ctx.updateAssignmentMode(folderId, ctx.hostId, "sync");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: true, error: `sync is up but server update failed: ${msg}` };
@@ -431,26 +462,100 @@ async function systemdAwareStopMount(folderId: string): Promise<void> {
 }
 
 /**
- * Boot-time adoption: when the daemon restarts while mounts are still active
- * under their systemd units, register each in the in-process `mounts` map so
- * the scheduler and TUI see them as live.
+ * LAMA-239: reconcile the local mount state against the effective type of
+ * every assignment after a config refresh (and at boot). Today mounts only
+ * start via an explicit `switch_to_mount` socket command; an effective
+ * `mount` set from the web UI never brings up the unit. This pass makes
+ * the override actually do something:
+ *
+ *   - effective `mount`, role != `source`, mount unit inactive → start it
+ *     (write + start + adopt). systemdAwareStartMount falls back to the
+ *     in-process mount when systemd isn't available, matching the existing
+ *     switch path.
+ *   - effective `mount`, role != `source`, mount unit already active →
+ *     adopt it into the in-process registry so the scheduler and TUI see
+ *     it as live (this is the old `adoptExistingMountUnits` behavior).
+ *   - effective anything-else, mount unit active → stop it so a host
+ *     flipped back to sync doesn't keep a stale mount running. The cron
+ *     scheduler then resumes its normal job.
+ *
+ * `role === "source"` assignments are never auto-started even when the
+ * folder is `mount` — the operator only mounts a folder on hosts that are
+ * supposed to serve it (matching the existing switch/adopt behavior).
  */
-function adoptExistingMountUnits(getAssignments: () => FolderAssignment[]): void {
-  if (!isSystemdAvailable()) return;
-  for (const assignment of getAssignments()) {
+async function reconcileMountsOnRefresh(
+  getHostConfig: () => HostConfig | null,
+): Promise<void> {
+  const cfg = getHostConfig();
+  if (!cfg) return;
+  const foldersById = new Map(cfg.folders.map((f) => [f.id, f]));
+  for (const assignment of cfg.assignments) {
     if (assignment.role === "source") continue;
-    if (listMounts().some((m) => m.folderId === assignment.folderId)) continue;
-    if (!isMountUnitActive(assignment.folderId)) continue;
-    const adopted = adoptMount(assignment.folderId, {
-      mountPath: assignment.localPath,
-      cacheProfile: assignment.cacheProfile ?? "normal",
-      remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${assignment.folderId}`,
-      configPath: "/dev/null",
-    });
-    if (adopted) {
-      console.log(
-        `[boot] adopted existing mount unit for folder=${assignment.folderId}`,
-      );
+    const folder = foldersById.get(assignment.folderId);
+    if (!folder) continue;
+    const effective = effectiveFolderType(folder, assignment);
+    const active = isMountUnitActive(assignment.folderId);
+    if (effective === "mount") {
+      if (active) {
+        // Already up under systemd — adopt it into the in-process registry
+        // so the scheduler and TUI see it as live.
+        if (listMounts().some((m) => m.folderId === assignment.folderId)) continue;
+        const adopted = adoptMount(assignment.folderId, {
+          mountPath: assignment.localPath,
+          cacheProfile: assignment.cacheProfile ?? "normal",
+          remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${assignment.folderId}`,
+          configPath: "/dev/null",
+        });
+        if (adopted) {
+          console.log(
+            `[reconcile] adopted existing mount unit for folder=${assignment.folderId}`,
+          );
+        }
+        continue;
+      }
+      // Not running — start it. systemdAwareStartMount writes the unit,
+      // starts it, waits, and falls back to in-process when systemd is
+      // unavailable (same semantics as switchToMount).
+      const hostConfigForStart = cfg;
+      try {
+        const { configPath, cleanup } = writeRcloneConfig(hostConfigForStart.rcloneConfig);
+        try {
+          await systemdAwareStartMount({
+            folderId: assignment.folderId,
+            remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${folder.name}`,
+            mountPath: assignment.localPath,
+            configPath,
+            cacheProfile: assignment.cacheProfile ?? undefined,
+            cacheMaxSize: assignment.cacheMaxSize ?? undefined,
+          });
+          console.log(
+            `[reconcile] started mount for folder=${assignment.folderId} (effective=mount)`,
+          );
+        } finally {
+          cleanup();
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[reconcile] failed to start mount for folder=${assignment.folderId}: ${msg}`,
+        );
+      }
+      continue;
+    }
+    // Effective type is sync/backup/dotfile/git — if a mount unit happens
+    // to be active, stop it so this host returns to its scheduled jobs.
+    if (active) {
+      try {
+        await systemdAwareStopMount(assignment.folderId);
+        console.log(
+          `[reconcile] stopped stale mount for folder=${assignment.folderId} (effective=${effective})`,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[reconcile] failed to stop stale mount for folder=${assignment.folderId}: ${msg}`,
+        );
+      }
     }
   }
 }
@@ -503,7 +608,10 @@ async function main(): Promise<void> {
       );
       warnMissingLocalPaths();
       scheduler.refresh();
-      adoptExistingMountUnits(() => cfg.assignments);
+      // LAMA-239: fire-and-forget — a slow reconcile (systemd unit write
+      // + wait) shouldn't block the cache save / heartbeat / action
+      // acks. Failures log inside reconcileMountsOnRefresh.
+      void reconcileMountsOnRefresh(() => hostConfig);
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -557,6 +665,15 @@ async function main(): Promise<void> {
       await refreshConfig();
       return null;
     }
+    // LAMA-239: per-host mount/sync override. Clone the folder with the
+    // effective type so every downstream branch (filter mode, disk-space
+    // pre-flight, retry loop, operation_log) reflects what THIS host will
+    // actually do, without mutating the cached folder (which is shared
+    // across all host assignments).
+    const effectiveFolder: Folder = {
+      ...folder,
+      type: effectiveFolderType(folder, assignment),
+    };
 
     const lockResult = await acquireLock(client, assignment.folderId, hostId);
     if (!lockResult.ok) {
@@ -568,7 +685,7 @@ async function main(): Promise<void> {
       const skipReport: OperationReport = {
         hostId,
         folderId: folder.id,
-        operation: folder.type,
+        operation: effectiveFolder.type,
         status: "failed",
         summary,
         durationMs: 0,
@@ -593,7 +710,7 @@ async function main(): Promise<void> {
     try {
       const report = await executeAssignment({
         assignment,
-        folder,
+        folder: effectiveFolder,
         hostConfig,
         client,
         hostId,
@@ -602,7 +719,7 @@ async function main(): Promise<void> {
         dryRun: opts?.dryRun === true,
       });
       console.log(
-        `[run] folder=${folder.name} type=${folder.type} status=${report.status} summary=${report.summary ?? ""}`,
+        `[run] folder=${folder.name} type=${effectiveFolder.type} status=${report.status} summary=${report.summary ?? ""}`,
       );
       await releaseLock(
         client,
@@ -621,7 +738,7 @@ async function main(): Promise<void> {
       const errReport: OperationReport = {
         hostId,
         folderId: folder.id,
-        operation: folder.type,
+        operation: effectiveFolder.type,
         status: "failed",
         summary: `executor threw: ${msg}`,
         durationMs: 0,
@@ -844,6 +961,10 @@ async function main(): Promise<void> {
   });
 
   setSwitchContext({
+    // LAMA-239: thread the daemon's hostId into the switch context so the
+    // switches can flip THIS host's mode via the per-host API instead of
+    // touching the global folder.type.
+    hostId,
     acquireLock: (folderId) => acquireLock(client, folderId, hostId),
     releaseLock: (folderId, status, summary) => releaseLock(client, folderId, hostId, status, summary),
     runOnce: async (assignment) => {
@@ -854,7 +975,9 @@ async function main(): Promise<void> {
     getRemoteName,
     startMount: systemdAwareStartMount,
     stopMount: systemdAwareStopMount,
-    updateFolderType: (folderId, type) => client.updateFolder(folderId, { type }),
+    // LAMA-239: replace updateFolderType with the per-host mode setter.
+    updateAssignmentMode: (folderId, hostId, mode) =>
+      client.updateAssignment(folderId, hostId, { mode }),
   });
 
   try {
@@ -893,6 +1016,11 @@ async function main(): Promise<void> {
     warnMissingLocalPaths();
     scheduler.start();
   }
+  // LAMA-239: reconcile mounts against the effective type on boot too, so
+  // a daemon restart picks up a web-UI-set override without needing a
+  // 5-min refresh. (refreshConfig() above already triggers one for the
+  // fresh-boot path; this covers the cached-config path.)
+  void reconcileMountsOnRefresh(() => hostConfig);
 
   // LAMA-232: actions the previous daemon incarnation claimed but never
   // acked are stuck in 'taken'. A freshly booted daemon has no in-flight

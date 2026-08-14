@@ -9,6 +9,7 @@ import type {
   Peer,
 } from "@lamasync/core";
 import { resolveFolderLocalConfig, resolveFolderResticConfig, resolveFolderS3Config } from "../backends.ts";
+import { effectiveFolderType } from "@lamasync/core";
 
 // Test seam: allows unit tests to substitute the production DB. Production
 // code never calls this; the default `db` is the live one.
@@ -53,6 +54,9 @@ interface AssignmentRow {
   remote_name: string | null;
   sync_expr: string | null;
   enabled: number;
+  // LAMA-239: per-host override. Rows written before the migration may have
+  // NULL here; default to "inherit" so the row maps cleanly to the new shape.
+  mode: string | null;
   conflict_strategy: string | null;
   pre_sync_cmd: string | null;
   post_sync_cmd: string | null;
@@ -115,6 +119,12 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     remoteName: r.remote_name,
     syncExpr: r.sync_expr,
     enabled: r.enabled === 1,
+    // LAMA-239: belt-and-braces default — older rows written before the
+    // migration have mode = NULL. The column also has NOT NULL DEFAULT
+    // 'inherit', so post-migration rows never hit this branch.
+    mode: r.mode === "sync" || r.mode === "mount" || r.mode === "inherit"
+      ? r.mode
+      : "inherit",
     conflictStrategy: (r.conflict_strategy as FolderAssignment["conflictStrategy"]) ?? null,
     postSyncCmd: r.post_sync_cmd,
     ignorePath: r.ignore_path,
@@ -476,7 +486,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const assignmentRows = activeDb
       .query<AssignmentRow, [string]>(
         `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
-                conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                 timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                 cache_profile, cache_max_size, restic_repository, restic_password
          FROM folder_assignments WHERE host_id = ?`,

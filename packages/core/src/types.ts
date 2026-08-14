@@ -112,6 +112,12 @@ export interface MountEntry {
 // rclone filter mode for selective sync
 export type FilterMode = "sync" | "mount";
 
+// LAMA-239: per-host override for folders whose folder.type is "sync" or
+// "mount". "inherit" falls back to the folder-level type; "sync"/"mount"
+// force the effective type for this host. No-op for backup/dotfile/git
+// folders (see effectiveFolderType in ./effective-type.ts).
+export type AssignmentMode = "inherit" | "sync" | "mount";
+
 export interface Host {
   id: string;
   hostname: string;
@@ -217,6 +223,12 @@ export interface FolderAssignment {
   remoteName?: string | null;
   syncExpr?: string | null; // cron expression
   enabled: boolean;
+  // LAMA-239: per-host override. "inherit" (the default) lets the
+  // folder-level type decide; "sync"/"mount" forces the effective type for
+  // this host — useful for "sync on most hosts, mount on the resource-
+  // constrained one" without changing the folder globally. Only honored
+  // when folder.type is "sync" or "mount" (see effectiveFolderType).
+  mode?: AssignmentMode;
   conflictStrategy?: ConflictStrategy | null;
   preSyncCmd?: string | null;
   postSyncCmd?: string | null;

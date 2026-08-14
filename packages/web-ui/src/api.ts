@@ -233,6 +233,8 @@ export const api = {
       role: string;
       localPath: string;
       syncExpr?: string | null;
+      // LAMA-239: per-host mount/sync override (omit for "inherit").
+      mode?: "inherit" | "sync" | "mount" | null;
     },
   ) =>
     apiPost<FolderAssignment>(
@@ -247,12 +249,15 @@ export const api = {
   // (packages/server/src/routes/folders.ts). role/localPath/
   // bandwidthSchedule are accepted since the hidden-api-power pass;
   // cacheProfile is one of normal/media/minimal.
+  // LAMA-239: per-host mount/sync override (`mode`) round-trips through
+  // the same endpoint — null on the wire resets to "inherit".
   updateAssignment: (
     folderId: string,
     hostId: string,
     body: Partial<{
       enabled: boolean;
       syncExpr: string | null;
+      mode: "inherit" | "sync" | "mount" | null;
       conflictStrategy: string | null;
       timeoutSec: number | null;
       maxRetries: number | null;

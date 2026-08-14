@@ -17,7 +17,10 @@ interface Captured {
   startMount: Array<Record<string, unknown>>;
   stopMount: Array<{ folderId: string }>;
   runOnce: Array<{ folderId: string }>;
-  updateFolderType: Array<{ folderId: string; type: "sync" | "mount" }>;
+  // LAMA-239: replaced `updateFolderType` with the per-host mode setter.
+  // Three-tuple shape (folderId, hostId, mode) — `hostId` is the daemon's
+  // hostId from SwitchContext; the same `h` used in the test assignments.
+  updateAssignmentMode: Array<{ folderId: string; hostId: string; mode: "sync" | "mount" }>;
 }
 
 function newCaptured(): Captured {
@@ -27,7 +30,7 @@ function newCaptured(): Captured {
     startMount: [],
     stopMount: [],
     runOnce: [],
-    updateFolderType: [],
+    updateAssignmentMode: [],
   };
 }
 
@@ -36,6 +39,9 @@ function makeCtx(
   overrides: Partial<SwitchContext> = {},
 ): SwitchContext {
   return {
+    // LAMA-239: switch context carries the daemon's hostId so the
+    // switchToMount / switchToSync helpers can flip THIS host's mode.
+    hostId: "h",
     acquireLock: async (folderId) => {
       captured.acquireLock.push({ folderId });
       return {
@@ -62,8 +68,9 @@ function makeCtx(
       captured.stopMount.push({ folderId });
     },
     getRemoteName: (_remoteName, folderId) => `lamasync-${folderId}`,
-    updateFolderType: async (folderId, type) => {
-      captured.updateFolderType.push({ folderId, type });
+    // LAMA-239: replace updateFolderType with per-host mode setter.
+    updateAssignmentMode: async (folderId, hostId, mode) => {
+      captured.updateAssignmentMode.push({ folderId, hostId, mode });
     },
     ...overrides,
   };
@@ -339,8 +346,8 @@ describe("dispatch — switch-to-mount", () => {
     expect(captured.startMount[0]?.cacheProfile).toBe("media");
     expect(captured.startMount[0]?.cacheMaxSize).toBe("5G");
     expect(captured.startMount[0]?.remotePath).toContain(folderId);
-    expect(captured.updateFolderType).toEqual([
-      { folderId, type: "mount" },
+    expect(captured.updateAssignmentMode).toEqual([
+      { folderId, hostId: "h", mode: "mount" },
     ]);
     expect(captured.releaseLock.map((e) => e.status)).toContain("success");
 
@@ -413,7 +420,7 @@ describe("dispatch — switch-to-mount", () => {
       error: expect.stringMatching(/expected sync/) as RegExp,
     });
     expect(captured.startMount).toHaveLength(0);
-    expect(captured.updateFolderType).toHaveLength(0);
+    expect(captured.updateAssignmentMode).toHaveLength(0);
   });
 
   test("mount failure restores trash and releases lock as failed", async () => {
@@ -479,7 +486,7 @@ describe("dispatch — switch-to-mount", () => {
 
     expect(captured.startMount).toHaveLength(1);
     expect(captured.releaseLock.map((e) => e.status)).toContain("failed");
-    expect(captured.updateFolderType).toHaveLength(0);
+    expect(captured.updateAssignmentMode).toHaveLength(0);
     expect(data).toMatchObject({
       folderId,
       ok: false,
@@ -548,7 +555,9 @@ describe("dispatch — switch-to-sync", () => {
 
     expect(captured.stopMount.map((e) => e.folderId)).toEqual([folderId]);
     expect(captured.runOnce.map((e) => e.folderId)).toEqual([folderId]);
-    expect(captured.updateFolderType).toEqual([{ folderId, type: "sync" }]);
+    expect(captured.updateAssignmentMode).toEqual([
+      { folderId, hostId: "h", mode: "sync" },
+    ]);
     expect(captured.releaseLock.map((e) => e.status)).toContain("success");
     expect(data).toMatchObject({ folderId, ok: true });
   });
@@ -615,7 +624,7 @@ describe("dispatch — switch-to-sync", () => {
       error: expect.stringMatching(/expected mount/) as RegExp,
     });
     expect(captured.stopMount).toHaveLength(0);
-    expect(captured.updateFolderType).toHaveLength(0);
+    expect(captured.updateAssignmentMode).toHaveLength(0);
   });
 });
 

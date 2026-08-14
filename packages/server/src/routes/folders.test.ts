@@ -21,6 +21,9 @@ const { __setDb, foldersRoutes } = (await import("./folders.ts")) as unknown as 
 const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as unknown as {
   __setDb: (db: Database) => void;
 };
+const { __setDb: __setConfigDb } = (await import("./config.ts")) as unknown as {
+  __setDb: (db: Database) => void;
+};
 const { encryptSecret } = await import("../crypto.ts");
 
 // LAMA-222: folders reference a reusable Backend row; tests insert one
@@ -70,6 +73,10 @@ beforeEach(() => {
   // config-revision.ts holds its own activeDb; point it at the test DB
   // so folder create/update/delete bumps land in the same in-memory store.
   __setConfigRevisionDb(db);
+  // config.ts holds its own activeDb too — wire it so the LAMA-239
+  // config SELECT test reads the same in-memory DB the assignments
+  // were just inserted into.
+  __setConfigDb(db);
   // LAMA-241: bare folder creates default to the first existing backend;
   // seed one so the legacy tests that omit `backend` keep working (and the
   // defaulting path is exercised implicitly). Tests that need a specific
@@ -540,4 +547,138 @@ describe("PUT/PATCH/DELETE /api/v1/assignments/:id — 405 guidance (LAMA-241)",
       expect(body.error).toContain("/folders/:folderId/assign/:hostId");
     });
   }
+});
+
+// LAMA-239: per-host sync/mount override (mode column on folder_assignments).
+describe("per-host mount/sync override (LAMA-239)", () => {
+  async function setupSyncFolder(): Promise<string> {
+    const res = await postJson("/api/v1/folders", { name: "v", type: "sync" });
+    return ((await res.json()) as { id: string }).id;
+  }
+
+  test("POST /assign defaults mode to inherit", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
+    const folderId = await setupSyncFolder();
+    const res = await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/v",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { mode?: string };
+    expect(body.mode).toBe("inherit");
+  });
+
+  test("POST /assign accepts mode: mount", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
+    const folderId = await setupSyncFolder();
+    const res = await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/v",
+      mode: "mount",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { mode?: string };
+    expect(body.mode).toBe("mount");
+  });
+
+  test("POST /assign rejects invalid mode values", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
+    const folderId = await setupSyncFolder();
+    const res = await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/v",
+      mode: "bogus",
+    });
+    expect(res.status).toBe(422);
+  });
+
+  test("PATCH /assign/:hostId persists mode", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
+    const folderId = await setupSyncFolder();
+    await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/v",
+    });
+
+    const patchRes = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ mode: "mount" }),
+      }),
+    );
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as { mode?: string };
+    expect(patched.mode).toBe("mount");
+
+    // GET /assignments returns the same mode.
+    const listRes = await app.handle(
+      request(`/api/v1/folders/${folderId}/assignments`),
+    );
+    const list = (await listRes.json()) as Array<{ mode?: string }>;
+    expect(list[0]?.mode).toBe("mount");
+  });
+
+  test("PATCH mode: null resets to inherit", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
+    const folderId = await setupSyncFolder();
+    await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/v",
+      mode: "mount",
+    });
+
+    const patchRes = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ mode: null }),
+      }),
+    );
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as { mode?: string };
+    expect(patched.mode).toBe("inherit");
+  });
+
+  test("config SELECT returns mode for assignments (LAMA-239)", async () => {
+    // Folder + host + assignment, with a mount override. Hit /config/:hostId
+    // and confirm the assignment row carries mode = "mount" (the daemon
+    // uses this to start the mount unit on reconcile).
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
+    const folderId = await setupSyncFolder();
+    await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/v",
+      mode: "mount",
+    });
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "folders-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const cfgApp = new Elysia().use(getAuthPlugin()).use(configRoutes);
+    const res = await cfgApp.handle(
+      new Request("http://localhost/api/v1/config/h", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      assignments: Array<{ folderId: string; mode?: string }>;
+    };
+    const a = body.assignments.find((x) => x.folderId === folderId);
+    expect(a?.mode).toBe("mount");
+  });
 });

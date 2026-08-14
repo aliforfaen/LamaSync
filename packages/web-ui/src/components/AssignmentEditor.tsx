@@ -5,7 +5,7 @@
 // `<form className="form">` panel — no modal framework.
 
 import { useState } from "react";
-import type { FolderAssignment } from "@lamasync/core";
+import type { Folder, FolderAssignment } from "@lamasync/core";
 import { api } from "../api.ts";
 // Workstream 2: hint copy lives in the shared glossary now.
 import { CONFLICT_STRATEGY_HINTS, ROLE_HINTS } from "../concepts.ts";
@@ -45,6 +45,9 @@ interface EditorState {
   role: string;
   schedulePreset: string;
   syncExpr: string;
+  // LAMA-239: per-host mount/sync override. Default "inherit" mirrors the
+  // column default and the wire shape — null on save resets to "inherit".
+  mode: "inherit" | "sync" | "mount";
   conflictStrategy: string;
   timeoutSec: string;
   maxRetries: string;
@@ -60,6 +63,7 @@ function stateFromAssignment(a: FolderAssignment): EditorState {
     role: a.role ?? "both",
     schedulePreset: schedulePresetForCron(a.syncExpr),
     syncExpr: toStr(a.syncExpr),
+    mode: a.mode === "sync" || a.mode === "mount" ? a.mode : "inherit",
     conflictStrategy: a.conflictStrategy ?? "newer_wins",
     timeoutSec: toStr(a.timeoutSec),
     maxRetries: toStr(a.maxRetries),
@@ -77,11 +81,21 @@ interface Props {
   // id if absent, so this stays a non-breaking add for any future caller.
   folderName?: string;
   hostName?: string;
+  // LAMA-239: the parent folder. Required to gate the Mode dropdown —
+  // the override only applies when folder.type is "sync" or "mount".
+  // Optional for back-compat (older callers pass nothing); when omitted
+  // the dropdown renders when the assignment's effective type makes it
+  // meaningful, falling back to always-hidden when we can't tell.
+  folder?: Folder;
   onSaved: () => void;
   onCancel: () => void;
 }
 
-export function AssignmentEditor({ assignment, folderName, hostName, onSaved, onCancel }: Props) {
+export function AssignmentEditor({ assignment, folder, folderName, hostName, onSaved, onCancel }: Props) {
+  // LAMA-239: render the Mode dropdown only when the folder-level type
+  // supports an override (sync / mount). backup / dotfile / git folders
+  // ignore mode, so showing it would mislead the operator.
+  const showMode = folder !== undefined && (folder.type === "sync" || folder.type === "mount");
   const initial = stateFromAssignment(assignment);
   const [state, setState] = useState<EditorState>(initial);
   const [error, setError] = useState<string | null>(null);
@@ -163,6 +177,15 @@ export function AssignmentEditor({ assignment, folderName, hostName, onSaved, on
       const target = raw.trim() === "" ? null : raw.trim();
       const was = initialValue ?? null;
       if (target !== was) body[key] = target;
+    }
+
+    // LAMA-239: only include mode when the folder supports an override,
+    // so the wire payload stays clean for backup/dotfile/git folders.
+    if (showMode) {
+      const currentMode = assignment.mode === "sync" || assignment.mode === "mount"
+        ? assignment.mode
+        : "inherit";
+      if (state.mode !== currentMode) body.mode = state.mode;
     }
 
     if (Object.keys(body).length === 0) {
@@ -256,6 +279,33 @@ export function AssignmentEditor({ assignment, folderName, hostName, onSaved, on
         </select>
         <span className="muted">{conflictHint}</span>
       </label>
+
+      {showMode ? (
+        <label>
+          {/* LAMA-239: per-host sync/mount override. "Inherit" falls back
+              to the folder's type; "Sync"/"Mount" force the effective
+              type for THIS host (other hosts keep the folder type). */}
+          Mode
+          <select
+            value={state.mode}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "sync" || v === "mount" || v === "inherit") {
+                set({ mode: v });
+              }
+            }}
+          >
+            <option value="inherit">Inherit</option>
+            <option value="sync">Sync</option>
+            <option value="mount">Mount</option>
+          </select>
+          <span className="muted">
+            Override the folder type for this host. "Inherit" uses the
+            folder's type; "Sync" / "Mount" forces this host to sync or
+            mount regardless. Other hosts are unaffected.
+          </span>
+        </label>
+      ) : null}
 
       <details className="assignment-editor-advanced">
         <summary>Advanced</summary>

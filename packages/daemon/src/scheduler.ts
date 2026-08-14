@@ -1,5 +1,6 @@
 import { CronExpressionParser } from "cron-parser";
 import type { DotfileManifest, Folder, FolderAssignment } from "@lamasync/core";
+import { effectiveFolderType } from "@lamasync/core";
 
 const DEFAULT_REBOOT_DELAY_MS = 30_000;
 
@@ -91,6 +92,13 @@ export class Scheduler {
     if (!assignment.enabled) return null;
     const folders = this.opts.getFolders?.() ?? [];
     const folder = folders.find((f) => f.id === assignment.folderId);
+    // LAMA-239: a per-host `mount` override turns this assignment into a
+    // persistent mount — the cron scheduler has nothing to do with it.
+    // `reconcileOnRefresh` in the daemon starts/stops the mount unit;
+    // returning null here keeps the cron fire loop out of the picture
+    // entirely. (backup/dotfile/git modes are unaffected by the override
+    // — see effectiveFolderType — so they keep their schedule.)
+    if (folder && effectiveFolderType(folder, assignment) === "mount") return null;
     if (folder?.type === "dotfile") {
       const manifests = this.opts.getManifests?.() ?? [];
       const manifest = manifests.find((m) => m.appName === folder.name);

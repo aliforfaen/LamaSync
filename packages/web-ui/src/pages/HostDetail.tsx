@@ -9,6 +9,7 @@ import type {
   QueuedAction,
   QueuedActionType,
 } from "@lamasync/core";
+import { effectiveFolderType } from "@lamasync/core";
 import { api } from "../api.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
@@ -319,6 +320,7 @@ export function HostDetail() {
         {editingAssignment ? (
           <AssignmentEditor
             assignment={editingAssignment}
+            folder={folderById.get(editingAssignment.folderId)}
             folderName={folderById.get(editingAssignment.folderId)?.name}
             hostName={data?.host.hostname}
             onSaved={() => {
@@ -356,9 +358,16 @@ export function HostDetail() {
                     </Link>
                   </td>
                   <td>
-                    <span className="badge badge-unknown">
-                      {folder?.type ?? "—"}
-                    </span>
+                    {folder && (folder.type === "sync" || folder.type === "mount") ? (
+                      <span className="badge badge-unknown">
+                        {effectiveFolderType(folder, assignment)}
+                        {assignment.mode && assignment.mode !== "inherit"
+                          ? " (override)"
+                          : ""}
+                      </span>
+                    ) : (
+                      <span className="badge badge-unknown">{folder?.type ?? "—"}</span>
+                    )}
                   </td>
                   <td className="muted"><code>{assignment.localPath}</code></td>
                   <td className="muted">{assignment.syncExpr ?? "—"}</td>

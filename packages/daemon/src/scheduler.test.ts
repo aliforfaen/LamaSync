@@ -209,4 +209,67 @@ describe("Scheduler", () => {
     expect(scheduler.nextRunFor(makeAssignment({ syncExpr: "@reboot" }))).toBeNull();
     scheduler.stop();
   });
+
+  // LAMA-239: an effective-mount assignment is a persistent mount, not a
+  // cron job. The scheduler must NOT fire it on the cron loop; the
+  // reconcile-on-refresh pass is responsible for keeping the mount unit
+  // running.
+  test("effective-mount assignment is not scheduled (LAMA-239)", async () => {
+    const ticks: string[] = [];
+    const scheduler = new Scheduler({
+      onTick: (a) => { ticks.push(a.id); },
+      getAssignments: () => [
+        // Per-host override turns this sync folder into a mount for this host.
+        makeAssignment({ syncExpr: "@reboot", mode: "mount" }),
+      ],
+      getFolders: () => [makeFolder({ type: "sync" })],
+      rebootDelayMs: 10,
+    });
+
+    scheduler.start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ticks).toEqual([]);
+    expect(
+      scheduler.nextRunFor(makeAssignment({ syncExpr: "@reboot", mode: "mount" })),
+    ).toBeNull();
+    scheduler.stop();
+  });
+
+  test("effective-sync assignment on a mount folder still schedules (override path)", async () => {
+    // Sanity check the other direction: a mount folder flipped to sync
+    // for this host must keep its cron schedule.
+    const ticks: string[] = [];
+    const scheduler = new Scheduler({
+      onTick: (a) => { ticks.push(a.id); },
+      getAssignments: () => [
+        makeAssignment({ id: "a-m2s", folderId: "f-mount", syncExpr: "@reboot", mode: "sync" }),
+      ],
+      getFolders: () => [makeFolder({ id: "f-mount", type: "mount" })],
+      rebootDelayMs: 10,
+    });
+
+    scheduler.start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ticks).toEqual(["a-m2s"]);
+    scheduler.stop();
+  });
+
+  test("backup folder is unaffected by mount mode override (LAMA-239)", async () => {
+    // backup has no mount equivalent — even with a mount override the
+    // scheduler keeps firing the cron.
+    const ticks: string[] = [];
+    const scheduler = new Scheduler({
+      onTick: (a) => { ticks.push(a.id); },
+      getAssignments: () => [
+        makeAssignment({ id: "a-bk", folderId: "f-bk", syncExpr: "@reboot", mode: "mount" }),
+      ],
+      getFolders: () => [makeFolder({ id: "f-bk", type: "backup" })],
+      rebootDelayMs: 10,
+    });
+
+    scheduler.start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ticks).toEqual(["a-bk"]);
+    scheduler.stop();
+  });
 });
