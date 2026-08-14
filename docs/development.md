@@ -142,7 +142,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 
 ## Version and release
 
-- **Version source of truth**: root `package.json` `version` field (currently `0.3.1`).
+- **Version source of truth**: root `package.json` `version` field (currently `0.3.2`).
 - **Generated constant**: `scripts/gen-version.ts` writes `packages/core/src/version.ts`, which is re-exported from `@lamasync/core`.
 - **All three standalone binaries** support `--version` and `-V`:
   `lamasync-server`, `lamasyncd`, `lamasync-tui`. The web UI is bundled
