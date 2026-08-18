@@ -3,6 +3,12 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Current status (as of 2026-08-18)
+
+- **Docs cleanup pass** (commit `7720c43`): deleted `docs/handoff/` (26 files + 30 dogfood PNGs), `docs/plans/` (2 plans), and the two LAMA-218/220 post-mortems — work is long done; `docs/features.md` is the canonical LAMA-XXX summary. Fixed stale `packages/agent-skill/lamasync-server.md` references across `README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `docs/development.md`, `docs/features.md`, `packages/agent-skill/{README.md,lamasync-client.md}`. Rewrote `docs/repository-layout.md` to reflect the LAMA-227/230/239/242/243 additions. Net: 74 files / 6140 lines / ~2 MB archived. `bun x tsc --noEmit` clean; LAMA-245 work in working tree untouched.
+- **Open Multica issues refreshed** (this session): LAMA-105, LAMA-104, LAMA-171 dropped from the "open list" — they're done. LAMA-182 is in_review; LAMA-228 supersedes it as the runtime-verify follow-up. Remaining lamasync-relevant: LAMA-243 (in_review), LAMA-228 (todo), LAMA-204 (todo), LAMA-237 (backlog), LAMA-236 (backlog), LAMA-110 (urgent).
+- **LAMA-227 update**: `lamasync <command>` exit-3 mapping from the LAMA-245 work verifies the `--json` envelope preserves HTTP status.
+
 ## Current status (as of 2026-08-14)
 
 - **LAMA-239 — per-host mount/sync override (implemented + pushed)**: a folder can now be synced on most hosts but only mounted on resource-constrained ones. New `folder_assignments.mode` column (`inherit|sync|mount`, default `inherit`, in both `SERVER_SCHEMA` + `MIGRATIONS`); `effectiveFolderType()` in core resolves `inherit` → folder type and is honored only for `sync`/`mount` folders (backup/dotfile/git ignore it). The daemon now reconciles on refresh + boot (`reconcileMountsOnRefresh`): starts the mount unit for effective-`mount` hosts, stops stale mounts and resumes cron for effective-`sync` hosts; the scheduler skips effective-mount assignments. `switchToMount`/`switchToSync` are now **per-host mode setters** (PATCH `assign/:hostId {mode}`) instead of flipping `folder.type` globally. Web UI: Mode dropdown (Inherit/Sync/Mount) in AssignmentEditor for sync/mount folders + effective-mode badge in Folders and HostDetail. Tests: `tsc --noEmit` clean; **582 pass / 1 skip / 0 fail** (20 new tests).
@@ -68,7 +74,7 @@ carries a one-line pointer here.
 - **LAMA-183 complete (2026-08-01)**: all seven epic issues done — LAMA-199/201 (batch 1), LAMA-197 (batch 2, 60651d8), LAMA-198 (batch 3, 3f4594d), LAMA-200 (bfa1a07), LAMA-202 (a449160), LAMA-203 (954ecec). Full dogfood/testing handoff: `docs/handoff/command-center-testing.md`.
 - **LAMA-183 dogfooded (2026-08-01)**: full-epic session against a local dev server (`docs/handoff/dogfood-2026-08-01/report.md`) — zero critical; 2 high + 3 medium + 1 low filed as LAMA-205..210. **Dogfood fixes landed (2026-08-02, commit 41c7cad)**: LAMA-205/206/208/209/210 fixed and verified live; LAMA-207 closed as not-an-app-bug (agent-browser below-fold click artifact). Daemon-dependent checks (D4/D5) and live S3/ntfy delivery still untested.
 - **LamaDB integration (LAMA-204, LamaDB project)**: receiving endpoint for the LAMA-200 webhook (`POST /api/lamasync/webhook`) — LamaSync side is live and env-gated via `LAMASYNC_LAMADB_WEBHOOK_URL`.
-- Open Multica issues: LAMA-105 (Exoscale S3), LAMA-110 (OMP inspiration), LAMA-104 (error handling backlog), LAMA-157 (installation documentation), LAMA-165 (CI/CD binary release), LAMA-171 (`@reboot` / `@login` dotfile schedule triggers), LAMA-182 (TUI process lingers after quit).
+- Open Multica issues (lamasync-relevant, as of 2026-08-18): LAMA-243 (update-check throttle, in_review), LAMA-228 (TUI clean process exit, todo), LAMA-204 (LamaSync → LamaDB webhook, todo), LAMA-237 (Host Types, backlog), LAMA-236 (Fleet software management, backlog). LAMA-105, LAMA-104, LAMA-171 closed since the last refresh.
 - **Production server**: running on LXC container `lamasync` at `100.113.52.108` via Docker image `ghcr.io/aliforfaen/lamasync-server:latest`. Deploy lives under user `messhias`'s home on the LXC (`/home/messhias/lamasync/` — `docker-compose.yml`, `update.sh`, `.env`, `update.log`); SSH access from this host uses `ssh -i ~/.ssh/lamasync_key root@lamasync`. Daily 04:00 cron (messhias's user crontab, `0 4 * * * /home/messhias/lamasync/update.sh`) pulls the latest GHCR image and recreates the container; manual `ssh root@lamasync '/home/messhias/lamasync/update.sh'` does the same on demand.
 - **Production deployment consolidated (2026-08-03)**: the 04:00 cron updater had been silently failing since 2026-08-02 — the live container belonged to compose project `docker` (from the `~/lamasync/src/docker/` checkout, with an override bind-mounting a stale `/tmp/lamasync-server` binary over the image's own), while `~/lamasync/update.sh` drove project `lamasync` and died on the container-name conflict. Fixed: `~/lamasync/docker-compose.yml` now references the live volumes `docker_lamasync-data` / `docker_lamasync-backups` as `external`, the two `.env` files' differing API keys were reconciled to the one live clients use, and `update.sh` was run by hand — new image pulled, container recreated under project `lamasync`, healthy in seconds. Boot log clean (no legacy S3 lift needed, gated DROP path never fired); host `cachy` heartbeating fine. Pre-swap backup of `/data`: `~/lamasync/pre-migration-backup-2026-08-03` on the LXC. Leftover cruft safe to delete on the LXC: `/tmp/lamasync-server` (95MB stale binary), orphaned `lamasync_lamasync-data` (holds a stale 2026-07-21 DB — look before deleting) and `lamasync_lamasync-backups` volumes, and the `~/lamasync/src` checkout if the local-build fallback is no longer wanted. (All `~/lamasync/...` paths above are relative to user `messhias`'s home, i.e. `/home/messhias/lamasync/...` on the LXC.)
 - **Web UI final pass (2026-08-02)**: audit + fixes — Add-host onboarding guide (copy-pasteable install commands, `web-ui/src/components/AddHostGuide.tsx`), folder assign/unassign UI on the Folders page. Testing guide: `docs/handoff/web-ui-final-pass-2026-08-02.md`. Findings filed as LAMA-211..217 (dotfiles edit-form clobber, dead hotkey hints, conflict-resolve confirm, operations page, assign hostId validation, unwired TUI backup wizard, web-ui polish).
@@ -77,27 +83,16 @@ carries a one-line pointer here.
 
 Ready-to-pick work, ordered by likely value/urgency:
 
-0. **LAMA-239 — Mount OR Sync remote folder** (deferred 2026-08-11; the one real feature in the UI-touch batch)
-   - Per-assignment mode override (sync vs mount) so a folder can be synced on most hosts but only mounted on resource-constrained ones.
-   - Needs: `folder_assignments` mode column (or reuse of the type-switch), daemon effective-type handling through `runOnce`/scheduler/`switchToMount`/`switchToSync`, mount lifecycle for overridden hosts (systemd unit vs in-process), UI toggle in AssignmentEditor/Folders, docs.
+1. **Doc + polish cleanup batch** — see `docs/handoff/2026-08-18-doc-and-polish-cleanup.md`. Twenty-five small items from the 2026-08-18 docs-overview pass: stale refs in `docs/development.md` / `docs/status.md`, no-issue nits from the WS4/WS6 review (S3 download streaming, S3 404 shape, stale `tailnet_ip`, web cron accept-list, etc.), and a few CI/packaging tidy-ups. Most are <30 LOC; pick from the top.
 
-1. **LAMA-105 — Backend storage: Exoscale S3 backend + basic tests** (in_progress, urgent)
-   - Wire up the Exoscale S3-compatible backend as a folder target.
-   - Add validation for `s3Endpoint`, `s3Bucket`, `s3AccessKeyId`, `s3SecretAccessKey`.
-   - Run basic end-to-end tests: create folder, assign, daemon sync, verify object listing in bucket.
-   - Revisit rclone config generation for S3 in `server/src/routes/config.ts` and folder validation in `server/src/routes/folders.ts`.
-
-2. **LAMA-171 — `@reboot`/`@login` dotfile schedule triggers** (in_progress, urgent)
-   - Scheduler special-token support + tests done; LAMA-168 (host selector, excludes, cron presets, deployment tracking) is done.
-
-3. **LAMA-104 — Error handling** (backlog, high)
-   - Harden error propagation, structured error responses, and retry/circuit-breaker behavior across the daemon and server.
-
-4. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
+2. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
    - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
 
-5. **Polish / tech debt**
-   - Dotfile diff preview against current disk files before extraction.
-   - `nts` / tabbed-cycle keyboard interactions in OpenTUI native mode.
-   - Multi-user auth scoping, operation-log archival.
-   - Renderer smoke tests behind `LAMASYNC_TUI_TEST_VIEWS` (foundation already wired the gating).
+3. **LAMA-228 — TUI runtime-verify clean process exit** (todo, medium)
+   - LAMA-182 fixed it statically (commit `cbb10a1`); nobody has watched the actual process exit yet. Run the pty harness against dead + live servers.
+
+4. **LAMA-204 — LamaSync → LamaDB webhook receiver** (todo)
+   - Cross-project: LamaSync side is live (env-gated), the LamaDB side doesn't exist yet. Builds the Life OS timeline.
+
+5. **LAMA-237 / LAMA-236** (backlog, no priority)
+   - Host Types (laptop vs server, etc.) and Fleet software management. Larger features; revisit when the above is quiet.

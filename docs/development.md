@@ -93,20 +93,13 @@ The complete client end-to-end path (Proxmox-over-tailnet, install → register
 Docker Compose sandbox. The Command Center v1 (LAMA-183) browser dogfood
 matrix is preserved in git history if you need to re-run it.
 
-Current coverage:
+Current coverage: every `*.test.ts` in the source tree (~50 files, ~580 passing as of v0.3.2). Worth knowing by name:
 - `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
 - `packages/server/src/routes/config.test.ts` — rclone config generation, encryption, peer detection
-- `packages/server/src/routes/shares.test.ts` — shares parsing and endpoint
-- `packages/server/src/routes/operations.test.ts` — operation locks and API
-- `packages/server/src/routes/restic.test.ts` — restic config generation
-- `packages/server/src/routes/conflicts.test.ts` — conflict resolution API
-- `packages/daemon/src/socket.test.ts` — socket command handling
-- `packages/daemon/src/systemd.test.ts` — systemd unit template generation
-- `packages/daemon/src/self-update.test.ts` — release parsing and version comparison
-- `packages/tui/src/index.test.ts` — `describeFolder` cases (legacy view helpers)
-- `packages/tui/src/app/keymap.test.ts` — hotkey dispatch (`matchHotkey`)
-- `packages/tui/src/app/view-manager.test.ts` — visibility toggling + lifecycle hooks
-- `packages/tui/src/app/wizard.test.ts` — wizard state-machine (next/back/validate/finish/cancel/onKey)
+- `packages/server/src/routes/{shares,operations,restic,conflicts,backends,browse,stats,actions,hosts}.test.ts` — REST routes
+- `packages/daemon/src/{socket,systemd,self-update,lock,config,executor,scheduler,hooks,lan-peer,update-check,actions,report-queue}.test.ts` — daemon behaviour
+- `packages/tui/src/{index.test.ts,cli/*.{args,output,client,commands,dispatch}.test.ts,app/{keymap,view-manager,wizard}.test.ts}` — TUI + CLI dispatch
+- Renderer-bound tests are gated behind `LAMASYNC_TUI_TEST_VIEWS=1` (foundation wired; bring them online when the harness becomes stable).
 
 ## Adding a new API endpoint
 
