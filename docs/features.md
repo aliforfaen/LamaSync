@@ -9,7 +9,7 @@
 |`@lamasync/daemon` — heartbeat, rclone execution, mounts, scheduler, socket server|done|
 |`@lamasync/tui` — Single tabbed shell with 6 views + guided wizards + CLI fallback (LAMA-173)|done|
 |`@lamasync/web-ui` — React SPA embedded in the server binary (Dashboard, Folders, Dotfiles, Conflicts, Admin)|done|
-|Agent skill (`lamasync-server.md`)|done (+ installed)|
+|Agent skill (`lamasync` two-tier bundle: `SKILL.md` + `reference/`) — LAMA-230|done (+ installed)|
 |Docker: `Dockerfile.server`, `docker-compose.yml`|done|
 |`bun run build` → standalone binaries|working|
 |Unit tests (core + server + daemon + self-update + TUI + executor + offset + web-ui + wizard)|passing|
@@ -59,7 +59,7 @@
 | remaining-features | Per-folder sync history: Operations page folder filter + `?folderId=`/`?hostId=` deep links from Folders/HostDetail History buttons | `web-ui/src/pages/{Operations,Folders,HostDetail}.tsx`, `web-ui/src/api.ts` |
 | remaining-features | Restic restore UI: restore modal + jobs panel (2s polling) on the DataBrowser restic tab | `web-ui/src/pages/DataBrowser.tsx`, `web-ui/src/api.ts` |
 | remaining-features | Data Browser delete + download: job-based `POST /browse/delete` (deletefile/purge), base64 `POST /browse/download` (64 MiB cap, realpath containment) | `server/src/{browse-jobs.ts,routes/browse.ts}`, `web-ui/src/pages/DataBrowser.tsx` |
-| LAMA-227 | Agent surface umbrella: CLI-first `lamasync` is the primary agent surface; the REST/WS API is the escape hatch. No MCP server, no per-user auth, six safety rules as the contract. | `docs/handoff/2026-08-11-agent-surface-cli-skill.md` |
+| LAMA-227 | Agent surface umbrella: CLI-first `lamasync` is the primary agent surface; the REST/WS API is the escape hatch. No MCP server, no per-user auth, six safety rules as the contract. | `packages/agent-skill/`, `packages/tui/src/cli/`, `packages/core/src/api-client.ts` |
 | LAMA-229 | CLI v1: workflow subcommands in the `lamasync` binary (`status`, `folders list|create|assign`, `backends list|create|test`, `sync`, `ops list`, `doctor`, `local status|folders|ops|sync|sync-all|mount|unmount`); `--json` everywhere; exit codes 0/1/2/3/4; auth discovery flags > env > client.toml; key masking `lamasync_…xxxx` | `packages/tui/src/cli/`, `packages/tui/src/index.ts`, `packages/core/src/api-client.ts` |
 | LAMA-230 | Agent skill: two-tier bundle (`SKILL.md` + `reference/{cli,api,recipes,troubleshooting,safety}.md`), install pipeline (`~/.lamasync/install-state.json` persisted; default-on, opt-out), `lamasyncd --update skill` refresh, `packaging/build-skill-tarball.sh` ships `lamasync-skill-<version>.tar.gz` as a release asset, `scripts/check-skill-drift.ts` runs in CI | `packages/agent-skill/`, `packaging/{build-skill-tarball.sh,install/}`, `packages/daemon/src/{index.ts,skill-update.ts}`, `scripts/check-skill-drift.ts`, `.github/workflows/ci.yml` |
 | LAMA-231 | CLI full CRUD coverage: `folders update|delete|unassign|assignments`, `dotfiles list|upload|download|manifests`, `conflicts list|resolve`, `snapshots list`, `restore`, `browse local|s3|restic|jobs`, `notifications list|channels`, `hosts list|rename`, `register`, `shares list`, `admin prune`. Destructive commands prompt on a TTY, require `--yes` non-interactively (safety rule 5). | `packages/tui/src/cli/{folders-ext,dotfiles,conflicts,snapshots,browse,notifications,hosts,admin,safety}.ts`, `packages/tui/src/cli/dispatch.ts`, `packages/core/src/api-client.ts` |

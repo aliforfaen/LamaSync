@@ -88,10 +88,10 @@ dotfile backup, operation-log verification) in Docker Compose:
 cd scripts/e2e-sandbox && docker compose up --build --abort-on-container-exit
 ```
 
-The complete testing handoff (including the realistic Proxmox-over-tailnet
-path and the production-smoke checklist) is in `docs/handoff/client-testing.md`.
-The Command Center v1 (LAMA-183 batches 1–2) browser dogfood brief lives in
-`docs/handoff/command-center-testing.md` (test matrix + known limitations).
+The complete client end-to-end path (Proxmox-over-tailnet, install → register
+→ backup → dotfile → log verification) is the `scripts/e2e-sandbox/`
+Docker Compose sandbox. The Command Center v1 (LAMA-183) browser dogfood
+matrix is preserved in git history if you need to re-run it.
 
 Current coverage:
 - `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
@@ -115,7 +115,7 @@ Current coverage:
 3. Add the endpoint to `packages/core/src/db/schema.ts` (if it needs persistence) and the migrations array
 4. Create a route file in `packages/server/src/routes/` exporting an Elysia plugin with a `detail` block (Swagger tags)
 5. Import and `.use()` the plugin in `packages/server/src/index.ts`
-6. Add the endpoint to the `lamasync-server.md` skill table
+6. Add the endpoint to `packages/agent-skill/reference/api.md` (drift-checked by `scripts/check-skill-drift.ts` in CI)
 7. Run `bun x tsc --noEmit` and `curl`-test the endpoint
 
 ## Adding a new TUI view (LAMA-173 contract)

@@ -22,8 +22,7 @@ run LamaSync as a client on your host (rather than hack on this repo), read
 server URL, prereqs, install steps, and verification. Server API operations:
 `packages/agent-skill/SKILL.md` (the CLI-first two-tier bundle — start with
 `SKILL.md`, then `reference/cli.md` for the full `lamasync` subcommand
-reference; `reference/api.md` is the REST/WS escape hatch). The legacy
-`lamasync-server.md` content has been folded into `reference/api.md`.
+reference; `reference/api.md` is the REST/WS escape hatch).
 
 Full annotated tree: `docs/repository-layout.md`. System design & DB schema:
 `ARCHITECTURE.md`. Feature history by LAMA issue: `docs/features.md`.
@@ -85,5 +84,5 @@ API endpoints and TUI views, release process): `docs/development.md`.
 
 ## Current status
 
-Project version **0.3.1**, tests green. See `docs/status.md` for the rolling
+Project version **0.3.2**, tests green. See `docs/status.md` for the rolling
 status log and the next-session work queue.

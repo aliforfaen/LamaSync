@@ -40,8 +40,10 @@ Three binaries per machine:
   `scripts/inline-web-ui.ts`; auth uses the same pre-shared API key via
   `sessionStorage` and REST/WebSocket calls.
 
-The agent skill at `packages/agent-skill/lamasync-server.md` lets external
-agents register, manage folders, and report on operations against the same API.
+The agent skill at `packages/agent-skill/SKILL.md` (CLI-first, two-tier
+bundle: `SKILL.md` + `reference/{cli,api,recipes,troubleshooting,safety}.md`)
+lets external agents register, manage folders, and report on operations
+against the same API.
 
 ---
 
@@ -561,8 +563,10 @@ lamasync/
 │   ├── tui/                  # @lamasync/tui — OpenTUI frontend
 │   │   ├── src/index.ts
 │   │   └── src/views/        # menu, local, fleet, logs, dotfiles
-│   └── agent-skill/          # OMP-managed lamasync-server skill
-│       └── lamasync-server.md
+│   └── agent-skill/          # CLI-first agent skill (LAMA-230)
+│       ├── SKILL.md          #   trigger + decision tree + safety summary
+│       ├── reference/        #   cli.md, api.md, recipes.md, troubleshooting.md, safety.md
+│       └── lamasync-client.md  # separate client-install onboarding skill
 ├── packaging/
 │   ├── install/              # curl | bash installer
 │   └── systemd/              # lamasyncd.service template

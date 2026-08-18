@@ -16,8 +16,8 @@ pulls its config bundle, and executes.
 
 Use this skill when your task is to **set this host up as a LamaSync
 client** or operate the local daemon. For direct server API operations
-(folders, assignments, dotfiles, operation log), see the sibling skill
-`lamasync-server.md`.
+(folders, assignments, dotfiles, operation log), see the `lamasync` skill
+(CLI-first; `reference/api.md` is the REST/WS escape hatch).
 
 ## Fleet facts (current production)
 
@@ -101,8 +101,8 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
 
 - **Everything is configured server-side.** Folders, host assignments,
   schedules, dotfile manifests: use the Web UI (`http://100.113.52.108:8080/`,
-  log in with the API key) or the REST API (`lamasync-server.md` skill).
-  There is no local config of jobs on the client.
+  log in with the API key) or the REST API (`lamasync` skill →
+  `reference/api.md`). There is no local config of jobs on the client.
 - The daemon re-pulls its config on heartbeat when the server's
   `config_revision` changes, plus a 5-minute poll. To apply a new
   assignment immediately, enqueue an action:
@@ -143,6 +143,7 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
 
 ## See also
 
-- `lamasync-server.md` (sibling skill) — full REST API reference and curl workflows.
+- `lamasync` skill (sibling) — CLI-first with `reference/api.md` as the REST
+  escape hatch.
 - `README.md` in the repo root — architecture, server deployment, TUI.
 - `ARCHITECTURE.md` — system design and DB schema.

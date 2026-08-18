@@ -305,8 +305,9 @@ Hotkeys per view are shown in the bottom row.
 | `lamasyncd` | Per-host systemd user daemon. Manages rclone processes, schedules, ignore patterns, hooks, and exposes a Unix socket for the TUI. |
 | `lamasync-tui` | OpenTUI terminal UI. Connects to local daemon over Unix socket, or directly to the server. |
 
-Server endpoints are documented via Swagger at `/swagger` and the
-`lamasync-server` agent skill (`packages/agent-skill/lamasync-server.md`).
+Server endpoints are documented via Swagger at `/swagger` and the `lamasync`
+agent skill (CLI-first with a REST/WS escape hatch — `packages/agent-skill/
+SKILL.md` + `reference/api.md`).
 
 ### Configuration flow
 

@@ -57,6 +57,6 @@ automatically; end users receive the update via:
 
 ## See also
 
-- `../docs/handoff/2026-08-11-agent-surface-cli-skill.md` for the original
-  design rationale and the umbrella issue (LAMA-227).
-- `docs/features.md` rows for LAMA-227, LAMA-229, LAMA-230, LAMA-231.
+- `docs/features.md` rows for LAMA-227, LAMA-229, LAMA-230, LAMA-231 for the
+  umbrella issue and the design rationale (the original handoff was archived
+  in git history).
