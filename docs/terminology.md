@@ -50,7 +50,7 @@ Tick items as later passes fix them. Statuses: ☐ todo · ◐ partial · ☑ do
 
 | Surface | Current terms found | Change needed | Status |
 |---|---|---|---|
-| Nav labels | Dashboard · **Hosts** · Folders · **Backends** · **Dotfiles** · Conflicts · Operations · Data · Admin | Hosts→Devices, Backends→Storage, Dotfiles→App settings; nav regrouping itself is LAMA-275 scope | ☐ |
+| Nav labels | Dashboard · **Hosts** · Folders · **Backends** · **Dotfiles** · Conflicts · Operations · Data · Admin | Regroup into rail per approved LAMA-275 proposal: Overview / Sync / **Apps** / Storage & tools / System; Hosts→Devices, Backends→Storage, Dotfiles under Apps | ☐ |
 | Hosts / HostDetail | "host", hostname fields | Device everywhere; keep actual hostname values as data | ☐ |
 | Folders list + editor | type chips sync/mount/backup/dotfile; "backend" select; assignment wording; cron presets exist | Type chips → glossary names; mount shown as sub-label; "Storage destination"; "Set up on …" | ☐ |
 | AssignmentEditor | "assign", mode Inherit/Sync/Mount, custom cron field | Per-device setup phrasing; mode → "read-only on this device"; hide raw cron behind Custom | ☐ |

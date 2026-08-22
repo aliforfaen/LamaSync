@@ -1,0 +1,24 @@
+ Local               Fleet               Dotfiles            Conflicts         ›
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+[?] help   [ / ] views   [q] quit
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ Local                                                                        │
+│ Local — localhost                                                            │
+│                                                                              │
+│ (no folders configured)                                                      │
+│ Press 3 to refresh, w to create a new backup.                                │
+│                                                                              │
+│ [1] sync [2] sync [3]      [p] cache    [s] switch [n] network   [w] new     │
+│ all      one      refresh  profile      type       shares        backup…     │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ [ok] Loaded 0 folder(s).                                                     │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+[ok] Loaded 0 folder(s).

@@ -1,0 +1,36 @@
+ Local               Fleet               Dotfiles            Conflicts           Logs                GitHub
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+[?] help   [ / ] views   [q] quit
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                      │
+│ Local                                                                                                                │
+│ Local — localhost                                                                                                    │
+│                                                                                                                      │
+│ (no folders configured)                                                                                              │
+│ Press 3 to refresh, w to create a new backup.                                                                        │
+│                                                                                                                      │
+│ [1] sync all [2] sync one [3] refresh [p] cache profile [s] switch type [n] network shares [w] new backup…           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ [ok] Loaded 0 folder(s).                                                                                             │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[ok] Loaded 0 folder(s).
