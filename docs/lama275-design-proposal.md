@@ -1,9 +1,10 @@
 # LAMA-275 design proposal — web UI + TUI shell overhaul
 
-Companion to the LAMA-275 work order. This is the **proposal** step from
-`docs/agent-start.md` §B: reversible recommendations only; nothing here is
-implemented until messhias approves the direction (in Multica comments or by
-editing this file).
+Companion to the LAMA-275 work order.
+
+> **VERDICT (owner, via chat 2026-08-22): D1–D5 APPROVED as recommended,
+> with one addition — an "Apps" destination in navigation (see D2/D3
+> amendments below). Implementation may proceed.**
 
 Before-screenshots at representative sizes are still pending (needs a dev
 server + browser session); they will be captured before implementation starts
@@ -48,23 +49,26 @@ console; the audit history (2026-08-08 UX review) repeatedly flags
 TUI and monospace conventions, so we don't lose honesty.
 
 ### D2 — Web navigation: **grouped left rail on desktop, drawer below ~900px**
-Four groups replacing the ten flat peers:
+Five groups replacing the ten flat peers *(amended per owner: explicit Apps
+group)*:
 - **Overview**: Dashboard
 - **Sync**: Devices (hosts), Synced folders, Conflicts
-- **Storage & tools**: Storage destinations (backends), App settings backups
-  (dotfiles), Data browser
+- **Apps**: App settings backups (dotfiles); future app-preset work lands here
+- **Storage & tools**: Storage destinations (backends), Data browser
 - **System**: Activity (operations), Admin
 Swagger/theme/sign-out move to a subdued footer/user area of the rail.
 Rationale: left rails scale (more pages are coming from other LAMA-249
 children), give room for group labels that teach the vocabulary, and collapse
 cleanly into a drawer. Top nav would wrap again at exactly the widths we need
-to support.
+to support. The Apps group gives application-level protection its own home
+instead of burying it under storage.
 
 ### D3 — TUI information architecture: **task-oriented tabs**
-`This device · All devices · Backups · Conflicts · Activity · More`
+`This device · All devices · Backups & apps · Conflicts · Activity · More`
 - This device ← Local (answers "am I synced?" first)
 - All devices ← Fleet
-- Backups ← backup/dotfile types surfaced from folder types
+- Backups & apps ← backup folders + dotfile/app-settings views surfaced from
+  folder types *(owner's Apps addition applied here; keeps the tab count at six)*
 - Conflicts unchanged · Activity ← Logs + operation stream merged view
 - More ← GitHub + settings/tools entry points
 Rationale: matches the mental model of "my stuff, everywhere, protected";
@@ -106,8 +110,8 @@ LAMA-275 comments and D2/D5 responsive work simplifies.
 
 | Decision | Recommendation | Owner verdict |
 |---|---|---|
-| D1 visual direction | warm homelab utility | ☐ |
-| D2 web nav | left rail + drawer | ☐ |
-| D3 TUI tabs | task-oriented six | ☐ |
-| D4 GitHub view | under More | ☐ |
-| D5 viewport floor | 360px / 80×24 (assumed) | ☐ |
+| D1 visual direction | warm homelab utility | ☑ approved 2026-08-22 |
+| D2 web nav | left rail + drawer, **+ Apps group** | ☑ approved with amendment |
+| D3 TUI tabs | task-oriented six → "Backups & apps" | ☑ approved with amendment |
+| D4 GitHub view | under More | ☑ approved |
+| D5 viewport floor | 360px / 80×24 (assumed) | ☑ approved as assumed |
