@@ -1,0 +1,36 @@
+ Local               Fleet               Dotfiles            Conflicts           Logs                GitHub
+                                                                                                    ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+[?] help   [ / ] views   [q] quit
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                      │
+│ GitHub                                                                                                               │
+│ 9 repo(s). Use ↑/↓ to move, Enter to adopt.                                                                          │
+│                                                                                                                      │
+│  ▶ LamaSync                                                                                                          │
+│    aliforfaen/LamaSync                                                                                               │
+│    pi                                                                                                                │
+│    aliforfaen/pi                                                                                                     │
+│    lamadb-android                                                                                                    │
+│    aliforfaen/lamadb-android                                                                                         │
+│    LamaDB                                                                                                            │
+│    aliforfaen/LamaDB                                                                                                 │
+│    lamadb-hermes                                                                                                     │
+│    aliforfaen/lamadb-hermes                                                                                          │
+│    hermes-life-os                                                                                                    │
+│    aliforfaen/hermes-life-os                                                                                         │
+│    honcho-docker                                                                                                     │
+│    aliforfaen/honcho-docker                                                                                          │
+│    dataskygge                                                                                                        │
+│    aliforfaen/dataskygge                                                                                             │
+│    Notflix-Dashboard                                                                                                 │
+│    aliforfaen/Notflix-Dashboard                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ [r] refresh                                                                                                          │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[ok] Loaded 0 host(s).

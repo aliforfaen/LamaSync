@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import type { DotfileManifest, DotfileVersion, Host } from "@lamasync/core";
 import { api } from "../api.ts";
 import { HintText } from "../components/Hint.tsx";
@@ -317,15 +318,15 @@ export function Dotfiles() {
   }
 
   function hostLabel(hostId: string): string {
-    if (hostId === GLOBAL_HOST_ID) return "Global (all hosts)";
+    if (hostId === GLOBAL_HOST_ID) return "All devices";
     const host = hosts.find((h) => h.id === hostId);
     return host?.hostname ?? hostId;
   }
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Dotfiles</h1>
+      <PageHeader title="App settings" purpose="Back up application settings on this device and restore them on another." />
+<div className="toolbar">
         <label className="scope-filter">
           Scope
           <select
@@ -337,7 +338,7 @@ export function Dotfiles() {
               else setScope({ kind: "host", hostId: v });
             }}
           >
-            <option value="__all__">All hosts</option>
+            <option value="__all__">All devices</option>
             <option value="__global__">Global only</option>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
@@ -347,7 +348,7 @@ export function Dotfiles() {
           </select>
         </label>
         <button type="button" className="action primary" onClick={() => setShowForm((s) => !s)}>
-          {showForm ? "Cancel" : "New manifest"}
+          {showForm ? "Cancel" : "New app backup"}
         </button>
       </div>
       {error && <div className="error">{error}</div>}
@@ -365,12 +366,12 @@ export function Dotfiles() {
             />
           </label>
           <label>
-            Host
+            Device
             <select
               value={form.hostId}
               onChange={(e) => setForm({ ...form, hostId: e.target.value })}
             >
-              <option value={GLOBAL_HOST_ID}>Global (all hosts)</option>
+              <option value={GLOBAL_HOST_ID}>All devices (default)</option>
               {hosts.map((h) => (
                 <option key={h.id} value={h.id}>
                   {h.hostname}
@@ -445,13 +446,13 @@ export function Dotfiles() {
             />
           </label>
           <label>
-            Host
+            Device
             <select
               value={editForm.hostId}
               onChange={(e) => setEditForm({ ...editForm, hostId: e.target.value })}
               disabled
             >
-              <option value={GLOBAL_HOST_ID}>Global (all hosts)</option>
+              <option value={GLOBAL_HOST_ID}>All devices (default)</option>
               {hosts.map((h) => (
                 <option key={h.id} value={h.id}>
                   {h.hostname}
@@ -534,10 +535,10 @@ export function Dotfiles() {
             <tr className="empty-row">
               <td colSpan={8}>
                 {scope.kind === "all"
-                  ? "No manifests yet — a manifest decides which app configs get backed up. Restoring runs from the TUI."
+                  ? "No app backups yet — an entry decides which app's settings get backed up, and where. Restoring runs from the TUI."
                   : scope.kind === "global"
                     ? "No global manifests yet"
-                    : `No manifests for ${hostLabel(scope.hostId)} yet`}
+                    : `No app backups for ${hostLabel(scope.hostId)} yet`}
               </td>
             </tr>
           ) : (
@@ -655,10 +656,10 @@ export function Dotfiles() {
 
       {deletingManifestId && (
         <ConfirmDialog
-          title="Delete manifest"
+          title="Delete app backup"
           danger
           confirmLabel="Delete"
-          message="Delete this manifest and all its versions?"
+          message="Delete this app backup and all its saved versions?"
           onConfirm={() => void confirmDeleteManifest()}
           onCancel={() => setDeletingManifestId(null)}
         />
@@ -666,7 +667,7 @@ export function Dotfiles() {
 
       {deletingVersion && (
         <ConfirmDialog
-          title="Delete dotfile version"
+          title="Delete saved version"
           danger
           confirmLabel="Delete"
           message={`Delete dotfile version ${deletingVersion.version.id.slice(0, 8)}?`}

@@ -9,6 +9,7 @@ import type {
 } from "@opentui/core";
 
 import { matchHotkey, type Hotkey } from "./keymap.ts";
+import { PALETTE_BG, SELECTION } from "./palette.ts";
 import { friendlyError } from "../friendly-error.ts";
 import type { ViewContext, ViewId, ViewSpec } from "./view-manager.ts";
 import { ViewManager } from "./view-manager.ts";
@@ -88,6 +89,8 @@ export class Shell {
       TabSelect({
         options: [{ name: " ", description: "" }],
         flexShrink: 0,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
       }),
     ) as TabSelectRenderable;
 

@@ -212,7 +212,7 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
   return (
     <form className="form assignment-editor" onSubmit={onSave}>
       <h2 className="form-title">
-        Edit assignment — {folderName ?? assignment.folderId} on {hostName ?? assignment.hostId}
+        Edit “{folderName ?? assignment.folderId}” on {hostName ?? assignment.hostId}
       </h2>
       {error && <div className="error">{error}</div>}
 
@@ -252,7 +252,7 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
       </label>
       {state.schedulePreset === "custom" && (
         <label>
-          Cron expression
+          Custom schedule
           <input
             placeholder="*/15 * * * *"
             value={state.syncExpr}
@@ -260,15 +260,15 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
             aria-invalid={cronError !== null}
           />
           <span className="muted">
-            Cron expression, e.g. <code>0 * * * *</code> = every hour. Leave
-            empty to use the daemon's default schedule.
+            Schedule in cron format, e.g. <code>0 * * * *</code> = every hour.
+            Leave empty for this device's default schedule.
           </span>
           {cronError && <div className="error">{cronError}</div>}
         </label>
       )}
 
       <label>
-        Conflict strategy
+        When both sides changed
         <select
           value={state.conflictStrategy}
           onChange={(e) => set({ conflictStrategy: e.target.value })}
@@ -295,14 +295,14 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
               }
             }}
           >
-            <option value="inherit">Inherit</option>
+            <option value="inherit">Use folder default</option>
             <option value="sync">Sync</option>
-            <option value="mount">Mount</option>
+            <option value="mount">Read-only mount</option>
           </select>
           <span className="muted">
-            Override the folder type for this host. "Inherit" uses the
-            folder's type; "Sync" / "Mount" forces this host to sync or
-            mount regardless. Other hosts are unaffected.
+            Override how this device uses the folder. "Use folder default"
+            follows the folder's type; the other two force syncing or a
+            read-only mount on this device only. Other devices are unaffected.
           </span>
         </label>
       ) : null}

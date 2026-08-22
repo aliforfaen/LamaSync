@@ -58,11 +58,11 @@ function statusLine(entry: OperationLog): string {
  * offset-based paging, so `next`/`prev` advance/retreat the offset.
  */
 export function renderLogs(opts: RenderLogsOpts): VNode {
-  const header = Text({ content: "Operations" });
+  const header = Text({ content: "Activity" });
   const filterLabel = Text({ content: `Filter: ${opts.state.status}` });
   const hostLabel = opts.state.hostId
-    ? Text({ content: `Host: ${opts.state.hostId}` })
-    : Text({ content: "Host: (any)" });
+    ? Text({ content: `Device: ${opts.state.hostId}` })
+    : Text({ content: "Device: (any)" });
   const body = renderEntries(opts.state.entries);
 
   return Box(
@@ -156,7 +156,7 @@ interface LogsInternalState {
  */
 export class LogsView implements View {
   static readonly id: ViewId = "logs";
-  static readonly title = "Logs";
+  static readonly title = "Activity";
 
   readonly id: ViewId = LogsView.id;
   readonly title: string = LogsView.title;

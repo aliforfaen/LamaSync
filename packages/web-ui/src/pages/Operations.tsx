@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { useSearchParams } from "react-router-dom";
 import type { Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -132,8 +133,8 @@ export function Operations() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Operations</h1>
+      <PageHeader title="Activity" purpose="Recent sync and backup activity across your fleet, including locks and results." />
+<div className="toolbar">
         <label className="scope-filter">
           Status
           <select value={status} onChange={onStatusChange}>
@@ -145,9 +146,9 @@ export function Operations() {
           </select>
         </label>
         <label className="scope-filter">
-          Host
+          Device
           <select value={hostFilter} onChange={onHostFilterChange}>
-            <option value="">All hosts</option>
+            <option value="">All devices</option>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.hostname}
@@ -191,7 +192,7 @@ export function Operations() {
             <thead>
               <tr>
                 <th>Folder</th>
-                <th>Host</th>
+                <th>Device</th>
                 <th>Acquired at</th>
                 <th>TTL</th>
               </tr>
@@ -213,7 +214,7 @@ export function Operations() {
         <thead>
           <tr>
             <th>Time</th>
-            <th>Host</th>
+            <th>Device</th>
             <th>Folder</th>
             <th>Operation</th>
             <th>Status</th>

@@ -34,6 +34,7 @@ import type {
 } from "@lamasync/core";
 
 import { hotkeyFooter, pageShell, realize, swapChildren } from "../app/widgets.ts";
+import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import { friendlyError } from "../friendly-error.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import { matchHotkey } from "../app/keymap.ts";
@@ -141,7 +142,7 @@ interface VersionRow {
  */
 export class DotfilesView implements View {
   static readonly id: ViewId = "dotfiles";
-  static readonly title = "Dotfiles";
+  static readonly title = "App settings";
 
   readonly id: ViewId = DotfilesView.id;
   readonly title: string = DotfilesView.title;
@@ -191,7 +192,7 @@ export class DotfilesView implements View {
     this.container = realize<Renderable>(
       opts.ctx.renderer,
       pageShell(
-        "Dotfiles",
+        "App settings",
         Box({ flexDirection: "column", flexGrow: 1 }, this.bodyBox),
       ),
     );
@@ -583,7 +584,12 @@ export class DotfilesView implements View {
         };
       }),
     ];
-    const select = Select({ options: rows, flexGrow: 1 });
+    const select = Select({
+      options: rows,
+      flexGrow: 1,
+      selectedBackgroundColor: PALETTE_BG.accent,
+      selectedTextColor: SELECTION.fg,
+    });
     select.on("itemSelected", (_i: number, opt: AppRow) => {
       if (opt.value === SETUP_KEY) {
         void this.runRestoreAllLatest();
@@ -612,7 +618,12 @@ export class DotfilesView implements View {
       description: v.description ? `${v.id} — ${v.description}` : v.id,
       value: v.id,
     }));
-    const select = Select({ options: rows, flexGrow: 1 });
+    const select = Select({
+      options: rows,
+      flexGrow: 1,
+      selectedBackgroundColor: PALETTE_BG.accent,
+      selectedTextColor: SELECTION.fg,
+    });
     select.on("itemSelected", (_i: number, opt: VersionRow) => {
       const version = this.state.versions.find((v) => v.id === opt.value);
       if (!version) return;

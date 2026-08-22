@@ -1,0 +1,36 @@
+ Local               Fleet               Dotfiles            Conflicts           Logs                GitHub
+                                        ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+[?] help   [ / ] views   [q] quit
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                      │
+│ Dotfiles                                                                                                             │
+│ Fresh-install setup                                                                                                  │
+│ No dotfile manifests yet — press n to create one, or run a sync on a dotfile folder.                                 │
+│ Press n to add a manifest, r to refresh.                                                                             │
+│ [r] refresh [n] new manifest…                                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[ok] Loaded 0 host(s).

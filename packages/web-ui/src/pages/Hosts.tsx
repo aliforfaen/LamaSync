@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { Host } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -100,7 +101,7 @@ export function Hosts() {
 
   useEffect(() => {
     if (event && event.kind === "host_renamed") {
-      setRenamedBanner(`host renamed: ${event.oldId} → ${event.hostname}`);
+      setRenamedBanner(`device renamed: ${event.oldId} → ${event.hostname}`);
       void refresh();
     }
   }, [event, refresh]);
@@ -130,15 +131,15 @@ export function Hosts() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Hosts</h1>
+      <PageHeader title="Devices" purpose="The machines running LamaSync — register new ones, check status, and manage each device." />
+<div className="toolbar">
         <span className="muted">{items ? `${items.length} registered` : "loading…"}</span>
         <button
           type="button"
           className="action primary"
           onClick={() => setShowGuide((s) => !s)}
         >
-          {showGuide ? "Hide guide" : "Add host"}
+          {showGuide ? "Hide guide" : "Add device"}
         </button>
       </div>
       {error && <div className="error">{error}</div>}
@@ -165,7 +166,7 @@ export function Hosts() {
           <div className="skel skel-card" />
         </div>
       ) : items.length === 0 ? (
-        <div className="empty-row">No hosts registered yet</div>
+        <div className="empty-row">No devices registered yet</div>
       ) : (
         <div className="host-list">
           {items.map((h) => (
@@ -177,7 +178,7 @@ export function Hosts() {
                   type="button"
                   className="action danger host-delete-btn"
                   aria-label={`Delete host ${h.hostname}`}
-                  title="Delete host (removes assignments, manifests, history)"
+                  title="Remove device (removes its folder setups, app settings, history)"
                   onClick={(e) => {
                     // The card is a Link; deleting must not navigate.
                     e.preventDefault();
@@ -216,12 +217,12 @@ export function Hosts() {
 
       {deletingHost && (
         <ConfirmDialog
-          title="Delete host"
+          title="Remove device"
           danger
           confirmLabel="Delete"
           message={
             <>
-              Delete host “{deletingHost.hostname}” ({deletingHost.id})?
+              Remove device “{deletingHost.hostname}” ({deletingHost.id})?
               <br />
               <br />
               This removes its assignments, dotfile manifests, and operation

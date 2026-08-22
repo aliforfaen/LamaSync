@@ -19,6 +19,7 @@ import type {
 } from "@lamasync/core";
 
 import { matchHotkey, type Hotkey } from "../app/keymap.ts";
+import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import { hotkeyFooter, realize, swapChildren } from "../app/widgets.ts";
 import { friendlyError } from "../friendly-error.ts";
 import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
@@ -102,6 +103,8 @@ export class ConflictsView implements View {
         options: [],
         flexGrow: 1,
         showDescription: true,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
       }),
     );
     this.contentBox = realize<BoxRenderable>(
