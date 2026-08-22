@@ -146,7 +146,7 @@ export function Operations() {
           </select>
         </label>
         <label className="scope-filter">
-          Host
+          Device
           <select value={hostFilter} onChange={onHostFilterChange}>
             <option value="">All devices</option>
             {hosts.map((h) => (

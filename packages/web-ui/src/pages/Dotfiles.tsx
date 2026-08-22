@@ -366,7 +366,7 @@ export function Dotfiles() {
             />
           </label>
           <label>
-            Host
+            Device
             <select
               value={form.hostId}
               onChange={(e) => setForm({ ...form, hostId: e.target.value })}
@@ -446,7 +446,7 @@ export function Dotfiles() {
             />
           </label>
           <label>
-            Host
+            Device
             <select
               value={editForm.hostId}
               onChange={(e) => setEditForm({ ...editForm, hostId: e.target.value })}
