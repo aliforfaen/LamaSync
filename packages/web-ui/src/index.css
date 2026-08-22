@@ -1,11 +1,25 @@
 /* Minimal dashboard styles — kept hand-rolled; no CSS framework dependency. */
 
+/* Design-token contract (LAMA-275, approved 2026-08-22):
+   Surface levels — exactly four, always in this order of "height":
+     canvas  = --bg               page background
+     panel   = --surface          cards, tables, nav rail
+     raised  = --surface-elevated modals, popovers, dropdowns
+     inset   = --surface-inset    technical detail wells (paths, IDs, raw output)
+   Status semantics — success/warning/critical/info each have fg (-rgb) and
+   tinted bg variants; NEVER signal status by color alone (pair with text/icon).
+   Monospace is reserved for machine-shaped data: paths, IDs, commands, JSON,
+   logs. Proportional type carries user intent.
+   Warm-homelab register: comfortable sizes win over density except inside
+   dense tables/logs. */
+
 :root,
 [data-theme="dark"] {
-  /* background / surface — near-black with a cool bias (ops-console) */
+  /* background / surface — near-black with a cool bias */
   --bg: #0a0d12;
   --surface: #10141c;
   --surface-elevated: #151b27;
+  --surface-inset: #0c1017;
 
   /* borders */
   --border: #1b2231;
@@ -70,12 +84,17 @@
   --radius-lg: 8px;
   --radius-full: 999px;
 
+  /* layout — deliberate max content width so wide displays don't produce
+     stretched tables; nav rail width for the LAMA-275 grouped left rail */
+  --content-max: 76rem;
+  --nav-rail-width: 14rem;
+
   /* typography */
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --font-size-xs: 0.7rem;
-  --font-size-sm: 0.75rem;
-  --font-size-md: 0.85rem;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.8125rem;
+  --font-size-md: 0.875rem;
   --font-size-base: 0.875rem;
   --font-size-lg: 1rem;
   --font-size-xl: 1.25rem;
@@ -96,6 +115,7 @@
   --bg: #f5f6f8;
   --surface: #ffffff;
   --surface-elevated: #eef1f5;
+  --surface-inset: #eceff4;
 
   --border: #d7dbe4;
   --border-strong: #b4bccb;
@@ -139,6 +159,10 @@
   --shadow-sm: 0 1px 2px rgba(15, 18, 26, 0.08);
   --shadow-lg: 0 10px 28px rgba(15, 18, 26, 0.18);
   --backdrop: rgba(15, 18, 26, 0.35);
+
+  /* layout tokens shared across themes */
+  --content-max: 76rem;
+  --nav-rail-width: 14rem;
 
   --muted-bg: rgba(var(--text-muted-rgb), 0.12);
 
