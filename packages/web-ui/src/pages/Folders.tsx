@@ -675,7 +675,7 @@ export function Folders() {
       <PageHeader title="Synced folders" purpose="Folders kept in sync or backed up across your devices." />
 <div className="toolbar">
         <label className="scope-filter" title="Show only folders set up on a specific device">
-          Host
+          Device
           <select
             value={hostFilter ?? "__all__"}
             onChange={(e) => {
