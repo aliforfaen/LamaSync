@@ -20,6 +20,7 @@ import {
   swapChildren,
 } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
+import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import type {
   View,
   ViewContext,
@@ -149,7 +150,7 @@ interface FolderRow {
 
 export class LocalView implements View {
   static readonly id: ViewId = "local";
-  static readonly title = "Local";
+  static readonly title = "This device";
 
   readonly id: ViewId = LocalView.id;
   readonly title: string = LocalView.title;
@@ -183,7 +184,12 @@ export class LocalView implements View {
     );
     this.selectRef = realize<SelectRenderable>(
       renderer,
-      Select({ options: [], flexGrow: 1 }),
+      Select({
+        options: [],
+        flexGrow: 1,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
+      }),
     );
     this.selectRef.on("itemSelected", (_index: number, option: FolderRow) => {
       if (option.value) {
@@ -197,7 +203,7 @@ export class LocalView implements View {
     this.container = realize<Renderable>(
       renderer,
       pageShell(
-        "Local",
+        "This device",
         Box(
           { flexDirection: "column", flexGrow: 1 },
           this.bodyBox,
@@ -251,7 +257,7 @@ export class LocalView implements View {
   // ---------------------------------------------------------------------------
 
   private renderBody(): void {
-    const titleText: VNode = Text({ content: `Local — ${this.hostname || "—"}` });
+    const titleText: VNode = Text({ content: `This device — ${this.hostname || "—"}` });
     const listContent: VNode | Renderable =
       this.folders.length === 0
         ? Box(
