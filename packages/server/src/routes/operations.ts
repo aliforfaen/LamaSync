@@ -322,4 +322,57 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
     },
   );
 
+/**
+ * Delete `folder_locks` rows whose `locked_at + lock_ttl*1000` is at or
+ * before `now`. Rows survive a daemon crash because release only runs
+ * inside the daemon's try/finally; without this reaper an orphaned lock
+ * stays visible until the next acquire overwrites it — which never
+ * happens for folders no other host is watching, so the row pollutes
+ * `GET /operations/locks` indefinitely and `acquire` from any other host
+ * gets `409 folder_locked` until either (a) the reaper runs or (b) the
+ * folder is never re-acquired at all.
+ *
+ * Broadcasts one `lock` event with action `"reaped"` per deleted row so
+ * connected TUI/web clients can drop the stale lock from their view.
+ *
+ * Idempotent; safe to call from a startup hook and a periodic timer.
+ *
+ * LAMA-244.
+ */
+export function reapExpiredFolderLocks(now: number = Date.now()): {
+  deleted: number;
+  folderIds: string[];
+} {
+  // Treat a row as expired when (locked_at + lock_ttl*1000) <= now. Rows
+  // with NULL locked_at / lock_ttl are kept (defensive; shouldn't exist
+  // in production but we don't want to nuke a half-built row).
+  const expired = activeDb
+    .query<{ folderId: string; lockedBy: string | null }, [number]>(
+      `SELECT folder_id AS folderId, locked_by AS lockedBy
+       FROM folder_locks
+       WHERE locked_at IS NOT NULL
+         AND lock_ttl IS NOT NULL
+         AND (locked_at + lock_ttl * 1000) <= ?`,
+    )
+    .all(now);
+  if (expired.length === 0) return { deleted: 0, folderIds: [] };
+
+  const result = activeDb.run(
+    `DELETE FROM folder_locks
+     WHERE locked_at IS NOT NULL
+       AND lock_ttl IS NOT NULL
+       AND (locked_at + lock_ttl * 1000) <= ?`,
+    [now],
+  );
+  const deleted = Number(result.changes ?? 0);
+  for (const row of expired) {
+    broadcast({
+      kind: "lock",
+      folderId: row.folderId,
+      hostId: row.lockedBy ?? "unknown",
+      action: "reaped",
+    });
+  }
+  return { deleted, folderIds: expired.map((row) => row.folderId) };
+}
 

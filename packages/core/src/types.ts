@@ -437,7 +437,7 @@ export type WSEvent =
   // LAMA-225: emitted after a host rename (id == hostname). The UI shows a
   // banner and re-fetches host lists; other fields reference the NEW id.
   | { kind: "host_renamed"; oldId: string; newId: string; hostname: string }
-  | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released"; status?: string; lockId?: string }
+  | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released" | "reaped"; status?: string; lockId?: string }
   | { kind: "mount"; folderId: string; status: MountEntry["status"]; path: string }
   | { kind: "conflict"; conflict: Conflict }
   | { kind: "restic_snapshot"; snapshot: ResticSnapshot }

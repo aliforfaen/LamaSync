@@ -11,7 +11,7 @@ import { sharesRoutes } from "./routes/shares.ts";
 import { adminRoutes, pruneOperationLog } from "./routes/admin.ts";
 import { resticRoutes } from "./routes/restic.ts";
 import { conflictsRoutes } from "./routes/conflicts.ts";
-import { operationsRoutes } from "./routes/operations.ts";
+import { operationsRoutes, reapExpiredFolderLocks } from "./routes/operations.ts";
 import { releaseRoutes } from "./routes/release.ts";
 import { actionsRoutes } from "./routes/actions.ts";
 import { notificationsRoutes } from "./routes/notifications.ts";
@@ -194,3 +194,49 @@ const pruneTimer = setInterval(() => {
   }
 }, 24 * 60 * 60 * 1000);
 pruneTimer.unref?.();
+
+// LAMA-244: reaper for `folder_locks` rows whose TTL has elapsed. Without
+// this, locks orphaned by a crashed daemon sit in the table forever and
+// `acquire` from other hosts gets `409 folder_locked` until something
+// overwrites the row. The reaper is opt-out (LAMASYNC_LOCK_REAPER_MS=0)
+// and gated by the same test env checks as the rest of the boot-time
+// timers so unit tests don't pick up a stray interval.
+const LOCK_REAPER_DEFAULT_MS = 5 * 60_000;
+const lockReaperMs = (() => {
+  const raw = process.env.LAMASYNC_LOCK_REAPER_MS;
+  if (raw === undefined) return LOCK_REAPER_DEFAULT_MS;
+  if (raw === "0") return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : LOCK_REAPER_DEFAULT_MS;
+})();
+
+if (
+  process.env.LAMASYNC_TEST !== "1" &&
+  process.env.NODE_ENV !== "test" &&
+  lockReaperMs > 0
+) {
+  try {
+    const out = reapExpiredFolderLocks();
+    if (out.deleted > 0) {
+      console.log(
+        `[reaper] cleared ${out.deleted} expired folder lock(s) at startup`,
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[reaper] startup pass failed: ${msg}`);
+  }
+
+  const lockReaperTimer = setInterval(() => {
+    try {
+      const out = reapExpiredFolderLocks();
+      if (out.deleted > 0) {
+        console.log(`[reaper] cleared ${out.deleted} expired folder lock(s)`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[reaper] pass failed: ${msg}`);
+    }
+  }, lockReaperMs);
+  lockReaperTimer.unref?.();
+}

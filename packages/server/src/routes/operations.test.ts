@@ -6,7 +6,9 @@ process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "operations-test-
 process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-operations-test-data";
 
 const { getAuthPlugin } = await import("../auth.ts");
-const { __setDb, operationsRoutes } = (await import("./operations.ts")) as typeof import("./operations.ts");
+const { subscribe } = (await import("../ws.ts")) as typeof import("../ws.ts");
+const { __setDb, operationsRoutes, reapExpiredFolderLocks } =
+  (await import("./operations.ts")) as typeof import("./operations.ts");
 
 let db: Database;
 let app: { handle(request: Request): Response | Promise<Response> };
@@ -203,5 +205,126 @@ describe("operations GET /operations", () => {
       expect(row.hostId).toBe("host-a");
       expect(row.status).toBe("success");
     }
+  });
+});
+
+describe("reapExpiredFolderLocks (LAMA-244)", () => {
+  const seedLockRow = (
+    folderId: string,
+    lockedBy: string | null,
+    lockedAt: number | null,
+    lockTtl: number | null,
+    lockId: string | null,
+  ): void => {
+    db.run(
+      `INSERT OR REPLACE INTO folder_locks (folder_id, locked_by, locked_at, lock_ttl, lock_id)
+       VALUES (?, ?, ?, ?, ?)`,
+      [folderId, lockedBy, lockedAt, lockTtl, lockId],
+    );
+  };
+
+  const countLocks = (folderId: string): number => {
+    const row = db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM folder_locks WHERE folder_id = ?",
+      )
+      .get(folderId);
+    return row?.c ?? 0;
+  };
+
+  test("deletes rows whose locked_at + lock_ttl*1000 <= now", () => {
+    const now = 1_700_000_000_000;
+    // Acquired 1500s ago with a 1200s TTL → 300s past expiry.
+    seedLockRow("f1", "host-a", now - 1500_000, 1200, "old-lock");
+    // Acquired 1199s ago with a 1200s TTL → 1s before expiry.
+    seedLockRow("f2", "host-b", now - 1199_000, 1200, "fresh-lock");
+
+    const out = reapExpiredFolderLocks(now);
+    expect(out.deleted).toBe(1);
+    expect(countLocks("f1")).toBe(0);
+    expect(countLocks("f2")).toBe(1);
+  });
+
+  test("keeps rows still within TTL", () => {
+    const now = 1_700_000_000_000;
+    seedLockRow("f1", "host-a", now, 1200, "active-lock");
+
+    const out = reapExpiredFolderLocks(now);
+    expect(out.deleted).toBe(0);
+    expect(countLocks("f1")).toBe(1);
+  });
+
+  test("keeps rows with NULL locked_at or NULL lock_ttl", () => {
+    const now = 1_700_000_000_000;
+    seedLockRow("f1", "host-a", null, 1200, "no-at");
+    seedLockRow("f2", "host-a", now - 9_999_000, null, "no-ttl");
+    seedLockRow("f3", "host-a", null, null, "no-both");
+
+    const out = reapExpiredFolderLocks(now);
+    expect(out.deleted).toBe(0);
+    expect(countLocks("f1")).toBe(1);
+    expect(countLocks("f2")).toBe(1);
+    expect(countLocks("f3")).toBe(1);
+  });
+
+  test("idempotent under repeated runs", () => {
+    const now = 1_700_000_000_000;
+    seedLockRow("f1", "host-a", now - 1500_000, 1200, "stale");
+    seedLockRow("f2", "host-b", now - 1500_000, 1200, "stale-2");
+
+    const first = reapExpiredFolderLocks(now);
+    expect(first.deleted).toBe(2);
+
+    const second = reapExpiredFolderLocks(now);
+    expect(second.deleted).toBe(0);
+  });
+
+  test("broadcasts a 'reaped' lock event per deleted row", () => {
+    const now = 1_700_000_000_000;
+    seedLockRow("f1", "host-a", now - 1500_000, 1200, "stale");
+    seedLockRow("f2", "host-b", now - 100_000, 1200, "fresh");
+
+    const events: unknown[] = [];
+    const unsubscribe = subscribe((event) => events.push(event));
+    try {
+      const out = reapExpiredFolderLocks(now);
+      expect(out.deleted).toBe(1);
+      expect(out.folderIds).toEqual(["f1"]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual({
+        kind: "lock",
+        folderId: "f1",
+        hostId: "host-a",
+        action: "reaped",
+      });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("acquire succeeds on a previously-reaped folder without waiting for overwrite", async () => {
+    // Daemon on host-a "crashed" 25 minutes ago: lock is well past TTL
+    // (default 1200s). Without the reaper, host-b's acquire below would
+    // get 409 folder_locked until either (a) the reaper runs or (b) a
+    // third host eventually acquires. With the reaper, host-b's acquire
+    // succeeds on the first attempt.
+    const now = Date.now();
+    db.run(
+      `INSERT OR REPLACE INTO folder_locks (folder_id, locked_by, locked_at, lock_ttl, lock_id)
+       VALUES ('f1', 'host-a', ?, 1200, 'orphaned')`,
+      [now - 25 * 60 * 1000],
+    );
+
+    const out = reapExpiredFolderLocks(now);
+    expect(out.deleted).toBe(1);
+
+    const acquire = await post("/api/v1/operations/acquire", {
+      folderId: "f1",
+      hostId: "host-b",
+    });
+    expect(acquire.status).toBe(200);
+    const body = (await acquire.json()) as { lockId: string; ttl: number; acquired: boolean };
+    expect(body.acquired).toBe(true);
+    expect(body.lockId).toEqual(expect.any(String));
   });
 });
