@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type {
   BrowseEntry,
@@ -663,8 +664,8 @@ export function DataBrowser() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Data Browser</h1>
+      <PageHeader title="Data browser" purpose="Browse and manage files inside storage destinations directly." />
+<div className="toolbar">
         <span className="muted">
           {tab === "restic" ? "Read-only" : "Copy / move / rename / upload"}
         </span>

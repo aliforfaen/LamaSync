@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { Conflict, Folder, Host } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -82,8 +83,8 @@ export function Conflicts() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Conflicts</h1>
+      <PageHeader title="Conflicts" purpose="When both sides changed, decide what to keep." />
+<div className="toolbar">
         <div className="tabs" role="tablist">
           {TABS.map((t) => (
             <button

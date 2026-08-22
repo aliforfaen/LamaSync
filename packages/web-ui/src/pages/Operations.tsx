@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { useSearchParams } from "react-router-dom";
 import type { Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -132,8 +133,8 @@ export function Operations() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Operations</h1>
+      <PageHeader title="Activity" purpose="Recent sync and backup activity across your fleet, including locks and results." />
+<div className="toolbar">
         <label className="scope-filter">
           Status
           <select value={status} onChange={onStatusChange}>

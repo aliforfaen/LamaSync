@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import type {
   NotificationChannel,
   NotificationEvent,
@@ -339,8 +340,8 @@ export function Admin() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Admin</h1>
+      <PageHeader title="Admin" purpose="Server health, log retention, and housekeeping." />
+<div className="toolbar">
       </div>
 
       <section className="section">

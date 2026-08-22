@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 import type {
@@ -281,8 +282,8 @@ export function Dashboard() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Command Center</h1>
+      <PageHeader title="Dashboard" purpose="See what needs attention across your devices at a glance." />
+<div className="toolbar">
         <span
           className={`ws-pill ws-${wsState}`}
           title="WebSocket connection status"

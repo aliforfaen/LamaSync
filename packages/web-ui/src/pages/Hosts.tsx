@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { Host } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -130,8 +131,8 @@ export function Hosts() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Hosts</h1>
+      <PageHeader title="Devices" purpose="The machines running LamaSync — register new ones, check status, and manage each device." />
+<div className="toolbar">
         <span className="muted">{items ? `${items.length} registered` : "loading…"}</span>
         <button
           type="button"

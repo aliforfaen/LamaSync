@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import type { DotfileManifest, DotfileVersion, Host } from "@lamasync/core";
 import { api } from "../api.ts";
 import { HintText } from "../components/Hint.tsx";
@@ -324,8 +325,8 @@ export function Dotfiles() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Dotfiles</h1>
+      <PageHeader title="App settings" purpose="Back up application settings on this device and restore them on another." />
+<div className="toolbar">
         <label className="scope-filter">
           Scope
           <select

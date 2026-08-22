@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import type { Backend, S3Provider } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
@@ -273,8 +274,8 @@ export function Backends() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Backends</h1>
+      <PageHeader title="Storage destinations" purpose="Where your data lives — S3 buckets, local disks, NFS mounts, and restic repositories." />
+<div className="toolbar">
         <span className="muted">
           {items ? `${items.length} configured` : "loading…"}
         </span>

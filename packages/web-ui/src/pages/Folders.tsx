@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
@@ -671,8 +672,8 @@ export function Folders() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Folders</h1>
+      <PageHeader title="Synced folders" purpose="Folders kept in sync or backed up across your devices." />
+<div className="toolbar">
         <label className="scope-filter" title="Show only folders assigned to a specific host">
           Host
           <select

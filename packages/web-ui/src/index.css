@@ -234,24 +234,154 @@ td.num {
   font-variant-numeric: tabular-nums;
 }
 
-.nav {
-  display: flex;
-  /* LAMA-205: wrap instead of clip when the row runs out of width (the nav
-     sits at its exact limit at 1280px — any scrollbar/narrowing used to
-     shrink trailing items like "Sign out" into "gn out"). */
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  row-gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  align-items: center;
+/* LAMA-275 shell: grouped left rail on desktop, off-canvas drawer <900px.
+   The old flat top nav (LAMA-205 wrap rules) is replaced by the rail; routes
+   and deep links are unchanged. */
+.app {
+  flex-direction: row; /* overrides the base column layout below */
 }
 
-/* LAMA-205: never squeeze nav items below their natural width; overflow
-   wraps to the next row instead of clipping the text. */
-.nav > * {
+.rail {
+  display: flex;
+  flex-direction: column;
+  width: var(--nav-rail-width);
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: var(--space-4) var(--space-2) var(--space-3);
+  gap: var(--space-4);
+}
+
+.rail-brand {
+  margin: 0 var(--space-2);
+}
+
+.rail-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex: 1;
+}
+
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.rail-group-label {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding: 0 var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.rail a {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-dim);
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-md);
+}
+
+.rail a:hover {
+  background: var(--surface-inset);
+  color: var(--text-strong);
+}
+
+.rail a.active {
+  background: var(--accent-info-bg);
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.rail-footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.rail-footer .action {
+  text-align: left;
+}
+
+/* Slim top bar + drawer behavior below 900px. Hidden on desktop. */
+.topbar {
+  display: none;
+}
+
+.rail-backdrop {
+  display: none;
+}
+
+@media (max-width: 899px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+  }
+
+  .topbar-menu {
+    font-size: 1.25rem;
+    line-height: 1;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-dim);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+  }
+
+  .rail {
+    position: fixed;
+    z-index: 40;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    transform: translateX(-100%);
+    transition: transform 0.18s ease-out;
+    box-shadow: var(--shadow-lg);
+    height: 100dvh;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rail {
+      transition: none;
+    }
+  }
+
+  .rail-open {
+    transform: translateX(0);
+  }
+
+  .rail-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    background: var(--backdrop);
+    border: none;
+    cursor: pointer;
+  }
 }
 
 /* WS5 P5: wordmark — mono, tracked, two-tone; keep the layout role. */
@@ -347,6 +477,28 @@ button.action.theme-toggle {
 .page {
   padding: var(--space-5);
   flex: 1;
+  /* LAMA-275: deliberate max content width; wide displays get centered
+     content instead of stretched tables. */
+  max-width: calc(var(--content-max) + 2 * var(--space-5));
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* LAMA-275 page-context header: title + one-sentence purpose. Pages include
+   it as the first element so every view answers "where am I, what is this". */
+.page-header {
+  margin-bottom: var(--space-5);
+}
+
+.page-header h1 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-xl);
+}
+
+.page-header .page-purpose {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-md);
 }
 
 .login-page {
