@@ -108,7 +108,7 @@ export function Conflicts() {
         <thead>
           <tr>
             <th>Path</th>
-            <th>Host</th>
+            <th>Device</th>
             <th>Folder</th>
             <th>Local mtime</th>
             <th>Remote mtime</th>

@@ -149,7 +149,7 @@ export function Backends() {
           resticRepository: form.resticRepository || undefined,
           resticPassword: form.resticPassword || undefined,
         });
-        setNotice("Backend updated");
+        setNotice("Storage destination updated");
       } else {
         await api.createBackend({
           name: form.name,
@@ -163,7 +163,7 @@ export function Backends() {
           resticRepository: form.resticRepository,
           resticPassword: form.resticPassword,
         });
-        setNotice("Backend created");
+        setNotice("Storage destination created");
       }
       setForm(EMPTY_FORM);
       setEditingId(null);
@@ -249,7 +249,7 @@ export function Backends() {
     setDeleteTarget(null);
     try {
       await api.deleteBackend(b.id);
-      setNotice(`Backend '${b.name}' deleted`);
+      setNotice(`Storage destination '${b.name}' deleted`);
       await refresh();
     } catch (err) {
       setError(errorText(err));
@@ -284,7 +284,7 @@ export function Backends() {
       {notice && <div className="all-quiet">{notice}</div>}
 
       <section className="section">
-        <h2>{editingId ? `Edit backend: ${form.name}` : "Add backend"}</h2>
+        <h2>{editingId ? `Edit destination: ${form.name}` : "Add storage destination"}</h2>
         <form className="form" onSubmit={onSubmit}>
           <div className="form-row">
             <label>
@@ -471,12 +471,12 @@ export function Backends() {
       </section>
 
       <section className="section">
-        <h2>Configured backends</h2>
+        <h2>Configured destinations</h2>
         {!items ? (
           <div className="skel skel-line" aria-busy="true" />
         ) : items.length === 0 ? (
           <div className="empty-row">
-            No backends yet. Create one above, then point S3 folders at it —
+            No storage destinations yet. Create one above, then point S3 folders at it —
             the folder form only asks for the bucket name.
           </div>
         ) : (
@@ -576,10 +576,10 @@ export function Backends() {
 
       {deleteTarget && (
         <ConfirmDialog
-          title="Delete backend"
+          title="Delete storage destination"
           danger
           confirmLabel="Delete"
-          message={`Delete backend "${deleteTarget.name}"?${
+          message={`Delete storage destination "${deleteTarget.name}"?${
             (deleteTarget.folderCount ?? 0) > 0
               ? ` It is used by ${deleteTarget.folderCount} folder(s) — the server will refuse while it is.`
               : ""

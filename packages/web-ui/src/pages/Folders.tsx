@@ -133,7 +133,7 @@ function buildCreateBody(form: FolderForm): Record<string, unknown> {
 function validateFolderForm(form: FolderForm): string | null {
   if (form.backend === "s3") {
     if (form.s3Bucket.trim() === "") return "s3 bucket name is required";
-    if (form.backendId.trim() === "") return "pick an S3 backend for this folder";
+    if (form.backendId.trim() === "") return "pick an S3 storage destination for this folder";
   }
   return null;
 }
@@ -423,13 +423,13 @@ export function Folders() {
     return (
       <>
         <label>
-          Backend
+          Storage destination
           <select
             required
             value={current.backendId}
             onChange={(e) => setter({ ...current, backendId: e.target.value })}
           >
-            <option value="">Select a backend…</option>
+            <option value="">Select a storage destination…</option>
             {backends
               .filter((b) => b.kind === "s3")
               .map((b) => (
@@ -451,8 +451,8 @@ export function Folders() {
         </label>
         {backends.length === 0 ? (
           <p className="muted">
-            No backends configured yet — create one on the{" "}
-            <a href="#/backends">Backends</a> page first.
+            No storage destinations configured yet — create one on the{" "}
+            <a href="#/backends">Storage</a> page first.
           </p>
         ) : null}
       </>
@@ -473,13 +473,13 @@ export function Folders() {
     return (
       <>
         <label>
-          Backend
+          Storage destination
           <select
             required
             value={current.backendId}
             onChange={(e) => setter({ ...current, backendId: e.target.value })}
           >
-            <option value="">Select a {current.backend} backend…</option>
+            <option value="">Select a {current.backend} destination…</option>
             {matching.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.name}
@@ -530,7 +530,7 @@ export function Folders() {
           <HintText>{FOLDER_TYPE_HINTS[current.type]}</HintText>
         </label>
         <label>
-          Backend
+          Storage destination
           <select
             value={current.backend}
             onChange={(e) => updateFormBackend(e.target.value, current, setter)}
@@ -570,17 +570,17 @@ export function Folders() {
     const availableHosts = hosts.filter((h) => !assignedHostIds.has(h.id));
     return (
       <form className="form" onSubmit={onAssign}>
-        <h2 className="form-title">Assign “{assigningFolder.name}” to a host</h2>
+        <h2 className="form-title">Set up “{assigningFolder.name}” on a device</h2>
         {availableHosts.length === 0 ? (
           <p className="muted">
             {hosts.length === 0
-              ? "No hosts registered yet — add one from the Hosts page first."
-              : "Every registered host already has this folder assigned."}
+              ? "No devices registered yet — add one from the Devices page first."
+              : "Every device already has this folder set up."}
           </p>
         ) : (
           <>
             <label>
-              Host
+              Device
               <select
                 required
                 value={assignForm.hostId}
@@ -619,7 +619,7 @@ export function Folders() {
               />
             </label>
             <label>
-              Schedule (cron, optional)
+              Schedule
               <select
                 value={schedulePresetForCron(assignForm.syncExpr)}
                 onChange={(e) => {
@@ -634,7 +634,7 @@ export function Folders() {
               </select>
             </label>
             <label>
-              Custom cron (optional)
+              Custom schedule
               <input
                 placeholder="*/15 * * * *"
                 value={assignForm.syncExpr}
@@ -644,8 +644,8 @@ export function Folders() {
                 }}
               />
               <HintText>
-                Cron expression, e.g. <code>0 * * * *</code> = every hour. Leave
-                empty to sync on the daemon's default schedule.
+                Schedule in cron format, e.g. <code>0 * * * *</code> = every
+                hour. Leave empty to use this device's default schedule.
               </HintText>
               {assignCronError && <div className="error">{assignCronError}</div>}
             </label>
@@ -654,7 +654,7 @@ export function Folders() {
         <div className="actions">
           {availableHosts.length > 0 && (
             <button type="submit" className="action primary" disabled={busy}>
-              Assign
+              Set up
             </button>
           )}
           <button
@@ -674,7 +674,7 @@ export function Folders() {
     <div className="page">
       <PageHeader title="Synced folders" purpose="Folders kept in sync or backed up across your devices." />
 <div className="toolbar">
-        <label className="scope-filter" title="Show only folders assigned to a specific host">
+        <label className="scope-filter" title="Show only folders set up on a specific device">
           Host
           <select
             value={hostFilter ?? "__all__"}
@@ -695,7 +695,7 @@ export function Folders() {
               }
             }}
           >
-            <option value="__all__">All hosts</option>
+            <option value="__all__">All devices</option>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.hostname}
@@ -763,9 +763,9 @@ export function Folders() {
           <tr>
             <th>Name</th>
             <th>Type</th>
-            <th>Backend</th>
+            <th>Storage</th>
             <th>Size</th>
-            <th>Assignments</th>
+            <th>Set up on</th>
             <th>Created</th>
             <th />
           </tr>
@@ -779,8 +779,8 @@ export function Folders() {
             <tr className="empty-row">
               <td colSpan={7}>
                 {hostFilter
-                  ? `No folders assigned to ${hostLabel(hostFilter)} yet.`
-                  : "No folders yet — create one, then assign it to a host to start syncing."}
+                  ? `No folders set up on ${hostLabel(hostFilter)} yet.`
+                  : "No synced folders yet — create one, then set it up on a device to start syncing."}
               </td>
             </tr>
           ) : (
@@ -843,7 +843,7 @@ export function Folders() {
                     onClick={() => beginAssign(folder, assignments)}
                     disabled={busy}
                   >
-                    Assign
+                    Set up on device…
                   </button>
                   <Link
                     className="action"
@@ -875,13 +875,13 @@ export function Folders() {
                   <td colSpan={7}>
                     {assignments.length === 0 ? (
                       <p className="muted">
-                        No assignments yet — pick a host from the “Assign” button above.
+                        Not set up on any device yet — use “Set up” above to add one.
                       </p>
                     ) : (
                       <table className="data data-nested">
                         <thead>
                           <tr>
-                            <th>Host</th>
+                            <th>Device</th>
                             <th>Role</th>
                             <th>Local path</th>
                             <th>Schedule</th>
@@ -979,7 +979,7 @@ export function Folders() {
           title="Delete folder"
           danger
           confirmLabel="Delete"
-          message="Delete this folder and all its assignments?"
+          message="Delete this folder and remove it from every device it is set up on?"
           onConfirm={() => void confirmDeleteFolder()}
           onCancel={() => setDeletingFolderId(null)}
         />
@@ -987,10 +987,10 @@ export function Folders() {
 
       {unassign && (
         <ConfirmDialog
-          title="Unassign folder"
+          title="Remove from device"
           danger
-          confirmLabel="Unassign"
-          message={`Unassign this folder from ${unassign.hostId}?`}
+          confirmLabel="Remove"
+          message={`Remove this folder from ${unassign.hostId}?`}
           onConfirm={() => void confirmUnassign()}
           onCancel={() => setUnassign(null)}
         />

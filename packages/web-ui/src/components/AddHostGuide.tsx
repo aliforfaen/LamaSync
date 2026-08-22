@@ -68,9 +68,9 @@ export function AddHostGuide() {
 
   return (
     <div className="guide-panel">
-      <h2>Add a host</h2>
+      <h2>Add a device</h2>
       <p className="muted">
-        Hosts register themselves — there is no server-side "add" form. Run the
+        Devices register themselves — there is no server-side "add" form. Run the
         installer on the machine you want to add; it installs{" "}
         <code>lamasyncd</code>, writes <code>~/.config/lamasync/client.toml</code>,
         and starts a systemd user service.
@@ -96,7 +96,7 @@ export function AddHostGuide() {
 
       <h3>3. Confirm it showed up</h3>
       <p className="muted">
-        The daemon heartbeats every 30 seconds — the new host appears in this
+        The service heartbeats every 30 seconds — the new device appears in this
         list (and on the dashboard) within a minute.
       </p>
 
