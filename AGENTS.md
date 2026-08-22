@@ -26,8 +26,9 @@ reference; `reference/api.md` is the REST/WS escape hatch).
 
 Full annotated tree: `docs/repository-layout.md`. System design & DB schema:
 `ARCHITECTURE.md`. Feature history by LAMA issue: `docs/features.md`.
-Status log & work queue: `docs/status.md`. Production LXC ops (SSH,
-update, rollback): `docs/prod-deploy.md`.
+Status log & work queue: `docs/status.md`. Agent starting point and current
+work-order routing: `docs/agent-start.md`. Production LXC ops (SSH, update,
+rollback): `docs/prod-deploy.md`.
 
 ## Quick start
 

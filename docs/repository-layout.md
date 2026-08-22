@@ -231,5 +231,6 @@ lamasync/                     # Bun workspace root
     repository-layout.md      # this file
     features.md               # implemented features by LAMA issue + known limitations
     status.md                 # current status log + next-session work queue
+    agent-start.md            # short current work-order guide for coding agents
     prod-deploy.md            # production LXC ops (SSH, update, rollback)
 ```
