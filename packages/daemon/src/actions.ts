@@ -152,6 +152,71 @@ export function summarizeConfigRefresh(assignmentCount: number): ActionCompletio
   };
 }
 
+/**
+ * Aggregate per-folder sync/backup outcomes into a single headline
+ * suitable for the Operations view.
+ *
+ * The naive version — `join("; ")` of every per-folder
+ * `"backup ok: 0 transfers, 0 B in 1s"` line — bloats a row to thousands
+ * of characters when many no-op folders report the same string; the
+ * Operations view then looks like raw rclone stdout pasted verbatim and
+ * pushes the rest of the table off-screen.
+ *
+ * The per-folder `OperationLog` entries already carry the full detail
+ * (transferred bytes, per-folder errors, etc.) via `reportOperation` →
+ * `client.reportOperation`, so the batched ack only needs a compact
+ * headline. This helper:
+ *
+ * - reports `"<verb> N folder(s)"` when nothing failed,
+ * - reports `"<verb> X/N folder(s), N failed: <first failure>"` when
+ *   any folder failed, with the first failure trimmed so the line stays
+ *   well below 200 chars,
+ * - prefixes `dry-run: ` when `dryRun` is set,
+ * - delegates the empty-batch case to the caller via the `empty`
+ *   override (the dispatcher already short-circuits on no assignments
+ *   with a domain-specific message).
+ *
+ * Note: `summarizeReportForAction` upgrades `"skipped: …"` failures to
+ * `done` (lock contention isn't an error), so only true failures count
+ * here.
+ *
+ * Pure; safe to test without a network or server. LAMA-245.
+ */
+export function summarizeBatchSync(
+  outcomes: readonly ActionCompletion[],
+  options: {
+    verb: "synced" | "backed up";
+    dryRun?: boolean;
+    empty?: string;
+  },
+): ActionCompletion {
+  const n = outcomes.length;
+  const done = outcomes.filter((o) => o.status === "done").length;
+  const failed = n - done;
+  const status: "done" | "failed" = failed > 0 ? "failed" : "done";
+  const prefix = options.dryRun === true ? "dry-run: " : "";
+
+  if (n === 0) {
+    return { status: "done", result: options.empty ?? `${prefix}${options.verb} 0 folder(s)` };
+  }
+
+  if (failed === 0) {
+    return { status: "done", result: `${prefix}${options.verb} ${n} folder(s)` };
+  }
+
+  const firstFailure = outcomes.find((o) => o.status !== "done")?.result ?? "";
+  const MAX_TAIL = 80;
+  const tail = firstFailure
+    ? firstFailure.length > MAX_TAIL
+      ? `: ${firstFailure.slice(0, MAX_TAIL - 3)}…`
+      : `: ${firstFailure}`
+    : "";
+  return {
+    status,
+    result: `${prefix}${options.verb} ${done}/${n} folder(s), ${failed} failed${tail}`,
+  };
+}
+
 /** Build the completion body when the action type is unknown to the daemon. */
 export function unknownActionTypeCompletion(): ActionCompletion {
   return { status: "failed", result: "unknown action type" };

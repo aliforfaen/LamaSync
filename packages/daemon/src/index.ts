@@ -44,6 +44,7 @@ import {
   releaseStaleLocks,
   type LockAcquireResult,
 } from "./lock.ts";
+import { summarizeBatchSync } from "./actions.ts";
 import { createReportQueue, type ReportQueue } from "./report-queue.ts";
 import {
   adoptMount,
@@ -859,12 +860,11 @@ async function main(): Promise<void> {
               summarizeReport(report, `synced folder=${assignment.folderId}`),
             );
           }
-          const failedCount = outcomes.filter((o) => o.status === "failed").length;
-          const summary = outcomes.map((o) => o.result).join("; ");
-          await ack(
-            failedCount > 0 ? "failed" : "done",
-            `${dryRun ? "dry-run: " : ""}synced ${targets.length} folder(s): ${summary}`,
-          );
+          const summary = summarizeBatchSync(outcomes, {
+            verb: "synced",
+            dryRun,
+          });
+          await ack(summary.status, summary.result);
           return;
         }
         case "trigger_backup": {
@@ -892,12 +892,8 @@ async function main(): Promise<void> {
               summarizeReport(report, `backed up folder=${assignment.folderId}`),
             );
           }
-          const failedCount = outcomes.filter((o) => o.status === "failed").length;
-          const summary = outcomes.map((o) => o.result).join("; ");
-          await ack(
-            failedCount > 0 ? "failed" : "done",
-            `backed up ${targets.length} folder(s): ${summary}`,
-          );
+          const summary = summarizeBatchSync(outcomes, { verb: "backed up" });
+          await ack(summary.status, summary.result);
           return;
         }
         case "check_update": {

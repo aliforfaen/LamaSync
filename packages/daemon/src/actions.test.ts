@@ -8,6 +8,7 @@ import type { FolderAssignment, QueuedAction } from "@lamasync/core";
 import {
   isDryRunRequested,
   selectAssignmentsForSyncAction,
+  summarizeBatchSync,
   summarizeConfigRefresh,
   summarizeReportForAction,
   summarizeUpdateCheck,
@@ -215,6 +216,101 @@ describe("summarizeConfigRefresh", () => {
       status: "done",
       result: "refreshed config (7 assignments)",
     });
+  });
+});
+
+describe("summarizeBatchSync (LAMA-245)", () => {
+  test("all-done batch collapses to '<verb> N folder(s)'", () => {
+    const out = summarizeBatchSync(
+      [
+        { status: "done", result: "backup ok: 3 transfers, 1 KiB in 1s" },
+        { status: "done", result: "backup ok: 0 transfers, 0 B in 0s" },
+        { status: "done", result: "backup ok: 0 transfers, 0 B in 1s" },
+      ],
+      { verb: "backed up" },
+    );
+    expect(out).toEqual({ status: "done", result: "backed up 3 folder(s)" });
+  });
+
+  test("any-failed batch returns X/Y counts and failed status", () => {
+    const out = summarizeBatchSync(
+      [
+        { status: "done", result: "ok 1" },
+        { status: "failed", result: "backup timed out after 1200s" },
+        { status: "done", result: "ok 3" },
+      ],
+      { verb: "backed up" },
+    );
+    expect(out.status).toBe("failed");
+    expect(out.result).toBe(
+      "backed up 2/3 folder(s), 1 failed: backup timed out after 1200s",
+    );
+  });
+
+  test("'skipped: …' completions (mapped to 'done' upstream) are not counted as failures", () => {
+    // Upstream `summarizeReportForAction` upgrades `"skipped: …"` to
+    // `done`, so a batch with one lock-contention skip should still
+    // report "all-OK" rather than 6/7 + 1 failed.
+    const out = summarizeBatchSync(
+      [
+        { status: "done", result: "backup ok: 0 transfers, 0 B in 0s" },
+        {
+          status: "done",
+          result: "skipped: folder locked by norheim (300s remaining)",
+        },
+        { status: "done", result: "backup ok: 0 transfers, 0 B in 0s" },
+      ],
+      { verb: "backed up" },
+    );
+    expect(out).toEqual({ status: "done", result: "backed up 3 folder(s)" });
+  });
+
+  test("dry-run prefix is applied when dryRun is true", () => {
+    const out = summarizeBatchSync(
+      [{ status: "done", result: "would-copy 5" }],
+      { verb: "synced", dryRun: true },
+    );
+    expect(out.result.startsWith("dry-run: ")).toBe(true);
+    expect(out.result).toBe("dry-run: synced 1 folder(s)");
+  });
+
+  test("long first-failure strings are truncated with an ellipsis", () => {
+    const longFailure = "x".repeat(500);
+    const out = summarizeBatchSync(
+      [
+        { status: "done", result: "ok" },
+        { status: "failed", result: longFailure },
+      ],
+      { verb: "synced" },
+    );
+    expect(out.status).toBe("failed");
+    expect(out.result.length).toBeLessThan(120);
+    expect(out.result.endsWith("…")).toBe(true);
+  });
+
+  test("empty batch uses empty override when provided", () => {
+    const out = summarizeBatchSync([], {
+      verb: "synced",
+      empty: "no sync assignments configured",
+    });
+    expect(out).toEqual({
+      status: "done",
+      result: "no sync assignments configured",
+    });
+  });
+
+  test("empty batch without override defaults to '<verb> 0 folder(s)'", () => {
+    const out = summarizeBatchSync([], { verb: "backed up" });
+    expect(out).toEqual({ status: "done", result: "backed up 0 folder(s)" });
+  });
+
+  test("stays well under 200 chars even for pathological 100-folder batches", () => {
+    const outcomes = Array.from({ length: 100 }, () => ({
+      status: "done" as const,
+      result: "backup ok: 0 transfers, 0 B in 0s",
+    }));
+    const out = summarizeBatchSync(outcomes, { verb: "backed up" });
+    expect(out.result.length).toBeLessThan(50);
   });
 });
 
