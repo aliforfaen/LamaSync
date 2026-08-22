@@ -51,13 +51,13 @@ Tick items as later passes fix them. Statuses: ☐ todo · ◐ partial · ☑ do
 | Surface | Current terms found | Change needed | Status |
 |---|---|---|---|
 | Nav labels | Dashboard · **Hosts** · Folders · **Backends** · **Dotfiles** · Conflicts · Operations · Data · Admin | Regroup into rail per approved LAMA-275 proposal: Overview / Sync / **Apps** / Storage & tools / System; Hosts→Devices, Backends→Storage, Dotfiles under Apps | ☐ |
-| Hosts / HostDetail | "host", hostname fields | Device everywhere; keep actual hostname values as data | ☐ |
-| Folders list + editor | type chips sync/mount/backup/dotfile; "backend" select; assignment wording; cron presets exist | Type chips → glossary names; mount shown as sub-label; "Storage destination"; "Set up on …" | ☐ |
-| AssignmentEditor | "assign", mode Inherit/Sync/Mount, custom cron field | Per-device setup phrasing; mode → "read-only on this device"; hide raw cron behind Custom | ☐ |
-| Backends page | "Backend(s)", kind names s3/local/nfs/restic | Storage destination; kind names may stay as technical tags | ☐ |
-| Dotfiles page | "Dotfiles", manifest wording | App settings backup; drop "manifest" from labels | ☐ |
-| Conflicts page | strategy names newer_wins/source_wins/… | Plain-language dropdown ("When both sides changed") | ☐ |
-| Operations page | "operation" | Activity framing in prose; title optional rename | ☐ |
+| Hosts / HostDetail | was: host everywhere | Swept list page (Add device, remove-device dialogs); HostDetail detail pass still open | ◐ |
+| Folders list + editor | was: type chips, backend select, Assign wording | Swept: Set up on device…, Storage/Set up on columns, device empty states, schedule presets (cron behind Custom) | ☑ |
+| AssignmentEditor | was: assign/Inherit/Sync/Mount/cron | Swept: When both sides changed, Use folder default/Sync/Read-only mount, Custom schedule label | ☑ |
+| Backends page | was: Backend(s) everywhere | Swept: storage destinations in headings/notices/dialogs; kind names remain as technical tags | ☑ |
+| Dotfiles page | was: Dotfiles/manifest wording | Swept: app backups wording (New app backup, All devices); deep manifest-speak in TUI wizard still pending | ◐ |
+| Conflicts page | strategy names were raw values | Swept via concepts.ts: Keep newest / Prefer this device / Keep both / Ask me; Device column | ☑ |
+| Operations page | was: operation/host | Swept: Activity header + purpose, Device column/filter | ☑ |
 | GettingStarted / empty states | mixed | Apply glossary while rewriting | ☐ |
 | Admin | server jargon | Mostly technical page; audit lightly | ☐ |
 
@@ -65,11 +65,11 @@ Tick items as later passes fix them. Statuses: ☐ todo · ◐ partial · ☑ do
 
 | Surface | Current terms found | Change needed | Status |
 |---|---|---|---|
-| View titles | Local · Fleet · Dotfiles · Logs · Conflicts · GitHub | Fleet→Devices (or All devices); Dotfiles→App settings; IA restructure itself is LAMA-275 | ☐ |
+| View titles | Local · Fleet · Dotfiles · Logs · Conflicts · GitHub | Renamed: This device · All devices · App settings · Conflicts · Activity · GitHub (structural moves → LAMA-276) | ◐ |
 | Backup setup wizard | "Cron expression" step, raw cron entry | Schedule presets first, Custom reveals cron | ☐ |
 | Setup wizard (flows/setup.ts) | host/backend/assignment wording | Device / storage destination | ☐ |
 | Dotfile manifest wizard | "Host", "manifest" | Device; drop manifest-speak | ☐ |
-| Local/Fleet view rows & hints | host naming, hotkey hints | Device naming; hint rewording pairs with LAMA-275 contextual actions | ☐ |
+| Local/Fleet view rows & hints | host naming, hotkey hints | Headings now device-first; hint rewording pairs with LAMA-276 contextual actions | ◐ |
 
 ### CLI (`packages/tui/src/cli/`) — LAMA-253
 
