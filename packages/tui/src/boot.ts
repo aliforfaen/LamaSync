@@ -55,6 +55,11 @@ export async function bootShell(): Promise<void> {
   // promise; `main()` then returns and Bun exits once the loop drains.
   const { promise: runtimeHeld, resolve: releaseRuntime } =
     Promise.withResolvers<void>();
+  // `specs` is populated later in boot (after the views are constructed);
+  // it must be initialized here so the renderer's onDestroy can never hit a
+  // temporal-dead-zone access on early-teardown paths (setup-wizard cancel
+  // or a renderer failure before the views exist) — LAMA-254 audit finding.
+  let specs: ViewSpec[] = [];
   const renderer: CliRenderer = await createCliRenderer({
     exitOnCtrlC: true,
     autoFocus: true,
@@ -149,7 +154,7 @@ export async function bootShell(): Promise<void> {
     new MoreView({ ctx }),
   ];
 
-  const specs: ViewSpec[] = views.map((view) => ({
+  specs = views.map((view) => ({
     id: view.id,
     title: view.title,
     container: view.container,
