@@ -133,9 +133,20 @@ carries a one-line pointer here.
 
 Ready-to-pick work, ordered by likely value/urgency:
 
-1. **Doc + polish cleanup batch** — see `docs/cleanup-2026-08-18.md` and LAMA-247. Twenty-five small items from the 2026-08-18 docs-overview pass: stale refs in `docs/development.md` / `docs/status.md`, no-issue nits from the WS4/WS6 review (S3 download streaming, S3 404 shape, stale `tailnet_ip`, web cron accept-list, etc.), and a few CI/packaging tidy-ups. Most are <30 LOC; pick from the top.
+1. **UX flourish batch — `docs/handoff-flourishes.md`** (LAMA-266/267/270/
+   271/272/273). Long-session work-order handoff: schedules as human
+   sentences → teaching empty states → device cards → cmd+k palette →
+   pause/slow mode → backup 'Prove it' + fire drills. Each is wired to the
+   shipped design system; session contract + acceptance inside.
 
-2. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
+2. **LAMA-249 Phase 7 leftovers** — merge PR #1 (owner), then a fuller
+   screenshot/GIF set + filing the audit findings (dogfood doc #1–#5), and
+   the first `v*` release tag (removes the build-from-source install gap).
+
+3. **LAMA-247 remainder** — op-log export, ntfyUrl dead code, dotfile diff
+   preview, renderer smoke tests, env-table doc (see the LAMA-247 comment).
+
+4. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
    - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
 
 3. **LAMA-228 — TUI runtime-verify clean process exit** (todo, medium)
