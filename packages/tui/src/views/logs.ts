@@ -197,7 +197,7 @@ export class LogsView implements View {
       renderer,
       Box(
         { flexDirection: "column" },
-        Text({ content: "Operations" }),
+        Text({ content: "Activity" }),
         Text({ content: "Filter: all" }),
         Text({ content: "Host: (any)" }),
         Text({ content: "Page 1 (0 entries shown)" }),

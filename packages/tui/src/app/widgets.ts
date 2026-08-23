@@ -4,20 +4,22 @@ import type { CliRenderer, Renderable, VNode } from "@opentui/core";
 import { statusPrefix, type StatusKind } from "./theme.ts";
 
 /**
- * Bordered column with a title row and arbitrary content. Mirrors the
- * existing per-view header pattern used in `views/local.ts`, `views/fleet.ts`,
- * `views/logs.ts`, and `views/conflicts.ts`.
+ * Page column with an optional title row and arbitrary content. Chrome
+ * reduction (LAMA-276): no border and no outer padding — the tab bar + a
+ * per-view heading line + content + context footer + one shell status line
+ * is the full chrome budget. Views with a dynamic first line (e.g. "This
+ * device — hostname") pass `null` and render their own heading; static
+ * pages pass a literal title.
  *
  * Return type is `VNode`; views that need a persistent `Renderable` should
  * wrap the returned node through `instantiate(ctx, vnode)` before handing it
  * to the ViewManager.
  */
-export function pageShell(title: string, content: VNode): VNode {
-  return Box(
-    { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
-    Text({ content: title }),
-    content,
-  );
+export function pageShell(title: string | null, content: VNode): VNode {
+  const children: VNode[] = [];
+  if (title) children.push(Text({ content: title }));
+  children.push(content);
+  return Box({ flexDirection: "column", flexGrow: 1 }, ...children);
 }
 
 /**

@@ -113,10 +113,12 @@ export class ConflictsView implements View {
     );
     // The container is a real renderable: replaceRoot() swaps its children
     // on every refresh, and the ViewManager flips `visible` on tab switches.
+    // Chrome reduction (LAMA-276): no border box — the Conflicts heading is
+    // the first body line.
     this.container = realize<Renderable>(
       renderer,
       Box(
-        { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
+        { flexDirection: "column", flexGrow: 1 },
         Text({ content: "Conflicts" }),
         Text({ content: "Loading pending conflicts…" }),
         Text({ content: "" }),

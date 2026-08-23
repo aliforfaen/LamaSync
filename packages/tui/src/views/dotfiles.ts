@@ -30,6 +30,7 @@ import { join } from "path";
 import type {
   DotfileManifest,
   DotfileVersion,
+  Folder,
   LamaSyncApiClient,
 } from "@lamasync/core";
 
@@ -65,6 +66,7 @@ type Step =
 export interface DotfilesState {
   step: Step;
   manifests: DotfileManifest[];
+  backupFolders: BackupFolderRow[];
   apps: string[];
   appName: string | null;
   instructions: string | null;
@@ -128,6 +130,21 @@ interface AppRow {
   value: string;
 }
 
+/** Fleet-wide backup-type folder, rendered as a read-only visibility list. */
+interface BackupFolderRow {
+  name: string;
+  description: string;
+}
+
+/** Storage-destination kind label for a backup folder row (glossary: backend → storage destination). */
+function describeBackupFolder(f: Folder): string {
+  const parts: string[] = [];
+  if (f.backend) parts.push(f.backend);
+  if (f.s3Bucket) parts.push(f.s3Bucket);
+  if (f.encrypted) parts.push("encrypted");
+  return parts.length > 0 ? parts.join(" · ") : "storage destination";
+}
+
 interface VersionRow {
   name: string;
   description: string;
@@ -142,7 +159,7 @@ interface VersionRow {
  */
 export class DotfilesView implements View {
   static readonly id: ViewId = "dotfiles";
-  static readonly title = "App settings";
+  static readonly title = "Backups & apps";
 
   readonly id: ViewId = DotfilesView.id;
   readonly title: string = DotfilesView.title;
@@ -154,6 +171,7 @@ export class DotfilesView implements View {
   private readonly state: DotfilesState = {
     step: "app",
     manifests: [],
+    backupFolders: [],
     apps: [],
     appName: null,
     instructions: null,
@@ -192,7 +210,7 @@ export class DotfilesView implements View {
     this.container = realize<Renderable>(
       opts.ctx.renderer,
       pageShell(
-        "App settings",
+        "Backups & apps",
         Box({ flexDirection: "column", flexGrow: 1 }, this.bodyBox),
       ),
     );
@@ -274,8 +292,17 @@ export class DotfilesView implements View {
     if (!ctx) return;
     const loadId = ++this.loadId;
     try {
-      const manifests = await ctx.api.listDotfileManifests(ctx.hostname);
+      // Manifests are the interactive part; folders are a visibility list, so
+      // a folders-fetch failure must not blank the app picker.
+      const [manifests, folders] = await Promise.all([
+        ctx.api.listDotfileManifests(ctx.hostname),
+        ctx.api.listFolders().catch(() => [] as Folder[]),
+      ]);
       if (loadId !== this.loadId) return;
+      this.state.backupFolders = folders
+        .filter((f) => f.type === "backup")
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((f) => ({ name: f.name, description: describeBackupFolder(f) }));
       const seen = new Set<string>();
       for (const m of manifests) seen.add(m.appName);
       this.state.manifests = manifests;
@@ -554,7 +581,21 @@ export class DotfilesView implements View {
     }
   }
 
+  /** Read-only fleet-wide backup-folder visibility block (LAMA-276). */
+  private renderBackupFolders(): VNode[] {
+    if (this.state.backupFolders.length === 0) return [];
+    const lines: VNode[] = [
+      Text({ content: `Backup folders (${this.state.backupFolders.length})` }),
+    ];
+    for (const b of this.state.backupFolders) {
+      lines.push(Text({ content: `  ${b.name} — ${b.description}` }));
+    }
+    lines.push(Text({ content: "" }));
+    return lines;
+  }
+
   private renderAppStep(): VNode[] {
+    const backups = this.renderBackupFolders();
     if (this.state.loadError) {
       return [
         Text({ content: `[!] ${this.state.loadError}` }),
@@ -563,6 +604,7 @@ export class DotfilesView implements View {
     }
     if (this.state.apps.length === 0) {
       return [
+        ...backups,
         Text({ content: "Loading apps…" }),
         Text({ content: "Press n to create a manifest, r to refresh." }),
       ];
@@ -598,6 +640,8 @@ export class DotfilesView implements View {
       void this.selectApp(opt.value);
     });
     return [
+      ...backups,
+      Text({ content: "App settings — dotfile snapshots and restore" }),
       Text({ content: "Select an app to browse its snapshots, or choose Setup." }),
       Text({ content: "" }),
       select,
@@ -733,6 +777,7 @@ export class DotfilesView implements View {
 
   private renderSetupStep(): VNode[] {
     return [
+      ...this.renderBackupFolders(),
       Text({ content: "Fresh-install setup" }),
       Text({ content: this.state.extractResult ?? "Working…" }),
       Text({ content: "Press n to add a manifest, r to refresh." }),

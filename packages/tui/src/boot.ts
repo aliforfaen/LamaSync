@@ -5,10 +5,14 @@
  * Slice J (LAMA-173) integrates the six foundation views:
  *   - Local      (folder list + sync/cache/wizard hotkeys)
  *   - Fleet      (live hosts via FleetService WebSocket)
- *   - Dotfiles   (manifest browser + restore wizard)
+ *   - Dotfiles   (app-settings manifests + backup-folder visibility)
  *   - Conflicts  (pending-conflict resolution)
  *   - Logs       (paginated operation log)
  *   - Gh         (GitHub repo selector for `gh` CLI adoption)
+ *
+ * LAMA-276/D4 additions: a `more` tab is the entry point for tools /
+ * integrations and the `gh` view is hidden from the tab bar, reachable
+ * only via the More menu (`hiddenFromTabBar` + `homeTab`).
  *
  * `bootShell` resolves the API client, the FleetService, the OpenTUI
  * renderer, and the daemon socket path, then constructs the view instances
@@ -24,7 +28,7 @@ import type { TuiClient } from "./api.ts";
 import { createFleetService } from "./app/fleet-service.ts";
 import type { FleetService } from "./app/fleet-service.ts";
 import { Shell } from "./app/shell.ts";
-import type { View, ViewContext, ViewSpec } from "./app/view-manager.ts";
+import type { View, ViewContext, ViewId, ViewSpec } from "./app/view-manager.ts";
 import { openWizard } from "./app/wizard.ts";
 import { runSetupFlow } from "./flows/setup.ts";
 
@@ -34,6 +38,7 @@ import { FleetView } from "./views/fleet.ts";
 import { GhView } from "./views/gh-selector.ts";
 import { LocalView } from "./views/local.ts";
 import { LogsView } from "./views/logs.ts";
+import { MoreView } from "./views/more.ts";
 
 /**
  * Compose the runtime, wire the six views through the Shell, and start the
@@ -141,6 +146,7 @@ export async function bootShell(): Promise<void> {
     new ConflictsView({ renderer }),
     new LogsView({ renderer }),
     new GhView({ ctx }),
+    new MoreView({ ctx }),
   ];
 
   const specs: ViewSpec[] = views.map((view) => ({
@@ -149,6 +155,11 @@ export async function bootShell(): Promise<void> {
     container: view.container,
     hotkeys: view.hotkeys(),
     ctx,
+    // LAMA-276/D4: GitHub is an integration, not a core destination — it
+    // hides from the tab bar and is opened from the More menu. Esc returns
+    // to More via the Shell's drill-in handling.
+    hiddenFromTabBar: view.id === "gh" ? true : undefined,
+    homeTab: view.id === "gh" ? "more" : undefined,
     onShow: () => view.onShow(ctx),
     onHide: view.onHide?.bind(view),
     handleKey: view.handleKey?.bind(view),
@@ -165,6 +176,12 @@ export async function bootShell(): Promise<void> {
 
   (ctx as { setStatus: (m:string, k?:"info"|"error"|"success") => void }).setStatus = (msg, kind = "info") => {
     shell.setStatus(msg, kind);
+  };
+
+  // LAMA-276/D4: wire the drill-in navigation so the More menu can open the
+  // hidden GitHub view (and Esc returns to More via the Shell).
+  (ctx as { navigateTo?: (id: ViewId) => void }).navigateTo = (id: ViewId) => {
+    shell.showView(id);
   };
 
   if (pendingStatus.message) {
