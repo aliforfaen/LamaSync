@@ -124,6 +124,31 @@ decided but you may want a relook
 - **Merge PR #1** when ready — all six phases are effectively done; review
   the What's new doc first.
 
+## 2026-08-23 — UX flourish batch (LAMA-267/271/272/270)
+
+### LAMA-267 — Schedules as human sentences
+
+- The raw cron box is gone from every schedule picker: folder "set up on
+  device", the assignment editor, and app settings manifests now show the
+  friendly presets (Custom / Every hour / Every 6 hours / Daily / Weekly /
+  Monthly / On boot / On login) with **"Advanced: custom cron" collapsed**
+  behind a reveal toggle. 🤖
+- A **"Next: …" sentence** now previews the next run wherever a schedule is
+  set — "Next: tonight at 02:00", "Next: in 27m", "Next: on boot" — computed
+  with the *same* `cron-parser` the daemon uses, so the preview matches what
+  will actually run. Invalid or never-firing crons show nothing. 🤖
+- Web preset labels now come from one shared module (`schedule-presets.ts`);
+  they already matched the TUI, so **zero TUI changes**. ⚠️ **Relook
+  candidate**: the TUI wizard's preset *description* still shows the raw cron
+  string — pre-existing copy, out of scope; flag if you want it humanized.
+- "When on WiFi" preset is **not** included (no wifi-trigger backend exists);
+  noted on LAMA-267.
+
+### Platform decisions (agents, no owner input yet)
+
+- Next-run sentence computed client-side via the shared `cron-parser`
+  dependency (added to web-ui); no new server endpoint.
+
 ---
 
 *(Future sessions: append a new dated section here instead of editing old

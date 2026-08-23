@@ -1568,3 +1568,25 @@ button.action:disabled {
   color: var(--accent-ok, var(--text-muted));
   border-color: var(--accent-ok, var(--border-strong));
 }
+
+/* LAMA-267: schedules as human sentences. `.next-run` is the "Next: …"
+   preview (forms + table cells); `.schedule-custom-reveal` is the collapsed
+   "Advanced: custom cron" toggle that hides the raw cron input by default. */
+.next-run {
+  font-size: var(--font-size-sm);
+  color: var(--accent-info);
+}
+
+.schedule-custom-reveal {
+  font-size: var(--font-size-sm);
+}
+
+.schedule-custom-reveal summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.schedule-custom-reveal summary:hover {
+  color: var(--text);
+}

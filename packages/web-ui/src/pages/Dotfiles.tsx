@@ -5,6 +5,10 @@ import { api } from "../api.ts";
 import { HintText } from "../components/Hint.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { MISC_HINTS } from "../concepts.ts";
+// LAMA-267: shared presets (single source of truth for labels) and the
+// client-side "Next: …" sentence helper.
+import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
+import { nextRunSentence } from "../next-run.ts";
 
 const GLOBAL_HOST_ID = "_global";
 
@@ -27,23 +31,6 @@ const EMPTY_FORM: ManifestForm = {
   schedule: "",
   instructions: "",
 };
-
-const SCHEDULE_PRESETS: { label: string; value: string; cron: string }[] = [
-  { label: "Custom", value: "custom", cron: "" },
-  { label: "Every hour", value: "hourly", cron: "0 * * * *" },
-  { label: "Every 6 hours", value: "6h", cron: "0 */6 * * *" },
-  { label: "Daily", value: "daily", cron: "0 0 * * *" },
-  { label: "Weekly", value: "weekly", cron: "0 0 * * 0" },
-  { label: "Monthly", value: "monthly", cron: "0 0 1 * *" },
-  { label: "On boot", value: "@reboot", cron: "@reboot" },
-  { label: "On login", value: "@login", cron: "@login" },
-];
-
-function schedulePresetForCron(cron: string | null | undefined): string {
-  if (!cron) return "custom";
-  const preset = SCHEDULE_PRESETS.find((p) => p.cron === cron);
-  return preset ? preset.value : "custom";
-}
 
 /** Human-readable byte count for the version Size column. */
 function formatBytes(bytes: number | null | undefined): string {
@@ -408,8 +395,18 @@ export function Dotfiles() {
                 </option>
               ))}
             </select>
+            {/* LAMA-267: plain-sentence preview of the next fire. */}
+            {nextRunSentence(form.schedule) && (
+              <span className="muted next-run">{nextRunSentence(form.schedule)}</span>
+            )}
           </label>
-          {form.schedulePreset === "custom" && (
+          {/* LAMA-267: the raw cron input hides behind a reveal toggle and
+              only auto-opens when the selected preset is "Custom". */}
+          <details
+            className="schedule-custom-reveal"
+            open={form.schedulePreset === "custom"}
+          >
+            <summary>Advanced: custom cron</summary>
             <label>
               Cron expression
               <input
@@ -418,7 +415,7 @@ export function Dotfiles() {
                 onChange={(e) => setForm({ ...form, schedule: e.target.value })}
               />
             </label>
-          )}
+          </details>
           <label>
             Instructions
             <textarea
@@ -488,8 +485,20 @@ export function Dotfiles() {
                 </option>
               ))}
             </select>
+            {/* LAMA-267: plain-sentence preview of the next fire. */}
+            {nextRunSentence(editForm.schedule) && (
+              <span className="muted next-run">
+                {nextRunSentence(editForm.schedule)}
+              </span>
+            )}
           </label>
-          {editForm.schedulePreset === "custom" && (
+          {/* LAMA-267: the raw cron input hides behind a reveal toggle and
+              only auto-opens when the selected preset is "Custom". */}
+          <details
+            className="schedule-custom-reveal"
+            open={editForm.schedulePreset === "custom"}
+          >
+            <summary>Advanced: custom cron</summary>
             <label>
               Cron expression
               <input
@@ -497,7 +506,7 @@ export function Dotfiles() {
                 onChange={(e) => setEditForm({ ...editForm, schedule: e.target.value })}
               />
             </label>
-          )}
+          </details>
           <label>
             Instructions
             <textarea
@@ -552,7 +561,17 @@ export function Dotfiles() {
                     <td className="muted">{hostLabel(m.hostId)}</td>
                     <td className="muted">{m.paths.join(", ")}</td>
                     <td className="muted">{(m.excludes ?? []).join(", ") || "—"}</td>
-                    <td className="muted">{m.schedule ?? "—"}</td>
+                    {/* LAMA-267: human sentence instead of raw cron; the raw
+                        expression stays available as a hover tooltip. */}
+                    <td className="muted">
+                      {m.schedule ? (
+                        <span className="next-run" title={m.schedule}>
+                          {nextRunSentence(m.schedule) ?? "—"}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="muted">
                       {m.lastSyncAt ? new Date(m.lastSyncAt).toLocaleString() : "—"}
                       {m.lastSyncDirection ? (

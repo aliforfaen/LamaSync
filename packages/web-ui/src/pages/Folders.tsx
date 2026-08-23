@@ -5,6 +5,10 @@ import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@la
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
+// LAMA-267: shared presets (single source of truth for labels) and the
+// client-side "Next: …" sentence helper.
+import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
+import { nextRunSentence } from "../next-run.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { HintText } from "../components/Hint.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
@@ -22,25 +26,6 @@ interface FolderWithAssignments {
 type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
 type AssignRole = "source" | "target" | "both";
-
-// Mirrors the Dotfiles page + AssignmentEditor presets so the assign form
-// offers the same schedule shortcuts.
-const SCHEDULE_PRESETS: { label: string; value: string; cron: string }[] = [
-  { label: "Custom", value: "custom", cron: "" },
-  { label: "Every hour", value: "hourly", cron: "0 * * * *" },
-  { label: "Every 6 hours", value: "6h", cron: "0 */6 * * *" },
-  { label: "Daily", value: "daily", cron: "0 0 * * *" },
-  { label: "Weekly", value: "weekly", cron: "0 0 * * 0" },
-  { label: "Monthly", value: "monthly", cron: "0 0 1 * *" },
-  { label: "On boot", value: "@reboot", cron: "@reboot" },
-  { label: "On login", value: "@login", cron: "@login" },
-];
-
-function schedulePresetForCron(cron: string | null | undefined): string {
-  if (!cron) return "custom";
-  const preset = SCHEDULE_PRESETS.find((p) => p.cron === cron);
-  return preset ? preset.value : "custom";
-}
 
 interface AssignForm {
   hostId: string;
@@ -568,6 +553,9 @@ export function Folders() {
       ),
     );
     const availableHosts = hosts.filter((h) => !assignedHostIds.has(h.id));
+    // LAMA-267: "Next: …" preview for the schedule being set up. Computed
+    // once per render; null when nothing schedulable is set yet.
+    const assignNextRun = nextRunSentence(assignForm.syncExpr);
     return (
       <form className="form" onSubmit={onAssign}>
         <h2 className="form-title">Set up “{assigningFolder.name}” on a device</h2>
@@ -632,23 +620,33 @@ export function Folders() {
                   <option key={p.value} value={p.value}>{p.label}</option>
                 ))}
               </select>
+              {/* LAMA-267: plain-sentence preview of the next fire. */}
+              {assignNextRun && <span className="muted next-run">{assignNextRun}</span>}
             </label>
-            <label>
-              Custom schedule
-              <input
-                placeholder="*/15 * * * *"
-                value={assignForm.syncExpr}
-                onChange={(e) => {
-                  setAssignForm({ ...assignForm, syncExpr: e.target.value });
-                  setAssignCronError(null);
-                }}
-              />
-              <HintText>
-                Schedule in cron format, e.g. <code>0 * * * *</code> = every
-                hour. Leave empty to use this device's default schedule.
-              </HintText>
-              {assignCronError && <div className="error">{assignCronError}</div>}
-            </label>
+            {/* LAMA-267: the raw cron input hides behind a reveal toggle and
+                only auto-opens when the selected preset is "Custom". */}
+            <details
+              className="schedule-custom-reveal"
+              open={schedulePresetForCron(assignForm.syncExpr) === "custom"}
+            >
+              <summary>Advanced: custom cron</summary>
+              <label>
+                Custom schedule
+                <input
+                  placeholder="*/15 * * * *"
+                  value={assignForm.syncExpr}
+                  onChange={(e) => {
+                    setAssignForm({ ...assignForm, syncExpr: e.target.value });
+                    setAssignCronError(null);
+                  }}
+                />
+                <HintText>
+                  Schedule in cron format, e.g. <code>0 * * * *</code> = every
+                  hour. Leave empty to use this device's default schedule.
+                </HintText>
+                {assignCronError && <div className="error">{assignCronError}</div>}
+              </label>
+            </details>
           </>
         )}
         <div className="actions">
@@ -915,8 +913,20 @@ export function Folders() {
                                   {assignment.localPath}
                                 </code>
                               </td>
-                              <td className="mono muted assignment-schedule">
-                                {assignment.syncExpr ?? "—"}
+                              <td className="muted assignment-schedule">
+                                {/* LAMA-267: human sentence instead of raw
+                                    cron; the raw expression stays available
+                                    as a hover tooltip. */}
+                                {assignment.syncExpr ? (
+                                  <span
+                                    className="next-run"
+                                    title={assignment.syncExpr}
+                                  >
+                                    {nextRunSentence(assignment.syncExpr) ?? "—"}
+                                  </span>
+                                ) : (
+                                  "—"
+                                )}
                               </td>
                               <td>
                                 {effectiveMode ? (
