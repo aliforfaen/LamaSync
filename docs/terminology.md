@@ -80,13 +80,13 @@ Tick items as later passes fix them. Statuses: ☐ todo · ◐ partial · ☑ do
 | friendly-error messages | mixed | Device/storage wording; exact API error text untouched | ☑ |
 | daemon/server `usage.ts` blocks | host/daemon terms | Prose only: this device, per-device configuration | ☑ |
 
-### Repo presence — LAMA-252 / LAMA-254
+### Repo presence — LAMA-252 ✅ shipped 2026-08-23 / LAMA-254 in progress
 
 | Surface | Current terms found | Change needed | Status |
 |---|---|---|---|
-| README headline + body | "folder assignments", "dotfile manifests", "machines" | Sync-first headline; devices/app settings backups; public-safe split to prod-deploy.md | ☐ |
-| Screenshots/GIFs | n/a yet | Capture AFTER copy passes land | ☐ |
-| CONTRIBUTING.md / templates | don't exist yet | New files; dev-facing so technical terms OK there | ☐ |
+| README headline + body | "folder assignments", "dotfile manifests", "machines" | Sync-first headline; devices/app settings backups; public-safe split to prod-deploy.md | ☑ README rewritten 2026-08-23 (private LXC/SSH details moved to prod-deploy.md only) |
+| Screenshots/GIFs | n/a yet | Capture AFTER copy passes land | ☐ (Phase 6) |
+| CONTRIBUTING.md / templates | don't exist yet | New files; dev-facing so technical terms OK there | ☐ (Phase 6) |
 
 ### Deliberately out of scope for renaming
 
