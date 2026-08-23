@@ -23,6 +23,8 @@ same binary.
 
 ## What does this do for me?
 
+![Web dashboard — dark theme](docs/lama275-artifacts/after/web-dashboard-1440-dark.png)
+
 - **Folders that stay in sync everywhere** — pick a folder, decide how it
   syncs (two-way, one-way backup, read-only mount), and the fleet keeps it
   that way. Per-folder conflict strategies ("keep newest", "prefer this
@@ -156,6 +158,26 @@ starts syncing on schedule. Watch it happen in the **Activity** view.
 | `lamasync-server` | REST + WebSocket + SQLite + embedded React web UI. Owns folder definitions, schedules, per-device generated rclone configs, and the operation log. |
 | `lamasyncd` | One per device (systemd user service). Runs the scheduled rclone operations, mounts, hooks, and ignore patterns; exposes a Unix socket for the local TUI. |
 | `lamasync-tui` | Terminal UI **and** CLI in one binary. Local mode talks to the daemon over its socket; fleet mode talks to the server; any positional command is a headless CLI (stable exit codes, `--json`). |
+
+The terminal UI (task-oriented tabs, 80-column-friendly):
+
+```
+ This device  All devices  Backups      Conflicts    Activity     More
+▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Backups & apps                                                               │
+│ Backup folders (3)                                                           │
+│   appdata-backups — sftp                                                     │
+│   home-snapshots — sftp                                                      │
+│   photos-archive — sftp                                                      │
+│                                                                              │
+│ App settings — dotfile snapshots and restore                                 │
+│ Select an app to browse its snapshots, or choose Setup.                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+(More captures: `docs/lama275-artifacts/`.)
 
 ### How a sync happens
 

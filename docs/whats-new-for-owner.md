@@ -104,11 +104,25 @@ decided but you may want a relook
   select), and daemon/server usage blocks use the glossary; commands,
   flags, exit codes, JSON keys untouched; skill-drift stays OK.
 
+### Phase 5 + 6 (2026-08-23)
+
+- **LAMA-252 README rewrite (Phase 5 done)**: sync-first headline, 15-min
+  setup, architecture last; private LXC/SSH details removed (now only in
+  docs/prod-deploy.md); glossary applied; embeds final-wording captures.
+- **LAMA-254 repo polish (Phase 6, mostly done)**: CONTRIBUTING.md + issue
+  forms + PR template; README screenshot embeds; **stranger-flow audit
+  passed** — fresh-HOME install → device registration → folder + "set up on
+  device" → daemon picked up the assignment via config_revision → CLI sync
+  trigger → real `backup ok: 1 transfers, 22 B` in Activity (live proof the
+  LAMA-247 transfer-count fix works). The audit caught and fixed a real bug:
+  `boot.ts` onDestroy TDZ crash on early teardown.
+
 ### Next for this branch
 
-- **LAMA-252** README rewrite (Phase 5) — worth your note on tone.
-- **LAMA-254** repo polish + stranger-flow audit (Phase 6) — dogfood doc is
-  the baseline.
+- **LAMA-254 remainder**: fuller screenshot/GIF set + a GIF convention;
+  file the audit findings as Multica follow-ups.
+- **Merge PR #1** when ready — all six phases are effectively done; review
+  the What's new doc first.
 
 ---
 

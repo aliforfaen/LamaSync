@@ -85,8 +85,8 @@ Tick items as later passes fix them. Statuses: ☐ todo · ◐ partial · ☑ do
 | Surface | Current terms found | Change needed | Status |
 |---|---|---|---|
 | README headline + body | "folder assignments", "dotfile manifests", "machines" | Sync-first headline; devices/app settings backups; public-safe split to prod-deploy.md | ☑ README rewritten 2026-08-23 (private LXC/SSH details moved to prod-deploy.md only) |
-| Screenshots/GIFs | n/a yet | Capture AFTER copy passes land | ☐ (Phase 6) |
-| CONTRIBUTING.md / templates | don't exist yet | New files; dev-facing so technical terms OK there | ☐ (Phase 6) |
+| Screenshots/GIFs | n/a yet | Capture AFTER copy passes land | ☑ README embeds final-wording captures (web dashboard dark + TUI backups/apps) from docs/lama275-artifacts/after |
+| CONTRIBUTING.md / templates | don't exist yet | New files; dev-facing so technical terms OK there | ☑ CONTRIBUTING.md + issue/PR templates added 2026-08-23 |
 
 ### Deliberately out of scope for renaming
 

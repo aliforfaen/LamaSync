@@ -67,16 +67,23 @@ as a separate pass. This phase covers only LAMA-253: CLI/TUI `--help` + usage
 blocks + wizard text + error messages. Strings only; commands/flags/exit
 codes/JSON keys unchanged. Re-run drift check after.
 
-### Phase 5 — LAMA-252: README rewrite
+### Phase 5 — LAMA-252: README rewrite ✅ shipped 2026-08-23
 Sync-first headline, what-does-this-do-for-me → 15-minute setup → architecture;
 public-safe (SSH/IP/fleet specifics move to `docs/prod-deploy.md` only);
-glossary applied.
+glossary applied. Also now embeds final-wording captures (Phase-6 screenshots
+item partly absorbed).
 
-### Phase 6 — LAMA-254: repo polish + fresh-eyes onboarding audit
+### Phase 6 — LAMA-254: repo polish + fresh-eyes onboarding audit ◐ in progress
 Screenshots/GIFs (AFTER wording is final), CONTRIBUTING.md, issue templates +
 PR template, stranger-flow install→register→folder→first-backup audit with
 findings filed as follow-up issues. The dogfood baseline lives in
 `docs/dogfood-2026-08-23.md` (stranger-flow audit section + findings log).
+
+Shipped 2026-08-23: CONTRIBUTING.md, bug-report/feature-request issue forms,
+PR template, README screenshot embeds, and the **stranger-flow audit (PASS)**
+which found + fixed the boot.ts onDestroy TDZ crash (findings #1–#5 in the
+dogfood doc). Remaining: fuller screenshot set/GIFs + GIF convention; findings
+filed as Multica follow-ups.
 
 ## Merge discipline
 
