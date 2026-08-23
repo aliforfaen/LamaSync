@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
 import { Link } from "react-router-dom";
 import type { Host } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -70,6 +71,8 @@ export function Hosts() {
   const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deletingHost, setDeletingHost] = useState<Host | null>(null);
+  // LAMA-271: the empty-state CTA scrolls to the existing AddHostGuide flow.
+  const guideRef = useRef<HTMLDivElement | null>(null);
   const { event } = useWebSocket();
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -157,7 +160,9 @@ export function Hosts() {
         </div>
       ) : null}
 
-      {(showGuide || (items !== null && items.length === 0)) && <AddHostGuide />}
+      <div ref={guideRef}>
+        {(showGuide || (items !== null && items.length === 0)) && <AddHostGuide />}
+      </div>
 
       {!items ? (
         <div className="host-list" aria-busy="true">
@@ -166,7 +171,21 @@ export function Hosts() {
           <div className="skel skel-card" />
         </div>
       ) : items.length === 0 ? (
-        <div className="empty-row">No devices registered yet</div>
+        <EmptyState
+          variant="devices"
+          title="Pair your first device"
+          how="Run one command on another machine and it registers with this server automatically."
+          ctaLabel="Open the setup guide"
+          onCta={() => {
+            guideRef.current?.scrollIntoView({ block: "start" });
+          }}
+          steps={[
+            "Install the service on the new machine",
+            "Point it at this server with your API key",
+            "It appears here within a minute",
+          ]}
+          timeNote="takes 30s"
+        />
       ) : (
         <div className="host-list">
           {items.map((h) => (

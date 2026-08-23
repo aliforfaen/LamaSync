@@ -274,8 +274,8 @@ export class LocalView implements View {
       this.folders.length === 0
         ? Box(
             { flexDirection: "column" },
-            Text({ content: "(no folders configured)" }),
-            Text({ content: "Press 3 to refresh, w to create a new backup." }),
+            Text({ content: "No folders set up on this device yet." }),
+            Text({ content: "Press w to create a backup, 3 to refresh." }),
           )
         : this.selectContainer;
 

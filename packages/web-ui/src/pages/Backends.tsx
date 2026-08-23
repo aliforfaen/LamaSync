@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
 import type { Backend, S3Provider } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
@@ -106,6 +107,10 @@ export function Backends() {
   const [notice, setNotice] = useState<string | null>(null);
   // UX workstream 4: styled delete confirmation.
   const [deleteTarget, setDeleteTarget] = useState<BackendRow | null>(null);
+  // LAMA-271: the empty-state CTA scrolls to (and focuses) the existing
+  // add-storage-destination form at the top of the page.
+  const formRef = useRef<HTMLElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
@@ -283,13 +288,14 @@ export function Backends() {
       {error && <div className="error">{error}</div>}
       {notice && <div className="all-quiet">{notice}</div>}
 
-      <section className="section">
+      <section className="section" ref={formRef}>
         <h2>{editingId ? `Edit destination: ${form.name}` : "Add storage destination"}</h2>
         <form className="form" onSubmit={onSubmit}>
           <div className="form-row">
             <label>
               Name
               <input
+                ref={nameInputRef}
                 value={form.name}
                 onChange={(e) => set("name", e.target.value)}
                 placeholder="e.g. Prod R2, cold-archive"
@@ -475,10 +481,22 @@ export function Backends() {
         {!items ? (
           <div className="skel skel-line" aria-busy="true" />
         ) : items.length === 0 ? (
-          <div className="empty-row">
-            No storage destinations yet. Create one above, then point S3 folders at it —
-            the folder form only asks for the bucket name.
-          </div>
+          <EmptyState
+            variant="storage"
+            title="No storage destinations yet"
+            how="Add where your data lives — S3 buckets, local disks, NFS exports, or a restic repository."
+            ctaLabel="Add a storage destination"
+            onCta={() => {
+              formRef.current?.scrollIntoView({ block: "start" });
+              nameInputRef.current?.focus();
+            }}
+            steps={[
+              "Pick a kind: S3, local, NFS, or restic",
+              "Enter the connection details",
+              "Test it — then point folders at it",
+            ]}
+            timeNote="takes 30s"
+          />
         ) : (
           <table className="data">
             <thead>

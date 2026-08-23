@@ -314,7 +314,7 @@ export class DotfilesView implements View {
       if (this.state.apps.length === 0 && this.state.step === "app") {
         this.state.step = "setup";
         this.state.extractResult =
-          "No dotfile manifests yet — press n to create one, or run a sync on a dotfile folder.";
+          "No app settings backups yet — press n to create one, or run a sync on an app settings folder.";
       }
       // P1 (TuiDotfilesGh.ReviewDotfilesGh): if we were stuck on setup
       // because manifests were empty, but a new refresh now surfaces some,
@@ -606,7 +606,7 @@ export class DotfilesView implements View {
       return [
         ...backups,
         Text({ content: "Loading apps…" }),
-        Text({ content: "Press n to create a manifest, r to refresh." }),
+        Text({ content: "Press n to create an app settings backup, r to refresh." }),
       ];
     }
     const rows: AppRow[] = [
@@ -780,7 +780,7 @@ export class DotfilesView implements View {
       ...this.renderBackupFolders(),
       Text({ content: "Fresh-install setup" }),
       Text({ content: this.state.extractResult ?? "Working…" }),
-      Text({ content: "Press n to add a manifest, r to refresh." }),
+      Text({ content: "Press n to add an app settings backup, r to refresh." }),
       hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
     ];
   }

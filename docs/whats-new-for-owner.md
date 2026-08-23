@@ -144,10 +144,27 @@ decided but you may want a relook
 - "When on WiFi" preset is **not** included (no wifi-trigger backend exists);
   noted on LAMA-267.
 
+### LAMA-271 — Empty states that teach
+
+- Every empty web view now shows a mini-wizard instead of a bare table: a
+  CSS-drawn glyph (no emoji/images), a one-sentence "how", and a single
+  primary CTA. Covered: Folders, Devices, Storage destinations, Activity,
+  Data browser, and the Dashboard empty-fleet ("Pair your first device").
+- Each CTA opens an **existing** flow (new-folder form, add-device guide,
+  add-storage form, upload, or a route) — no new endpoints. 🤖
+- TUI empty text in This device / Backups & apps / Activity was reworded to
+  match the glossary + web ("No folders set up on this device yet.", etc.);
+  TUI state-machine untouched. 🤖
+- ⚠️ **Relook candidate**: the glyph is a simple CSS "orbit" drawing — a
+  deliberately conservative choice (no assets); flag if you'd like a richer
+  illustration later.
+
 ### Platform decisions (agents, no owner input yet)
 
 - Next-run sentence computed client-side via the shared `cron-parser`
   dependency (added to web-ui); no new server endpoint.
+- Empty-state illustration is pure CSS (no emoji/image assets) per the
+  issue's "icon/emoji-free" constraint.
 
 ---
 

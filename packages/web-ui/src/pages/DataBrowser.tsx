@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
 import { Link } from "react-router-dom";
 import type {
   BrowseEntry,
@@ -97,9 +98,13 @@ interface EntriesTableProps {
   onRename?: (name: string) => void;
   // UX workstream 4: per-file download.
   onDownload?: (name: string) => void;
+  // LAMA-271: empty-directory teaching CTA (opens an existing flow such as
+  // the upload picker). Omitted → message-only empty state.
+  emptyCtaLabel?: string;
+  emptyCta?: () => void;
 }
 
-function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename, onDownload }: EntriesTableProps) {
+function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename, onDownload, emptyCtaLabel, emptyCta }: EntriesTableProps) {
   const parent = parentPath(path);
   const selectable = Boolean(selection && onToggleSelect);
   const hasActions = Boolean(onRename || onDownload);
@@ -125,7 +130,29 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
     );
   }
   if (response.entries.length === 0) {
-    return <div className="empty-row">This directory is empty</div>;
+    return (
+      <EmptyState
+        variant="data"
+        title="This directory is empty"
+        how={
+          emptyCta
+            ? "Add something to browse — upload a file or create a folder here."
+            : "Nothing has been added to this location yet."
+        }
+        ctaLabel={emptyCtaLabel ?? "Upload a file"}
+        onCta={emptyCta}
+        steps={
+          emptyCta
+            ? [
+                "Pick a file to upload",
+                "It lands in this directory",
+                "Rename, move, or download it anytime",
+              ]
+            : undefined
+        }
+        timeNote={emptyCta ? "takes 30s" : undefined}
+      />
+    );
   }
 
   return (
@@ -219,6 +246,8 @@ function RefBrowser({
   onToggleSelect,
   onRename,
   onDownload,
+  emptyCtaLabel,
+  emptyCta,
 }: {
   browseRef: BrowseRef;
   onContext: (ctx: TabContext) => void;
@@ -226,6 +255,8 @@ function RefBrowser({
   onToggleSelect?: (name: string) => void;
   onRename?: (name: string) => void;
   onDownload?: (name: string) => void;
+  emptyCtaLabel?: string;
+  emptyCta?: () => void;
 }) {
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -299,6 +330,8 @@ function RefBrowser({
         onToggleSelect={onToggleSelect}
         onRename={onRename}
         onDownload={onDownload}
+        emptyCtaLabel={emptyCtaLabel}
+        emptyCta={emptyCta}
       />
     </div>
   );
@@ -541,6 +574,12 @@ export function DataBrowser() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 
+  // LAMA-271: the empty-directory teaching CTA opens the existing upload
+  // picker (same flow as the toolbar "Upload" button).
+  function openUpload(): void {
+    fileInputRef.current?.click();
+  }
+
   function onUpload(file: File | undefined): void {
     if (!file || !current) return;
     // UX workstream 4: confirm overwrite when a same-named entry already
@@ -725,7 +764,7 @@ export function DataBrowser() {
           <button type="button" className="action" onClick={onMkdir}>
             New folder
           </button>
-          <button type="button" className="action" onClick={() => fileInputRef.current?.click()}>
+          <button type="button" className="action" onClick={openUpload}>
             Upload
           </button>
           <input
@@ -760,9 +799,11 @@ export function DataBrowser() {
           onToggleSelect={toggleSelect}
           onRename={onRename}
           onDownload={onDownload}
+          emptyCtaLabel="Upload a file"
+          emptyCta={openUpload}
         />
       )}
-      {tab === "s3" && <S3Browser onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} />}
+      {tab === "s3" && <S3Browser onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} emptyCtaLabel="Upload a file" emptyCta={openUpload} />}
       {tab === "restic" && <ResticBrowser />}
 
       {picker && (
@@ -860,12 +901,16 @@ function S3Browser({
   onToggleSelect,
   onRename,
   onDownload,
+  emptyCtaLabel,
+  emptyCta,
 }: {
   onContext: (ctx: TabContext) => void;
   selection?: Set<string>;
   onToggleSelect?: (name: string) => void;
   onRename?: (name: string) => void;
   onDownload?: (name: string) => void;
+  emptyCtaLabel?: string;
+  emptyCta?: () => void;
 }) {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [state, setState] = useState<S3PickerState | null>(null);
@@ -903,7 +948,21 @@ function S3Browser({
   }, [state?.folderId, state?.path, onContext]);
 
   if (!state) {
-    return <div className="browser-tab">{error ? <div className="error">{error}</div> : <div className="empty-row">No S3 folders configured</div>}</div>;
+    return (
+      <div className="browser-tab">
+        {error ? (
+          <div className="error">{error}</div>
+        ) : (
+          <EmptyState
+            variant="data"
+            title="No S3 folders to browse"
+            how="Create an S3 folder on the Folders page and its contents become browsable here."
+            ctaLabel="Go to Folders"
+            ctaTo="/folders"
+          />
+        )}
+      </div>
+    );
   }
 
   return (
@@ -935,6 +994,8 @@ function S3Browser({
         onToggleSelect={onToggleSelect}
         onRename={onRename}
         onDownload={onDownload}
+        emptyCtaLabel={emptyCtaLabel}
+        emptyCta={emptyCta}
       />
     </div>
   );
@@ -983,6 +1044,23 @@ function ResticBrowser() {
   return (
     <div className="browser-tab">
       {error && <div className="error">{error}</div>}
+      {snapshots.length === 0 ? (
+        error ? null : (
+          <EmptyState
+            variant="storage"
+            title="No backups recorded yet"
+            how="Backups run on a schedule from the Folders page — each completed run records a snapshot here."
+            ctaLabel="Set up a backup"
+            ctaTo="/folders"
+            steps={[
+              "Create a backup folder on the Folders page",
+              "Set it up on a device",
+              "The next scheduled run records a snapshot",
+            ]}
+            timeNote="takes 30s"
+          />
+        )
+      ) : (
       <table className="data">
         <thead>
           <tr>
@@ -996,39 +1074,30 @@ function ResticBrowser() {
           </tr>
         </thead>
         <tbody>
-          {snapshots.length === 0 ? (
-            <tr className="empty-row">
-              <td colSpan={7}>
-                No restic snapshots recorded — backups run on a schedule from
-                the Folders page, and each completed run records a snapshot
-                here.
+          {snapshots.map((s) => (
+            <tr key={s.id}>
+              <td>
+                <code>{s.snapshotId}</code>
+              </td>
+              <td>{s.folderId}</td>
+              <td>{s.hostId}</td>
+              <td>{formatTimestamp(s.timestamp)}</td>
+              <td>{s.paths.join(", ")}</td>
+              <td>{formatBytes(s.sizeBytes ?? 0)}</td>
+              <td>
+                <button
+                  type="button"
+                  className="action"
+                  onClick={() => setRestoreTarget(s)}
+                >
+                  Restore…
+                </button>
               </td>
             </tr>
-          ) : (
-            snapshots.map((s) => (
-              <tr key={s.id}>
-                <td>
-                  <code>{s.snapshotId}</code>
-                </td>
-                <td>{s.folderId}</td>
-                <td>{s.hostId}</td>
-                <td>{formatTimestamp(s.timestamp)}</td>
-                <td>{s.paths.join(", ")}</td>
-                <td>{formatBytes(s.sizeBytes ?? 0)}</td>
-                <td>
-                  <button
-                    type="button"
-                    className="action"
-                    onClick={() => setRestoreTarget(s)}
-                  >
-                    Restore…
-                  </button>
-                </td>
-              </tr>
-            ))
-          )}
+          ))}
         </tbody>
       </table>
+      )}
 
       <div className="section">
         <h2>Restore jobs</h2>

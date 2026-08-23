@@ -1590,3 +1590,137 @@ button.action:disabled {
 .schedule-custom-reveal summary:hover {
   color: var(--text);
 }
+
+/* --- EmptyState (LAMA-271) ---
+   Teaches instead of leaving a bare table: a CSS-drawn glyph (no emoji, no
+   image assets) made from the design tokens, a title, a one-sentence "how",
+   a single primary CTA, and an optional 3-step hint. The glyph is an orbit
+   ring with a paired node — reads as "a device joining the fleet"; the core
+   pulses gently and the pulse is disabled under prefers-reduced-motion.
+   Variant classes only re-tint the accent via the existing semantic tokens. */
+.estate {
+  --estate-accent: var(--accent-info);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  text-align: center;
+  padding: var(--space-8) var(--space-5);
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  margin: var(--space-4) 0;
+}
+.estate--devices,
+.estate--activity {
+  --estate-accent: var(--accent-info);
+}
+.estate--folders {
+  --estate-accent: var(--accent-sync);
+}
+.estate--storage,
+.estate--data {
+  --estate-accent: var(--accent-storage);
+}
+
+.estate-glyph {
+  position: relative;
+  width: 4.5rem;
+  height: 4.5rem;
+  margin-bottom: var(--space-2);
+  flex-shrink: 0;
+}
+.estate-orbit {
+  position: absolute;
+  inset: 0;
+  border: 2px dashed var(--border-strong);
+  border-radius: 50%;
+}
+.estate-core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.75rem;
+  height: 1.75rem;
+  margin: -0.875rem 0 0 -0.875rem;
+  border-radius: 50%;
+  background: var(--estate-accent);
+  animation: estate-pulse 2.4s ease-out infinite;
+}
+.estate-node {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.6rem;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--accent-sync);
+}
+@keyframes estate-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-info-rgb), 0.35);
+  }
+  70% {
+    box-shadow: 0 0 0 0.9rem rgba(var(--accent-info-rgb), 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-info-rgb), 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .estate-core {
+    animation: none;
+  }
+}
+
+.estate-title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.estate-how {
+  margin: 0;
+  max-width: 46ch;
+  color: var(--text-dim);
+  font-size: var(--font-size-md);
+}
+.estate-steps {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2) var(--space-4);
+  counter-reset: estate-step;
+}
+.estate-steps li {
+  counter-increment: estate-step;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  max-width: 26ch;
+}
+.estate-steps li::before {
+  content: counter(estate-step);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  flex-shrink: 0;
+}
+.estate-time {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}

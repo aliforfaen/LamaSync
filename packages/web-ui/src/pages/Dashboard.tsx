@@ -14,6 +14,7 @@ import type {
   WSEvent,
 } from "@lamasync/core";
 import { api } from "../api.ts";
+import { EmptyState } from "../components/EmptyState.tsx";
 import { GettingStarted } from "../components/GettingStarted.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 
@@ -376,12 +377,18 @@ export function Dashboard() {
             <div className="skel skel-card" />
           </div>
         ) : data.hosts.length === 0 ? (
-          <GettingStarted
-            hosts={data.hosts}
-            backends={data.backends}
-            folders={data.folders}
-            hasAssignments={data.hasAssignments}
-            hasOperations={data.operations.length > 0}
+          <EmptyState
+            variant="devices"
+            title="Pair your first device"
+            how="Register a machine with this server and start syncing folders between your devices."
+            ctaLabel="Pair your first device"
+            ctaTo="/hosts"
+            steps={[
+              "Run the installer on the new machine",
+              "Point it at this server with your API key",
+              "It appears here within a minute",
+            ]}
+            timeNote="takes 30s"
           />
         ) : (
           <div className="fleet-grid">

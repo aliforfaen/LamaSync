@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
 import { useSearchParams } from "react-router-dom";
 import type { Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -210,6 +211,22 @@ export function Operations() {
           </table>
         )}
       </section>
+      {items !== null && items.length === 0 && status === "" ? (
+        <EmptyState
+          variant="activity"
+          title="Nothing here yet"
+          how="Every sync and backup your devices run lands here — set one up and the results will show up."
+          ctaLabel="Set up a synced folder"
+          ctaTo="/folders"
+          steps={[
+            "Create a folder on the Folders page",
+            "Set it up on a device",
+            "Run a sync — the result appears here",
+          ]}
+          timeNote="takes 30s"
+        />
+      ) : (
+      <>
       <table className="data">
         <thead>
           <tr>
@@ -228,11 +245,7 @@ export function Operations() {
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={6}>
-                {status
-                  ? `No ${status} operations`
-                  : "No operations yet — every sync and backup the daemons run is logged here."}
-              </td>
+              <td colSpan={6}>No {status} operations</td>
             </tr>
           ) : (
             items.map((op) => (
@@ -271,6 +284,8 @@ export function Operations() {
           Next ›
         </button>
       </div>
+      </>
+      )}
     </div>
   );
 }

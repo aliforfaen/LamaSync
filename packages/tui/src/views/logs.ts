@@ -87,7 +87,7 @@ function renderEntries(entries: OperationLog[]): VNode {
   if (entries.length === 0) {
     return Box(
       { flexDirection: "column" },
-      Text({ content: "(no entries)" }),
+      Text({ content: "(no activity yet — syncs and backups appear here once a device runs one)" }),
       Text({ content: "Press r to refresh or f to change filter." }),
     );
   }
@@ -319,9 +319,18 @@ export class LogsView implements View {
       return;
     }
     if (entries.length === 0) {
+      const filtered = this.state.status !== "all";
       swapChildren(this.bodyBox, [
-        Text({ content: "(no entries)" }),
-        Text({ content: "Press r to refresh or f to change filter." }),
+        Text({
+          content: filtered
+            ? `(no ${this.state.status} activity — syncs and backups appear here once a device runs one)`
+            : "(no activity yet — syncs and backups appear here once a device runs one)",
+        }),
+        Text({
+          content: filtered
+            ? "Press f to change filter, r to refresh."
+            : "Press r to refresh or f to change filter.",
+        }),
       ]);
       return;
     }

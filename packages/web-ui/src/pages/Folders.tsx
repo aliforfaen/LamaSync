@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
@@ -232,6 +233,22 @@ export function Folders() {
       ? true
       : assignments.some((a) => a.hostId === hostFilter),
   );
+
+  // LAMA-271: shared with the empty state — the toolbar "New folder" button
+  // and the empty-state CTA open the same existing in-page flow.
+  function openNewFolder(): void {
+    // LAMA-241: preselect the first configured backend instead of the
+    // credential-less sftp default.
+    if (!showForm) {
+      const first = backends[0];
+      setForm(
+        first
+          ? { ...DEFAULT_FORM, backend: first.kind, backendId: first.id }
+          : DEFAULT_FORM,
+      );
+    }
+    setShowForm((s) => !s);
+  }
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -704,19 +721,7 @@ export function Folders() {
         <button
           type="button"
           className="action primary"
-          onClick={() => {
-            // LAMA-241: preselect the first configured backend instead of
-            // the credential-less sftp default.
-            if (!showForm) {
-              const first = backends[0];
-              setForm(
-                first
-                  ? { ...DEFAULT_FORM, backend: first.kind, backendId: first.id }
-                  : DEFAULT_FORM,
-              );
-            }
-            setShowForm((s) => !s);
-          }}
+          onClick={openNewFolder}
         >
           {showForm ? "Cancel" : "New folder"}
         </button>
@@ -744,6 +749,21 @@ export function Folders() {
         />
       ) : null}
 
+      {items !== null && filteredItems.length === 0 && !hostFilter ? (
+        <EmptyState
+          variant="folders"
+          title="No synced folders yet"
+          how="Create a folder, choose where its data lives, and set it up on a device to start syncing."
+          ctaLabel="New folder"
+          onCta={openNewFolder}
+          steps={[
+            "Name the folder and pick a storage destination",
+            "Choose which devices it's set up on",
+            "Pick a schedule — or sync it now",
+          ]}
+          timeNote="takes 30s"
+        />
+      ) : (
       <table className="data data-folders">
         <colgroup>
           {/* LAMA-240: pinned widths so the row geometry stays stable when
@@ -983,6 +1003,7 @@ export function Folders() {
           )}
         </tbody>
       </table>
+      )}
 
       {deletingFolderId && (
         <ConfirmDialog
