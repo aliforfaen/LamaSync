@@ -27,9 +27,13 @@ carries a one-line pointer here.
   checklists, stranger-flow baseline for Phase 6, findings log, artifacts
   convention). Future sessions update it instead of recreating it; it is also
   tracked in the memsearch progress note.
-- Remaining branch phases: **LAMA-253** CLI/TUI help copy (Phase 4),
-  **LAMA-252** README rewrite (Phase 5), **LAMA-254** repo polish + onboarding
-  audit (Phase 6). See `docs/product-finish-plan.md`.
+- Remaining branch phases: **LAMA-253 CLI/TUI help copy (Phase 4) shipped
+  2026-08-23** (glossary prose, drift check green), **LAMA-252 README rewrite
+  (Phase 5)**, **LAMA-254 repo polish + onboarding audit (Phase 6)**. Owner
+  relooks applied same day: six tabs fit 80 cols (tabWidth 13, Backups tab
+  label), bordered pages restored, loud fake-key warning; LAMA-228 clean-exit
+  pty-verified (q + Ctrl+C, dead + live). See `docs/product-finish-plan.md`
+  and `docs/whats-new-for-owner.md`.
 
 ## Status (as of 2026-08-22)
 

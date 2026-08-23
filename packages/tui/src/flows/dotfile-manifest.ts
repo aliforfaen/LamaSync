@@ -77,19 +77,19 @@ function hostSelectStep(args: {
   runner: WizardRunner;
 }): WizardStep {
   return {
-    title: "Host",
+    title: "Device",
     render: (state) => {
       const failed = Boolean(state["_hostFetchFailed"]);
       if (failed) {
         return Box(
           { flexDirection: "column", gap: 1 },
-          Text({ content: "Host" }),
+          Text({ content: "Device" }),
           Text({ content: "[fetch failed — default to global]" }),
         ) as unknown as Renderable;
       }
       const hosts = Array.isArray(state["_hosts"]) ? (state["_hosts"] as Array<{ id: string; hostname: string }>) : [];
       const options = [
-        { name: "<global>", description: "all hosts", value: "_global" },
+        { name: "<global>", description: "all devices", value: "_global" },
         ...hosts.map((h) => ({
           name: h.hostname,
           description: h.id,

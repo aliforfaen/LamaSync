@@ -22,10 +22,10 @@ import type { CliContext } from "./dispatch.ts";
 import { printJson, printTable } from "./output.ts";
 
 export const help = {
-  summary: "Fleet health + per-host status.",
+  summary: "Fleet health + per-device status.",
   usage:
     `Usage: lamasync status [--json]\n\n` +
-    `  Default output is a brief summary + per-host table.\n` +
+    `  Default output is a brief summary + per-device table.\n` +
     `  --json emits the raw HealthResponse (serverVersion, dbSizeBytes, hosts).`,
 };
 

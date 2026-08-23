@@ -157,8 +157,8 @@ function summaryRenderable(state: Record<string, unknown>): Renderable {
 
 /** Index of the schedule step inside the assembled step list. */
 const SCHEDULE_INDEX = 4;
-/** Title of the dynamically-inserted cron step. */
-const CRON_TITLE = "Cron expression";
+/** Title of the dynamically-inserted schedule step (custom cron only). */
+const CRON_TITLE = "Custom schedule";
 
 export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
   const { ctx } = opts;
@@ -193,7 +193,7 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
       });
       return Box(
         { flexDirection: "column", gap: 1 },
-        Text({ content: "Enter a cron expression." }),
+        Text({ content: "Enter a schedule (cron syntax, e.g. 0 * * * *)." }),
         input,
       ) as unknown as Renderable;
     },
@@ -214,7 +214,7 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
       field: "type",
       prompt: "What kind of folder is this?",
       options: [
-        { name: "sync", description: "two-way sync between hosts", value: "sync" },
+        { name: "sync", description: "two-way sync between devices", value: "sync" },
         { name: "backup", description: "one-shot backup", value: "backup" },
       ],
       runner,
@@ -222,7 +222,7 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
     inputStep({
       title: "Local path",
       field: "localPath",
-      prompt: "Local path on this host.",
+      prompt: "Local path on this device.",
       placeholder: "/home/user/LamaFiles",
       runner,
       validate: (value) =>
@@ -231,12 +231,12 @@ export function createBackupSetupWizard(opts: { ctx: ViewContext }): Wizard {
           : "localPath must be an absolute path (starts with /)",
     }),
     selectStep({
-      title: "Role on this host",
+      title: "Role on this device",
       field: "role",
-      prompt: "How does this host use the folder?",
+      prompt: "How does this device use the folder?",
       options: [
-        { name: "source", description: "this host originates data", value: "source" },
-        { name: "target", description: "this host receives data", value: "target" },
+        { name: "source", description: "this device originates data", value: "source" },
+        { name: "target", description: "this device receives data", value: "target" },
         { name: "both", description: "bidirectional", value: "both" },
       ],
       runner,

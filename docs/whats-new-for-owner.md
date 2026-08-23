@@ -78,6 +78,38 @@ decided but you may want a relook
 - Whether GitHub-under-More (approval) should also hide release-check
   tooling or keep it reachable in More.
 
+## 2026-08-23 follow-up — owner relooks + LAMA-228 + LAMA-253 (same PR #1)
+
+### Relook outcomes (your selections)
+
+- **Tabs now fit at 80 columns**: `This device | All devices | Backups |
+  Conflicts | Activity | More` — no more `›` truncation. `Backups` is the
+  tab label; the page heading keeps the full approved "Backups & apps".
+- **Bordered page shells restored** — the LAMA-275 look is back; the
+  status/hint merge, adaptive help, and contextual footer stay.
+- Behavioral agent decisions (tailnet `""` sentinel, cron `@midnight`/`@noon`
+  reject, JSON envelope, rename 400, streaming cap) **accepted** per your
+  selection.
+- **CLI fake-key warning now loud** (your decision): when no credentials
+  resolve, `lamasync` prints a clear "using fake localhost/dev-key" warning
+  on stderr and the legacy fallback does too. Look: try `lamasync status`
+  outside a configured fleet and you should see it.
+
+### Verified + shipped
+
+- **LAMA-228 — TUI clean exit pty-verified**: `q` and Ctrl+C both exit
+  code 0 against dead AND live servers (no lingering processes).
+- **LAMA-253 — CLI/TUI help copy pass shipped (Phase 4 done)**: prose in
+  CLI help, wizard steps (Custom schedule, Role on this device, Device
+  select), and daemon/server usage blocks use the glossary; commands,
+  flags, exit codes, JSON keys untouched; skill-drift stays OK.
+
+### Next for this branch
+
+- **LAMA-252** README rewrite (Phase 5) — worth your note on tone.
+- **LAMA-254** repo polish + stranger-flow audit (Phase 6) — dogfood doc is
+  the baseline.
+
 ---
 
 *(Future sessions: append a new dated section here instead of editing old

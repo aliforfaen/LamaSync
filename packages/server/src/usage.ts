@@ -27,8 +27,8 @@ export function serverUsage(): string {
   return [
     `lamasync-server ${VERSION}`,
     "",
-    "LamaSync REST + WebSocket server: stores host registration, distributes",
-    "per-host configuration, exposes the Swagger UI and React web UI, and",
+    "LamaSync REST + WebSocket server: stores device registration, distributes",
+    "per-device configuration, exposes the Swagger UI and React web UI, and",
     "proxies the GitHub release feed for daemon self-update.",
     "",
     "Usage:",

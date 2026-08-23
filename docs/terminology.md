@@ -71,14 +71,14 @@ Tick items as later passes fix them. Statuses: ☐ todo · ◐ partial · ☑ do
 | Dotfile manifest wizard | "Host", "manifest" | Device; drop manifest-speak | ☐ |
 | Local/Fleet view rows & hints | host naming, hotkey hints | Headings device-first; contextual footer per selected folder (LAMA-276) | ☑ 2026-08-23 |
 
-### CLI (`packages/tui/src/cli/`) — LAMA-253
+### CLI (`packages/tui/src/cli/`) — LAMA-253 ✅ shipped 2026-08-23
 
 | Surface | Current terms found | Change needed | Status |
 |---|---|---|---|
-| Command tree | `hosts`, `backends`, `folders assignments` subcommands | **Command names stay identical** (drift check); only descriptions/synopsis prose change | ☐ |
-| Help descriptions | host/backend/assignment jargon | Glossary wording in usage text | ☐ |
-| friendly-error messages | mixed | Device/storage wording; exact API error text untouched | ☐ |
-| daemon/server `usage.ts` blocks | host/daemon terms | Same rule: prose only | ☐ |
+| Command tree | `hosts`, `backends`, `folders assignments` subcommands | **Command names stay identical** (drift check); only descriptions/synopsis prose change | ☑ (names untouched) |
+| Help descriptions | host/backend/assignment jargon | Glossary wording in usage text (device, storage destination, activity, app settings backups) | ☑ |
+| friendly-error messages | mixed | Device/storage wording; exact API error text untouched | ☑ |
+| daemon/server `usage.ts` blocks | host/daemon terms | Prose only: this device, per-device configuration | ☑ |
 
 ### Repo presence — LAMA-252 / LAMA-254
 

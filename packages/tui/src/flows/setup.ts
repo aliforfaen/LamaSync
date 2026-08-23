@@ -114,9 +114,9 @@ export function createSetupWizard(opts: {
       runner,
     }),
     inputStep({
-      title: "Hostname",
+      title: "Device name",
       field: "hostname",
-      prompt: "This machine's identifier on the server.",
+      prompt: "This machine's identifier on the server (stored as client.toml hostname).",
       placeholder: opts.defaultHostname ?? osHostname(),
       initial: opts.defaultHostname ?? osHostname(),
       runner,

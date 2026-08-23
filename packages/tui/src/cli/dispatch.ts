@@ -89,21 +89,21 @@ Commands:
   status                  Fleet health + per-host status (LAMA-229)
   folders list            List folders
   folders create          Create a folder (--name, --type, ...)
-  folders assign          Assign a folder to a host (--host, --path)
+  folders assign          Assign a folder to a device (--host, --path)
   folders update          Update an existing folder
   folders delete          Delete a folder (cascade; DESTRUCTIVE)
-  folders unassign        Remove a folder's host assignment (DESTRUCTIVE)
-  folders assignments     List a folder's host assignments
-  backends list           List reusable backends
-  backends create         Create a backend (--name, --kind, ...)
-  backends test           Test a backend by id
+  folders unassign        Remove a folder's device assignment (DESTRUCTIVE)
+  folders assignments     List a folder's device assignments
+  backends list           List reusable storage destinations
+  backends create         Create a storage destination (--name, --kind, ...)
+  backends test           Test a storage destination by id
   sync [folderId]         Trigger a sync (--host, optional --folder)
-  ops list                List operations (--status, --host, --folder, --limit)
+  ops list                List recent activity (--status, --host, --folder, --limit)
   doctor                  Structured health report (env, server, socket, version)
-  dotfiles list           List dotfile manifests
-  dotfiles manifests      CRUD over dotfile manifests
-  dotfiles upload         Upload a new dotfile version
-  dotfiles download       Download a dotfile tarball
+  dotfiles list           List app settings backups (dotfile manifests)
+  dotfiles manifests      CRUD over app settings backup manifests
+  dotfiles upload         Upload a new app settings backup version
+  dotfiles download       Download an app settings backup tarball
   conflicts list          List manual sync conflicts
   conflicts resolve       Resolve a conflict
   snapshots list          List restic snapshots
@@ -115,14 +115,14 @@ Commands:
   notifications list      List notification events
   notifications channels  List delivery channels
   notifications test      Send a test notification (--channel for one channel)
-  hosts list              List registered hosts
-  hosts rename            Rename a host (DESTRUCTIVE)
-  register                Register or update a host in the fleet
+  hosts list              List registered devices
+  hosts rename            Rename a device (DESTRUCTIVE)
+  register                Register or update a device in the fleet
   shares list             List NFS / SMB shares
   admin prune             Manually prune operation_log (DESTRUCTIVE)
   local status            Local daemon status (Unix socket)
   local folders           List local folder assignments
-  local ops               List local operation log
+  local ops               List local activity (operation log)
   local sync [folderId]   Trigger sync for one folder via the socket
   local sync-all          Trigger sync for every folder
   local mount <id>        Switch folder to mount mode
@@ -188,7 +188,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
         key: "assign",
         help: subHelp(
           "folders assign <folderId>",
-          "Assign an existing folder to a host.",
+          "Assign an existing folder to a device.",
           [
             "--host <hostId>        host id (required)",
             "--path <localPath>     absolute local path (required)",
@@ -223,7 +223,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
         key: "delete",
         help: subHelp(
           "folders delete <folderId>",
-          "Delete a folder + cascade its assignments (DESTRUCTIVE — safety rule 5).",
+          "Delete a folder + cascade its device assignments (DESTRUCTIVE — safety rule 5).",
           [
             "--yes, -y           skip the confirmation prompt (required non-interactively)",
           ],
@@ -234,7 +234,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
         key: "unassign",
         help: subHelp(
           "folders unassign <folderId> --host <hostId>",
-          "Remove a folder's assignment on a host (DESTRUCTIVE — safety rule 5).",
+          "Remove a folder's device assignment (DESTRUCTIVE — safety rule 5).",
           [
             "--host <hostId>    host id (required)",
             "--yes, -y          skip the confirmation prompt (required non-interactively)",
@@ -246,7 +246,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
         key: "assignments",
         help: subHelp(
           "folders assignments <folderId>",
-          "List the assignments for a folder.",
+          "List a folder's device assignments.",
           ["--json"],
         ),
         run: async (ctx) => foldersExt.runAssignments(ctx),
@@ -268,7 +268,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
         key: "create",
         help: subHelp(
           "backends create",
-          "Create a reusable backend.",
+          "Create a reusable storage destination.",
           [
             "--name <name>            backend name (required)",
             "--kind <kind>            s3 | local | nfs | restic (required)",
@@ -291,7 +291,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
         key: "test",
         help: subHelp(
           "backends test <backendId>",
-          "Test a backend (POST /backends/:id/test).",
+          "Test a storage destination (POST /backends/:id/test).",
           ["--json"],
         ),
         run: async (ctx) => backends.runTest(ctx),
@@ -311,7 +311,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
         key: "list",
         help: subHelp(
           "ops list",
-          "List operations.",
+          "List recent activity (operation log).",
           [
             "--status <s>     filter by status (started|success|failed|conflict|recovery|retry)",
             "--host <id>      filter by host",
@@ -333,14 +333,14 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
   dotfiles: {
     help: groupHelp(
       "dotfiles",
-      "Manage dotfile manifests and version tarballs.",
+      "Manage app settings backups (dotfile manifests).",
     ),
     subcommands: {
       list: {
         key: "list",
         help: subHelp(
           "dotfiles list",
-          "List dotfile manifests (--host filters by host).",
+          "List app settings backups (dotfile manifests; --host filters by device).",
           ["--host <id>", "--json"],
         ),
         run: async (ctx) => dotfiles.runList(ctx),
@@ -355,7 +355,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
             key: "list",
             help: subHelp(
               "dotfiles manifests list",
-              "List dotfile manifests (--host filters by host).",
+              "List app settings backups (dotfile manifests; --host filters by device).",
               ["--host <id>", "--json"],
             ),
             run: async (ctx) => dotfiles.runManifestsList(ctx),
@@ -364,7 +364,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
             key: "create",
             help: subHelp(
               "dotfiles manifests create",
-              "Create a dotfile manifest.",
+              "Create an app settings backup manifest.",
               [
                 "--app-name <name>        app name (required)",
                 "--paths <p1,p2>          comma-separated paths (required)",
@@ -381,7 +381,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
             key: "delete",
             help: subHelp(
               "dotfiles manifests delete <id>",
-              "Delete a dotfile manifest and cascade its versions (DESTRUCTIVE — safety rule 5).",
+              "Delete an app settings backup manifest and cascade its versions (DESTRUCTIVE — safety rule 5).",
               ["--yes, -y    skip the confirmation prompt (required non-interactively)"],
             ),
             run: async (ctx) => dotfiles.runManifestDelete(ctx),
@@ -553,12 +553,12 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
   hosts: {
     help: groupHelp(
       "hosts",
-      "List / rename / register hosts in the fleet.",
+      "List / rename / register devices in the fleet.",
     ),
     subcommands: {
       list: {
         key: "list",
-        help: subHelp("hosts list", "List registered hosts.", ["--json"]),
+        help: subHelp("hosts list", "List registered devices.", ["--json"]),
         run: async (ctx) => hosts.runList(ctx),
       },
       rename: {
@@ -575,7 +575,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
   register: {
     command: {
       help: {
-        summary: "Register or update a host in the fleet.",
+        summary: "Register or update a device in the fleet.",
         usage:
           `Usage: lamasync register --hostname <name> [--tailnet-ip <ip>]\n\n` +
           `  This is the agent fallback for the install script's web UI flow.\n` +
@@ -706,7 +706,7 @@ function subHelp(
 
 function statusHelp(): { summary: string; usage: string } {
   return {
-    summary: "Fleet health + per-host status.",
+    summary: "Fleet health + per-device status.",
     usage:
       `Usage: lamasync status [--json]\n\n` +
       `  Calls GET /api/v1/health and prints fleet status. Default output is a\n` +
@@ -717,7 +717,7 @@ function statusHelp(): { summary: string; usage: string } {
 
 function syncHelp(): { summary: string; usage: string } {
   return {
-    summary: "Trigger a sync on a host (one folder or all).",
+    summary: "Trigger a sync on a device (one folder or all).",
     usage:
       `Usage: lamasync sync [folderId] --host <hostId> [--json]\n` +
       `       lamasync sync --all --host <hostId>     # sync every assignment\n\n` +
