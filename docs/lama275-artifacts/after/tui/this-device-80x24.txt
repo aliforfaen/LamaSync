@@ -1,24 +1,24 @@
- This device         All devices         App settings        Conflicts         ›
+ This device         All devices         Backups & apps      Conflicts         ›
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
 
-[?] help   [ / ] views   [q] quit
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                                                                              │
-│ This device                                                                  │
-│ This device — localhost                                                      │
-│                                                                              │
-│ (no folders configured)                                                      │
-│ Press 3 to refresh, w to create a new backup.                                │
-│                                                                              │
-│ [1] sync [2] sync [3]      [p] cache    [s] switch [n] network   [w] new     │
-│ all      one      refresh  profile      type       shares        backup…     │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│ [ok] Loaded 0 folder(s).                                                     │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
-[ok] Loaded 0 folder(s).
+This device — localhost
+
+ ▶ photos-archive
+   backup — unknown
+   home-snapshots
+   backup — unknown
+   appdata-backups
+   backup — unknown
+
+
+
+
+
+
+
+
+Selected: photos-archive
+[2] sync photos-archive [p] cache profile [s] switch type [n] network shares
+[1] sync all [3] refresh [w] new backup…
+[ok] Loaded 3 folder(s).
+[ok] Loaded 3 folder(s).

@@ -21,3 +21,14 @@ TUI tab titles/selection). Local dev server, empty fleet, dev-key.
 - Folders table: Backend/Assignments columns → Storage/Set up on
 - TUI tabs: Local/Fleet/Dotfiles/Logs → This device/All devices/App settings/
   Activity; consistent selection colors from app/palette.ts
+
+## LAMA-276 pass-2 deltas (2026-08-23, re-captured)
+- Third tab is now **Backups & apps**: fleet-wide backup-folders block
+  (`this-device-80x24.txt` shows the new 80-col footer + this-device view;
+  `more-80x24.txt` is the new More tab). GitHub is a drill-in under More
+  (tab bar still selects More while the GitHub list is open; Esc returns).
+- Chrome: per-view borders gone (content starts right under the tab bar's
+  underline), the separate hint line is merged into the single status/hint
+  bar (“[ok] Loaded 3 folder(s).” replaces the “[?] help ...” row).
+- Tab-bar overflow at 80 cols persists for six task-oriented tabs (›);
+  tracked in the dogfood findings log — abbreviations accepted.
