@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Login } from "./components/Login.tsx";
 import { Nav } from "./components/Nav.tsx";
+import { CommandPalette } from "./components/CommandPalette.tsx";
 import { Dashboard } from "./pages/Dashboard.tsx";
 import { Hosts } from "./pages/Hosts.tsx";
 import { HostDetail } from "./pages/HostDetail.tsx";
@@ -44,6 +45,9 @@ export function App() {
             authed ? (
               <div className="app">
                 <Nav />
+                {/* LAMA-270: cmd+k palette — authed sessions only, mounted
+                    inside the router so it can use useNavigate(). */}
+                <CommandPalette />
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/hosts" element={<Hosts />} />

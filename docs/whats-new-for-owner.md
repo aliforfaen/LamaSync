@@ -175,6 +175,20 @@ decided but you may want a relook
 - User-facing "host" copy in Device detail + rename + TUI Activity filter was
   swept to "device"; wire fields untouched. 🤖
 
+### LAMA-270 — Command palette (cmd+k)
+
+- **⌘/Ctrl+K** opens a fuzzy command palette over navigation + actions:
+  "Add synced folder", "Pair device", "Resolve conflicts", "Go to Storage",
+  etc. Typo'd input still matches ("syncd flder" → "Add synced folder").
+  Arrow keys + Enter navigate (router push — deep links preserved), Esc
+  closes, click works. 🤖
+- The palette derives its navigation commands from the same nav model as the
+  left rail (single source of truth — can't drift), and its CTAs just
+  navigate to the page that owns each flow. 🤖
+- Fixed overlay → **no layout shift**, usable at 360px, **reduced-motion
+  safe** (fade only, disabled under `prefers-reduced-motion`). Fuzzy match is
+  a dependency-free ~30-line scorer (no new deps). 🤖
+
 ### Platform decisions (agents, no owner input yet)
 
 - Next-run sentence computed client-side via the shared `cron-parser`
@@ -183,6 +197,8 @@ decided but you may want a relook
   issue's "icon/emoji-free" constraint.
 - Device cards omit OS icon + storage-used (no wire fields); "last backup"
   derived from the operations feed, not a new endpoint.
+- Command palette is dependency-free (custom fuzzy scorer); CTAs navigate
+  rather than cross-component form-opening.
 
 ---
 

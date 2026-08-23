@@ -26,41 +26,58 @@ const LABELS: Record<ThemeChoice, string> = {
   system: "System",
 };
 
+export interface NavItem {
+  to: string;
+  icon: JSX.Element;
+  text: string;
+  end?: boolean;
+  /** User-facing synonyms matched by the LAMA-270 command palette only;
+   *  the rendered rail ignores this field. */
+  keywords?: string;
+}
+
+export interface NavGroup {
+  label: string;
+  items: NavItem[];
+}
+
 /**
- * LAMA-275 grouped left navigation (approved D2). Routes are unchanged —
- * only labels and grouping follow docs/terminology.md:
+ * LAMA-275 grouped left navigation (approved D2). Single source of truth for
+ * the rail rendered below AND the LAMA-270 command palette, so the two can
+ * never drift. Routes are unchanged — only labels and grouping follow
+ * docs/terminology.md:
  *   /hosts → Devices · /folders → Synced folders · /backends → Storage
  *   destinations · /dotfiles → App settings · /operations → Activity.
  */
-const GROUPS: { label: string; items: { to: string; icon: JSX.Element; text: string; end?: boolean }[] }[] = [
+export const GROUPS: NavGroup[] = [
   {
     label: "Overview",
-    items: [{ to: "/", icon: <IconHome />, text: "Dashboard", end: true }],
+    items: [{ to: "/", icon: <IconHome />, text: "Dashboard", end: true, keywords: "home overview" }],
   },
   {
     label: "Sync",
     items: [
-      { to: "/hosts", icon: <IconHost />, text: "Devices" },
-      { to: "/folders", icon: <IconFolder />, text: "Synced folders" },
-      { to: "/conflicts", icon: <IconConflict />, text: "Conflicts" },
+      { to: "/hosts", icon: <IconHost />, text: "Devices", keywords: "hosts fleet machines pair" },
+      { to: "/folders", icon: <IconFolder />, text: "Synced folders", keywords: "sync mount folders" },
+      { to: "/conflicts", icon: <IconConflict />, text: "Conflicts", keywords: "merge resolve" },
     ],
   },
   {
     label: "Apps",
-    items: [{ to: "/dotfiles", icon: <IconDotfile />, text: "App settings" }],
+    items: [{ to: "/dotfiles", icon: <IconDotfile />, text: "App settings", keywords: "backup dotfiles manifests" }],
   },
   {
     label: "Storage & tools",
     items: [
-      { to: "/backends", icon: <IconStorage />, text: "Storage" },
-      { to: "/data", icon: <IconSearch />, text: "Data browser" },
+      { to: "/backends", icon: <IconStorage />, text: "Storage", keywords: "backends destinations" },
+      { to: "/data", icon: <IconSearch />, text: "Data browser", keywords: "browse files" },
     ],
   },
   {
     label: "System",
     items: [
-      { to: "/operations", icon: <IconActivity />, text: "Activity" },
-      { to: "/admin", icon: <IconNotification />, text: "Admin" },
+      { to: "/operations", icon: <IconActivity />, text: "Activity", keywords: "operations log history" },
+      { to: "/admin", icon: <IconNotification />, text: "Admin", keywords: "settings server" },
     ],
   },
 ];

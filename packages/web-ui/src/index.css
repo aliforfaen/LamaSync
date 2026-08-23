@@ -1853,3 +1853,167 @@ button.action:disabled {
   letter-spacing: 0.08em;
   color: var(--text-muted);
 }
+
+/* --- Command palette (LAMA-270) ---
+   Fixed overlay above everything (z 60 > modal family 50), zero layout
+   impact: it is removed from document flow, and the panel is sized from the
+   viewport (min(560px, 100%) / 60vh) so 360px stays usable. No slide/bounce
+   by default — only a 120–140ms fade, and even that is disabled under
+   prefers-reduced-motion. */
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--backdrop);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: min(15vh, 6rem) var(--space-4) var(--space-4);
+}
+
+.palette {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  width: min(560px, 100%);
+  max-height: min(60vh, 30rem);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.palette-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.palette-search-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.palette-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  padding: 0.5rem 0.6rem;
+  min-height: 2.25rem;
+}
+
+.palette-input:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.palette-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1);
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.palette-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.palette-option:hover {
+  background: var(--surface-elevated);
+}
+
+.palette-option--active {
+  background: var(--accent-info-bg);
+  color: var(--text-strong);
+}
+
+.palette-option-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.palette-option--active .palette-option-icon {
+  color: var(--accent-info);
+}
+
+.palette-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-option-group {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.palette-option--active .palette-option-group {
+  color: var(--text-dim);
+}
+
+.palette-empty {
+  padding: var(--space-5);
+  color: var(--text-muted);
+  text-align: center;
+  font-size: var(--font-size-sm);
+}
+
+.palette-footer {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .palette-backdrop {
+    animation: palette-fade 120ms ease-out;
+  }
+  .palette {
+    animation: palette-pop 140ms ease-out;
+  }
+}
+
+@keyframes palette-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes palette-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
