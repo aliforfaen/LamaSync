@@ -11,7 +11,17 @@ export async function runCliFallback(): Promise<void> {
   const local = osHostname();
   console.log("LamaSync TUI (CLI fallback — LAMASYNC_NO_TUI=1)");
   console.log(`Local: ${local}`);
-  const { client } = buildClient();
+  const { client, needsSetup } = buildClient();
+  // Owner decision (2026-08-23, LAMA-247 #13): keep the fake default but
+  // make it loud — this fallback silently used localhost/dev-key before.
+  if (needsSetup) {
+    console.error(
+      "[!] no credentials found — using fake http://localhost:8080 / dev-key. " +
+        "Set LAMASYNC_SERVER_URL/LAMASYNC_API_KEY or create " +
+        "~/.config/lamasync/client.toml before trusting this output. " +
+        "(Ignore if you really are running the local dev server.)",
+    );
+  }
   try {
     const fleet = await client.getHealth();
     console.log(

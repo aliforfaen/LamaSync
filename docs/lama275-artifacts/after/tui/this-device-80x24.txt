@@ -1,24 +1,24 @@
- This device         All devices         Backups & apps      Conflicts         ›
-▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+ This device  All devices  Backups      Conflicts    Activity     More
+▬▬▬▬▬▬▬▬▬▬▬▬▬
 
-This device — localhost
-
- ▶ photos-archive
-   backup — unknown
-   home-snapshots
-   backup — unknown
-   appdata-backups
-   backup — unknown
-
-
-
-
-
-
-
-
-Selected: photos-archive
-[2] sync photos-archive [p] cache profile [s] switch type [n] network shares
-[1] sync all [3] refresh [w] new backup…
-[ok] Loaded 3 folder(s).
-[ok] Loaded 3 folder(s).
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ This device — localhost                                                      │
+│                                                                              │
+│ (no folders configured)                                                      │
+│ Press 3 to refresh, w to create a new backup.                                │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ [1] sync all [3] refresh [w] new backup…                                     │
+│ [ok] Sync queued for all assigned folders.                                   │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+[ok] Sync queued for all assigned folders.

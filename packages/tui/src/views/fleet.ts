@@ -182,7 +182,7 @@ export class FleetView implements View {
     this.container = realize<Renderable>(
       renderer,
       Box(
-        { flexDirection: "column", flexGrow: 1 },
+        { flexDirection: "column", padding: 1, border: true, flexGrow: 1 },
         this.bodyBox,
         this.statusBlock,
       ),

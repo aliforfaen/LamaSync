@@ -160,6 +160,9 @@ export async function bootShell(): Promise<void> {
     // to More via the Shell's drill-in handling.
     hiddenFromTabBar: view.id === "gh" ? true : undefined,
     homeTab: view.id === "gh" ? "more" : undefined,
+    // Relook (owner, 2026-08-23): tab bar uses the short label so six tabs
+    // fit at 80 cols; the page heading + help keep the full approved name.
+    tabLabel: view.id === "dotfiles" ? "Backups" : undefined,
     onShow: () => view.onShow(ctx),
     onHide: view.onHide?.bind(view),
     handleKey: view.handleKey?.bind(view),

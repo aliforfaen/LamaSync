@@ -69,6 +69,9 @@ export interface View {
 export interface ViewSpec {
   readonly id: ViewId;
   readonly title: string;
+  /** Shorter label for the tab bar when the full title doesn't fit
+   *  (e.g. "Backups" on the tab vs "Backups & apps" page heading). */
+  readonly tabLabel?: string;
   readonly container: Renderable;
   readonly hotkeys: ReadonlyArray<Hotkey>;
   readonly ctx: ViewContext;

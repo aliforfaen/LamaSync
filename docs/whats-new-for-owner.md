@@ -1,0 +1,84 @@
+# What's new for the owner — rolling brief
+
+User-facing summary of what changed on `feature/product-finish`, what to look
+for when you review or dogfood, and which decisions were made by agents vs.
+approved by you. Appended to at every milestone; the current branch work is
+tracked in Multica (LAMA-249 parent, LAMA-275/276/247 children).
+
+**Legend:** ✅ you approved it · 🤖 agent decided (safe/mechanical) · ⚠️ agent
+decided but you may want a relook
+
+---
+
+## 2026-08-23 — LAMA-276 (TUI pass 2) + LAMA-247 fix batch · PR #1 open, not merged
+
+### TUI shell — what changed / what to look for
+
+- **Tabs are now: This device · All devices · Backups & apps · Conflicts ·
+  Activity · More** ✅ (your D3 verdict). The third tab shows fleet-wide
+  *backup folders* (name + storage destination, read-only) above the app
+  settings picker 🤖 — look: it's a visibility list only; no actions on
+  those folder rows yet (fine for now, revisit later).
+- **GitHub lives under More** ✅ (your D4 verdict). More is a small tools
+  menu; Enter or `g` opens GitHub, Esc returns. Look: the tab bar stays on
+  "More" while you're inside GitHub — intended drill-in behavior.
+- **Less chrome**: per-view borders removed, the key-hint row merged into
+  the bottom status bar, "Activity" heading fixed. Look: the shell is
+  intentionally flatter now — confirm you like the look vs. the bordered
+  pages from the before-captures.
+- **Contextual actions**: when you select a folder on This device, the
+  footer names that folder's actions (`[2] sync`, `[p] cache`, `[s] type`,
+  `[n] shares`) above the global row. 🤖
+- **Adaptive help**: `?` now sizes to your terminal (verified at 60×20). 🤖
+- ⚠️ **Relook candidate**: six task-oriented tabs **truncate at 80 columns**
+  (`This device / All devices / Backups & apps / Conflicts` then `›`).
+  Shortening the tab labels (e.g. "Backups") fixes it; we kept names as
+  approved and accepted the truncation — your call.
+
+### Fixes — what changed / what to look for
+
+- **Backup summary counts are real again.** Root cause: rclone ≥1.63 writes
+  its JSON log to *stderr*, the daemon only read stdout → "0 transfers, 0 B"
+  even when data copied. Now both streams are parsed. Look: run a backup on
+  a real folder and check the operation summary shows transfers/bytes.
+- **S3 Data Browser**: a missing object now returns **404** (was 400), and
+  downloads over 64 MiB are rejected *while streaming* instead of buffering
+  the whole object (no more OOM risk). 🤖
+- **Admin page**: a dead `/health` now shows a caption under the Server
+  block instead of silent "—" placeholders. 🤖
+- **Schedule editor**: `@midnight` / `@noon` in a custom cron are now
+  rejected with an error — the daemon could never schedule them (silent
+  never-running before). ⚠️ **Relook candidate**: alternative was teaching
+  the daemon to map `@midnight`/`@noon`; we chose the honest-reject route.
+- **Rename a device to its own name** now returns 400 "unchanged" instead of
+  faking a successful rename. 🤖
+- **tailnet IP staleness**: when Tailscale is down for >5 min the daemon now
+  clears the stored IP (sends `""` as an explicit clear; server bumps
+  `config_revision` so peers re-pull). ⚠️ **Relook candidate**: `""` is a
+  new wire sentinel — backwards-compatible (old daemons never send it), but
+  it's a semantic addition agents chose.
+- **CLI automation**: `lamasync <cmd> --json` failing with 401/403 now also
+  prints `{ok:false, reason:"auth-failure", exitCode:3}` on stdout (in
+  addition to the human stderr line) — grep/jq-able. 🤖
+
+### Platform decisions made by agents (no owner input yet)
+
+1. `""` empty-string = explicit tailnet-clear on the health wire.
+2. Cron validators reject `@midnight`/`@noon` rather than daemon mapping.
+3. CLI `--json` failure envelope shape `{ok, reason, error, exitCode}`.
+4. S3 download cap enforced mid-stream via process kill + bounded reader.
+5. Rename-no-op → 400 (vs. explicit no-op success).
+6. Tab truncation accepted at 80 cols for now.
+
+### Suggested relooks (flag if any bother you)
+
+- 80-col tab truncation (shorten labels or accept).
+- Borderless pages look (compare before/after captures).
+- `@midnight`/`@noon` — reject vs. teach the daemon.
+- Whether GitHub-under-More (approval) should also hide release-check
+  tooling or keep it reachable in More.
+
+---
+
+*(Future sessions: append a new dated section here instead of editing old
+ones. The technical mirror of this is `docs/dogfood-2026-08-23.md`.)*

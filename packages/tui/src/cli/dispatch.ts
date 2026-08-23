@@ -833,6 +833,18 @@ async function runCliInner(argv: string[]): Promise<void> {
     flagKey: flagString(parsed.flags, "api-key"),
   });
 
+  // Owner decision (2026-08-23, LAMA-247 #13): keep the friendly
+  // localhost/dev-key default for the local dev loop, but make it LOUD — a
+  // command running against the fake fleet must never look like a real one.
+  if (client.source === "default") {
+    process.stderr.write(
+      "lamasync: [!] no credentials found — using fake http://localhost:8080 / dev-key. " +
+        "Point at your real fleet with --server/--api-key, " +
+        "LAMASYNC_SERVER_URL/LAMASYNC_API_KEY, or ~/.config/lamasync/client.toml. " +
+        "(Ignore this if you really are running the local dev server.)\n",
+    );
+  }
+
   const ctx: CliContext = {
     parsed: {
       ...parsed,

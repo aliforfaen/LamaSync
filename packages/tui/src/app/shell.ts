@@ -94,6 +94,9 @@ export class Shell {
       this.renderer,
       TabSelect({
         options: [{ name: " ", description: "" }],
+        // Six task-oriented tabs must fit 80 cols with no scroll-arrow
+        // truncation (owner relook 2026-08-23): names are <= 12 chars.
+        tabWidth: 13,
         flexShrink: 0,
         selectedBackgroundColor: PALETTE_BG.accent,
         selectedTextColor: SELECTION.fg,
@@ -152,7 +155,9 @@ export class Shell {
     // registered, so indexOf/manager.show work for hidden ids too.
     const visible = this.visibleSpecs();
     const tabOptions = visible.map((spec) => ({
-      name: spec.title,
+      // Relook (owner, 2026-08-23): the tab bar uses the short label when
+      // given so all six tabs fit at 80 columns without the '›' truncation.
+      name: spec.tabLabel ?? spec.title,
       description: "",
     }));
     this.tabBar.setOptions(tabOptions);

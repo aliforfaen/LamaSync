@@ -5,6 +5,10 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
 import { runCli } from "./dispatch.ts";
 
 interface RecordedRequest {
@@ -136,6 +140,36 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
       exitCode: 3,
     });
     expect(written).toContain("lamasync: status:");
+  });
+
+  // Owner decision (LAMA-247 #13): no-credentials invocations keep the
+  // localhost/dev-key default but must warn loudly on stderr. HOME is
+  // pointed at a temp dir so a real ~/.config/lamasync/client.toml on the
+  // host can't side-step the fallback path.
+  test("config-less invocation warns loudly about the fake default client", async () => {
+    const originalHome = process.env.HOME;
+    const originalUrl = process.env.LAMASYNC_SERVER_URL;
+    const originalKey = process.env.LAMASYNC_API_KEY;
+    const fakeHome = mkdtempSync(join(tmpdir(), "lamasync-cli-test-"));
+    try {
+      process.env.HOME = fakeHome;
+      delete process.env.LAMASYNC_SERVER_URL;
+      delete process.env.LAMASYNC_API_KEY;
+      const code = await runExpectingExit(["status", "--json"]);
+      expect(code).toBe(3); // stub transport 401s the fake-client request
+      expect(written).toContain("[!] no credentials found");
+      expect(written).toContain("dev-key");
+      // And NOT a real-fleet silent lookup: the request went to the fake
+      // default URL.
+      expect(recorded[0]?.url).toContain("localhost:8080");
+    } finally {
+      process.env.HOME = originalHome;
+      if (originalUrl === undefined) delete process.env.LAMASYNC_SERVER_URL;
+      else process.env.LAMASYNC_SERVER_URL = originalUrl;
+      if (originalKey === undefined) delete process.env.LAMASYNC_API_KEY;
+      else process.env.LAMASYNC_API_KEY = originalKey;
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 
   test("'dotfiles manifests create' dispatches to create (POST), not list", async () => {
