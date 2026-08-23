@@ -762,8 +762,20 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     if (err && typeof err === "object" && "message" in err) {
       const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`lamasync: ${message}\n`);
       const code = exitCodeForError(err);
+      // LAMA-247 #14: a `--json` invocation failing with exit 3 (auth)
+      // gets a grep-able structured reason on stdout instead of only a
+      // (masked) key string — `echo $? ` plus `jq .reason` works headless.
+      if (code === 3 && parseArgs(argv).flags.json === true) {
+        process.stdout.write(
+          JSON.stringify(
+            { ok: false, reason: "auth-failure", error: message, exitCode: code },
+            null,
+            2,
+          ) + "\n",
+        );
+      }
+      process.stderr.write(`lamasync: ${message}\n`);
       process.exit(code);
     }
     throw err;

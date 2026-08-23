@@ -6,9 +6,11 @@ documented escape hatch when the CLI doesn't express what you need.
 
 This reference is **sourced from** `lamasync <command> --help` — the drift
 checker (`scripts/check-skill-drift.ts`) verifies every command and flag
-mentioned here exists in the CLI's help output. If you add or rename a
-flag, run `bun run scripts/gen-cli-reference.ts > reference/cli.md` (or
-edit both manually and run the drift-check).
+mentioned here exists in the CLI's help output and runs in CI. If you add
+or rename a command/flag, update the relevant section below AND the help
+block in `packages/tui/src/cli/dispatch.ts`, then run
+`bun scripts/check-skill-drift.ts` locally (no generator script exists —
+this file stays curated prose on top of the help texts).
 
 ## Conventions
 

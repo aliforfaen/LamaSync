@@ -1,20 +1,24 @@
 // Cron sanity checker for the Folders assign form. Mirrors the TUI's
 // `packages/tui/src/app/cron.ts` (web-ui cannot import from the tui package).
 // Plain string → error-string function: five whitespace-separated fields,
-// numeric ranges per field, `*` / steps / ranges / lists, plus the standard
-// @-keywords offered by the schedule presets.
+// numeric ranges per field, `*` / steps / ranges / lists, plus the
+// @-keywords the daemon can actually schedule.
+//
+// LAMA-247 #10: the allowlist mirrors the daemon Scheduler — cron-parser
+// 5.x understands @hourly/@daily/@weekly/@monthly/@yearly/@annually, and the
+// Scheduler special-cases @reboot/@login. @midnight and @noon are NOT
+// schedulable (cron-parser rejects them and the daemon never fires) so they
+// are rejected here rather than accepted then silently never running.
 
 const AT_KEYWORDS: ReadonlySet<string> = new Set([
   "@reboot",
   "@login",
   "@hourly",
   "@daily",
-  "@midnight",
   "@weekly",
   "@monthly",
   "@yearly",
   "@annually",
-  "@noon",
 ]);
 
 const FIELD_RANGES: ReadonlyArray<readonly [number, number]> = [

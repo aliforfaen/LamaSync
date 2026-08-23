@@ -337,6 +337,29 @@ async function runCommand(argv: string[]): Promise<string | null> {
  * The previous order scanned the default-route first, so ISP CGNAT on
  * eth0 (100.64–100.127) was reported as a tailnet IP.
  */
+/**
+ * LAMA-247 #8: decides what the daemon reports for `tailnetIp` on each
+ * heartbeat. Tailscale being momentarily down must NOT clear the stored
+ * address (null = "preserve", server-side), but a sustained outage must
+ * not leave a dead address pinned in the fleet either — after `graceMs` of
+ * consecutive detection failures the tracker returns `""` (empty string),
+ * an explicit server-side clear sentinel that wipes the column and bumps
+ * config_revision so peers re-pull without the stale tailnet address.
+ */
+export class TailnetReportTracker {
+  private downSince: number | null = null;
+  constructor(private readonly graceMs: number = 5 * 60 * 1000) {}
+
+  value(detected: string | null, now: number): string | null | undefined {
+    if (detected) {
+      this.downSince = null;
+      return detected;
+    }
+    if (this.downSince === null) this.downSince = now;
+    return now - this.downSince >= this.graceMs ? "" : null;
+  }
+}
+
 export async function detectTailnetIp(): Promise<string | null> {
   // 1. tailscale0 by name — unambiguous when present.
   const tsIface = await runCommand([

@@ -19,6 +19,15 @@ describe("validateCronExpression", () => {
     expect(validateCronExpression("@login")).toBeNull();
     expect(validateCronExpression("@hourly")).toBeNull();
     expect(validateCronExpression("@Monthly")).toBeNull();
+    expect(validateCronExpression("@yearly")).toBeNull();
+  });
+
+  // LAMA-247 #10: the daemon's cron-parser rejects these two, so a folder
+  // scheduled with them would silently never run — the validator must not
+  // accept them.
+  test("rejects @-keywords the daemon cannot schedule (@midnight/@noon)", () => {
+    expect(validateCronExpression("@midnight")).toContain("cron");
+    expect(validateCronExpression("@noon")).toContain("cron");
   });
 
   test("rejects empty input", () => {

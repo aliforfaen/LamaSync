@@ -21,6 +21,60 @@ export interface ExecuteOptions {
 interface TransferStats {
   files: number; bytes: number; errors: number; checks: number; transfers: number;
 }
+
+/**
+ * LAMA-247 #12: aggregated rclone JSON-log state + dry-run candidates.
+ * `files` counts per-file "Copied …" messages; the rest mirror the final
+ * `stats` block rclone emits (transfers/bytes/checks/errors).
+ */
+export interface RcloneLogStats extends TransferStats {
+  wouldCopy: string[];
+  wouldDelete: string[];
+  wouldMkdir: string[];
+}
+
+/**
+ * Feed one chunk of raw rclone `--use-json-log` output into `acc` (returns
+ * it for chaining). Stat lines update cumulative counters; per-file messages
+ * count copied files and dry-run candidates. Non-JSON lines are skipped.
+ *
+ * Exported for the fixture test (LAMA-247 #12): modern rclone (>= 1.63)
+ * writes the JSON log to stderr while older writers use stdout, so the
+ * daemon feeds BOTH streams through this accumulator.
+ */
+export function accumulateRcloneJsonLog(
+  text: string,
+  acc: RcloneLogStats,
+): RcloneLogStats {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("{")) continue;
+    try {
+      const obj = JSON.parse(line) as {
+        stats?: {
+          bytes?: unknown;
+          checks?: unknown;
+          errors?: unknown;
+          transfers?: unknown;
+        };
+        msg?: unknown;
+        object?: unknown;
+      };
+      const s = obj.stats;
+      if (s) {
+        if (typeof s.bytes === "number") acc.bytes = s.bytes;
+        if (typeof s.errors === "number") acc.errors = s.errors;
+        if (typeof s.checks === "number") acc.checks = s.checks;
+        if (typeof s.transfers === "number") acc.transfers = s.transfers;
+      }
+      const msg = obj.msg;
+      if (msg === "Copied (new)" || msg === "Copied (server-side copy)") acc.files += 1;
+      if (msg === "Would copy" && typeof obj.object === "string") acc.wouldCopy.push(obj.object);
+      if (msg === "Would delete" && typeof obj.object === "string") acc.wouldDelete.push(obj.object);
+      if (msg === "Would make directory" && typeof obj.object === "string") acc.wouldMkdir.push(obj.object);
+    } catch {}
+  }
+  return acc;
+}
 interface CommandResult {
   exitCode: number; timedOut: boolean; aborted: boolean; abortReason?: string;
   stats: TransferStats;
@@ -726,29 +780,20 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
       signal.addEventListener("abort", onAbort, { once: true });
     }
   }
-  const stats: TransferStats = { files: 0, bytes: 0, errors: 0, checks: 0, transfers: 0 };
-  const wouldCopy: string[] = [], wouldDelete: string[] = [], wouldMkdir: string[] = [];
-  const parse = (line: string): void => {
-    if (!line.startsWith("{")) return;
-    try {
-      const obj = JSON.parse(line);
-      const s = obj.stats;
-      if (s) {
-        if (typeof s.bytes === "number") stats.bytes = s.bytes;
-        if (typeof s.errors === "number") stats.errors = s.errors;
-        if (typeof s.checks === "number") stats.checks = s.checks;
-        if (typeof s.transfers === "number") stats.transfers = s.transfers;
-      }
-      const msg = obj.msg;
-      if (msg === "Copied (new)" || msg === "Copied (server-side copy)") stats.files += 1;
-      if (msg === "Would copy" && typeof obj.object === "string") wouldCopy.push(obj.object);
-      if (msg === "Would delete" && typeof obj.object === "string") wouldDelete.push(obj.object);
-      if (msg === "Would make directory" && typeof obj.object === "string") wouldMkdir.push(obj.object);
-    } catch {}
+  const acc: RcloneLogStats = {
+    files: 0, bytes: 0, errors: 0, checks: 0, transfers: 0,
+    wouldCopy: [], wouldDelete: [], wouldMkdir: [],
   };
-  const rdr = (async () => { const t = await new Response(proc.stdout).text(); t.split(/\r?\n/).forEach(parse); return t; })();
-  const stderrText = await new Response(proc.stderr).text();
-  const stdoutText = await rdr;
+  const [stdoutText, stderrText] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  // LAMA-247 #12: rclone >= 1.63 writes --use-json-log lines to STDERR;
+  // older writers used stdout. Feed both so per-file/stats counters are not
+  // silently zeroed on modern rclone (the "0 transfers, 0 B" misreport).
+  accumulateRcloneJsonLog(stdoutText, acc);
+  accumulateRcloneJsonLog(stderrText, acc);
+  const { wouldCopy, wouldDelete, wouldMkdir, ...stats } = acc;
   const exitCode = await proc.exited;
   clearTimeout(timer);
   if (signal) {

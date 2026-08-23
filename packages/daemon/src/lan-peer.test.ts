@@ -8,6 +8,7 @@ import {
   parseDefaultRouteInterface,
   parseIpAddrOutput,
   parseTailscaleStatusJson,
+  TailnetReportTracker,
 } from "./lan-peer.ts";
 
 describe("parseDefaultRouteInterface", () => {
@@ -122,5 +123,45 @@ describe("parseTailscaleStatusJson", () => {
   test("returns null for malformed JSON", () => {
     expect(parseTailscaleStatusJson("{not json")).toBeNull();
     expect(parseTailscaleStatusJson("")).toBeNull();
+  });
+});
+
+describe("TailnetReportTracker (LAMA-247 #8)", () => {
+  const T0 = 1_700_000_000_000;
+  const MINUTE = 60 * 1000;
+
+  test("passes through a detected address and resets the down timer", () => {
+    const t = new TailnetReportTracker();
+    expect(t.value("100.64.0.5", T0)).toBe("100.64.0.5");
+    expect(t.value("100.64.0.5", T0 + MINUTE)).toBe("100.64.0.5");
+    expect(t.value(null, T0 + 2 * MINUTE)).toBeNull(); // transient drop
+    expect(t.value(null, T0 + 3 * MINUTE)).toBeNull();
+    expect(t.value("100.64.0.5", T0 + 4 * MINUTE)).toBe("100.64.0.5");
+  });
+
+  test("preserves for transient drops but emits the clear sentinel after the grace", () => {
+    const t = new TailnetReportTracker(5 * MINUTE);
+    t.value("100.64.0.5", T0);
+    expect(t.value(null, T0 + MINUTE)).toBeNull();
+    expect(t.value(null, T0 + 4 * MINUTE)).toBeNull();
+    // Grace (5 min) expired → explicit clear sentinel the server wipes on.
+    expect(t.value(null, T0 + 6 * MINUTE)).toBe("");
+    expect(t.value(null, T0 + 7 * MINUTE)).toBe("");
+  });
+
+  test("an address arriving during the grace resets the timer", () => {
+    const t = new TailnetReportTracker(5 * MINUTE);
+    t.value("100.64.0.5", T0);
+    t.value(null, T0 + MINUTE);
+    t.value("100.64.0.5", T0 + 2 * MINUTE); // back up before grace ends
+    expect(t.value(null, T0 + 3 * MINUTE)).toBeNull();
+    expect(t.value(null, T0 + 8 * MINUTE)).toBe(""); // fresh 5-min grace
+  });
+
+  test("custom grace length is honored", () => {
+    const t = new TailnetReportTracker(1000);
+    t.value("100.64.0.5", T0);
+    expect(t.value(null, T0 + 500)).toBeNull();
+    expect(t.value(null, T0 + 2000)).toBe("");
   });
 });

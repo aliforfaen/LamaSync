@@ -19,12 +19,14 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
   let originalExit: typeof process.exit;
   let originalFetch: typeof globalThis.fetch;
   let written: string;
+  let stdout: string;
   let exitCode: number | undefined;
   let recorded: RecordedRequest[];
   let responder: (req: RecordedRequest) => Response;
 
   beforeEach(() => {
     written = "";
+    stdout = "";
     exitCode = undefined;
     recorded = [];
     responder = () =>
@@ -39,7 +41,9 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
     originalFetch = globalThis.fetch;
 
     process.stdout.write = ((data: string | Uint8Array): boolean => {
-      written += typeof data === "string" ? data : new TextDecoder().decode(data);
+      const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+      written += text;
+      stdout += text;
       return true;
     }) as typeof process.stdout.write;
     process.stderr.write = ((data: string | Uint8Array): boolean => {
@@ -111,6 +115,27 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
     ]);
     expect(code).toBe(3);
     expect(written).toContain("lamasync: list folders:");
+  });
+
+  // LAMA-247 #14: `--json` + exit 3 must emit a grep-able structured
+  // `reason` on stdout so headless callers can jq it instead of scraping
+  // a masked key string from stderr.
+  test("--json auth failure emits {ok:false, reason:\"auth-failure\"} on stdout", async () => {
+    const code = await runExpectingExit([
+      "status",
+      "--server", "http://lamasync.test",
+      "--api-key", "wrong-key-1234567890",
+      "--json",
+    ]);
+    expect(code).toBe(3);
+    // stdout carries the machine-readable envelope; stderr the human line.
+    const envelope = JSON.parse(stdout);
+    expect(envelope).toMatchObject({
+      ok: false,
+      reason: "auth-failure",
+      exitCode: 3,
+    });
+    expect(written).toContain("lamasync: status:");
   });
 
   test("'dotfiles manifests create' dispatches to create (POST), not list", async () => {

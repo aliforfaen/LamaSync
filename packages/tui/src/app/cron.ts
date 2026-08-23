@@ -1,20 +1,24 @@
 // WS3 (TUI foundations): a small cron sanity checker for the wizard flows.
 // Plain string → error-string function, unit-tested. It is a sanity check,
 // not a full cron parser: five whitespace-separated fields, numeric ranges
-// per field, `*` / steps / ranges / lists, plus the standard @-keywords
-// (matching what the schedule presets already offer).
+// per field, `*` / steps / ranges / lists, plus the @-keywords the daemon
+// can actually schedule.
+//
+// LAMA-247 #10: the allowlist mirrors the daemon Scheduler — cron-parser
+// 5.x understands @hourly/@daily/@weekly/@monthly/@yearly/@annually, and the
+// Scheduler special-cases @reboot/@login. @midnight and @noon are NOT
+// schedulable (cron-parser rejects them and the daemon never fires) so they
+// are rejected here rather than accepted then silently never running.
 
 const AT_KEYWORDS: ReadonlySet<string> = new Set([
   "@reboot",
   "@login",
   "@hourly",
   "@daily",
-  "@midnight",
   "@weekly",
   "@monthly",
   "@yearly",
   "@annually",
-  "@noon",
 ]);
 
 /** Per-field [min, max] for minute, hour, day-of-month, month, day-of-week

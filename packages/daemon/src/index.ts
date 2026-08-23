@@ -36,7 +36,7 @@ import {
   type SocketState,
 } from "./socket.ts";
 import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
-import { detectTailnetIp } from "./lan-peer.ts";
+import { detectTailnetIp, TailnetReportTracker } from "./lan-peer.ts";
 import {
   acquireLock,
   heartbeatLock,
@@ -575,6 +575,9 @@ async function main(): Promise<void> {
 
   const client = new LamaSyncApiClient(clientConfig.serverUrl, clientConfig.apiKey);
   const reportQueue = createReportQueue(clientConfig.dataDir, client);
+  // LAMA-247 #8: tailnet address lifecycle — sustained detection failure
+  // clears the stored address after a 5-minute grace.
+  const tailnetTracker = new TailnetReportTracker();
 
   let hostConfig: HostConfig | null = loadCache();
   const operations: OperationLog[] = [];
@@ -989,7 +992,7 @@ async function main(): Promise<void> {
       timestamp: Date.now(),
       status: "online",
       lanIp,
-      tailnetIp,
+      tailnetIp: tailnetTracker.value(tailnetIp, Date.now()),
       version: VERSION,
     });
     lastHeartbeatAt = Date.now();
@@ -1069,7 +1072,7 @@ async function main(): Promise<void> {
           timestamp: now,
           status: "online",
           lanIp: getLocalLanIp(),
-          tailnetIp,
+          tailnetIp: tailnetTracker.value(tailnetIp, now),
           version: VERSION,
         });
         lastHeartbeatAt = now;
