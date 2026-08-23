@@ -3,7 +3,33 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
-## Current status (as of 2026-08-23)
+## UX flourish batch — web-first shipped (2026-08-23)
+
+The four web-first flourishes from `docs/handoff-flourishes.md` landed on
+`feature/product-finish`, one commit each, gates green after each:
+
+- **LAMA-267 — schedules as human sentences** (`eca5c2f`): raw cron
+  collapsed behind "Advanced: custom cron"; "Next: …" sentence computed
+  client-side with the daemon's own `cron-parser`; web presets consolidated.
+- **LAMA-271 — empty states that teach** (`ef0e1f8`): shared `EmptyState`
+  (CSS glyph + CTA) across web pages + Dashboard empty-fleet; TUI empty text
+  reworded to the glossary.
+- **LAMA-272 — device cards** (`797a3e9`): Devices page card grid (status dot
+  + text never color-alone, last-backup from the operations feed);
+  device-first copy sweep. OS icon + storage-used noted as wire gaps.
+- **LAMA-270 — command palette** (`7ea88ec`): cmd+k fuzzy palette,
+  dependency-free; 7 new tests (now **622 pass / 1 skip / 0 fail**).
+
+All four flipped to done on Multica with comments. `tsc --noEmit` +
+`build:web-ui` green. Docs updated: `whats-new-for-owner.md`,
+`dogfood-2026-08-23.md`, `features.md`.
+
+**LAMA-273 (pause/slow mode) + LAMA-266 (backup health) handed off** — real
+features needing a live daemon/backends on the LXC. Execution plan is
+`docs/handoff-273-266-plan.md`; the main orchestrator runs them against the
+live app. Both remain `backlog` on Multica.
+
+## Current status (as of 2026-08-23, earlier — phases 5/6)
 
 - **LAMA-275/LAMA-251/LAMA-276 implementation shipped on
   `feature/product-finish` (PR #1 open, CI green, 614 tests)**: design tokens,
@@ -134,10 +160,11 @@ carries a one-line pointer here.
 Ready-to-pick work, ordered by likely value/urgency:
 
 1. **UX flourish batch — `docs/handoff-flourishes.md`** (LAMA-266/267/270/
-   271/272/273). Long-session work-order handoff: schedules as human
-   sentences → teaching empty states → device cards → cmd+k palette →
-   pause/slow mode → backup 'Prove it' + fire drills. Each is wired to the
-   shipped design system; session contract + acceptance inside.
+   271/272/273). **Web-first half done this session** (LAMA-267/271/272/270,
+   see "UX flourish batch" above). Remaining: **LAMA-273 (pause/slow) +
+   LAMA-266 (backup 'Prove it' + fire drills)** — handed off to the main
+   orchestrator via `docs/handoff-273-266-plan.md` (live daemon/backends on
+   the LXC).
 
 2. **LAMA-249 Phase 7 leftovers** — merge PR #1 (owner), then a fuller
    screenshot/GIF set + filing the audit findings (dogfood doc #1–#5), and
