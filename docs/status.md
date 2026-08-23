@@ -3,7 +3,35 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
-## Current status (as of 2026-08-22)
+## Current status (as of 2026-08-23)
+
+- **LAMA-275/LAMA-251/LAMA-276 implementation shipped on
+  `feature/product-finish` (PR #1 open, CI green, 614 tests)**: design tokens,
+  web shell (grouped rail + drawer <900px, page-context headers, max-width),
+  page sweep with the LAMA-250 glossary (LAMA-251 folded in), TUI pass 2
+  (task-oriented tabs, **Backups & apps** with fleet backup folders, **GitHub
+  under More** drill-in, chrome reduction to one status/hint bar, adaptive
+  help, per-selection contextual footer). Owner D1–D5 approved 2026-08-22.
+- **LAMA-247 no-issue batch landed on the branch**: S3 download streaming
+  cap + 404 shape, stale `tailnet_ip` clear after a 5-min grace (`""`
+  sentinel + `config_revision` bump), rename-no-op 400, web/TUI cron
+  allowlist (@midnight/@noon rejected), Admin health caption, **backup
+  summaries now count real transfers** (rclone ≥1.63 logs JSON to stderr —
+  both streams parsed), `lamasync --json` exit-3 `{reason:"auth-failure"}`
+  envelope, `clean:pi` script, clock-drift test, ARCHITECTURE refresh.
+  Remaining items (op-log archival, ntfyUrl cleanup, CLI-fallback decision,
+  dotfile diff preview, renderer smoke tests, `LAMASYNC_SOCKET_PATH` env table)
+  still open in `docs/cleanup-2026-08-18.md`.
+- **Dogfood guide live**: `docs/dogfood-2026-08-23.md` is the single place
+  capturing what LAMA-250+ built and how to verify it (web/TUI/CLI/server
+  checklists, stranger-flow baseline for Phase 6, findings log, artifacts
+  convention). Future sessions update it instead of recreating it; it is also
+  tracked in the memsearch progress note.
+- Remaining branch phases: **LAMA-253** CLI/TUI help copy (Phase 4),
+  **LAMA-252** README rewrite (Phase 5), **LAMA-254** repo polish + onboarding
+  audit (Phase 6). See `docs/product-finish-plan.md`.
+
+## Status (as of 2026-08-22)
 
 - **LAMA-249 user-facing polish planning**: the parent now has a terminology
   foundation (LAMA-250), web copy pass (LAMA-251), README/repo polish work

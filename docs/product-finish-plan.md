@@ -49,11 +49,17 @@ placement, minimum viewport floor — with a recommendation for each. Post to
 LAMA-275 comments; owner approves/adjusts there. Reversible work only until
 approved.
 
-### Phase 3 — LAMA-275 implementation + LAMA-251 web copy (after approval)
+### Phase 3 — LAMA-275 implementation + LAMA-251 web copy (after approval) ✅ merge-ready
 Shared design contract → web shell/navigation/responsive → TUI shell/IA/
 selection/contextual actions → recompose representative pages → sweep rest,
 applying the terminology glossary to every page as it is recomposed (LAMA-251
 folded in here). Before/after artifacts at all supported sizes.
+
+Shipped on the branch (PR #1): design tokens, web shell + drawer, page
+sweep, TUI pass 1 + **TUI pass 2 (LAMA-276 follow-up)**: Backups & apps
+tab, GitHub under More drill-in, chrome reduction, adaptive help,
+contextual footer. After-artifacts were captured at TUI pass 1; refresh
+after pass-2 render checks (final capture pass lives in Phase 6).
 
 ### Phase 4 — copy passes against the glossary (LAMA-251 folded in, LAMA-253)
 The **web-ui view copy (LAMA-251) is applied during Phase 3's page sweep**, not
@@ -69,7 +75,8 @@ glossary applied.
 ### Phase 6 — LAMA-254: repo polish + fresh-eyes onboarding audit
 Screenshots/GIFs (AFTER wording is final), CONTRIBUTING.md, issue templates +
 PR template, stranger-flow install→register→folder→first-backup audit with
-findings filed as follow-up issues.
+findings filed as follow-up issues. The dogfood baseline lives in
+`docs/dogfood-2026-08-23.md` (stranger-flow audit section + findings log).
 
 ## Merge discipline
 

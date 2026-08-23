@@ -65,11 +65,11 @@ Tick items as later passes fix them. Statuses: ☐ todo · ◐ partial · ☑ do
 
 | Surface | Current terms found | Change needed | Status |
 |---|---|---|---|
-| View titles | Local · Fleet · Dotfiles · Logs · Conflicts · GitHub | Renamed: This device · All devices · App settings · Conflicts · Activity · GitHub (structural moves → LAMA-276) | ◐ |
+| View titles | Local · Fleet · Dotfiles · Logs · Conflicts · GitHub | LAMA-276 done: This device · All devices · Backups & apps (backup folders + app settings) · Conflicts · Activity · More; GitHub is a drill-in under More | ☑ 2026-08-23 |
 | Backup setup wizard | "Cron expression" step, raw cron entry | Schedule presets first, Custom reveals cron | ☐ |
 | Setup wizard (flows/setup.ts) | host/backend/assignment wording | Device / storage destination | ☐ |
 | Dotfile manifest wizard | "Host", "manifest" | Device; drop manifest-speak | ☐ |
-| Local/Fleet view rows & hints | host naming, hotkey hints | Headings now device-first; hint rewording pairs with LAMA-276 contextual actions | ◐ |
+| Local/Fleet view rows & hints | host naming, hotkey hints | Headings device-first; contextual footer per selected folder (LAMA-276) | ☑ 2026-08-23 |
 
 ### CLI (`packages/tui/src/cli/`) — LAMA-253
 
