@@ -95,8 +95,8 @@ export function EditableHostname({ host, onRenamed }: EditableHostnameProps) {
       <button
         type="button"
         className="hostname-edit-btn"
-        title="Rename host"
-        aria-label={`Rename host ${host.hostname}`}
+        title="Rename device"
+        aria-label={`Rename device ${host.hostname}`}
         onClick={(e) => start(e)}
       >
         ✎

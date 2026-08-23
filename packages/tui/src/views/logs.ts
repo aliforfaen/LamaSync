@@ -199,7 +199,7 @@ export class LogsView implements View {
         { flexDirection: "column" },
         Text({ content: "Activity" }),
         Text({ content: "Filter: all" }),
-        Text({ content: "Host: (any)" }),
+        Text({ content: "Device: (any)" }),
         Text({ content: "Page 1 (0 entries shown)" }),
         Text({ content: "" }),
         this.scrollBox,

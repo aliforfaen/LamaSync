@@ -159,12 +159,30 @@ decided but you may want a relook
   deliberately conservative choice (no assets); flag if you'd like a richer
   illustration later.
 
+### LAMA-272 — Device cards, not host table
+
+- The Devices page is now a **responsive card grid** (4-up at 1440, single
+  column at 360) instead of a host table: device glyph, name, a pulsing
+  online dot **plus** the word "Online/Offline" (never color alone), and a
+  "Last backup …ago" line derived from the operations feed. Clicking a card
+  opens the device detail page. 🤖
+- The "Pair your first device" empty state (LAMA-271) is preserved in the
+  new layout. 🤖
+- ⚠️ **Noted gaps (no wire change, per issue)**: there is **no OS field** on
+  the wire (so the card uses a generic CSS device glyph, not a real OS icon),
+  and **no per-host storage-used field** in `/health` (so "storage used" is
+  omitted). Both would need an *additive* endpoint/field in a future issue.
+- User-facing "host" copy in Device detail + rename + TUI Activity filter was
+  swept to "device"; wire fields untouched. 🤖
+
 ### Platform decisions (agents, no owner input yet)
 
 - Next-run sentence computed client-side via the shared `cron-parser`
   dependency (added to web-ui); no new server endpoint.
 - Empty-state illustration is pure CSS (no emoji/image assets) per the
   issue's "icon/emoji-free" constraint.
+- Device cards omit OS icon + storage-used (no wire fields); "last backup"
+  derived from the operations feed, not a new endpoint.
 
 ---
 

@@ -1033,11 +1033,14 @@ button.action:disabled {
   .skel::after { animation: none; }
 }
 
-/* --- Host list / detail (LAMA-198) --- */
+/* --- Host list / detail (LAMA-198) ---
+   LAMA-272: the host table became a device-card grid (Tailscale-like
+   glance). `.host-list` is `auto-fit` with a 280px minimum — 4 columns at
+   1440px content width, one column at 360px. */
 
 .host-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--space-3);
 }
 
@@ -1048,7 +1051,7 @@ button.action:disabled {
   padding: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
   color: var(--text);
   box-shadow: var(--shadow-sm);
 }
@@ -1061,15 +1064,141 @@ button.action:disabled {
 .host-card-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: var(--space-2);
+  align-items: flex-start;
+  gap: var(--space-3);
 }
 
 .host-card-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
   font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+/* CSS-drawn device glyph (no emoji, no image assets): a tinted tile with a
+   monitor screen + stand built from the design tokens, echoing the LAMA-271
+   EmptyState orbit-glyph aesthetic. */
+.device-card-glyph {
+  position: relative;
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-md);
+  background: var(--accent-info-bg);
+}
+.device-card-glyph::before {
+  /* screen */
+  content: "";
+  position: absolute;
+  top: 0.45rem;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: 0.85rem;
+  border: 2px solid var(--accent-info);
+  border-radius: var(--radius-sm);
+}
+.device-card-glyph::after {
+  /* stand */
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0.3rem;
+  width: 0.7rem;
+  height: 0.35rem;
+  transform: translateX(-50%);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--accent-info);
+}
+
+.host-card-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.host-card-title .hostname-edit {
+  min-width: 0;
+}
+.host-card-title .hostname-edit strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Status line: dot + text. The dot's color is decorative; the word is the
+   signal (never color alone). The dot pulses while online or degraded; the
+   pulse is disabled under prefers-reduced-motion. */
+.host-status {
+  --status-pulse-rgb: var(--text-muted-rgb);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.host-status-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+.host-status--online {
+  --status-pulse-rgb: var(--accent-ok-rgb);
+  color: var(--accent-ok);
+}
+.host-status--online .host-status-dot {
+  background: var(--accent-ok);
+  animation: status-pulse 2s ease-out infinite;
+}
+.host-status--offline .host-status-dot {
+  background: var(--accent-critical);
+}
+.host-status--degraded {
+  --status-pulse-rgb: var(--accent-warn-rgb);
+  color: var(--accent-warn);
+}
+.host-status--degraded .host-status-dot {
+  background: var(--accent-warn);
+  animation: status-pulse 2.4s ease-out infinite;
+}
+.host-status--unknown .host-status-dot {
+  background: var(--text-muted);
+}
+@keyframes status-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--status-pulse-rgb), 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 0.5rem rgba(var(--status-pulse-rgb), 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(var(--status-pulse-rgb), 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .host-status-dot {
+    animation: none;
+  }
+}
+
+/* "Last backup 2h ago" — omitted entirely when no backup was found. */
+.host-card-last-backup {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--text-dim);
+}
+.host-card-label {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
 }
 
 /* LAMA-223: tailnet address chip with copy affordance (host list cards). */

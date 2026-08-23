@@ -94,7 +94,7 @@ export function HostDetail() {
 
   useEffect(() => {
     if (event && event.kind === "host_renamed" && event.oldId === hostId) {
-      setRenamedBanner(`host renamed: ${event.oldId} → ${event.hostname}`);
+      setRenamedBanner(`device renamed: ${event.oldId} → ${event.hostname}`);
       void refresh();
     }
   }, [event, hostId, refresh]);
@@ -193,7 +193,7 @@ export function HostDetail() {
   if (!hostId) {
     return (
       <div className="page">
-        <div className="error">Missing host id</div>
+        <div className="error">Missing device id</div>
       </div>
     );
   }
@@ -202,8 +202,8 @@ export function HostDetail() {
     return (
       <div className="page">
         <div className="toolbar">
-          <h1>Host</h1>
-          <Link className="action" to="/hosts">← Back to hosts</Link>
+          <h1>Device</h1>
+          <Link className="action" to="/hosts">← Back to devices</Link>
         </div>
         <div className="error">{error}</div>
       </div>
@@ -214,7 +214,7 @@ export function HostDetail() {
     return (
       <div className="page">
         <div className="toolbar">
-          <h1>Host</h1>
+          <h1>Device</h1>
           <span className="muted">loading…</span>
         </div>
       </div>
@@ -227,14 +227,14 @@ export function HostDetail() {
     <div className="page">
       <div className="toolbar">
         <h1>{host.hostname}</h1>
-        <Link className="action" to="/hosts">← All hosts</Link>
+        <Link className="action" to="/hosts">← All devices</Link>
         <button
           type="button"
           className="action danger"
           disabled={deleting}
           onClick={() => onDeleteHost()}
         >
-          {deleting ? "…" : "Delete host"}
+          {deleting ? "…" : "Delete device"}
         </button>
       </div>
       {error && <div className="error">{error}</div>}
@@ -262,7 +262,7 @@ export function HostDetail() {
           <dd>
             <EditableHostname host={host} onRenamed={() => void refresh()} />
           </dd>
-          <dt>Host ID</dt>
+          <dt>Device ID</dt>
           <dd><code>{host.id}</code></dd>
           <dt>Last seen</dt>
           <dd className="mono">{formatTimestamp(host.lastSeen)}</dd>
@@ -515,12 +515,12 @@ export function HostDetail() {
 
       {confirmDelete && data && (
         <ConfirmDialog
-          title="Delete host"
+          title="Delete device"
           danger
           confirmLabel="Delete"
           message={
             <>
-              Delete host “{data.host.hostname}” ({data.host.id})?
+              Delete device “{data.host.hostname}” ({data.host.id})?
               <br />
               <br />
               This removes its assignments, dotfile manifests, and operation
