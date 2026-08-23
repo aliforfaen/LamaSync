@@ -1,0 +1,36 @@
+ This device         All devices         App settings        Conflicts           Activity            GitHub
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+[?] help   [ / ] views   [q] quit
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                      │
+│ This device                                                                                                          │
+│ This device — localhost                                                                                              │
+│                                                                                                                      │
+│ (no folders configured)                                                                                              │
+│ Press 3 to refresh, w to create a new backup.                                                                        │
+│                                                                                                                      │
+│ [1] sync all [2] sync one [3] refresh [p] cache profile [s] switch type [n] network shares [w] new backup…           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ [!] sync-one: no folder selected.                                                                                    │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[!] sync-one: no folder selected.

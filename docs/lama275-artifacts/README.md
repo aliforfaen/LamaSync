@@ -1,12 +1,23 @@
 # LAMA-275 before/after artifacts
 
-Before captures taken 2026-08-22 against a local dev server
-(LAMASYNC_API_KEY=dev-key, empty fleet).
+Before captures: 2026-08-22, base + terminology doc (pre-design work).
+After captures: 2026-08-23, at TUI pass 1 (tokens + web shell + page sweep +
+TUI tab titles/selection). Local dev server, empty fleet, dev-key.
 
-## before/
-- web-*.png — agent-browser screenshots: login + main pages at 1440px dark;
-  dashboard light; dashboard+folders at 768px and 360px light.
-- tui/*.txt — tmux capture-pane text of every TUI view at 120x36, plus
-  local-80x24.txt showing tab-bar truncation at the supported floor.
+## Naming
+- `web-login-1440.png`, `web-<page>-1440-dark.png` — 1440×900 dark
+- `web-dashboard-1440-light.png` — light theme
+- `web-{dashboard,folders}-{768,360}-light.png` — responsive checks; the 360
+  folder shots show the closed state, use agent-browser to see the drawer
+- `tui/*-120x36.txt`, `tui/this-device-80x24.txt` — tmux capture-pane text;
+  both 80×24 captures show the pre-existing tab-bar truncation (`›`) that
+  motivates the LAMA-276 chrome-reduction pass
 
-After captures use the same names under after/ once each chunk lands.
+## Key before→after deltas visible in artifacts
+- Web nav: flat 10-item wrapping top bar → grouped left rail
+  (Overview / Sync / Apps / Storage & tools / System) with drawer <900px
+- Page titles: "Command Center"/"Hosts"/"Backends"/"Dotfiles"/"Operations" →
+  Dashboard/Devices/Storage/App settings/Activity, each with a one-sentence purpose
+- Folders table: Backend/Assignments columns → Storage/Set up on
+- TUI tabs: Local/Fleet/Dotfiles/Logs → This device/All devices/App settings/
+  Activity; consistent selection colors from app/palette.ts
