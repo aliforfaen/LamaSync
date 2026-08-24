@@ -27,6 +27,8 @@ import type {
   FolderSize,
   BrowseRef,
   BrowseJob,
+  DemoState,
+  DemoSeedSummary,
 } from "@lamasync/core";
 
 const API_KEY_STORAGE = "lamasync_api_key";
@@ -459,6 +461,11 @@ export const api = {
       "/notifications/test",
       { channelId },
     ),
+  // LAMA-264: demo mode. Read state, seed a demo fleet, or delete all demo
+  // data (the Delete action is confirmed in the UI before calling this).
+  getDemo: () => apiGet<DemoState>("/demo"),
+  seedDemo: () => apiPost<DemoSeedSummary>("/demo/seed"),
+  deleteDemo: () => apiDelete<DemoSeedSummary>("/demo"),
   // LAMA-198: queued-action model. The Web UI uses `enqueueAction` to ask
   // a daemon to do work (sync, backup, check-update, refresh-config); the
   // rest of the endpoints exist for the detail page to render recent

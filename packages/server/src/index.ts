@@ -18,6 +18,7 @@ import { notificationsRoutes } from "./routes/notifications.ts";
 import { browseRoutes } from "./routes/browse.ts";
 import { backendsRoutes } from "./routes/backends.ts";
 import { statsRoutes } from "./routes/stats.ts";
+import { demoRoutes } from "./routes/demo.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -100,6 +101,10 @@ const app = new Elysia()
             name: "Data Browser",
             description: "Read-only browsing of local backups, S3 folders, and restic snapshots",
           },
+          {
+            name: "Demo",
+            description: "Demo-mode fleet seeding and deletion",
+          },
         ],
         components: {
           securitySchemes: {
@@ -133,6 +138,7 @@ const app = new Elysia()
   .use(notificationsRoutes)
   .use(backendsRoutes)
   .use(statsRoutes)
+  .use(demoRoutes)
   .use(browseRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {

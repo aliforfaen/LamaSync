@@ -87,6 +87,9 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/operations/release`                      | Release folder lock                              |
 | GET      | `/shares`                                  | List NFS / SMB shares                            |
 | POST     | `/admin/prune?olderThanMs=<ms>`            | Manually trim operation_log                      |
+| GET      | `/demo`                                   | Demo-mode state (whether demo data is present)  |
+| POST     | `/demo/seed`                              | Seed a demo fleet (fake devices, timeline, snapshot) |
+| DELETE   | `/demo`                                   | Delete all demo data (confirmed by caller)      |
 | GET      | `/notifications`                           | Durable notification history                      |
 | GET      | `/notifications/channels`                  | List delivery channels                           |
 | POST     | `/notifications/channels`                  | Create channel                                   |

@@ -3,6 +3,25 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Feature batch — LAMA-263 + LAMA-264 (2026-08-23)
+
+Shipped on `feature/product-finish` (two commits; gates green: `tsc --noEmit`,
+`build:web-ui`, `bun test` 630 pass / 1 skip). Both are LAMA-249 flourishes
+that were out of scope for the LAMA-275 design issue.
+
+- **LAMA-263 — App presets gallery (curated)**: new `/presets` page under the
+  Apps nav group listing 6 hand-picked apps (VS Code, Neovim, Zsh, Firefox,
+  Git config, tmux). "Backup" creates an app-settings backup (dotfile
+  manifest) for the app's per-OS paths on a chosen device — reuses the
+  existing manifest verb, **no new server endpoints**. Pure web feature.
+- **LAMA-264 — Demo mode**: additive `demo` flag on 8 tables (schema +
+  migrations) + new `demo.ts` route (`GET /api/v1/demo`, `POST /api/v1/demo/seed`,
+  `DELETE /api/v1/demo`). "Explore a demo fleet" seeds 3 fake devices, a
+  timeline, and a browsable snapshot; "Delete demo data" (confirmed) wipes all
+  flagged rows without touching real data. Dashboard banner + empty-fleet CTA.
+- Handoff plan: `docs/handoff-263-264-plan.md`. LAMA-262 (pairing) and
+  LAMA-266 (backup health) remain open; 266 has its own live-feature plan.
+
 ## UX flourish batch — web-first shipped (2026-08-23)
 
 The four web-first flourishes from `docs/handoff-flourishes.md` landed on

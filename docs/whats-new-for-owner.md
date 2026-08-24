@@ -220,3 +220,24 @@ ones. The technical mirror of this is `docs/dogfood-2026-08-23.md`.)*
   interface is the seam if a community registry is wanted later. 🤖
 - Pure web feature: zero API/schema/CLI changes, zero `any`. Verified via
   `tsc --noEmit`, `build:web-ui`, `bun test` (626 pass / 1 skip). 🤖
+
+### LAMA-264 — Demo mode + "Delete demo data"
+
+- New **demo mode**: "Explore a demo fleet" (Dashboard empty state, when no
+  real devices) seeds 3 fake devices, a realistic timeline of activity, a
+  browsable restic snapshot, and a local file-viewer seed — so a new user
+  learns by poking empty states without adding real folders. 🤖
+- All demo rows are **flagged `demo = 1`** (additive column on hosts, folders,
+  folder_assignments, backends, operation_log, restic_snapshots,
+  dotfile_manifests, restic_restore_jobs — both `SERVER_SCHEMA` and
+  `MIGRATIONS`). A single confirmed **Delete demo data** wipes every flagged
+  row in FK-safe order; real data is never touched, and a real daemon never
+  acts on demo hosts (they have no heartbeat). 🤖
+- Additive server route `packages/server/src/routes/demo.ts`:
+  `GET /api/v1/demo` (state), `POST /api/v1/demo/seed`, `DELETE /api/v1/demo`.
+  Seeding does **not** bump `config_revision` and triggers no rclone sync —
+  demo data is strictly visual/learn-by-poking. 🤖
+- Web: Dashboard banner when demo is active + confirm dialog for delete;
+  empty-fleet secondary CTA to seed. Verified via `tsc`, `build:web-ui`,
+  `bun test` (630 pass / 1 skip) including `demo.test.ts` (seed counts +
+  idempotent, real-data-safe delete). 🤖

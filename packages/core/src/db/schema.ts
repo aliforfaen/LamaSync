@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS hosts (
     status      TEXT DEFAULT 'unknown',
     lan_ip      TEXT,
     version     TEXT,
-    config_revision INTEGER DEFAULT 0
+    config_revision INTEGER DEFAULT 0,
+    demo        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -23,7 +24,8 @@ CREATE TABLE IF NOT EXISTS folders (
     git_remote            TEXT,
     backend               TEXT DEFAULT 'sftp',
     backend_id            TEXT REFERENCES backends(id),
-    s3_bucket             TEXT
+    s3_bucket             TEXT,
+    demo                  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS folder_assignments (
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     cache_max_size      TEXT,
     restic_repository   TEXT,
     restic_password     TEXT,
+    demo                INTEGER NOT NULL DEFAULT 0,
     UNIQUE(folder_id, host_id)
 );
 
@@ -69,6 +72,7 @@ CREATE TABLE IF NOT EXISTS dotfile_manifests (
     last_sync_at  INTEGER,
     last_sync_direction TEXT,
     original_uploader_host_id TEXT,
+    demo                    INTEGER NOT NULL DEFAULT 0,
     UNIQUE(host_id, app_name)
 );
 
@@ -90,7 +94,8 @@ CREATE TABLE IF NOT EXISTS restic_snapshots (
     timestamp     INTEGER NOT NULL,
     paths         TEXT NOT NULL, -- JSON array
     size_bytes    INTEGER,
-    tags          TEXT -- JSON array
+    tags          TEXT, -- JSON array
+    demo          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_restic_snapshots_folder_host
@@ -106,7 +111,8 @@ CREATE TABLE IF NOT EXISTS restic_restore_jobs (
     status        TEXT NOT NULL DEFAULT 'pending',
     created_at    INTEGER NOT NULL,
     resolved_at   INTEGER,
-    error         TEXT
+    error         TEXT,
+    demo          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_restic_restore_jobs_target
@@ -138,7 +144,8 @@ CREATE TABLE IF NOT EXISTS operation_log (
     status      TEXT NOT NULL,
     summary     TEXT,
     details     TEXT,
-    duration_ms INTEGER
+    duration_ms INTEGER,
+    demo        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS notification_events (
@@ -189,6 +196,7 @@ CREATE TABLE IF NOT EXISTS backends (
     local_path         TEXT,
     restic_repository  TEXT,
     restic_password_enc TEXT,
+    demo               INTEGER NOT NULL DEFAULT 0,
     created_at         INTEGER NOT NULL
 );
 
@@ -308,6 +316,21 @@ export const MIGRATIONS: string[] = [
   // today's behavior so existing assignments (and existing dev databases)
   // need no migration other than this ADD COLUMN.
   "ALTER TABLE folder_assignments ADD COLUMN mode TEXT NOT NULL DEFAULT 'inherit'",
+  // LAMA-264: demo-mode flag on every table the demo seeder writes. Demo
+  // rows are flagged (demo = 1) so a single confirmed DELETE wipes them
+  // without touching any real data, and a real daemon never acts on them
+  // (demo hosts have no heartbeat; a daemon only pulls its own host id).
+  "ALTER TABLE hosts ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE folders ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE folder_assignments ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE backends ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE operation_log ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE restic_snapshots ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE dotfile_manifests ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  // LAMA-264: restic_restore_jobs can reference demo folders/hosts; flag it
+  // too so a demo delete is exhaustive. No seeder writes restore jobs yet,
+  // but the column keeps the demo-cleanup contract complete.
+  "ALTER TABLE restic_restore_jobs ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
 ];
 
 /**

@@ -632,6 +632,18 @@ button.action.theme-toggle {
 .preset-actions { display: flex; gap: var(--space-2); margin-top: auto; flex-wrap: wrap; }
 .preset-actions .action { text-align: center; }
 .preset-hint { margin-top: var(--space-3); }
+/* LAMA-264: demo-mode banner + empty-fleet secondary CTA on the Dashboard. */
+.demo-banner {
+  border-left: 3px solid var(--accent-info);
+  background: var(--surface-2, var(--surface));
+}
+.demo-secondary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  flex-wrap: wrap;
+}
 .quick-actions { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
 .quick-actions h2 { width: 100%; }
 /* WS5 P3: anchors that act as buttons share the action family defined in the

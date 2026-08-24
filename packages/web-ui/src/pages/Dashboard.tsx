@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import type {
   Backend,
   Conflict,
+  DemoState,
   Folder,
   Host,
   OperationLog,
@@ -16,6 +17,7 @@ import type {
 import { api } from "../api.ts";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { GettingStarted } from "../components/GettingStarted.tsx";
+import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 interface DashboardData {
@@ -146,6 +148,11 @@ export function Dashboard() {
   // UX workstream 4: a failed storage fetch surfaces an inline hint instead
   // of being silently swallowed.
   const [storageError, setStorageError] = useState<string | null>(null);
+  // LAMA-264: demo-mode state (whether a demo fleet is present). Best-effort;
+  // failures are ignored so a missing endpoint never breaks the dashboard.
+  const [demo, setDemo] = useState<DemoState | null>(null);
+  const [demoBusy, setDemoBusy] = useState(false);
+  const [confirmDeleteDemo, setConfirmDeleteDemo] = useState(false);
   // LAMA-203: captured once; highlights are computed against the previous
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
@@ -227,6 +234,8 @@ export function Dashboard() {
         if (cancelled) return;
         setStorageError(err instanceof Error ? err.message : String(err));
       });
+    // LAMA-264: read demo-mode state (best-effort, never blocks render).
+    api.getDemo().then(setDemo).catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -235,6 +244,31 @@ export function Dashboard() {
   useEffect(() => {
     if (event) setData((prev) => (prev ? mergeEvent(prev, event) : prev));
   }, [event]);
+
+  async function onSeedDemo(): Promise<void> {
+    setDemoBusy(true);
+    try {
+      await api.seedDemo();
+      setDemo(await api.getDemo());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDemoBusy(false);
+    }
+  }
+
+  async function onDeleteDemo(): Promise<void> {
+    setConfirmDeleteDemo(false);
+    setDemoBusy(true);
+    try {
+      await api.deleteDemo();
+      setDemo(await api.getDemo());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDemoBusy(false);
+    }
+  }
 
   const counts = useMemo(() => {
     const hosts = data?.hosts ?? [];
@@ -367,6 +401,38 @@ export function Dashboard() {
         />
       ) : null}
 
+      {demo?.hasDemo ? (
+        <section className="section demo-banner">
+          <div className="toolbar">
+            <h2>Demo data is active</h2>
+            <button
+              type="button"
+              className="action danger"
+              disabled={demoBusy}
+              onClick={() => setConfirmDeleteDemo(true)}
+            >
+              {demoBusy ? "Working…" : "Delete demo data"}
+            </button>
+          </div>
+          <p className="muted">
+            You're exploring a demo fleet — 3 fake devices, a timeline, and a
+            browsable snapshot. Nothing here touches a real backend. Delete it
+            any time to start fresh.
+          </p>
+        </section>
+      ) : null}
+
+      {confirmDeleteDemo ? (
+        <ConfirmDialog
+          title="Delete demo data?"
+          message="This permanently removes the demo devices, folders, timeline, and snapshot. Your real data is not affected."
+          confirmLabel="Delete demo data"
+          danger
+          onConfirm={() => void onDeleteDemo()}
+          onCancel={() => setConfirmDeleteDemo(false)}
+        />
+      ) : null}
+
       <section className="section">
         <h2>Fleet</h2>
         {!data ? (
@@ -377,19 +443,34 @@ export function Dashboard() {
             <div className="skel skel-card" />
           </div>
         ) : data.hosts.length === 0 ? (
-          <EmptyState
-            variant="devices"
-            title="Pair your first device"
-            how="Register a machine with this server and start syncing folders between your devices."
-            ctaLabel="Pair your first device"
-            ctaTo="/hosts"
-            steps={[
-              "Run the installer on the new machine",
-              "Point it at this server with your API key",
-              "It appears here within a minute",
-            ]}
-            timeNote="takes 30s"
-          />
+          <>
+            <EmptyState
+              variant="devices"
+              title="Pair your first device"
+              how="Register a machine with this server and start syncing folders between your devices."
+              ctaLabel="Pair your first device"
+              ctaTo="/hosts"
+              steps={[
+                "Run the installer on the new machine",
+                "Point it at this server with your API key",
+                "It appears here within a minute",
+              ]}
+              timeNote="takes 30s"
+            />
+            {!demo?.hasDemo ? (
+              <div className="demo-secondary">
+                <span className="muted">Or explore without setting anything up:</span>
+                <button
+                  type="button"
+                  className="action"
+                  disabled={demoBusy}
+                  onClick={() => void onSeedDemo()}
+                >
+                  {demoBusy ? "Seeding…" : "Explore a demo fleet"}
+                </button>
+              </div>
+            ) : null}
+          </>
         ) : (
           <div className="fleet-grid">
             {data.hosts.map((h) => (

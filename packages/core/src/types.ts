@@ -342,6 +342,37 @@ export interface NotificationEvent {
   webhookDelivered: boolean;
 }
 
+// LAMA-264: demo-mode state. Returned by GET /api/v1/demo so the web UI
+// can decide between a "See a demo fleet" entry point and an active-demo
+// banner with a "Delete demo data" action. `counts` reflects only rows
+// flagged demo = 1; real data is never counted here.
+export interface DemoState {
+  hasDemo: boolean;
+  counts: {
+    hosts: number;
+    folders: number;
+    assignments: number;
+    backends: number;
+    operations: number;
+    snapshots: number;
+    manifests: number;
+  };
+}
+
+// LAMA-264: summary returned after a demo seed, so the UI can confirm what
+// was created. Mirrors the per-table demo counts.
+export interface DemoSeedSummary {
+  hosts: number;
+  folders: number;
+  assignments: number;
+  backends: number;
+  operations: number;
+  snapshots: number;
+  manifests: number;
+  /** Server-side seed directory the demo file viewer reads from. */
+  seedDir: string;
+}
+
 // API request/response shapes
 export interface HealthResponse {
   status: "ok";
