@@ -204,3 +204,19 @@ decided but you may want a relook
 
 *(Future sessions: append a new dated section here instead of editing old
 ones. The technical mirror of this is `docs/dogfood-2026-08-23.md`.)*
+### LAMA-263 — App presets gallery (curated)
+
+- New **App presets** page (under the Apps nav group, `/presets`): a gallery
+  of 6 hand-picked apps — VS Code, Neovim, Zsh, Firefox, Git config, tmux —
+  each with an Install (docs) link, a one-click **Backup** on a chosen
+  device, and a **Manage** link to App settings. 🤖
+- "Backup" creates an **app-settings backup** (dotfile manifest) for the
+  app's OS-specific appdata paths on the selected device — reusing the
+  existing manifest model, **no new server endpoints**. The gallery shows
+  which devices already back each app up (count + hostnames), derived from
+  the manifest list. Restore is handled on the App settings page. 🤖
+- Catalog is a static curated module (`packages/web-ui/src/presets.ts`) —
+  decision locked 2026-08-22 (ship curated, not a registry). The module
+  interface is the seam if a community registry is wanted later. 🤖
+- Pure web feature: zero API/schema/CLI changes, zero `any`. Verified via
+  `tsc --noEmit`, `build:web-ui`, `bun test` (626 pass / 1 skip). 🤖

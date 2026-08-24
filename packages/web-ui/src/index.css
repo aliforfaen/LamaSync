@@ -625,6 +625,13 @@ button.action.theme-toggle {
 .attention-host { display: block; }
 .all-quiet { color: var(--accent-ok); background: var(--accent-ok-bg); border-radius: var(--radius-md); padding: var(--space-3); }
 .fleet-card { display: flex; flex-direction: column; gap: var(--space-2); }
+/* LAMA-263: preset gallery cards reuse the fleet-card surface; these are
+   the per-card bits the shared card style doesn't cover. */
+.preset-blurb { margin: 0; }
+.preset-devices { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.preset-actions { display: flex; gap: var(--space-2); margin-top: auto; flex-wrap: wrap; }
+.preset-actions .action { text-align: center; }
+.preset-hint { margin-top: var(--space-3); }
 .quick-actions { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
 .quick-actions h2 { width: 100%; }
 /* WS5 P3: anchors that act as buttons share the action family defined in the

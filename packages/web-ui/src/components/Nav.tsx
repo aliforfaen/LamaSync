@@ -15,6 +15,7 @@ import {
   IconHome,
   IconHost,
   IconNotification,
+  IconPresets,
   IconSearch,
   IconStorage,
 } from "./icons.tsx";
@@ -64,7 +65,10 @@ export const GROUPS: NavGroup[] = [
   },
   {
     label: "Apps",
-    items: [{ to: "/dotfiles", icon: <IconDotfile />, text: "App settings", keywords: "backup dotfiles manifests" }],
+    items: [
+      { to: "/dotfiles", icon: <IconDotfile />, text: "App settings", keywords: "backup dotfiles manifests" },
+      { to: "/presets", icon: <IconPresets />, text: "App presets", keywords: "vscode neovim zsh firefox git tmux settings backup" },
+    ],
   },
   {
     label: "Storage & tools",
