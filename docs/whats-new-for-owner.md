@@ -293,3 +293,60 @@ per issue. Gates after each: `tsc --noEmit` → `build:web-ui` → `bun test`
   "Linux 6.8.0") and **storage used** ("123.5 GiB used"). The daemon reports
   both on every heartbeat; fields are additive/optional so older daemons
   and existing databases are unaffected (SCHEMA + MIGRATION included). 🤖
+
+## 2026-08-24 (cont.) — LAMA-257/268/153 (same PR #1, pushed)
+
+Second slice of the coding-agent batch, one commit per issue; gates green
+(tsc, build:web-ui, bun test — now 679 pass / 1 skip / 0 fail, drift
+`--strict` OK at 87 routes).
+
+### LAMA-257 — "Preview next run" drawer (dry-run)
+
+- Device detail page: each assigned folder has **Preview next run**. It
+  enqueues a `trigger_sync` action with `{dryRun:true}` (the daemon's
+  existing `rclone --dry-run` path — nothing is changed), polls the action,
+  then reads the tagged `dry-run:` operation row and renders **would-copy /
+  would-delete / would-mkdir counts + a capped file list** (first 200) in a
+  right-side drawer (backdrop / × / Esc to close). 🤖
+- No new endpoints — the server relays via the existing action model; dry-run
+  rows stay tagged `dry-run:` in the log and never bump `config_revision`.
+  The daemon already captured the would-change file lists in operation
+  `details` (no daemon changes needed). 🤖
+
+### LAMA-268 — Smart conflict cards (side-by-side)
+
+- Conflicts page is now a **card grid**: each card shows **this device vs
+  destination** side-by-side (size + modified) with **Keep local / Keep
+  remote / Keep both**, resolved through the existing
+  `POST /conflicts/:id/resolve` verb. Winner/loser is always a text label
+  ("kept", "Newer on this device/destination", resolution line) — never
+  colour alone. 🤖
+- **Wire (additive)**: `Conflict` gains `localSizeBytes`/`remoteSizeBytes`
+  (table columns `local_size`/`remote_size` in SCHEMA + MIGRATIONS). The
+  daemon stats the local file; the **remote size is null** unless known (no
+  extra rclone call) and renders "—". ⚠️ Relook candidate: remote sizes stay
+  blank on real conflicts until we add a per-conflict remote stat — cards
+  are still fully usable.
+- Demo mode now seeds two pending conflicts so the cards can be explored;
+  demo-delete cleans them (additive `demo` flag on conflicts). 🤖
+
+### LAMA-153 — TUI markdown tables + foldable sections
+
+- New pure, width-aware helpers (`packages/tui/src/markdown.ts`) with
+  golden-output tests: aligned fixed-width markdown tables (80-col safe) and
+  `<details>`-style sections as expandable `[+]`/`[-]` rows (the `open` set
+  drives expansion; Enter stays owned by the focused widget per LAMA-173). 🤖
+- Wired where markdown-ish text actually prints: the adaptive **help overlay**
+  (tables align; no-op today) and **app-settings instructions** (tables +
+  collapsed `[+]` folds). OpenTUI's `MarkdownRenderable` already handled
+  rich tables in the preview — this covers the plain-text surfaces. 🤖
+- Six-tabs-fit-80-cols layout untouched.
+
+### Platform decisions (agents, no owner input yet)
+
+1. Dry-run preview reads the tagged operation row (no new wire), so the
+   file list depends on the daemon's operation report arriving (falls back
+   to an explicit error otherwise).
+2. Conflict remote sizes are null by design (no per-conflict rclone call).
+3. Fold expansion model is data-driven (`open` set) — the renderer is pure;
+   interactive fold widgets can build on it later.
