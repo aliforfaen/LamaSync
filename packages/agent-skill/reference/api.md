@@ -68,6 +68,7 @@ All paths are under `/api/v1/` unless noted.
 | PATCH    | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | DELETE   | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only; 15-min cache) |
+| GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only; 15-min cache) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
 | GET      | `/backends/:backendId`                     | Read one backend                                 |
@@ -113,6 +114,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/browse/delete`                           | Delete entries (job)                              |
 | GET      | `/browse/jobs`                             | Recent browse write jobs                         |
 | GET      | `/stats/storage`                           | Storage report (5-min cache)                     |
+| GET      | `/stats/storage/history`                   | Per-backend size time series for the growth sparkline (LAMA-269) |
 | GET      | `/restic/snapshots`                        | List restic snapshots                            |
 | POST     | `/restic/snapshots`                        | Daemon reports a new snapshot                    |
 | GET      | `/restic/restore`                          | List restore jobs                                |

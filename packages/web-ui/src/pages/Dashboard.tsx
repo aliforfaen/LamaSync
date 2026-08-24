@@ -21,6 +21,7 @@ import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 import { formatTimeAgo } from "../relative-time.ts";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
+import { Donut } from "../components/Donut.tsx";
 
 interface DashboardData {
   hosts: Host[];
@@ -545,6 +546,20 @@ export function Dashboard() {
             {storageError && (
               <div className="error">Storage refresh failed — {storageError}</div>
             )}
+            {storage.backends.some((b) => b.bytes > 0) ? (
+              <div className="storage-overview">
+                <Donut
+                  data={storage.backends
+                    .filter((b) => b.bytes > 0)
+                    .map((b) => ({ label: b.label, value: b.bytes }))}
+                  size={120}
+                  thickness={16}
+                  centerLabel={formatBytes(storage.totalBytes)}
+                  centerSublabel="total"
+                  ariaLabel="Storage by source"
+                />
+              </div>
+            ) : null}
             <table className="data">
             <thead>
               <tr>

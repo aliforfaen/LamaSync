@@ -2,7 +2,7 @@ import { Elysia, t } from "elysia";
 import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
-import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderType } from "@lamasync/core";
+import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderSize, FolderType } from "@lamasync/core";
 import { normalizeAssignmentMode } from "@lamasync/core";
 import { getBackend } from "../backends.ts";
 import {
@@ -472,6 +472,36 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
               "Folder size; non-S3 folders return {bytes:null, error:'not measurable server-side'}",
           },
           404: { description: "Not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .get(
+    "/folders/sizes",
+    async () => {
+      // LAMA-269: bulk last-known working-set sizes for every folder, used
+      // by the storage donut to compose a destination from its folders.
+      // Each call measures (or serves the 15-min cache for) S3 folders only;
+      // non-S3 folders return a typed null the UI renders as "n/a".
+      const rows = db
+        .query<FolderRow, []>(
+          "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket FROM folders",
+        )
+        .all();
+      const out: Record<string, FolderSize> = {};
+      for (const row of rows) {
+        const folder = rowToFolder(row);
+        out[folder.id] = await getFolderSize(db, folder, false);
+      }
+      return out;
+    },
+    {
+      detail: {
+        summary: "Bulk last-known working-set sizes for all folders (S3 only; 15-min cache)",
+        tags: ["Folders"],
+        responses: {
+          200: { description: "Map of folderId -> FolderSize; non-S3 folders have bytes:null" },
           401: { description: "Unauthorized" },
         },
       },

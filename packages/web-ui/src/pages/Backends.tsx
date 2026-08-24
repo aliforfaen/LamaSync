@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
-import type { Backend, S3Provider } from "@lamasync/core";
+import type { Backend, Folder, FolderSize, S3Provider, StorageReport } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { Donut } from "../components/Donut.tsx";
+import { Sparkline } from "../components/Sparkline.tsx";
+import { formatBytes } from "../format-bytes.ts";
 import { BACKEND_KIND_HINTS } from "../concepts.ts";
 
 const PROVIDERS: Array<{ value: S3Provider; label: string }> = [
@@ -90,6 +93,13 @@ function validateForm(form: FormState): string | null {
 
 export function Backends() {
   const [items, setItems] = useState<BackendRow[] | null>(null);
+  // LAMA-269: data for the per-destination donut + growth sparkline.
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderSizes, setFolderSizes] = useState<Record<string, FolderSize>>({});
+  const [storageHistory, setStorageHistory] = useState<
+    Record<string, Array<{ measuredAt: number; bytes: number | null }>>
+  >({});
+  const [storageReport, setStorageReport] = useState<StorageReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -115,7 +125,18 @@ export function Backends() {
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
     try {
-      setItems(await api.listBackends());
+      const [backendList, folderList, sizes, history, report] = await Promise.all([
+        api.listBackends(),
+        api.listFolders().catch(() => [] as Folder[]),
+        api.folderSizes().catch(() => ({}) as Record<string, FolderSize>),
+        api.storageHistory().catch(() => ({ backends: {} })),
+        api.storageReport().catch(() => null),
+      ]);
+      setItems(backendList);
+      setFolders(folderList);
+      setFolderSizes(sizes);
+      setStorageHistory(history.backends);
+      setStorageReport(report);
     } catch (err) {
       setError(errorText(err));
     }
@@ -275,6 +296,45 @@ export function Backends() {
     } finally {
       setTestingId(null);
     }
+  }
+
+  // LAMA-269: per-destination storage picture. The donut composes the
+  // destination from its folders (sized via /folders/sizes); the sparkline
+  // plots the destination's total growth from /stats/storage/history. When
+  // nothing has been measured we show an explicit state rather than a fake
+  // zero (non-S3 backends are never measurable server-side).
+  function renderStorageCell(b: BackendRow) {
+    const destFolders = folders.filter((f) => f.backendId === b.id);
+    const slices = destFolders
+      .map((f) => ({ label: f.name, value: folderSizes[f.id]?.bytes ?? 0 }))
+      .filter((s) => s.value > 0);
+    const measured = destFolders.some((f) => folderSizes[f.id]?.bytes != null);
+    const historyPts = (storageHistory[b.id] ?? [])
+      .map((p) => p.bytes)
+      .filter((v): v is number => v != null);
+    if (!measured && historyPts.length === 0) {
+      return <span className="muted">Not measured yet</span>;
+    }
+    const reportBytes =
+      storageReport?.backends.find((x) => x.backendId === b.id)?.bytes ?? null;
+    const center = reportBytes ?? slices.reduce((acc, s) => acc + s.value, 0);
+    return (
+      <div className="storage-cell">
+        <Donut
+          data={slices}
+          size={56}
+          thickness={9}
+          centerLabel={formatBytes(center)}
+          ariaLabel={`${b.name} storage breakdown`}
+        />
+        <Sparkline
+          data={historyPts}
+          width={96}
+          height={28}
+          ariaLabel={`${b.name} storage growth`}
+        />
+      </div>
+    );
   }
 
   return (
@@ -508,6 +568,7 @@ export function Backends() {
                 <th>Access key</th>
                 <th>Secret</th>
                 <th>Folders</th>
+                <th>Storage</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -564,6 +625,7 @@ export function Backends() {
                     )}
                   </td>
                   <td>{b.folderCount ?? 0}</td>
+                  <td>{renderStorageCell(b)}</td>
                   <td>
                     <div className="row-actions">
                       <button type="button" className="action" onClick={() => startEdit(b)}>

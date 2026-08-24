@@ -2036,3 +2036,80 @@ button.action:disabled {
     transform: translateY(-4px);
   }
 }
+
+/* LAMA-269: storage donut + growth sparkline.
+   Inline SVG; colours come from the design tokens so they adapt to the
+   light/dark themes. No emoji or image assets. */
+.storage-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.donut {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.donut svg {
+  display: block;
+}
+
+.donut-track {
+  stroke: var(--border-strong);
+  opacity: 0.5;
+}
+
+.donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+  line-height: 1.1;
+  padding: 0 6px;
+}
+
+.sparkline {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.spark-line {
+  stroke: var(--accent-sync);
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.spark-area {
+  fill: var(--accent-sync);
+  opacity: 0.14;
+}
+
+.storage-overview {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.donut-sub {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  /* push the sublabel below the centred total */
+  align-items: flex-end;
+  padding-bottom: 10px;
+  pointer-events: none;
+}

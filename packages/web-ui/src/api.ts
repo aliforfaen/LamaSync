@@ -415,6 +415,14 @@ export const api = {
   // LAMA-224: storage statistics.
   storageReport: (refresh = false) =>
     apiGet<StorageReport>(`/stats/storage${refresh ? "?refresh=1" : ""}`),
+  // LAMA-269: bulk last-known working-set sizes for the storage donut.
+  folderSizes: () =>
+    apiGet<Record<string, FolderSize>>("/folders/sizes"),
+  // LAMA-269: per-backend size time series for the growth sparkline.
+  storageHistory: () =>
+    apiGet<{
+      backends: Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
+    }>("/stats/storage/history"),
   folderSize: (id: string) =>
     apiGet<FolderSize>(`/folders/${encodeURIComponent(id)}/size`),
   listShares: () => apiGet<Share[]>("/shares"),

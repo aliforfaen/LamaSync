@@ -256,6 +256,21 @@ CREATE TABLE IF NOT EXISTS queued_actions (
 
 CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status
     ON queued_actions(host_id, status);
+
+-- LAMA-269: size time series for the storage donut + growth sparkline.
+-- folder-scoped rows record each measured folder working set; backend-
+-- scoped rows aggregate a destination's total so the sparkline can plot
+-- growth without re-aggregating per-folder history on every request.
+CREATE TABLE IF NOT EXISTS size_history (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope         TEXT NOT NULL,        -- 'folder' | 'backend'
+    ref_id        TEXT NOT NULL,        -- folder id or backend id
+    bytes         INTEGER,
+    object_count  INTEGER,
+    measured_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope
+    ON size_history(ref_id, scope, measured_at);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -331,6 +346,9 @@ export const MIGRATIONS: string[] = [
   // too so a demo delete is exhaustive. No seeder writes restore jobs yet,
   // but the column keeps the demo-cleanup contract complete.
   "ALTER TABLE restic_restore_jobs ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  // LAMA-269: size time series for the storage donut + growth sparkline.
+  "CREATE TABLE IF NOT EXISTS size_history (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, ref_id TEXT NOT NULL, bytes INTEGER, object_count INTEGER, measured_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope ON size_history(ref_id, scope, measured_at)",
 ];
 
 /**

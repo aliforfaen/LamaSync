@@ -247,12 +247,82 @@ export async function getFolderSize(
 
   const value: FolderSize = { ...base, ...result, measuredAt: now };
   folderCache.set(folder.id, { value, at: now });
+  recordSizeHistory(db, folder, value);
   return value;
 }
 
 /** Invalidate a folder's cached size (e.g. after a sync report). */
 export function invalidateFolderSize(folderId: string): void {
   folderCache.delete(folderId);
+}
+
+// --- LAMA-269: size time series for the storage donut + growth sparkline ---
+
+export interface SizeHistoryPoint {
+  measuredAt: number;
+  bytes: number | null;
+}
+
+/**
+ * Persist a measured folder size into `size_history`. Only measured sizes
+ * (bytes != null) are stored; non-S3 folders return null and are skipped so
+ * the sparkline never plots a fake zero. Alongside the folder-scoped row we
+ * keep a backend-scoped aggregate so the web can plot a destination's total
+ * growth directly instead of re-aggregating per-folder history per request.
+ */
+export function recordSizeHistory(
+  db: Database,
+  folder: Folder,
+  size: FolderSize,
+): void {
+  // Only persist genuinely measured sizes. A failed measurement (error
+  // set, or bytes null because the backend isn't measurable server-side)
+  // must never create a misleading zero point in the sparkline.
+  if (size.error !== null || size.bytes === null) return;
+  const measuredAt = size.measuredAt ?? Date.now();
+  db.run(
+    "INSERT INTO size_history (scope, ref_id, bytes, object_count, measured_at) VALUES (?, ?, ?, ?, ?)",
+    ["folder", folder.id, size.bytes, size.objectCount ?? null, measuredAt],
+  );
+  const backendId = folder.backendId;
+  if (!backendId) return;
+  // Sum the latest measured size of every folder that points at this backend.
+  const agg = db
+    .query<{ bytes: number | null; objects: number | null }, [string]>(
+      `SELECT SUM(h.bytes) AS bytes, SUM(h.object_count) AS objects
+       FROM size_history h
+       JOIN folders f ON f.id = h.ref_id
+       WHERE h.scope = 'folder' AND f.backend_id = ?
+         AND h.measured_at = (
+           SELECT MAX(measured_at) FROM size_history
+           WHERE scope = 'folder' AND ref_id = h.ref_id
+         )`,
+    )
+    .get(backendId);
+  db.run(
+    "INSERT INTO size_history (scope, ref_id, bytes, object_count, measured_at) VALUES (?, ?, ?, ?, ?)",
+    ["backend", backendId, agg?.bytes ?? 0, agg?.objects ?? 0, measuredAt],
+  );
+}
+
+/**
+ * Per-backend size time series for the growth sparkline. Returns a map of
+ * backendId -> chronological points. Backends with no measured point are
+ * absent, so callers can render an explicit "not measured yet" state.
+ */
+export function getStorageHistory(
+  db: Database,
+): Record<string, SizeHistoryPoint[]> {
+  const rows = db
+    .query<{ ref_id: string; measured_at: number; bytes: number | null }, []>(
+      "SELECT ref_id, measured_at, bytes FROM size_history WHERE scope = 'backend' ORDER BY ref_id, measured_at ASC",
+    )
+    .all();
+  const out: Record<string, SizeHistoryPoint[]> = {};
+  for (const r of rows) {
+    (out[r.ref_id] ??= []).push({ measuredAt: r.measured_at, bytes: r.bytes });
+  }
+  return out;
 }
 
 // Re-export for tests.

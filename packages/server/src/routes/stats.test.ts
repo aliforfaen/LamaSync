@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SERVER_SCHEMA, MIGRATIONS } from "@lamasync/core";
+import type { Folder, FolderSize } from "@lamasync/core";
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "stats-test-key";
 process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "stats-test-secret-key-0123456789abcdef";
 
@@ -24,7 +25,11 @@ const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts"
   __setDb: (db: Database) => void;
 };
 const { encryptSecret } = await import("../crypto.ts");
-const { __resetStatsCaches } = await import("../stats.ts");
+const { __resetStatsCaches, recordSizeHistory, getStorageHistory } = (await import("../stats.ts")) as unknown as {
+  __resetStatsCaches: () => void;
+  recordSizeHistory: (db: Database, folder: Folder, size: FolderSize) => void;
+  getStorageHistory: (db: Database) => Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
+};
 
 let db: Database;
 let app: { handle(request: Request): Response | Promise<Response> };
@@ -168,5 +173,85 @@ describe("GET /api/v1/folders/:id/size", () => {
   test("404 for unknown folder", async () => {
     const res = await app.handle(request("/api/v1/folders/missing/size"));
     expect(res.status).toBe(404);
+  });
+});
+
+describe("LAMA-269: size history + storage donut/sparkline data", () => {
+  function folderObj(id: string, backendId: string | null): Folder {
+    return { id, name: id, type: "backup", backend: "s3", backendId, s3Bucket: "b" };
+  }
+  function seedFolder(id: string, backendId: string | null): Folder {
+    const f = folderObj(id, backendId);
+    db.run(
+      "INSERT INTO folders (id, name, type, backend, backend_id) VALUES (?, ?, 'backup', 's3', ?)",
+      [id, id, backendId],
+    );
+    return f;
+  }
+
+  test("recordSizeHistory aggregates a destination's total across its folders", () => {
+    seedFolder("f1", "b1");
+    seedFolder("f2", "b1");
+    // Two measurements at different times; the backend snapshot reflects
+    // the destination's running total (f1 measured first, then f2 added).
+    recordSizeHistory(db, folderObj("f1", "b1"), {
+      folderId: "f1", bytes: 100, objectCount: 5, error: null, measuredAt: 1000,
+    });
+    recordSizeHistory(db, folderObj("f2", "b1"), {
+      folderId: "f2", bytes: 200, objectCount: 8, error: null, measuredAt: 2000,
+    });
+    const history = getStorageHistory(db);
+    expect(history["b1"]).toEqual([
+      { measuredAt: 1000, bytes: 100 },
+      { measuredAt: 2000, bytes: 300 },
+    ]);
+  });
+
+  test("backend aggregate tracks the latest per-folder size over time", () => {
+    seedFolder("f1", "b1");
+    recordSizeHistory(db, folderObj("f1", "b1"), {
+      folderId: "f1", bytes: 100, objectCount: 1, error: null, measuredAt: 1000,
+    });
+    recordSizeHistory(db, folderObj("f1", "b1"), {
+      folderId: "f1", bytes: 150, objectCount: 2, error: null, measuredAt: 2000,
+    });
+    expect(getStorageHistory(db)["b1"]).toEqual([
+      { measuredAt: 1000, bytes: 100 },
+      { measuredAt: 2000, bytes: 150 },
+    ]);
+  });
+
+  test("failed / unmeasured sizes are not recorded (no fake zero)", () => {
+    seedFolder("f1", "b1");
+    recordSizeHistory(db, folderObj("f1", "b1"), {
+      folderId: "f1", bytes: null, objectCount: null,
+      error: "not measurable server-side", measuredAt: 1000,
+    });
+    expect(getStorageHistory(db)).toEqual({});
+  });
+
+  test("GET /stats/storage/history returns a per-backend time series", async () => {
+    const backendId = insertS3BackendWithFolder();
+    recordSizeHistory(db, folderObj("folder-s3", backendId), {
+      folderId: "folder-s3", bytes: 42, objectCount: 3, error: null, measuredAt: 5000,
+    });
+    const res = await app.handle(request("/api/v1/stats/storage/history"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      backends: Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
+    };
+    expect(body.backends[backendId]).toEqual([{ measuredAt: 5000, bytes: 42 }]);
+  });
+
+  test("GET /folders/sizes returns a map; non-S3 folders are bytes:null", async () => {
+    insertS3BackendWithFolder();
+    db.run(
+      "INSERT INTO folders (id, name, type, backend) VALUES ('local1', 'localdoc', 'sync', 'sftp')",
+    );
+    const res = await app.handle(request("/api/v1/folders/sizes"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, FolderSize>;
+    expect(body["local1"].bytes).toBeNull();
+    expect(body["folder-s3"]).toBeTruthy();
   });
 });
