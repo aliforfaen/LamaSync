@@ -52,6 +52,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/hosts/:hostId/actions`                   | Enqueue a control-plane action                   |
 | GET      | `/hosts/:hostId/actions`                   | Action history for the host                      |
 | GET      | `/actions/pending`                         | Daemon poll: claim pending actions               |
+| GET      | `/actions/taken?hostId=...`                | Daemon boot-time reclaim: a host's taken actions |
 | POST     | `/actions/:id/complete`                    | Daemon ack: mark action done/failed              |
 | GET      | `/release/latest`                          | Latest GitHub release info (proxy)               |
 | GET      | `/folders`                                 | List folders                                     |
@@ -63,6 +64,9 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/folders/:id/assignments`                 | List assignments for a folder                    |
 | PATCH    | `/folders/:id/assign/:hostId`              | Update one assignment (role, schedule, ...)      |
 | DELETE   | `/folders/:id/assign/:hostId`              | Unassign                                         |
+| PUT      | `/assignments/:id`                         | Intentional 405 — assignments are addressed by folder+host; use `/folders/:folderId/assign/:hostId` |
+| PATCH    | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
+| DELETE   | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only; 15-min cache) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
@@ -70,6 +74,7 @@ All paths are under `/api/v1/` unless noted.
 | PATCH    | `/backends/:backendId`                     | Update/rotate backend credentials                |
 | DELETE   | `/backends/:backendId`                     | Delete backend (409 while folders use it)        |
 | POST     | `/backends/:backendId/test`                | Test connection (rclone lsd, 5s timeout)         |
+| POST     | `/backends/test`                           | Test a backend DRAFT without persisting (write-only secret fields may fall back to the stored value via `backendId`) |
 | GET      | `/dotfiles/manifests`                      | List dotfile manifests                           |
 | POST     | `/dotfiles/manifests`                      | Create a manifest                                |
 | PUT      | `/dotfiles/manifests/:id`                  | Update a manifest                                |
