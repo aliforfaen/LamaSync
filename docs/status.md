@@ -3,6 +3,47 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Coding-agent batch — LAMA-283/258/269/282/257/268/153 (2026-08-24)
+
+Full seven-issue batch from `docs/handoff-agent-batch-2026-08-24.md` shipped
+on `feature/product-finish` (one commit each + 2 doc commits), all pushed to
+PR #1; CI green (check + build). Gates after every commit: `tsc --noEmit`,
+`build:web-ui`, `bun test` 679 pass / 1 skip / 0 fail, skill-drift `--strict`
+OK (87 routes). All issues flipped to done on Multica with ship comments.
+
+- **LAMA-283** (`a560238`): skill-drift check is now `--strict` in CI +
+  AGENTS.md policy line (any undocumented route/command fails the build).
+- **LAMA-258** (`77dc7a5`): human-sentence activity feed — Operations +
+  Dashboard render glossary sentences (verb + folder + from device + to
+  destination · 2h ago · status word); raw summary on hover tooltip; shared
+  `relative-time.ts` + `format-bytes.ts` extracted (killed 2×/5× dup).
+- **LAMA-269** (`89011e3`): storage donut + growth sparkline per destination
+  (Backends Storage column + Dashboard fleet donut); additive `size_history`
+  store + `GET /folders/sizes` + `GET /stats/storage/history` (both
+  documented); 'Not measured yet' state for non-S3.
+- **LAMA-282** (`938e43e`): device OS + storage-used on the wire — daemon
+  reports `os` + `storageUsedBytes` per heartbeat (SCHEMA + MIGRATIONS),
+  device cards show them.
+- **LAMA-257** (`3e4f528`): 'Preview next run' drawer on device detail —
+  dry-run via existing daemon `--dry-run` path, polls the action, reads the
+  tagged `dry-run:` op row, shows would-copy/delete/mkdir counts + capped
+  file list. No new endpoints.
+- **LAMA-268** (`d7dc477`): Conflicts page → side-by-side cards (this device
+  vs destination: size + mtime), Keep local/remote/both via the existing
+  resolve verb; additive `localSizeBytes`/`remoteSizeBytes` (daemon stats
+  local, remote stays null); demo seeds 2 conflicts (+ `demo` flag on
+  conflicts so demo-delete cleans them).
+- **LAMA-153** (`fe4ce8c`): TUI markdown helpers (`packages/tui/src/markdown.ts`,
+  golden-tested) — aligned fixed-width tables + `<details>` folds as [+] / [-]
+  rows; wired into the adaptive help overlay + app-settings instructions.
+- Docs: `whats-new-for-owner.md` (2 sections), `dogfood-2026-08-23.md` ticks,
+  this status log, `features.md` rows.
+
+Relook candidates (recorded in whats-new): 269 donut slices equal when
+folders share an S3 bucket (center uses the storage-report total) and the
+sparkline only accumulates as measurements happen; 268 remote conflict sizes
+render "—" until a per-conflict remote stat is added.
+
 ## Wrap-up audit — 2026-08-24
 
 Post-session audit of the 8 unpushed commits (flourish batch + LAMA-263/264):
@@ -188,28 +229,29 @@ live app. Both remain `backlog` on Multica.
 
 Ready-to-pick work, ordered by likely value/urgency:
 
-1. **UX flourish batch — `docs/handoff-flourishes.md`** (LAMA-266/267/270/
-   271/272/273). **Web-first half done this session** (LAMA-267/271/272/270,
-   see "UX flourish batch" above). Remaining: **LAMA-273 (pause/slow) +
-   LAMA-266 (backup 'Prove it' + fire drills)** — handed off to the main
-   orchestrator via `docs/handoff-273-266-plan.md` (live daemon/backends on
-   the LXC).
+1. **Merge PR #1** (owner) — the full coding-agent batch + prior flourishes
+   are pushed and CI-green; the what's-new doc has the review notes.
 
-2. **LAMA-249 Phase 7 leftovers** — merge PR #1 (owner), then a fuller
-   screenshot/GIF set + filing the audit findings (dogfood doc #1–#5), and
-   the first `v*` release tag (removes the build-from-source install gap).
+2. **Live-LXC items** — LAMA-273 (pause/slow mode), LAMA-266 (backup fire
+   drills), LAMA-262 (pairing), plus live verification of LAMA-263/264 and
+   the new 257/269/282 surfaces against a real daemon — with the main
+   orchestrator (`docs/handoff-273-266-plan.md`).
 
-3. **LAMA-247 remainder** — op-log export, ntfyUrl dead code, dotfile diff
+3. **LAMA-249 Phase 7 leftovers** — fuller screenshot/GIF set + filing the
+   audit findings (dogfood doc #1–#5), and the first `v*` release tag
+   (removes the build-from-source install gap).
+
+4. **LAMA-247 remainder** — op-log export, ntfyUrl dead code, dotfile diff
    preview, renderer smoke tests, env-table doc (see the LAMA-247 comment).
 
-4. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
+5. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
    - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
 
-3. **LAMA-228 — TUI runtime-verify clean process exit** (todo, medium)
+6. **LAMA-228 — TUI runtime-verify clean process exit** (todo, medium)
    - LAMA-182 fixed it statically (commit `cbb10a1`); nobody has watched the actual process exit yet. Run the pty harness against dead + live servers.
 
-4. **LAMA-204 — LamaSync → LamaDB webhook receiver** (todo)
+7. **LAMA-204 — LamaSync → LamaDB webhook receiver** (todo)
    - Cross-project: LamaSync side is live (env-gated), the LamaDB side doesn't exist yet. Builds the Life OS timeline.
 
-5. **LAMA-237 / LAMA-236** (backlog, no priority)
+8. **LAMA-237 / LAMA-236** (backlog, no priority)
    - Host Types (laptop vs server, etc.) and Fleet software management. Larger features; revisit when the above is quiet.
