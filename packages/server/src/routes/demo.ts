@@ -195,6 +195,48 @@ export function seedDemo(): DemoSeedSummary {
     );
   }
 
+  // --- a couple of pending conflicts on the first demo folder (LAMA-268) ---
+  // Real conflicts arrive from the daemon via POST /conflicts; the demo
+  // seed writes the same shape so the side-by-side cards can be explored.
+  const DEMO_CONFLICTS: Array<{
+    path: string;
+    localMtime: number;
+    remoteMtime: number;
+    localSizeBytes: number;
+    remoteSizeBytes: number;
+  }> = [
+    {
+      path: "notes.md",
+      localMtime: now - 1_200_000,
+      remoteMtime: now - 3_600_000,
+      localSizeBytes: 1_842,
+      remoteSizeBytes: 2_011,
+    },
+    {
+      path: "settings.json",
+      localMtime: now - 2_400_000,
+      remoteMtime: now - 86_400_000,
+      localSizeBytes: 4_096,
+      remoteSizeBytes: 3_512,
+    },
+  ];
+  for (const c of DEMO_CONFLICTS) {
+    db.run(
+      "INSERT INTO conflicts (id, host_id, folder_id, path, local_mtime, remote_mtime, local_size, remote_size, status, created_at, demo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 1)",
+      [
+        `demo-${crypto.randomUUID()}`,
+        hostIds[0],
+        folderIds[0],
+        c.path,
+        c.localMtime,
+        c.remoteMtime,
+        c.localSizeBytes,
+        c.remoteSizeBytes,
+        now,
+      ],
+    );
+  }
+
   return {
     hosts: DEMO_HOSTS.length,
     folders: DEMO_FOLDERS.length,
@@ -203,6 +245,7 @@ export function seedDemo(): DemoSeedSummary {
     operations: DEMO_OPERATIONS.length,
     snapshots: 1,
     manifests: 1,
+    conflicts: DEMO_CONFLICTS.length,
     seedDir,
   };
 }
@@ -221,6 +264,7 @@ export function deleteDemo(): DemoSeedSummary {
     "DELETE FROM dotfile_versions WHERE manifest_id IN (SELECT id FROM dotfile_manifests WHERE demo = 1)",
   );
   db.run("DELETE FROM dotfile_manifests WHERE demo = 1");
+  db.run("DELETE FROM conflicts WHERE demo = 1");
   db.run("DELETE FROM folders WHERE demo = 1");
   db.run("DELETE FROM backends WHERE demo = 1");
   db.run("DELETE FROM hosts WHERE demo = 1");

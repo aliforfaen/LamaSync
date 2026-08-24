@@ -134,4 +134,37 @@ describe("conflictsRoutes", () => {
       .get();
     expect(eventCount?.count).toBe(1);
   });
+
+  test("LAMA-268: per-side sizes round-trip through POST and GET", async () => {
+    const app = new Elysia().use(conflictsRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/conflicts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conflicts: [
+            {
+              hostId: "host-1",
+              folderId: "folder-1",
+              path: "notes.md",
+              localMtime: 1000,
+              remoteMtime: 2000,
+              localSizeBytes: 1842,
+              remoteSizeBytes: 2011,
+            },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as Array<Record<string, unknown>>;
+    expect(created[0]!.localSizeBytes).toBe(1842);
+    expect(created[0]!.remoteSizeBytes).toBe(2011);
+
+    const list = (await (await app.handle(
+      new Request("http://localhost/api/v1/conflicts?status=pending"),
+    )).json()) as Array<Record<string, unknown>>;
+    expect(list[0]!.localSizeBytes).toBe(1842);
+    expect(list[0]!.remoteSizeBytes).toBe(2011);
+  });
 });

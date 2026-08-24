@@ -280,6 +280,11 @@ export interface Conflict {
   path: string;
   localMtime?: number | null;
   remoteMtime?: number | null;
+  // LAMA-268: per-side file sizes for the side-by-side conflict cards.
+  // The daemon stats the local file; `remoteSizeBytes` is null when the
+  // remote size is unknown (no extra rclone call) — the UI renders "—".
+  localSizeBytes?: number | null;
+  remoteSizeBytes?: number | null;
   status: ConflictStatus;
   resolution?: ConflictResolution | null;
   createdAt: number;
@@ -375,6 +380,8 @@ export interface DemoSeedSummary {
   operations: number;
   snapshots: number;
   manifests: number;
+  /** Number of seeded pending conflicts (LAMA-268). */
+  conflicts?: number;
   /** Server-side seed directory the demo file viewer reads from. */
   seedDir: string;
 }

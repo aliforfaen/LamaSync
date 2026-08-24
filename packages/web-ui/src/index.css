@@ -2212,3 +2212,128 @@ button.action:disabled {
   background: var(--accent-critical-bg);
   color: var(--accent-critical);
 }
+
+/* LAMA-268: conflict cards — side-by-side this-device vs destination.
+   Winner/loser is always a text label, never colour alone. */
+.conflict-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+
+.conflict-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.conflict-card--resolved {
+  opacity: 0.72;
+}
+
+.conflict-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.conflict-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.conflict-path {
+  word-break: break-all;
+  font-size: 14px;
+}
+
+.conflict-meta {
+  font-size: 12px;
+}
+
+.conflict-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.conflict-side {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--muted-bg);
+}
+
+.conflict-side h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.conflict-kept {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  background: var(--accent-ok-bg);
+  color: var(--accent-ok);
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+.conflict-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  font-size: 12px;
+}
+
+.conflict-dl dt {
+  color: var(--text-muted);
+}
+
+.conflict-dl dd {
+  margin: 0;
+  text-align: right;
+  word-break: break-all;
+}
+
+.conflict-note {
+  display: block;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.conflict-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.conflict-pending-note {
+  font-size: 12px;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}

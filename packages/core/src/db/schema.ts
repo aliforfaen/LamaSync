@@ -127,10 +127,13 @@ CREATE TABLE IF NOT EXISTS conflicts (
     path          TEXT NOT NULL,
     local_mtime   INTEGER,
     remote_mtime  INTEGER,
+    local_size    INTEGER,
+    remote_size   INTEGER,
     status        TEXT NOT NULL DEFAULT 'pending',
     resolution    TEXT,
     created_at    INTEGER NOT NULL,
     resolved_at   INTEGER,
+    demo          INTEGER NOT NULL DEFAULT 0,
     UNIQUE(host_id, folder_id, path)
 );
 
@@ -295,6 +298,11 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE dotfile_manifests ADD COLUMN instructions TEXT",
   "ALTER TABLE restic_restore_jobs ADD COLUMN include TEXT",
   "CREATE INDEX IF NOT EXISTS idx_conflicts_host_folder ON conflicts(host_id, folder_id, status)",
+  // LAMA-268: per-side sizes for the conflict cards + demo flag so seeded
+  // demo conflicts are wiped by the demo-delete.
+  "ALTER TABLE conflicts ADD COLUMN local_size INTEGER",
+  "ALTER TABLE conflicts ADD COLUMN remote_size INTEGER",
+  "ALTER TABLE conflicts ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE folders ADD COLUMN git_provider TEXT",
   "ALTER TABLE folders ADD COLUMN git_remote TEXT",
   "CREATE TABLE IF NOT EXISTS folder_locks (folder_id TEXT PRIMARY KEY, locked_by TEXT, locked_at INTEGER, lock_ttl INTEGER DEFAULT 1200, lock_id TEXT)",

@@ -268,6 +268,18 @@ interface ParsedConflict {
   remoteMtime?: number;
 }
 
+/** Best-effort size of the local conflict file. stat can race with a
+ *  deletion/rename, so unknown sizes stay null (the card renders "—").
+ *  The remote size is deliberately NOT measured here — it would need an
+ *  extra rclone call per conflict; null is the honest value. */
+function localConflictSize(localPath: string, relPath: string): number | null {
+  try {
+    return statSync(join(localPath, relPath)).size;
+  } catch {
+    return null;
+  }
+}
+
 function parseBisyncConflicts(stdout: string, stderr: string): ParsedConflict[] {
   const text = `${stdout}\n${stderr}`;
   const lines = text.split(/\r?\n/);
@@ -625,6 +637,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
               path: c.path,
               localMtime: c.localMtime,
               remoteMtime: c.remoteMtime,
+              localSizeBytes: localConflictSize(assignment.localPath, c.path),
+              remoteSizeBytes: null,
             })),
           );
         } catch (err) {
@@ -658,6 +672,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
               path: c.path,
               localMtime: c.localMtime,
               remoteMtime: c.remoteMtime,
+              localSizeBytes: localConflictSize(assignment.localPath, c.path),
+              remoteSizeBytes: null,
             })),
           );
         } catch (err) {
