@@ -8,6 +8,7 @@ import { AddHostGuide } from "../components/AddHostGuide.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
+import { formatTimeAgo } from "../relative-time.ts";
 
 // LAMA-272: device cards, not a host table. The page renders the same
 // `GET /api/v1/health` payload as a responsive card grid — CSS device glyph,
@@ -23,20 +24,6 @@ const STATUS_LABELS: Record<Host["status"], string> = {
   degraded: "Degraded",
   unknown: "Unknown",
 };
-
-/** Compact "…ago" label, mirroring the Dashboard triage style. */
-function formatTimeAgo(ts: number | null | undefined): string {
-  if (!ts) return "—";
-  const diffMs = Date.now() - ts;
-  if (diffMs < 60_000) return "just now";
-  const min = Math.floor(diffMs / 60_000);
-  if (min < 60) return `${min}m ago`;
-  const hrs = Math.floor(min / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(ts).toLocaleDateString();
-}
 
 /**
  * LAMA-272: "last backup" comes from the per-host operations feed — there

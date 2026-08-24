@@ -19,6 +19,8 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { GettingStarted } from "../components/GettingStarted.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
+import { formatTimeAgo } from "../relative-time.ts";
+import { OperationSentenceView } from "../components/OperationSentence.tsx";
 
 interface DashboardData {
   hosts: Host[];
@@ -76,23 +78,6 @@ function formatBytes(bytes: number | null | undefined): string {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
-/**
- * Compact "time ago" label for triage cards. Full `toLocaleString()`
- * timestamps wrap to 2-3 lines inside the narrow attention-grid columns;
- * a relative label keeps each entry on a single line.
- */
-function formatTimeAgo(ts: number | null | undefined): string {
-  if (!ts) return "—";
-  const diffMs = Date.now() - ts;
-  if (diffMs < 60_000) return "just now";
-  const min = Math.floor(diffMs / 60_000);
-  if (min < 60) return `${min}m ago`;
-  const hrs = Math.floor(min / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(ts).toLocaleDateString();
-}
 
 /**
  * LAMA-203: the last-visit timestamp used to highlight "what changed since
@@ -165,6 +150,32 @@ export function Dashboard() {
     for (const f of data?.folders ?? []) m.set(f.id, f.name);
     return m;
   }, [data?.folders]);
+
+  // LAMA-258: resolve device + storage-destination names for the activity
+  // sentence. Unknown ids fall back to the raw id inside the sentence.
+  const hostNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const h of data?.hosts ?? []) m.set(h.id, h.hostname);
+    return m;
+  }, [data?.hosts]);
+
+  const backendNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const b of data?.backends ?? []) m.set(b.id, b.name);
+    return m;
+  }, [data?.backends]);
+
+  // folder id -> its storage destination display name (folder.backendId).
+  const folderBackendNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const f of data?.folders ?? []) {
+      if (f.backendId) {
+        const name = backendNameById.get(f.backendId);
+        if (name) m.set(f.id, name);
+      }
+    }
+    return m;
+  }, [data?.folders, backendNameById]);
 
   useEffect(() => {
     if (typeof localStorage === "undefined") return;
@@ -360,7 +371,14 @@ export function Dashboard() {
                     title={`${op.summary ?? op.operation} · ${formatTimestamp(op.timestamp)}`}
                   >
                     <span className="attention-entry-text">
-                      {op.summary ?? op.operation}
+                      <OperationSentenceView
+                        op={op}
+                        ctx={{
+                          folderName: op.folderId ? folderNameById.get(op.folderId) : undefined,
+                          hostName: hostNameById.get(op.hostId),
+                          backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined,
+                        }}
+                      />
                     </span>
                     <span className="attention-entry-time">
                       {formatTimeAgo(op.timestamp)}
@@ -603,7 +621,16 @@ export function Dashboard() {
                       <span className="chip-new">new</span>
                     ) : null}
                   </td>
-                  <td className="muted">{op.summary ?? "—"}</td>
+                  <td className="muted">
+                    <OperationSentenceView
+                      op={op}
+                      ctx={{
+                        folderName: op.folderId ? folderNameById.get(op.folderId) : undefined,
+                        hostName: hostNameById.get(op.hostId),
+                        backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined,
+                      }}
+                    />
+                  </td>
                 </tr>
               ))
             )}

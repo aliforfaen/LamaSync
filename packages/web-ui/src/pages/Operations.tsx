@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
+import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { useSearchParams } from "react-router-dom";
-import type { Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
+import type { Backend, Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
 
 const PAGE_SIZE = 50;
@@ -31,6 +32,7 @@ export function Operations() {
   // folder filter + ?folderId=/?hostId= URL preselect so History links on
   // folder rows land pre-filtered.
   const [hosts, setHosts] = useState<Host[]>([]);
+  const [backends, setBackends] = useState<Backend[]>([]);
   const [hostFilter, setHostFilter] = useState("");
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderFilter, setFolderFilter] = useState("");
@@ -41,14 +43,16 @@ export function Operations() {
 
   async function loadLocks(): Promise<void> {
     try {
-      const [lockList, hostList, folderList] = await Promise.all([
+      const [lockList, hostList, folderList, backendList] = await Promise.all([
         api.listLocks(),
         api.listHosts().catch(() => [] as Host[]),
         api.listFolders().catch(() => [] as Folder[]),
+        api.listBackends().catch(() => [] as Backend[]),
       ]);
       setLocks(lockList);
       setHosts(hostList);
       setFolders(folderList);
+      setBackends(backendList);
     } catch {
       // Locks are best-effort; a failure must not break the log view.
       setLocks([]);
@@ -123,6 +127,13 @@ export function Operations() {
 
   function folderLabel(id: string): string {
     return folders.find((f) => f.id === id)?.name ?? id;
+  }
+
+  function backendNameForFolder(folderId: string | null | undefined): string | undefined {
+    if (!folderId) return undefined;
+    const folder = folders.find((f) => f.id === folderId);
+    if (!folder?.backendId) return undefined;
+    return backends.find((b) => b.id === folder.backendId)?.name;
   }
 
   function lockLabel(hostId: string): string {
@@ -257,7 +268,16 @@ export function Operations() {
                 <td>
                   <span className={`badge badge-${op.status}`}>{op.status}</span>
                 </td>
-                <td className="muted">{op.summary ?? "—"}</td>
+                <td className="muted">
+                  <OperationSentenceView
+                    op={op}
+                    ctx={{
+                      folderName: op.folderId ? folderLabel(op.folderId) : null,
+                      hostName: lockLabel(op.hostId),
+                      backendName: backendNameForFolder(op.folderId),
+                    }}
+                  />
+                </td>
               </tr>
             ))
           )}
