@@ -18,28 +18,28 @@ feature ideas in the other LAMA-249 children.
 
 ## Where to begin today
 
-### A. Foundation: LAMA-250
+Updated 2026-08-24. The foundation (LAMA-250 terminology) and design
+overhaul (LAMA-275, owner-approved D1–D5) are **done** — do not redo them.
+Current work orders:
 
-Create `docs/terminology.md` and the audit checklist first. This settles the
-human-facing vocabulary before UI copy or navigation changes spread inconsistent
-terms across the product.
+### A. Coding-agent batch (no live infra needed)
 
-### B. Design proposal: LAMA-275
+Work order: `docs/handoff-agent-batch-2026-08-24.md` — LAMA-258, LAMA-269,
+LAMA-257, LAMA-268, LAMA-153 (+ trivial add-ons LAMA-282, LAMA-283).
+Web-first/additive features on `feature/product-finish`; session contract is
+at the top of that file.
 
-Before broad code changes, inventory the current web and TUI shells and produce
-a small proposal or before/after mockup. The owner must decide, in Multica
-comments, any unresolved direction questions in LAMA-275:
+### B. Live-LXC batch (needs SSH to the container)
 
-- retain the terminal-flavored visual style or move toward a warmer personal
-  homelab utility;
-- grouped left rail/drawer or grouped responsive top navigation for the web;
-- task-oriented TUI views versus the current implementation-oriented tabs;
-- whether GitHub remains a top-level TUI view;
-- minimum browser width and terminal size to support first-class.
+Plans: `docs/handoff-273-266-plan.md` (LAMA-273 pause/slow mode,
+LAMA-266 backup health fire drills) plus pending live verification of
+LAMA-263/264 (see `docs/handoff-wrapup-2026-08-24.md`). Run against the
+live app; the main orchestrator owns this one.
 
-Do not silently choose a broad visual direction. If an answer is unavailable,
-make reversible inventory/proposal work only and list the decision in the final
-handoff.
+### Historical context
+
+The original LAMA-275 sequencing (terminology → design proposal → shell
+implementation) is preserved below for reference.
 
 ### C. Implementation sequence after approval
 
