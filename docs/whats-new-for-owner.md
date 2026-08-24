@@ -241,3 +241,55 @@ ones. The technical mirror of this is `docs/dogfood-2026-08-23.md`.)*
   empty-fleet secondary CTA to seed. Verified via `tsc`, `build:web-ui`,
   `bun test` (630 pass / 1 skip) including `demo.test.ts` (seed counts +
   idempotent, real-data-safe delete). 🤖
+
+## 2026-08-24 — coding-agent batch (LAMA-283/258/269/282) · PR #1 open
+
+Quick-wins batch from `docs/handoff-agent-batch-2026-08-24.md`, one commit
+per issue. Gates after each: `tsc --noEmit` → `build:web-ui` → `bun test`
+→ `check-skill-drift.ts --strict` (all green; 661 pass / 1 skip / 0 fail,
+87 server routes drift-clean). Live-LXC items (LAMA-273/266/262) and the
+257/268/153 slice are NOT in this batch.
+
+### LAMA-283 — skill-drift check is now strict
+
+- CI runs `scripts/check-skill-drift.ts --strict`: any new route/command
+  must be documented under `packages/agent-skill/reference/` or the build
+  fails. Policy line added to AGENTS.md. 🤖 (mechanical)
+
+### LAMA-258 — Human-sentence activity feed
+
+- Operations page + Dashboard timeline now read as sentences instead of raw
+  server summaries: "Backed up **Dev configs** from **cachy** to **Exoscale**
+  · 2h ago · ok". Status word is always text ("ok / failed / conflict /
+  retrying / recovered / started") — never colour alone. 🤖
+- The raw server `summary` is kept on the row's hover tooltip (nothing
+  deleted). 🤖
+- Shared, unit-tested helpers extracted while at it: `relative-time.ts`
+  (the previously-duplicated "…ago" logic) and `format-bytes.ts` (the
+  5×-duplicated byte formatter) now live in one place. 🤖
+
+### LAMA-269 — Storage as a picture: donut + growth sparkline
+
+- **Storage destinations page**: each destination row now shows a **donut**
+  (its folders as slices, centre = total) and a **growth sparkline** (its
+  size over time). Folders/Dashboard storage summary also gets a fleet
+  donut. Pure inline-SVG components, no chart dependency. 🤖
+- **"Not measured yet"** state instead of a fake zero: non-S3 backends and
+  folders the server can't size render the explicit state. 🤖
+- Real data behind it (your "full additive" call): a new `size_history`
+  table records each measured folder size + a per-destination aggregate,
+  and two additive endpoints serve it: `GET /folders/sizes` (bulk) and
+  `GET /stats/storage/history`. Both documented in `reference/api.md`.
+  ⚠️ **Relook candidates**:
+  - Folders sharing one S3 bucket each report the *full bucket* size, so the
+    donut slices are equal — the centre total uses the storage-report value
+    instead to avoid n× inflation. Honest, but worth a look with real data.
+  - The sparkline only grows as size measurements accumulate (every 15-min
+    cache expiry) — it starts empty on a fresh install. That's by design.
+
+### LAMA-282 — Device OS + storage used on the wire
+
+- Device cards (Devices page) now show the device's **OS** (e.g.
+  "Linux 6.8.0") and **storage used** ("123.5 GiB used"). The daemon reports
+  both on every heartbeat; fields are additive/optional so older daemons
+  and existing databases are unaffected (SCHEMA + MIGRATION included). 🤖
