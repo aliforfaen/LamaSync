@@ -9,6 +9,7 @@ import { EditableHostname } from "../components/EditableHostname.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 import { formatTimeAgo } from "../relative-time.ts";
+import { formatBytes } from "../format-bytes.ts";
 
 // LAMA-272: device cards, not a host table. The page renders the same
 // `GET /api/v1/health` payload as a responsive card grid — CSS device glyph,
@@ -163,6 +164,14 @@ function DeviceCard({ host, lastBackup, deleting, onDelete, onRenamed }: DeviceC
             <span className="badge badge-update">update</span>
           ) : null}
         </span>
+        {host.os ? (
+          <span title="Operating system">{host.os}</span>
+        ) : null}
+        {host.storageUsedBytes != null ? (
+          <span title="Storage used on this device">
+            {formatBytes(host.storageUsedBytes)} used
+          </span>
+        ) : null}
       </div>
     </Link>
   );

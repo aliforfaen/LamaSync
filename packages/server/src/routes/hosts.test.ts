@@ -59,6 +59,8 @@ function loadHostRow(hostId: string): {
   tailnet_ip: string | null;
   last_seen: number | null;
   status: string | null;
+  os: string | null;
+  storage_used_bytes: number | null;
 } {
   const row = db
     .query<
@@ -68,9 +70,11 @@ function loadHostRow(hostId: string): {
         tailnet_ip: string | null;
         last_seen: number | null;
         status: string | null;
+        os: string | null;
+        storage_used_bytes: number | null;
       },
       [string]
-    >("SELECT version, lan_ip, tailnet_ip, last_seen, status FROM hosts WHERE id = ?")
+    >("SELECT version, lan_ip, tailnet_ip, last_seen, status, os, storage_used_bytes FROM hosts WHERE id = ?")
     .get(hostId);
   if (!row) throw new Error(`host ${hostId} not found`);
   return row;
@@ -258,6 +262,29 @@ describe("POST /api/v1/report/health — version field (LAMA-199)", () => {
       version: "0.4.0",
     });
     expect(res.status).toBe(422);
+  });
+
+  test("LAMA-282: heartbeat with os + storageUsedBytes stores them on the wire", async () => {
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      os: "Linux 6.8.0",
+      storageUsedBytes: 123456789,
+    });
+    expect(res.status).toBe(204);
+    const row = loadHostRow("host-a");
+    expect(row.os).toBe("Linux 6.8.0");
+    expect(row.storage_used_bytes).toBe(123456789);
+    // The fields surface on the GET /hosts wire shape for the device cards.
+    const list = (await (await app.handle(request("/api/v1/hosts"))).json()) as Array<{
+      id: string;
+      os: string | null;
+      storageUsedBytes: number | null;
+    }>;
+    const wire = list.find((h) => h.id === "host-a");
+    expect(wire?.os).toBe("Linux 6.8.0");
+    expect(wire?.storageUsedBytes).toBe(123456789);
   });
 });
 

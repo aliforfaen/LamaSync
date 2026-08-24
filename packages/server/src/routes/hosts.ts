@@ -30,6 +30,8 @@ interface HostRow {
   lan_ip: string | null;
   version: string | null;
   config_revision: number | null;
+  os: string | null;
+  storage_used_bytes: number | null;
 }
 
 /**
@@ -53,10 +55,12 @@ function rowToHost(row: HostRow, latestVersion: string | null): Host {
     version,
     updateAvailable,
     configRevision: row.config_revision ?? 0,
+    os: row.os,
+    storageUsedBytes: row.storage_used_bytes,
   };
 }
 
-const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision FROM hosts";
+const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, os, storage_used_bytes FROM hosts";
 
 /**
  * LAMA-225: DNS-safe hostname for rename — lowercase a-z0-9 plus internal
@@ -407,13 +411,15 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/report/health",
     async ({ body, set }) => {
-      const { hostId, timestamp, status, lanIp, tailnetIp, version } = body as {
+      const { hostId, timestamp, status, lanIp, tailnetIp, version, os, storageUsedBytes } = body as {
         hostId: string;
         timestamp: number;
         status: HostStatus;
         lanIp?: string | null;
         tailnetIp?: string | null;
         version?: string | null;
+        os?: string | null;
+        storageUsedBytes?: number | null;
       };
       const previous = activeDb
         .query<{ status: string | null }, [string]>(
@@ -463,6 +469,17 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       if (typeof version === "string" && version.length > 0) {
         sets.push("version = ?");
         params.push(version);
+      }
+      // LAMA-282: device OS + storage used, reported by the daemon on each
+      // heartbeat. Persist only when present so an older/blank report never
+      // wipes a previously stored value (mirrors the `version` rule).
+      if (typeof os === "string" && os.length > 0) {
+        sets.push("os = ?");
+        params.push(os);
+      }
+      if (typeof storageUsedBytes === "number" && Number.isFinite(storageUsedBytes)) {
+        sets.push("storage_used_bytes = ?");
+        params.push(storageUsedBytes);
       }
       params.push(hostId);
       const result = activeDb.run(
@@ -516,6 +533,11 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         lanIp: t.Optional(t.Union([t.String(), t.Null()])),
         tailnetIp: t.Optional(t.Union([t.String(), t.Null()])),
         version: t.Optional(t.Union([t.String(), t.Null()])),
+        // LAMA-282: device OS + storage used, reported by the daemon on
+        // each heartbeat for the device cards. Optional so older daemons
+        // (and transient blanks) don't break the report.
+        os: t.Optional(t.Union([t.String(), t.Null()])),
+        storageUsedBytes: t.Optional(t.Union([t.Number(), t.Null()])),
       }),
       detail: {
         summary: "Update host heartbeat",

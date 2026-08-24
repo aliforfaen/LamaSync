@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS hosts (
     lan_ip      TEXT,
     version     TEXT,
     config_revision INTEGER DEFAULT 0,
+    os          TEXT,
+    storage_used_bytes INTEGER,
     demo        INTEGER NOT NULL DEFAULT 0
 );
 
@@ -311,6 +313,9 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE dotfile_manifests ADD COLUMN original_uploader_host_id TEXT",
   "ALTER TABLE hosts ADD COLUMN version TEXT",
   "ALTER TABLE hosts ADD COLUMN config_revision INTEGER DEFAULT 0",
+  // LAMA-282: device OS label + storage used for the device cards.
+  "ALTER TABLE hosts ADD COLUMN os TEXT",
+  "ALTER TABLE hosts ADD COLUMN storage_used_bytes INTEGER",
   "CREATE TABLE IF NOT EXISTS queued_actions (id TEXT PRIMARY KEY, host_id TEXT NOT NULL REFERENCES hosts(id), type TEXT NOT NULL, payload TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, taken_at INTEGER, completed_at INTEGER, result TEXT)",
   "CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status ON queued_actions(host_id, status)",
   "CREATE TABLE IF NOT EXISTS notification_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, severity TEXT NOT NULL, message TEXT NOT NULL, host_id TEXT, folder_id TEXT, payload TEXT, created_at INTEGER NOT NULL, ntfy_delivered INTEGER DEFAULT 0, webhook_delivered INTEGER DEFAULT 0)",

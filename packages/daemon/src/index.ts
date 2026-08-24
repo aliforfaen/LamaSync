@@ -55,6 +55,7 @@ import {
   stopAllMounts,
   stopMount,
 } from "./mounts.ts";
+import { osLabel, storageUsedBytes } from "./device-info.ts";
 import {
   disableMountUnit,
   isMountUnitActive,
@@ -994,6 +995,8 @@ async function main(): Promise<void> {
       lanIp,
       tailnetIp: tailnetTracker.value(tailnetIp, Date.now()),
       version: VERSION,
+      os: osLabel(),
+      storageUsedBytes: storageUsedBytes(clientConfig.dataDir),
     });
     lastHeartbeatAt = Date.now();
     await reportQueue.flush();
@@ -1074,6 +1077,8 @@ async function main(): Promise<void> {
           lanIp: getLocalLanIp(),
           tailnetIp: tailnetTracker.value(tailnetIp, now),
           version: VERSION,
+          os: osLabel(),
+          storageUsedBytes: storageUsedBytes(clientConfig.dataDir),
         });
         lastHeartbeatAt = now;
         await reportQueue.flush();

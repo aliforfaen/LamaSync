@@ -134,6 +134,12 @@ export interface Host {
   // assignment, or dotfile change so daemons can detect "config drift" and
   // pull a fresh `/config/:hostId` without waiting for the 5-min refresh.
   configRevision?: number | null;
+  // LAMA-282: device OS label + storage used, reported by the daemon on
+  // each heartbeat for the device cards. `os` is a display string
+  // (e.g. "Linux 6.8.0"); `storageUsedBytes` is the bytes used on the
+  // device's primary filesystem.
+  os?: string | null;
+  storageUsedBytes?: number | null;
 }
 
 // LAMA-198: queued-action model. The control plane (Web UI) enqueues actions
@@ -444,6 +450,10 @@ export interface HealthReport {
   // preserve whatever the daemon reported last, so transient blank reports
   // don't downgrade the stored value.
   version?: string | null;
+  // LAMA-282: device OS label + bytes used on the primary filesystem,
+  // reported by the daemon on each heartbeat.
+  os?: string | null;
+  storageUsedBytes?: number | null;
 }
 
 export interface OperationReport {
