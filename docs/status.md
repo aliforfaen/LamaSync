@@ -3,6 +3,16 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Wrap-up audit — 2026-08-24
+
+Post-session audit of the 8 unpushed commits (flourish batch + LAMA-263/264):
+all gates green on re-run (`tsc`, `build:web-ui`, `bun test` 630/1/0, skill
+drift OK), PR #1 CI green. Fixed: LAMA-263/264 flipped to done on Multica
+(were left backlog) + comments; LAMA-263/264 rows added to `docs/features.md`.
+Open items and the next-session plan live in
+`docs/handoff-wrapup-2026-08-24.md` (headline: live-LXC verification of
+263/264 still pending; push pending owner go-ahead).
+
 ## Feature batch — LAMA-263 + LAMA-264 (2026-08-23)
 
 Shipped on `feature/product-finish` (two commits; gates green: `tsc --noEmit`,
