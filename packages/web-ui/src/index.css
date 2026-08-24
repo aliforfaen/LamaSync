@@ -2113,3 +2113,102 @@ button.action:disabled {
   padding-bottom: 10px;
   pointer-events: none;
 }
+
+/* LAMA-257: "Preview next run" drawer — right-side panel over a dimmed
+   backdrop. Close via ×, backdrop click, or Escape. */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 80;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.drawer {
+  width: min(440px, 92vw);
+  height: 100%;
+  background: var(--bg);
+  border-left: 1px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.drawer-close {
+  line-height: 1;
+  font-size: 18px;
+  padding: 4px 10px;
+}
+
+.drawer-body {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.dry-run-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.dry-run-counts .count {
+  background: var(--muted-bg);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.dry-run-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.dry-run-files li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.dry-run-files li:last-child {
+  border-bottom: none;
+}
+
+.dry-run-kind {
+  flex: 0 0 auto;
+  font-size: 11px;
+  text-transform: lowercase;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--muted-bg);
+}
+
+.dry-run-kind--delete {
+  background: var(--accent-critical-bg);
+  color: var(--accent-critical);
+}

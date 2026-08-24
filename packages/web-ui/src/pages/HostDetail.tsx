@@ -10,9 +10,11 @@ import type {
   QueuedActionType,
 } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
-import { api } from "../api.ts";
+import { api, errorText } from "../api.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
+import { DryRunDrawer, type DryRunState } from "../components/DryRunDrawer.tsx";
+import { findDryRunOperation, parseDryRunDetails } from "../dry-run.ts";
 import { Hint } from "../components/Hint.tsx";
 import { MISC_HINTS } from "../concepts.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
@@ -63,6 +65,10 @@ export function HostDetail() {
   const [busy, setBusy] = useState<QueuedActionType | null>(null);
   // LAMA-198: per-assignment sync/dry-run enqueue in flight (assignmentId:mode).
   const [assignmentBusy, setAssignmentBusy] = useState<string | null>(null);
+  // LAMA-257: "Preview next run" drawer state — the folder being previewed
+  // and the dry-run result (or running/error).
+  const [preview, setPreview] = useState<{ folderId: string } | null>(null);
+  const [previewState, setPreviewState] = useState<DryRunState | null>(null);
   const [syncNote, setSyncNote] = useState<string | null>(null);
   // Assignment editing (pause/resume + full editor).
   const [editingAssignment, setEditingAssignment] = useState<FolderAssignment | null>(null);
@@ -148,6 +154,66 @@ export function HostDetail() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setAssignmentBusy(null);
+    }
+  }
+
+  // LAMA-257: close the preview drawer (also bound to Escape below).
+  function closePreview(): void {
+    setPreview(null);
+    setPreviewState(null);
+  }
+
+  useEffect(() => {
+    if (!preview) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") closePreview();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [preview]);
+
+  // LAMA-257: enqueue a dry-run sync, poll the action to completion, then
+  // read the tagged operation row (the daemon reports the would-change file
+  // lists in its JSON `details`) and surface counts + capped file list.
+  async function openDryRunPreview(folderId: string): Promise<void> {
+    setPreview({ folderId });
+    setPreviewState({ status: "running" });
+    try {
+      const created = await api.enqueueAction(hostId, {
+        type: "trigger_sync",
+        payload: { folderId, dryRun: true },
+      });
+      const deadline = Date.now() + 90_000;
+      let action: QueuedAction | null = null;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const actions = await api.listHostActions(hostId);
+        action = actions.find((a) => a.id === created.id) ?? null;
+        if (action && (action.status === "done" || action.status === "failed")) break;
+      }
+      if (!action) {
+        setPreviewState({
+          status: "error",
+          message: "The dry run timed out waiting for the daemon — is the device online?",
+        });
+        return;
+      }
+      if (action.status === "failed") {
+        setPreviewState({ status: "error", message: action.result ?? "Dry run failed on the device." });
+        return;
+      }
+      const ops = await api.listOperationsForHost(hostId, 50);
+      const dryOp = findDryRunOperation(ops, folderId);
+      if (!dryOp) {
+        setPreviewState({
+          status: "error",
+          message: `The dry run finished but reported no details (${action.result ?? "unknown"}).`,
+        });
+        return;
+      }
+      setPreviewState({ status: "done", details: parseDryRunDetails(dryOp.details) });
+    } catch (err) {
+      setPreviewState({ status: "error", message: errorText(err) });
     }
   }
 
@@ -408,11 +474,11 @@ export function HostDetail() {
                     <button
                       type="button"
                       className="action"
-                      disabled={assignmentBusy !== null}
-                      onClick={() => void onAssignmentSync(assignment.folderId, true)}
-                      title="Dry run (rclone --dry-run, no file changes)"
+                      disabled={assignmentBusy !== null || preview !== null}
+                      onClick={() => void openDryRunPreview(assignment.folderId)}
+                      title="Preview next run (rclone --dry-run, no file changes)"
                     >
-                      {assignmentBusy === `${assignment.folderId}:dry` ? "…" : "Dry run"}
+                      Preview next run
                     </button>
                   </td>
                 </tr>
@@ -532,6 +598,15 @@ export function HostDetail() {
           onCancel={() => setConfirmDelete(false)}
         />
       )}
+
+      <DryRunDrawer
+        open={preview !== null}
+        folderName={
+          preview ? (folderById.get(preview.folderId)?.name ?? preview.folderId) : ""
+        }
+        state={previewState}
+        onClose={closePreview}
+      />
     </div>
   );
 }
