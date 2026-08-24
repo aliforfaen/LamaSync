@@ -35,6 +35,7 @@ import type {
 } from "@lamasync/core";
 
 import { hotkeyFooter, pageShell, realize, swapChildren } from "../app/widgets.ts";
+import { formatMarkdownText } from "../markdown.ts";
 import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import { friendlyError } from "../friendly-error.ts";
 import type { Hotkey } from "../app/keymap.ts";
@@ -676,7 +677,7 @@ export class DotfilesView implements View {
     return [
       Text({ content: `App: ${this.state.appName ?? "?"}` }),
       this.state.instructions
-        ? Text({ content: `Instructions: ${this.state.instructions}` })
+        ? Text({ content: `Instructions: ${formatMarkdownText(this.state.instructions, this.renderer?.width ?? 80)}` })
         : Text({ content: "" }),
       Text({ content: "" }),
       select,
@@ -708,7 +709,7 @@ export class DotfilesView implements View {
     return [
       Text({ content: `Preview: ${this.state.version?.id ?? "?"}` }),
       this.state.instructions
-        ? Text({ content: `Instructions: ${this.state.instructions}` })
+        ? Text({ content: `Instructions: ${formatMarkdownText(this.state.instructions, this.renderer?.width ?? 80)}` })
         : Text({ content: "" }),
       Text({ content: "Press Enter to extract, Esc to go back." }),
       ...previewNodes,

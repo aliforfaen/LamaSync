@@ -14,6 +14,7 @@ import { friendlyError } from "../friendly-error.ts";
 import type { ViewContext, ViewId, ViewSpec } from "./view-manager.ts";
 import { ViewManager } from "./view-manager.ts";
 import { wizardRegistry } from "./wizard.ts";
+import { formatMarkdownTables } from "../markdown.ts";
 
 export interface ShellDeps {
   readonly renderer: CliRenderer;
@@ -378,7 +379,7 @@ export class Shell {
       `Active view — ${active?.title ?? "?"}`,
       viewLines.length > 0 ? viewLines : "(no view hotkeys)",
     ].join("\n");
-    this.helpText.content = lines;
+    this.helpText.content = formatMarkdownTables(lines, width);
     this.layout.add(this.helpOverlay);
     this.helpOpen = true;
   }
