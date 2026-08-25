@@ -3,6 +3,33 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Live-LXC session — LAMA-263/264 verified, LAMA-273/266 shipped (2026-08-25)
+
+Orchestrator ran with prod SSH authority (`docs/prod-deploy.md`; branch
+source shipped to the LXC via `git archive | tar` + `docker compose build`,
+superseded by GHCR pulls after merge). All gates green at end of session:
+`tsc --noEmit`, drift `--strict` (95 routes), **832 pass / 1 skip / 0 fail**.
+
+- **LAMA-263/264 live verification PASSED**: demo seed/delete round-trip on
+  prod (real fleet untouched, idempotent, non-demo rows survive); preset →
+  manifest flow exercised. One defect found & fixed: presets device counts
+  were always empty because unfiltered `/dotfiles/manifests` returns only
+  `_global` rows — Presets now folds in per-host manifests (`78b5b86`).
+- **LAMA-273 pause/slow mode SHIPPED + LIVE-VERIFIED**: 3 commits
+  (`c6f4c10` server/core/daemon, `db7ad86` web, `82363af` TUI Ctrl+P).
+  Prod checks: effective pause on `/config/:hostId`, host-over-global
+  override, bwlimit validation, DELETE resume, `config_revision` bump
+  observed (36→37→38).
+- **LAMA-266 backup health SHIPPED + LIVE-VERIFIED against a real restic
+  repo**: prove-it restored a real file byte-exact; fire drill passed
+  (liveness + restore + operation_log audit row); failures scrubbed.
+  Fixes found by live testing: ls parsing switched to `restic ls --json`
+  (`0f8021b`), documented 409 for non-restic backends enforced (`4c4201b`),
+  restic added to the server runtime image (`17009bc`). Web:
+  `36c4748`.
+- Batch-2 handoff (`docs/handoff-agent-batch2-2026-08-25.md`) items
+  LAMA-259/265 and polish run 2 are still open for coding agents.
+
 ## Coding-agent batch — LAMA-283/258/269/282/257/268/153 (2026-08-24)
 
 Full seven-issue batch from `docs/handoff-agent-batch-2026-08-24.md` shipped
