@@ -157,35 +157,93 @@ export function parseSnapshotsJson(stdout: string): Array<{
   }
 }
 
-/** Parse the long listing emitted by `restic ls --long <snapshot>`.
- *  Format per line (whitespace-separated, path may contain spaces):
- *    mode  size  mtime_date  mtime_time  path
- *  We extract just (size, path) pairs; anything we can't parse is
- *  silently dropped. Directories end with `/` in restic ls --long and
- *  are filtered out (we want files to hash). */
+/** One row extracted from a `restic ls --json <snapshot>` listing.
+ *  Mirrors the shape the candidate picker downstream needs (path +
+ *  size + isDir); we don't expose the restic-side fields (uid/gid/
+ *  mode/mtime/...) because nothing reads them. */
 export interface LsLongEntry {
   path: string;
   size: number;
   isDir: boolean;
 }
 
-export function parseLsLong(stdout: string): LsLongEntry[] {
+/**
+ * Parse the JSON-lines listing emitted by `restic ls --json <snapshotId>`.
+ * Restic 0.17 writes one JSON object per line, with two message types
+ * (per https://restic.readthedocs.io/en/v0.17.1/075_scripting.html#ls):
+ *
+ *   1. `{"message_type":"snapshot", ...}` — header line emitted ONCE at
+ *      the start. Carries the snapshot id + paths; we ignore it.
+ *   2. `{"message_type":"node", "name":..., "type":..., "path":...,
+ *       "size":..., "uid":..., "gid":..., "mode":..., "permissions":...,
+ *       "mtime":..., ...}` — one per file/dir/symlink/etc.
+ *
+ * Older 0.17.0 builds only emit `struct_type` (the deprecated alias of
+ * `message_type`); we accept either to stay forward/backward compatible.
+ *
+ * Per-line contract:
+ *   - A line that doesn't parse as JSON, or that doesn't decode to an
+ *     object, is dropped silently (defensive — restic may evolve).
+ *   - A non-"node" message type (e.g. the snapshot header, or a future
+ *     `summary` line) is dropped.
+ *   - `type` is the canonical isDir signal: `"dir"` → isDir=true.
+ *     For entries with no `type` field (very old restic), we fall back
+ *     to `permissions[0] === "d"` (the `ls -l`-style mode string).
+ *   - `size` is omitted (`omitempty`) for non-file types; we default to
+ *     0 so directories still flow through pickCandidate's isDir filter
+ *     without NaN-poisoning size comparisons.
+ *   - Only regular files and directories are returned. Symlinks, dev
+ *     nodes, fifos, and sockets are dropped (restic restore can't
+ *     `--include` them the way the prove step needs).
+ */
+export function parseLsJson(stdout: string): LsLongEntry[] {
   const out: LsLongEntry[] = [];
   for (const rawLine of stdout.split("\n")) {
     const line = rawLine.trim();
     if (line === "") continue;
-    const parts = line.split(/\s+/);
-    if (parts.length < 5) continue;
-    const mode = parts[0] ?? "";
-    const sizeRaw = parts[1] ?? "0";
-    if (mode.startsWith("d")) continue; // directory
-    const size = Number.parseInt(sizeRaw, 10);
-    if (!Number.isFinite(size) || size < 0) continue;
-    // Re-join the trailing path; restic's long listing doesn't escape
-    // spaces in paths, so joining everything from index 4 onwards is the
-    // simplest contract and matches how `restic restore` accepts paths.
-    const path = parts.slice(4).join(" ");
-    out.push({ path, size, isDir: false });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // malformed JSON line — drop silently
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const obj = parsed as Record<string, unknown>;
+    // Filter by struct_type / message_type when present. If a future
+    // restic version emits a new message type we don't recognise, the
+    // safest behaviour is to skip it — we'd rather restore nothing
+    // than the wrong file.
+    const structType = obj["struct_type"];
+    const messageType = obj["message_type"];
+    if (structType !== undefined && structType !== "node") continue;
+    if (messageType !== undefined && messageType !== "node") continue;
+    // Derive isDir: canonical `type` field first, permissions string
+    // fallback for the rare build that doesn't emit `type`. Anything
+    // we can't classify as file-or-dir (symlink, chardev, …) is
+    // dropped — we only ever want to --include regular files.
+    const typeField = obj["type"];
+    let isDir: boolean;
+    if (typeField === "file") isDir = false;
+    else if (typeField === "dir") isDir = true;
+    else if (typeField === undefined) {
+      const perms = obj["permissions"];
+      if (typeof perms !== "string" || perms.length === 0) continue;
+      isDir = perms[0] === "d";
+    } else {
+      // symlink / chardev / blockdev / fifo / socket / dev — skip
+      continue;
+    }
+    const path = obj["path"];
+    if (typeof path !== "string" || path.trim() === "") continue;
+    // `size` is a JSON number for files; restic omits the field for
+    // directories + other node types. Default to 0 so we never NaN-
+    // poison downstream comparisons.
+    const sizeRaw = obj["size"];
+    const size =
+      typeof sizeRaw === "number" && Number.isFinite(sizeRaw)
+        ? Math.max(0, sizeRaw)
+        : 0;
+    out.push({ path, size, isDir });
   }
   return out;
 }
@@ -294,7 +352,7 @@ interface RunProveArgs {
  * Run the "Prove it" sequence for a restic backend. Restores ONE small
  * file from the latest snapshot of the backend's repository into a
  * private tempdir (mkdtemp under os.tmpdir), compares its SHA-256 to
- * the snapshot's stored hash from `restic ls --long`, and cleans up the
+ * the snapshot's stored hash from `restic ls --json`, and cleans up the
  * tempdir in a `finally` block. Never writes to a real folder.
  *
  * Outcomes:
@@ -339,8 +397,14 @@ export async function runProve(args: RunProveArgs): Promise<ProveOutcome> {
   const snapshotId = probe.latestSnapshotId;
 
   // Step 2: list files in that snapshot, pick a small candidate.
+  // We use `restic ls --json` rather than the long text listing because
+  // the text format's column layout is brittle (mode, uid, gid, size,
+  // date, time, path) and earlier restic builds produced a free-text
+  // "snapshot <id> of [paths] at <time>" header that shifted every
+  // column. JSON-lines gives one record per node with stable keys
+  // (type, path, size, …) and is robust to spaces in paths.
   const lsResult = await runner({
-    args: ["ls", "--long", snapshotId, "-r", backend.repository],
+    args: ["ls", "--json", snapshotId, "-r", backend.repository],
     env: { RESTIC_PASSWORD: backend.password },
   });
   if (lsResult.code !== 0) {
@@ -354,7 +418,7 @@ export async function runProve(args: RunProveArgs): Promise<ProveOutcome> {
       detail: scrubFailureSummary("ls", lsResult.code),
     };
   }
-  const entries = parseLsLong(lsResult.stdout);
+  const entries = parseLsJson(lsResult.stdout);
   const candidate = pickCandidate(entries, { rng: args.rng });
   if (!candidate) {
     return {
@@ -362,6 +426,24 @@ export async function runProve(args: RunProveArgs): Promise<ProveOutcome> {
       checkedAt: now(),
       durationMs: now() - startedAt,
       detail: "no small files in the latest snapshot to prove with",
+    };
+  }
+
+  // Defense-in-depth (LAMA-266): never spawn restic with `--include ""`.
+  // A bug in the listing parser (or any future restic JSON-shape drift)
+  // could otherwise produce a blank --include arg, which restic rejects
+  // with `Fatal: --include: invalid pattern(s) provided:`. If this ever
+  // triggers in production, treat it as a server-side bug — the parser
+  // + picker should never let an empty path through.
+  if (candidate.path.trim() === "") {
+    console.error(
+      `[health-drill] picked an empty candidate path for ${backend.name} — refusing to spawn restic with --include ""`,
+    );
+    return {
+      ok: false,
+      checkedAt: now(),
+      durationMs: now() - startedAt,
+      detail: "no usable files in the latest snapshot to prove with",
     };
   }
 
@@ -406,8 +488,8 @@ export async function runProve(args: RunProveArgs): Promise<ProveOutcome> {
     }
     const restoredBytes = readFileSync(restoredPath);
     const restoredHash = sha256Hex(restoredBytes);
-    // The "snapshot stored hash" in `restic ls --long` is the size-only
-    // hint (restic's ls --long doesn't print sha256). Treat size match
+    // The "snapshot stored hash" in `restic ls --json` is the size-only
+    // hint (restic's ls output doesn't print sha256). Treat size match
     // AND non-empty as the "at minimum" check the spec allows — see the
     // module header. A future enhancement could cross-check against
     // `restic dump <snap>:<path>` for a byte-exact prove.

@@ -3,7 +3,7 @@
 // suite stays hermetic (AGENTS.md: "`bun test` always works").
 //
 // Coverage:
-//   - pure helpers: parseSnapshotsJson, parseLsLong, pickCandidate,
+//   - pure helpers: parseSnapshotsJson, parseLsJson, pickCandidate,
 //     scrubFailureSummary, sha256Hex
 //   - prove path: ok returns file + duration, failure scrubs stderr,
 //     tempdir cleaned up, 409-style outcome when no snapshots exist
@@ -32,7 +32,7 @@ import {
   lastDrillAtByBackend,
   listDrills,
   parseDrillIntervalMs,
-  parseLsLong,
+  parseLsJson,
   parseSnapshotsJson,
   pickCandidate,
   recordDrill,
@@ -95,6 +95,46 @@ function insertResticBackend(
   );
 }
 
+/** Build a minimal-but-realistic `restic ls --json <snap>` response:
+ *  one snapshot header line + one regular-file node line. Mirrors the
+ *  real restic 0.17 output shape so parseLsJson is exercised against
+ *  the exact wire format, not a hand-rolled mock that drifts over time. */
+function resticLsJson(path: string, size: number): string {
+  const name = path.split("/").pop() ?? "file";
+  const header = JSON.stringify({
+    message_type: "snapshot",
+    struct_type: "snapshot",
+    time: "2026-08-25T13:26:28.328521227Z",
+    tree: "1bb0eeb4cafebabe1234567890abcdef1234567890abcdef1234567890abcdef",
+    paths: ["/backups"],
+    hostname: "test-host",
+    username: "root",
+    uid: 0,
+    gid: 0,
+    excludes: [],
+    tags: null,
+    id: "1bb0eeb4deadbeef",
+    short_id: "1bb0eeb4",
+  });
+  const node = JSON.stringify({
+    name,
+    type: "file",
+    path,
+    uid: 0,
+    gid: 0,
+    size,
+    mode: 33184,
+    permissions: "-rw-r--r--",
+    mtime: "2026-08-25T13:26:21Z",
+    atime: "2026-08-25T13:26:21Z",
+    ctime: "2026-08-25T13:26:21Z",
+    inode: 2,
+    message_type: "node",
+    struct_type: "node",
+  });
+  return `${header}\n${node}\n`;
+}
+
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(SERVER_SCHEMA);
@@ -153,27 +193,162 @@ describe("parseSnapshotsJson", () => {
   });
 });
 
-describe("parseLsLong", () => {
-  test("extracts file paths + sizes from a typical long listing", () => {
-    const stdout = [
-      "-rw-r--r--    1024 2026-01-01 00:00:00  /data/notes.txt",
-      "-rw-r--r--      42 2026-01-01 00:00:00  /data/readme.md",
-      "drwxr-xr-x       0 2026-01-01 00:00:00  /data/dir",
-    ].join("\n");
-    const out = parseLsLong(stdout);
-    expect(out).toHaveLength(2);
-    expect(out[0]).toEqual({ path: "/data/notes.txt", size: 1024, isDir: false });
-    expect(out[1]).toEqual({ path: "/data/readme.md", size: 42, isDir: false });
+// Real restic 0.17 `ls --json <snapshot>` output. Mirrors the documented
+// shape at https://restic.readthedocs.io/en/v0.17.1/075_scripting.html#ls:
+// the first line is a "snapshot" header (id, paths, time, ...) and the
+// remaining lines are "node" records (name, type, path, size, ...).
+// Keep the fixtures in sync with the live shape the LAMA-266 fire-drill
+// engine parses — a drift here was the root cause of the original
+// `restic restore --include ""` failure.
+const RESTIC_LS_JSON_FIXTURE = [
+  // Header line — snapshot metadata. This is what the brittle `ls --long`
+  // text parser used to mis-classify as a row, shifting every column.
+  JSON.stringify({
+    message_type: "snapshot",
+    struct_type: "snapshot",
+    time: "2026-08-25T13:26:28.328521227Z",
+    tree: "1bb0eeb4deadbeefcafebabe1234567890abcdef1234567890abcdef12345678",
+    paths: ["/backups/demo-verify-src"],
+    hostname: "59e734b10a2b",
+    username: "root",
+    uid: 0,
+    gid: 0,
+    excludes: [],
+    tags: null,
+    id: "1bb0eeb4deadbeef",
+    short_id: "1bb0eeb4",
+  }),
+  // A directory node — no `size` field, isDir=true.
+  JSON.stringify({
+    name: "demo-verify-src",
+    type: "dir",
+    path: "/backups/demo-verify-src",
+    uid: 0,
+    gid: 0,
+    mode: 2147484141,
+    permissions: "drwxr-xr-x",
+    mtime: "2026-08-25T13:26:25Z",
+    atime: "2026-08-25T13:26:25Z",
+    ctime: "2026-08-25T13:26:25Z",
+    inode: 1,
+    message_type: "node",
+    struct_type: "node",
+  }),
+  // A regular file node — size 61, isDir=false. The actual scenario
+  // from the production bug report (notes-a.txt, 61 bytes).
+  JSON.stringify({
+    name: "notes-a.txt",
+    type: "file",
+    path: "/backups/demo-verify-src/notes-a.txt",
+    uid: 0,
+    gid: 0,
+    size: 61,
+    mode: 33184,
+    permissions: "-rw-r--r--",
+    mtime: "2026-08-25T13:26:21Z",
+    atime: "2026-08-25T13:26:21Z",
+    ctime: "2026-08-25T13:26:21Z",
+    inode: 2,
+    message_type: "node",
+    struct_type: "node",
+  }),
+].join("\n");
+
+describe("parseLsJson", () => {
+  test("extracts file paths + sizes from a real restic 0.17 ls --json listing", () => {
+    // The header line ("message_type":"snapshot") is dropped, the
+    // directory is kept with isDir=true + size=0, and the file is kept
+    // with the recorded size + isDir=false. The exact two entries the
+    // candidate picker would see in production.
+    const out = parseLsJson(RESTIC_LS_JSON_FIXTURE);
+    expect(out).toEqual([
+      {
+        path: "/backups/demo-verify-src",
+        size: 0,
+        isDir: true,
+      },
+      {
+        path: "/backups/demo-verify-src/notes-a.txt",
+        size: 61,
+        isDir: false,
+      },
+    ]);
   });
 
   test("drops malformed lines without throwing", () => {
-    const out = parseLsLong("garbage\n-short  10  x  /file\n");
-    expect(out).toEqual([]);
+    // A line that doesn't parse as JSON, a line that's a JSON string
+    // (not an object), and an object that's not tagged as a node.
+    // None of them should blow up the parser.
+    const stdout = [
+      "this is not json",
+      JSON.stringify("just a string"),
+      JSON.stringify({ message_type: "node", struct_type: "snapshot" }),
+      "",
+    ].join("\n");
+    expect(parseLsJson(stdout)).toEqual([]);
   });
 
-  test("ignores directory entries (mode starts with d)", () => {
-    const out = parseLsLong("drwxr-xr-x  0  2026-01-01 00:00:00  /data/dir");
-    expect(out).toEqual([]);
+  test("ignores directory entries (keeps them with isDir=true, drops symlinks/devs)", () => {
+    const stdout = [
+      JSON.stringify({
+        name: "links",
+        type: "symlink",
+        path: "/data/links",
+        mode: 41471,
+        permissions: "lrwxrwxrwx",
+        message_type: "node",
+        struct_type: "node",
+      }),
+      JSON.stringify({
+        name: "dir",
+        type: "dir",
+        path: "/data/dir",
+        permissions: "drwxr-xr-x",
+        message_type: "node",
+        struct_type: "node",
+      }),
+      JSON.stringify({
+        name: "file",
+        type: "file",
+        path: "/data/file",
+        size: 10,
+        permissions: "-rw-r--r--",
+        message_type: "node",
+        struct_type: "node",
+      }),
+    ].join("\n");
+    const out = parseLsJson(stdout);
+    expect(out).toEqual([
+      { path: "/data/dir", size: 0, isDir: true },
+      { path: "/data/file", size: 10, isDir: false },
+    ]);
+  });
+
+  test("falls back to permissions[0] when `type` is absent (older restic builds)", () => {
+    // Some restic 0.17.0 nodes ship without a `type` field but still
+    // carry the `permissions` string. We should classify them the same
+    // way (leading 'd' → isDir=true, leading '-' → isDir=false).
+    const stdout = [
+      JSON.stringify({
+        name: "d",
+        path: "/d",
+        permissions: "drwxr-xr-x",
+        message_type: "node",
+        struct_type: "node",
+      }),
+      JSON.stringify({
+        name: "f",
+        path: "/f",
+        permissions: "-rw-r--r--",
+        size: 5,
+        message_type: "node",
+        struct_type: "node",
+      }),
+    ].join("\n");
+    expect(parseLsJson(stdout)).toEqual([
+      { path: "/d", size: 0, isDir: true },
+      { path: "/f", size: 5, isDir: false },
+    ]);
   });
 });
 
@@ -256,7 +431,11 @@ describe("runProve", () => {
       if (input.args[0] === "ls") {
         return {
           code: 0,
-          stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /notes.txt\n",
+          // Real restic 0.17 ls --json shape (header line + 5-byte file
+          // node). pickCandidate is fed the single 5-byte entry and
+          // restores it; the restore mock below writes "hello" (5 B)
+          // so the size-match assertion holds.
+          stdout: resticLsJson("/notes.txt", 5),
           stderr: "",
         };
       }
@@ -312,7 +491,7 @@ describe("runProve", () => {
         };
       }
       if (input.args[0] === "ls") {
-        return { code: 0, stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /notes.txt\n", stderr: "" };
+        return { code: 0, stdout: resticLsJson("/notes.txt", 5), stderr: "" };
       }
       if (input.args[0] === "restore") {
         return {
@@ -359,6 +538,83 @@ describe("runProve", () => {
     expect(outcome.detail).toContain("no restic snapshots");
   });
 
+  test("never spawns restic restore with `--include \"\"` (LAMA-266 defense-in-depth)", async () => {
+    // LAMA-266 live bug: restic 0.17 `ls --long` TEXT output has columns
+    // (mode, uid, gid, size, date, time, path) + a free-text "snapshot
+    // <id> of [paths] at <time>" header. The brittle text parser turned
+    // that header into garbage rows whose path was empty, and the
+    // subsequent `restic restore --include ""` failed with
+    // `Fatal: --include: invalid pattern(s) provided:`.
+    //
+    // The fix has two layers:
+    //   1. parseLsJson replaces the brittle text parser (real test above).
+    //   2. The restore step refuses to spawn restic if the candidate
+    //      path is empty/whitespace, so the same class of bug can never
+    //      produce an invalid argv again. This test pins the contract.
+    insertResticBackend("b1", "repo", "/tmp/repo", "pw");
+    const calls: string[][] = [];
+    const runner: ResticSpawnFn = async (input) => {
+      calls.push(input.args);
+      if (input.args[0] === "snapshots") {
+        return {
+          code: 0,
+          stdout: JSON.stringify([{ id: "snap-1" }]),
+          stderr: "",
+        };
+      }
+      if (input.args[0] === "ls") {
+        // One node whose `path` is an empty string — exactly the shape
+        // a buggy listing parser could produce. parseLsJson filters it
+        // out (path.trim() === ""), pickCandidate sees an empty list,
+        // and runProve short-circuits to the "no small files" detail
+        // WITHOUT ever calling the restore subcommand.
+        const stdout = [
+          JSON.stringify({
+            message_type: "snapshot",
+            struct_type: "snapshot",
+            time: "2026-08-25T13:26:28.328521227Z",
+            tree: "1bb0eeb4",
+            paths: ["/backups"],
+            id: "1bb0eeb4",
+            short_id: "1bb0eeb4",
+          }),
+          JSON.stringify({
+            name: "ghost",
+            type: "file",
+            path: "",
+            uid: 0,
+            gid: 0,
+            size: 42,
+            mode: 33184,
+            permissions: "-rw-r--r--",
+            mtime: "2026-08-25T13:26:21Z",
+            message_type: "node",
+            struct_type: "node",
+          }),
+        ].join("\n");
+        return { code: 0, stdout, stderr: "" };
+      }
+      // If we're called here, the safety net failed — let the test
+      // surface the bug clearly.
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    __setResticRunnerForTests(runner);
+    const outcome = await runProve({ backendId: "b1" });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.detail).not.toContain("restore");
+    // Hard safety property: no restic call ever received an empty
+    // --include arg, and the restore subcommand was never invoked.
+    const restoreCalls = calls.filter((a) => a[0] === "restore");
+    expect(restoreCalls).toHaveLength(0);
+    for (const args of calls) {
+      const i = args.indexOf("--include");
+      if (i >= 0) {
+        const value = args[i + 1] ?? "";
+        expect(value).not.toBe("");
+      }
+    }
+  });
+
   test("throws HealthDrillError for non-restic backends (route → 409)", async () => {
     // LAMA-266: an s3 backend with no restic_repository must NOT return
     // ok=false (that's reserved for genuine restic-run failures which
@@ -387,7 +643,7 @@ describe("runProve", () => {
       if (input.args[0] === "ls") {
         return {
           code: 0,
-          stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /a.txt\n",
+          stdout: resticLsJson("/a.txt", 5),
           stderr: "",
         };
       }
@@ -431,7 +687,7 @@ describe("runDrill", () => {
       if (input.args[0] === "ls") {
         return {
           code: 0,
-          stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /ok.txt\n",
+          stdout: resticLsJson("/ok.txt", 5),
           stderr: "",
         };
       }
@@ -504,7 +760,7 @@ describe("runDrill", () => {
         return { code: 0, stdout: JSON.stringify([{ id: "snap-1" }]), stderr: "" };
       }
       if (input.args[0] === "ls") {
-        return { code: 0, stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /a.txt\n", stderr: "" };
+        return { code: 0, stdout: resticLsJson("/a.txt", 5), stderr: "" };
       }
       return { code: 7, stdout: "", stderr: "Fatal: snapshot is truncated" };
     };
@@ -585,7 +841,7 @@ describe("runDrillScheduler", () => {
         return { code: 0, stdout: JSON.stringify([{ id: "snap-1" }]), stderr: "" };
       }
       if (input.args[0] === "ls") {
-        return { code: 0, stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /ok.txt\n", stderr: "" };
+        return { code: 0, stdout: resticLsJson("/ok.txt", 5), stderr: "" };
       }
       if (input.args[0] === "restore") {
         const include = input.args[input.args.indexOf("--include") + 1];
@@ -626,7 +882,7 @@ describe("runDrillScheduler", () => {
         return { code: 0, stdout: JSON.stringify([{ id: "snap-1" }]), stderr: "" };
       }
       if (input.args[0] === "ls") {
-        return { code: 0, stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /ok.txt\n", stderr: "" };
+        return { code: 0, stdout: resticLsJson("/ok.txt", 5), stderr: "" };
       }
       if (input.args[0] === "restore") {
         const include = input.args[input.args.indexOf("--include") + 1];
@@ -735,7 +991,7 @@ describe("health-drill routes", () => {
         return { code: 0, stdout: JSON.stringify([{ id: "snap-1" }]), stderr: "" };
       }
       if (input.args[0] === "ls") {
-        return { code: 0, stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /hello.txt\n", stderr: "" };
+        return { code: 0, stdout: resticLsJson("/hello.txt", 5), stderr: "" };
       }
       if (input.args[0] === "restore") {
         const include = input.args[input.args.indexOf("--include") + 1];
@@ -767,7 +1023,7 @@ describe("health-drill routes", () => {
         return { code: 0, stdout: JSON.stringify([{ id: "snap-1" }]), stderr: "" };
       }
       if (input.args[0] === "ls") {
-        return { code: 0, stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /a.txt\n", stderr: "" };
+        return { code: 0, stdout: resticLsJson("/a.txt", 5), stderr: "" };
       }
       return { code: 1, stdout: "", stderr: "secret-bucket-shouldnt-leak" };
     };
@@ -830,7 +1086,7 @@ describe("health-drill routes", () => {
         return { code: 0, stdout: JSON.stringify([{ id: "snap-1" }]), stderr: "" };
       }
       if (input.args[0] === "ls") {
-        return { code: 0, stdout: "-rw-r--r--   5 2026-01-01 00:00:00  /a.txt\n", stderr: "" };
+        return { code: 0, stdout: resticLsJson("/a.txt", 5), stderr: "" };
       }
       if (input.args[0] === "restore") {
         const include = input.args[input.args.indexOf("--include") + 1];
