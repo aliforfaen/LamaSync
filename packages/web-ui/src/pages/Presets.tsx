@@ -39,12 +39,21 @@ export function Presets() {
     setLoading(true);
     setError(null);
     try {
-      const [hostList, manifestList] = await Promise.all([
-        api.listHosts(),
-        api.listManifests(),
-      ]);
+      const hostList = await api.listHosts();
+      const globalManifests = await api.listManifests();
+      // The unfiltered catalog only returns global template rows (hostId
+      // "_global"); fold in each host's manifests so device chips reflect
+      // real backups. Dedupe by manifest id to avoid double-counting.
+      const perHostLists = await Promise.all(
+        hostList.map((h) => api.listManifests(h.id)),
+      );
+      const byId = new Map<string, DotfileManifest>();
+      for (const m of globalManifests) byId.set(m.id, m);
+      for (const list of perHostLists) {
+        for (const m of list) byId.set(m.id, m);
+      }
       setHosts(hostList);
-      setManifests(manifestList);
+      setManifests(Array.from(byId.values()));
     } catch (err) {
       setError(errorText(err));
     } finally {
