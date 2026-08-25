@@ -8,6 +8,16 @@ import { Donut } from "../components/Donut.tsx";
 import { Sparkline } from "../components/Sparkline.tsx";
 import { formatBytes } from "../format-bytes.ts";
 import { BACKEND_KIND_HINTS } from "../concepts.ts";
+import {
+  PROVE_NEEDS_RESTIC,
+  isRestic,
+  proveResultText,
+} from "../backup-health.ts";
+import type {
+  DrillHistory,
+  DrillResult,
+} from "../api.ts";
+import { formatTimeAgo } from "../relative-time.ts";
 
 const PROVIDERS: Array<{ value: S3Provider; label: string }> = [
   { value: "other", label: "Other / S3-compatible" },
@@ -106,6 +116,12 @@ export function Backends() {
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, string>>({});
+  // LAMA-266: "Prove it" + fire-drill buttons per restic destination. Busy
+  // tracks which backend is mid-run (one at a time); resultLines hold the
+  // inline status text per backend id.
+  const [healthBusy, setHealthBusy] = useState<string | null>(null);
+  const [healthResults, setHealthResults] = useState<Record<string, string>>({});
+  const [drills, setDrills] = useState<DrillHistory["drills"] | null>(null);
   // LAMA-238: in-form connection test for an unsaved backend config.
   const [formTesting, setFormTesting] = useState(false);
   const [formTestResult, setFormTestResult] = useState<{
@@ -125,18 +141,21 @@ export function Backends() {
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
     try {
-      const [backendList, folderList, sizes, history, report] = await Promise.all([
-        api.listBackends(),
-        api.listFolders().catch(() => [] as Folder[]),
-        api.folderSizes().catch(() => ({}) as Record<string, FolderSize>),
-        api.storageHistory().catch(() => ({ backends: {} })),
-        api.storageReport().catch(() => null),
-      ]);
+      const [backendList, folderList, sizes, history, report, drillHistory] =
+        await Promise.all([
+          api.listBackends(),
+          api.listFolders().catch(() => [] as Folder[]),
+          api.folderSizes().catch(() => ({}) as Record<string, FolderSize>),
+          api.storageHistory().catch(() => ({ backends: {} })),
+          api.storageReport().catch(() => null),
+          api.listHealthDrills(10).catch(() => ({ drills: [] })),
+        ]);
       setItems(backendList);
       setFolders(folderList);
       setFolderSizes(sizes);
       setStorageHistory(history.backends);
       setStorageReport(report);
+      setDrills(drillHistory.drills);
     } catch (err) {
       setError(errorText(err));
     }
@@ -296,6 +315,76 @@ export function Backends() {
     } finally {
       setTestingId(null);
     }
+  }
+
+  // LAMA-266: "Prove it" — restore one random file from the destination's
+  // latest restic snapshot and diff it. On success we refresh backends so
+  // the lastProveAt/lastProveOk columns drive the Dashboard badge.
+  async function onProve(b: BackendRow): Promise<void> {
+    if (healthBusy) return;
+    setHealthBusy(b.id);
+    setError(null);
+    try {
+      const res = await api.proveBackend(b.id);
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: proveResultText({
+          kind: "prove",
+          ok: res.ok,
+          file: res.file,
+          durationMs: res.durationMs,
+          detail: res.detail,
+        }),
+      }));
+      await refresh();
+    } catch (err) {
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: `✗ Prove failed: ${errorText(err)}`,
+      }));
+    } finally {
+      setHealthBusy(null);
+    }
+  }
+
+  // LAMA-266: fire drill — liveness probe + prove-it restore + audit row.
+  // Result writes through to the drills history (refreshed here) and the
+  // backend's lastProveAt/_ok columns.
+  async function onDrill(b: BackendRow): Promise<void> {
+    if (healthBusy) return;
+    setHealthBusy(b.id);
+    setError(null);
+    try {
+      const res: DrillResult = await api.runDrill(b.id);
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: proveResultText({
+          kind: "drill",
+          ok: res.ok,
+          file: res.file,
+          durationMs: res.durationMs,
+          detail: res.detail,
+        }),
+      }));
+      await refresh();
+    } catch (err) {
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: `✗ Fire drill failed: ${errorText(err)}`,
+      }));
+    } finally {
+      setHealthBusy(null);
+    }
+  }
+
+  // LAMA-266: clear the inline status once the user has read it (keeps the
+  // Actions cell from growing stale lines after edits).
+  function dismissHealth(b: BackendRow): void {
+    setHealthResults((prev) => {
+      const next = { ...prev };
+      delete next[b.id];
+      return next;
+    });
   }
 
   // LAMA-269: per-destination storage picture. The donut composes the
@@ -639,12 +728,106 @@ export function Backends() {
                       >
                         {testingId === b.id ? "Testing…" : "Test"}
                       </button>
+                      {isRestic(b.kind) ? (
+                        <>
+                          <button
+                            type="button"
+                            className="action"
+                            disabled={healthBusy !== null}
+                            onClick={() => void onProve(b)}
+                          >
+                            {healthBusy === b.id ? "Proving…" : "Prove it"}
+                          </button>
+                          <button
+                            type="button"
+                            className="action"
+                            disabled={healthBusy !== null}
+                            onClick={() => void onDrill(b)}
+                          >
+                            {healthBusy === b.id ? "Drilling…" : "Run fire drill"}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="action"
+                          disabled
+                          title={PROVE_NEEDS_RESTIC}
+                          aria-label={`Prove it — ${PROVE_NEEDS_RESTIC}`}
+                        >
+                          Prove it
+                        </button>
+                      )}
                       <button type="button" className="action danger" onClick={() => void onDelete(b)}>
                         Delete
                       </button>
                     </div>
+                    {healthResults[b.id] ? (
+                      <div className="row-actions health-result">
+                        <span
+                          className={healthResults[b.id].startsWith("✓") ? "all-quiet-inline" : "error-inline"}
+                          role={healthResults[b.id].startsWith("✓") ? "status" : "alert"}
+                        >
+                          {healthResults[b.id]}
+                        </span>
+                        <button
+                          type="button"
+                          className="copy-btn"
+                          title="Dismiss"
+                          aria-label="Dismiss result"
+                          onClick={() => dismissHealth(b)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : null}
                     {testResult[b.id] ? (
                       <div className="muted">{testResult[b.id]}</div>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="section">
+        <h2>Backup fire-drill history</h2>
+        {drills === null ? (
+          <div className="skel skel-line" aria-busy="true" />
+        ) : drills.length === 0 ? (
+          <p className="muted">
+            No fire drills yet — run one from a restic destination's row above
+            to prove restores work end to end.
+          </p>
+        ) : (
+          <table className="data">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Destination</th>
+                <th>Type</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {drills.map((d) => (
+                <tr key={d.id}>
+                  <td>{formatTimeAgo(new Date(d.ranAt).getTime())}</td>
+                  <td>
+                    <strong>{d.backendName}</strong>
+                  </td>
+                  <td className="muted">{d.kind === "drill" ? "fire drill" : "prove"}</td>
+                  <td>
+                    <span className={`badge ${d.ok ? "badge-success" : "badge-failed"}`}>
+                      {d.ok ? "ok" : "failed"}
+                    </span>
+                    {d.detail ? (
+                      <span className="muted" title={d.detail}>
+                        {" "}
+                        · {d.detail}
+                      </span>
                     ) : null}
                   </td>
                 </tr>

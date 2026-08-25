@@ -23,6 +23,7 @@ import { usePause } from "../hooks/usePause.ts";
 import { PauseBanner } from "../components/PauseBanner.tsx";
 import { PauseControl } from "../components/PauseControl.tsx";
 import { formatTimeAgo } from "../relative-time.ts";
+import { showVerifiedBadge } from "../backup-health.ts";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { Donut } from "../components/Donut.tsx";
 
@@ -169,6 +170,22 @@ export function Dashboard() {
     const m = new Map<string, string>();
     for (const b of data?.backends ?? []) m.set(b.id, b.name);
     return m;
+  }, [data?.backends]);
+
+  // LAMA-266: backup-health badge. Show "✓ Verified <t> ago" when any
+  // destination was proven ok within 30 days (using the most recent such
+  // prove); otherwise a muted "not verified yet" caption.
+  const backupVerified = useMemo(() => {
+    const now = Date.now();
+    let mostRecent: number | null = null;
+    for (const b of data?.backends ?? []) {
+      if (showVerifiedBadge(b.lastProveAt, b.lastProveOk, now)) {
+        if (mostRecent === null || (b.lastProveAt ?? 0) > mostRecent) {
+          mostRecent = b.lastProveAt ?? null;
+        }
+      }
+    }
+    return mostRecent;
   }, [data?.backends]);
 
   // folder id -> its storage destination display name (folder.backendId).
@@ -347,6 +364,18 @@ export function Dashboard() {
           active={overview?.global !== null}
           onChanged={() => void refreshPause()}
         />
+        {backupVerified !== null ? (
+          <span
+            className="badge badge-success"
+            title="A storage destination was proven within the last 30 days"
+          >
+            ✓ Verified {formatTimeAgo(backupVerified)} ago
+          </span>
+        ) : (
+          <span className="muted" title="Run 'Prove it' on a restic destination">
+            backups not verified yet
+          </span>
+        )}
       </div>
       {overview?.global ? (
         <PauseBanner

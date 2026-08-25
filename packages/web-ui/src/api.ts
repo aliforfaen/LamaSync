@@ -48,6 +48,45 @@ export interface PauseRequest {
   bwlimit?: string | null;
 }
 
+// LAMA-266: backup-health wire shapes. `checkedAt` is an ISO string from the
+// server. `detail` is a scrubbed failure summary — never raw stderr/secrets.
+
+/** Result of POST /backends/:id/prove (200 ok | 502 not-ok). */
+export interface ProveResult {
+  ok: boolean;
+  /** Restored relative path; present on success. */
+  file?: string | null;
+  checkedAt: string;
+  durationMs: number;
+  detail?: string | null;
+}
+
+/** Result of POST /backends/:id/drill (201 ok | 502 not-ok). */
+export interface DrillResult extends ProveResult {
+  summary?: string | null;
+  drillId: string;
+  livenessOk?: boolean | null;
+  backendId: string;
+  backendName: string;
+  kind: "prove" | "drill";
+}
+
+/** One row of GET /health/drills history (newest first). */
+export interface HealthDrill {
+  id: string;
+  backendId: string;
+  backendName: string;
+  kind: "prove" | "drill";
+  ranAt: string;
+  ok: boolean;
+  detail?: string | null;
+}
+
+/** Response of GET /health/drills?limit=N. */
+export interface DrillHistory {
+  drills: HealthDrill[];
+}
+
 const API_KEY_STORAGE = "lamasync_api_key";
 const API_KEY_PERSIST_STORAGE = "lamasync_api_key_persist";
 
@@ -414,6 +453,15 @@ export const api = {
     apiDelete(`/backends/${encodeURIComponent(id)}`),
   testBackend: (id: string) =>
     apiPost<{ ok: boolean; detail?: string }>(`/backends/${encodeURIComponent(id)}/test`),
+  // LAMA-266: backup health — "Prove it" restore tests, fire drills, and the
+  // drill history feed. Both mutating calls refresh backends after success so
+  // lastProveAt/lastProveOk stay current for the Dashboard badge.
+  proveBackend: (id: string) =>
+    apiPost<ProveResult>(`/backends/${encodeURIComponent(id)}/prove`),
+  runDrill: (id: string) =>
+    apiPost<DrillResult>(`/backends/${encodeURIComponent(id)}/drill`),
+  listHealthDrills: (limit = 10) =>
+    apiGet<DrillHistory>(`/health/drills?limit=${limit}`),
   // LAMA-238: connection test for an unsaved backend config (create/edit
   // form). Write-only fields fall back to the stored values server-side
   // when backendId references an existing backend.

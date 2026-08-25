@@ -624,6 +624,24 @@ button.action.theme-toggle {
 }
 .attention-host { display: block; }
 .all-quiet { color: var(--accent-ok); background: var(--accent-ok-bg); border-radius: var(--radius-md); padding: var(--space-3); }
+/* LAMA-266: compact inline prove/drill result lines in the Backends table —
+   text (✓/✗) carries the state, so tinting is decorative, never the sole cue. */
+.health-result { margin-top: var(--space-2); flex-wrap: nowrap; }
+.all-quiet-inline {
+  color: var(--accent-ok);
+  background: var(--accent-ok-bg);
+  border-radius: var(--radius-sm);
+  padding: 0.1rem 0.4rem;
+  font-size: var(--font-size-sm);
+}
+.error-inline {
+  color: var(--color-error);
+  background: var(--accent-critical-bg);
+  border: 1px solid var(--accent-critical-border);
+  border-radius: var(--radius-sm);
+  padding: 0.1rem 0.4rem;
+  font-size: var(--font-size-sm);
+}
 .fleet-card { display: flex; flex-direction: column; gap: var(--space-2); }
 /* LAMA-263: preset gallery cards reuse the fleet-card surface; these are
    the per-card bits the shared card style doesn't cover. */
