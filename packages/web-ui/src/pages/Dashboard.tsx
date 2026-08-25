@@ -19,6 +19,9 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { GettingStarted } from "../components/GettingStarted.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
+import { usePause } from "../hooks/usePause.ts";
+import { PauseBanner } from "../components/PauseBanner.tsx";
+import { PauseControl } from "../components/PauseControl.tsx";
 import { formatTimeAgo } from "../relative-time.ts";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { Donut } from "../components/Donut.tsx";
@@ -128,6 +131,8 @@ export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { state: wsState, event } = useWebSocket();
+  // LAMA-273: global pause / slow mode — banner + control for the fleet.
+  const { overview, refresh: refreshPause } = usePause();
   // LAMA-224: storage report (server-side 5-min cache; refresh button bypasses).
   const [storage, setStorage] = useState<StorageReport | null>(null);
   const [storageBusy, setStorageBusy] = useState(false);
@@ -337,7 +342,19 @@ export function Dashboard() {
         >
           <span className="ws-dot" aria-hidden="true" /> {wsState}
         </span>
+        <PauseControl
+          scope="global"
+          active={overview?.global !== null}
+          onChanged={() => void refreshPause()}
+        />
       </div>
+      {overview?.global ? (
+        <PauseBanner
+          state={overview.global}
+          scope="global"
+          onResumed={() => void refreshPause()}
+        />
+      ) : null}
       {error && <div className="error">{error}</div>}
 
       <section className="section">

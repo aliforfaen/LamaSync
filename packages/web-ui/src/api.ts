@@ -29,7 +29,24 @@ import type {
   BrowseJob,
   DemoState,
   DemoSeedSummary,
+  PauseMode,
+  PauseState,
 } from "@lamasync/core";
+
+/** Wire shape of `GET /api/v1/pause` (LAMA-273). */
+export interface PauseOverview {
+  global: PauseState | null;
+  hosts: PauseState[];
+}
+
+/** Request body shared by the global and per-device pause endpoints. */
+export interface PauseRequest {
+  /** ISO timestamp or epoch ms the window ends at. */
+  until: string | number;
+  mode: PauseMode;
+  /** Single-segment rclone size; honored only when mode === "slow". */
+  bwlimit?: string | null;
+}
 
 const API_KEY_STORAGE = "lamasync_api_key";
 const API_KEY_PERSIST_STORAGE = "lamasync_api_key_persist";
@@ -492,6 +509,16 @@ export const api = {
         ? `/hosts/${encodeURIComponent(hostId)}/actions?status=${encodeURIComponent(status)}`
         : `/hosts/${encodeURIComponent(hostId)}/actions`,
     ),
+  // LAMA-273: pause / slow mode. Global + per-device set/clear; GET returns
+  // the current global row plus every per-device row so the UI can render a
+  // countdown banner and control for the current context.
+  getPause: () => apiGet<PauseOverview>("/pause"),
+  setPause: (body: PauseRequest) => apiPost<PauseState>("/pause", body),
+  clearPause: () => apiDelete<void>("/pause"),
+  setHostPause: (hostId: string, body: PauseRequest) =>
+    apiPost<PauseState>(`/hosts/${encodeURIComponent(hostId)}/pause`, body),
+  clearHostPause: (hostId: string) =>
+    apiDelete<void>(`/hosts/${encodeURIComponent(hostId)}/pause`),
 };
 
 export { ApiError };

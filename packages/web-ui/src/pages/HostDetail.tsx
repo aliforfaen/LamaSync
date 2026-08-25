@@ -18,6 +18,9 @@ import { findDryRunOperation, parseDryRunDetails } from "../dry-run.ts";
 import { Hint } from "../components/Hint.tsx";
 import { MISC_HINTS } from "../concepts.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
+import { usePause } from "../hooks/usePause.ts";
+import { PauseBanner } from "../components/PauseBanner.tsx";
+import { PauseControl } from "../components/PauseControl.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 
 interface DetailData {
@@ -77,6 +80,11 @@ export function HostDetail() {
   // LAMA-225: transient banner when this host's label is renamed.
   const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
   const { event } = useWebSocket();
+  // LAMA-273: per-device pause / slow mode. The effective pause for this
+  // device is its own row when present, else the global fleet pause.
+  const { overview, refresh: refreshPause, effectiveFor } = usePause();
+  const activePause = effectiveFor(hostId);
+  const hostPause = overview?.hosts.find((h) => h.hostId === hostId) ?? null;
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!hostId) return;
@@ -294,6 +302,13 @@ export function HostDetail() {
       <div className="toolbar">
         <h1>{host.hostname}</h1>
         <Link className="action" to="/hosts">← All devices</Link>
+        <PauseControl
+          scope="host"
+          hostId={hostId}
+          deviceName={host.hostname}
+          active={activePause !== null && activePause !== undefined}
+          onChanged={() => void refreshPause()}
+        />
         <button
           type="button"
           className="action danger"
@@ -305,6 +320,14 @@ export function HostDetail() {
       </div>
       {error && <div className="error">{error}</div>}
       {syncNote && <div className="banner">{syncNote}</div>}
+      {activePause ? (
+        <PauseBanner
+          state={activePause}
+          scope={hostPause ? "host" : "global"}
+          hostId={hostId}
+          onResumed={() => void refreshPause()}
+        />
+      ) : null}
       {renamedBanner ? (
         <div className="banner">
           <span>{renamedBanner}</span>
