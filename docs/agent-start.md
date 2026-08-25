@@ -18,16 +18,18 @@ feature ideas in the other LAMA-249 children.
 
 ## Where to begin today
 
-Updated 2026-08-24. The foundation (LAMA-250 terminology) and design
+Updated 2026-08-25. The foundation (LAMA-250 terminology) and design
 overhaul (LAMA-275, owner-approved D1–D5) are **done** — do not redo them.
+Batch 1 (LAMA-153/257/258/268/269/282/283) is shipped and audited green.
 Current work orders:
 
-### A. Coding-agent batch (no live infra needed)
+### A. Coding-agent batch 2 (no live infra needed)
 
-Work order: `docs/handoff-agent-batch-2026-08-24.md` — LAMA-258, LAMA-269,
-LAMA-257, LAMA-268, LAMA-153 (+ trivial add-ons LAMA-282, LAMA-283).
-Web-first/additive features on `feature/product-finish`; session contract is
-at the top of that file.
+Work order: `docs/handoff-agent-batch2-2026-08-25.md` — LAMA-259
+(time-travel browser), LAMA-265 (llama + confetti delight pass), and the
+agent-planned polish run 2 (P-A web UX hardening + P-B cleanup leftovers).
+Session contract is at the top of that file. Batch 1's contract and audit:
+`docs/handoff-agent-batch-2026-08-24.md`.
 
 ### B. Live-LXC batch (needs SSH to the container)
 
