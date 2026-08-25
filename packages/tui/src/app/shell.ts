@@ -22,6 +22,10 @@ export interface ShellDeps {
   /** Late-binding view iterator so slice J can supply concrete views. */
   readonly views: () => Iterable<ViewSpec>;
   readonly startView: ViewId;
+  /** Optional callback the LAMA-273 PauseService uses to open the pause
+   *  dialog when the user presses the global Ctrl+P hotkey. When omitted
+   *  (renderer-less test harnesses) the key is silently ignored. */
+  readonly onPauseRequest?: () => void;
 }
 
 /**
@@ -55,6 +59,7 @@ export class Shell {
   private readonly ctxByView: ViewContext;
   private readonly viewsFn: () => Iterable<ViewSpec>;
   private readonly startView: ViewId;
+  private readonly onPauseRequest: (() => void) | undefined;
   private readonly manager: ViewManager = new ViewManager();
   private readonly tabBar: TabSelectRenderable;
   private readonly statusText: TextRenderable;
@@ -63,6 +68,11 @@ export class Shell {
   // until a view/flow calls setStatus, which temporarily replaces them.
   private static readonly DEFAULT_HINT =
     "[?] help   [ / ] views   [q] quit";
+  // LAMA-273: persistent pause/slow indicator lives in the same status line
+  // (single chrome — no separate banner). When set, it follows whatever the
+  // status text currently says (transient message OR default hint) so the
+  // user never loses the countdown when a status message lands.
+  private pauseIndicator: string | null = null;
   // WS3 (TUI foundations): the `?` help overlay (real renderable, added /
   // removed from the layout). Sized at open time from the renderer dims.
   private readonly helpOverlay: BoxRenderable;
@@ -78,6 +88,7 @@ export class Shell {
     this.ctxByView = deps.ctxByView;
     this.viewsFn = deps.views;
     this.startView = deps.startView;
+    this.onPauseRequest = deps.onPauseRequest;
 
     // Every node the Shell mutates after mount is instantiated into a real
     // renderable up front (LAMA-181): the tab bar gets setOptions /
@@ -283,6 +294,21 @@ export class Shell {
       return true;
     }
 
+    // Step 6.5 (LAMA-273): Ctrl+P opens the pause / resume dialog from any
+    // view (no view-local handler should shadow it). Ctrl arrives as a 0x10
+    // byte with `e.ctrl === true`; matching by name + ctrl is more readable
+    // than by raw byte and survives terminals that emit `\x10` differently.
+    if (
+      !this.hasInputFocus() &&
+      this.onPauseRequest !== undefined &&
+      ((e.ctrl === true && (name === "p" || char === "p")) ||
+        (e.ctrl === true && char === "\x10"))
+    ) {
+      this.onPauseRequest();
+      e.preventDefault();
+      return true;
+    }
+
     // Step 7: view-local dispatch.
     const active = this.manager.active();
     if (active.handleKey?.(e) === true) return true;
@@ -322,13 +348,38 @@ export class Shell {
   setStatus(text: string, kind: "info" | "error" | "success"): void {
     const prefix =
       kind === "error" ? "[!] " : kind === "success" ? "[ok] " : "[i] ";
-    this.statusText.content = `${prefix}${text}`;
+    this.lastBaseLine = `${prefix}${text}`;
+    this.statusText.content = this.composeStatusLine();
   }
 
   /** Restore the default hint text in the status/hint bar. */
   clearStatus(): void {
-    this.statusText.content = Shell.DEFAULT_HINT;
+    this.lastBaseLine = Shell.DEFAULT_HINT;
+    this.statusText.content = this.composeStatusLine();
   }
+
+  /**
+   * LAMA-273: install (or clear with `null`) the persistent pause / slow-mode
+   * indicator that rides alongside the default hint / transient status
+   * message. Composed lazily so a clear() on the indicator does not have
+   * to know whether a transient message is in flight.
+   */
+  setPauseIndicator(text: string | null): void {
+    this.pauseIndicator = text && text.length > 0 ? text : null;
+    this.statusText.content = this.composeStatusLine();
+  }
+
+  /**
+   * Compose the final status-line text from the last base line (transient
+   * message or default hint) plus the optional pause indicator. Indicator
+   * sits at the right edge so the default hint / message stays scannable.
+   */
+  private composeStatusLine(): string {
+    const base = this.lastBaseLine;
+    if (this.pauseIndicator === null) return base;
+    return `${base}   ${this.pauseIndicator}`;
+  }
+  private lastBaseLine: string = Shell.DEFAULT_HINT;
 
   /**
    * Tab-bar-visible specs only (drill-in/hidden views excluded).
@@ -373,6 +424,7 @@ export class Shell {
       "[ / ]  cycle views",
       "1-6    jump to tab",
       "?      toggle help",
+      "Ctrl+P pause / resume devices",
       "q      quit",
       "Esc    cancel wizard / close help",
       "",

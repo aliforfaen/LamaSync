@@ -53,6 +53,18 @@ describe("friendlyError", () => {
     );
   });
 
+  test("LAMA-273: 'sync skipped: paused until <iso>' maps to a resume hint", () => {
+    // The daemon's executor emits this exact phrase when its pause refusal
+    // trips; surfacing it verbatim in the status bar would be opaque, so the
+    // friendly-error translator turns it into a one-liner that points at the
+    // Ctrl+P dialog hotkey.
+    expect(
+      friendlyError(
+        new Error("sync skipped: paused until 2026-08-25T18:00:00.000Z"),
+      ),
+    ).toBe("sync skipped — fleet is paused (Ctrl+P to resume)");
+  });
+
   test("anything else passes through trimmed to one line", () => {
     expect(friendlyError(new Error("boom"))).toBe("boom");
     expect(friendlyError("first line\nsecond line")).toBe("first line");

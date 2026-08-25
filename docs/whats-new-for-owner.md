@@ -350,3 +350,85 @@ Second slice of the coding-agent batch, one commit per issue; gates green
 2. Conflict remote sizes are null by design (no per-conflict rclone call).
 3. Fold expansion model is data-driven (`open` set) — the renderer is pure;
    interactive fold widgets can build on it later.
+
+## 2026-08-25 — LAMA-273 TUI layer · PR #1 open
+
+Server + daemon half of LAMA-273 landed on this branch already (the
+`pause.ts` server route + `config.ts` resolution + daemon's belt-and-
+braces pause refusal in `executor.ts` / `scheduler.ts`). This entry covers
+the TUI half that wraps those endpoints.
+
+### Pause / slow-mode — what changed / what to look for
+
+- **Status-bar indicator** — when the fleet (or this device) has an active
+  pause row, the single bottom status line appends a caption like
+  `⏸ paused 39m` or `🐢 slow 1M · 2h`. Countdown comes from the server's
+  ISO `until`; we re-resolve every 30 s (same cadence as the fleet
+  WebSocket). Look: set a 1-hour pause and watch the count tick down. 🤖
+- **Ctrl+P opens the dialog** (global hotkey — works from any tab, no
+  view-local shadow). The dialog adapts to state: nothing paused → walks
+  Scope → Duration (1h / 4h / 24h / Until resumed) → Mode (Pause / Slow)
+  → (Slow adds a bwlimit prompt) → Confirm. Already paused → jumps
+  straight to Scope → Confirm and clears the matching row. 🤖
+- **Glossary copy** — "devices" everywhere (no "hosts"), "pause" /
+  "slow mode", no "fleet" in user-facing labels. Bandwidth limit is
+  single-segment only ("1M", "512K") — schedules intentionally not
+  exposed (server rejects them). 🤖
+- **Friendly daemon refusal** — when a sync hits the daemon while paused,
+  the daemon's `sync skipped: paused until <iso>` summary now renders as
+  `sync skipped — fleet is paused (Ctrl+P to resume)` in the status bar
+  instead of dumping the raw ISO timestamp. 🤖
+- **No new chrome** — the LAMA-275 / LAMA-276 "one status line" rule
+  holds: the indicator rides alongside the default hint / transient
+  status message, no second banner added. 🤖
+- **Adaptive help** — `Ctrl+P pause / resume devices` now appears in the
+  global-keys section of the `?` overlay. 🤖
+
+### Live verification (do this against your LXC fleet)
+
+1. Set a 1h pause on All devices from the TUI (Ctrl+P, all, 1h, pause,
+   confirm). Watch the status bar switch to `⏸ paused 60m`.
+2. Open the Activity / Operations view and look for the next sync attempt
+   — the daemon's refusal log line should show `sync skipped: paused
+   until <iso>`, and the activity card should summarise the skip (no
+   rclone spawn).
+3. Hit Ctrl+P again — the dialog now jumps straight to Scope → Confirm
+   (since a pause is active). Confirm → caption disappears.
+4. Try slow mode at 1M — confirm a manual sync still runs but its
+   daemon log line shows the `--bwlimit 1M` override.
+
+### Files touched (additive only)
+
+- `packages/core/src/api-client.ts` — 5 new methods
+  (`getPause`, `setPause`, `clearPause`, `setHostPause`,
+  `clearHostPause`). Distinct from the server-side commit's surface
+  (`LamaSyncApiClient` is the shared client).
+- `packages/tui/src/pause.ts` + `pause.test.ts` — pure helpers (duration
+  math, host-row-wins resolution, emoji/ ASCII formatters).
+- `packages/tui/src/app/pause-service.ts` + `pause-service.test.ts` —
+  poller.
+- `packages/tui/src/app/shell.ts` — `setPauseIndicator` + Ctrl+P
+  dispatch + help-overlay line.
+- `packages/tui/src/app/friendly-error.ts` + `friendly-error.test.ts`
+  — paused-refusal rule.
+- `packages/tui/src/flows/pause.ts` — wizard.
+- `packages/tui/src/boot.ts` — wire poller + dialog opener + cleanup on
+  teardown.
+- `docs/features.md` — LAMA-273 row.
+
+### Platform decisions (agents)
+
+1. Hotkey is **Ctrl+P** globally — `p` alone is taken by Local view's
+   cache-profile, so the modifier keeps the gesture distinct everywhere
+   without forcing the user to pick a less-meaningful letter.
+2. "Until resumed" maps to a **30-day** `until` server-side — long enough
+   to be indefinite in practice (the resume verb is DELETE), short
+   enough that a forgotten row can't survive forever. Server's
+   past-`until` validation still accepts it.
+3. The pause indicator rides alongside the existing status text in the
+   single bottom line — no second banner. Three-space separator keeps
+   it readable at 60 cols; emoji fallback to `[paused 39m]` brackets for
+   ASCII terminals (auto-detected via `formatPauseIndicatorAscii`).
+4. Poller cadence is **30 s** (same as the Fleet view's `getHealth`
+   interval) — fresh enough to feel live, far enough from the existing
+   timer storms.

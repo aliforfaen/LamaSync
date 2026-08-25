@@ -27,10 +27,14 @@ import { buildClient, writeClientConfig } from "./api.ts";
 import type { TuiClient } from "./api.ts";
 import { createFleetService } from "./app/fleet-service.ts";
 import type { FleetService } from "./app/fleet-service.ts";
+import { createPauseService } from "./app/pause-service.ts";
+import type { PauseService } from "./app/pause-service.ts";
 import { Shell } from "./app/shell.ts";
 import type { View, ViewContext, ViewId, ViewSpec } from "./app/view-manager.ts";
 import { openWizard } from "./app/wizard.ts";
 import { runSetupFlow } from "./flows/setup.ts";
+import { createPauseWizard } from "./flows/pause.ts";
+import type { PauseDialogMode } from "./flows/pause.ts";
 
 import { ConflictsView } from "./views/conflicts.ts";
 import { DotfilesView } from "./views/dotfiles.ts";
@@ -66,6 +70,11 @@ export async function bootShell(): Promise<void> {
     onDestroy: () => {
       for (const spec of specs) spec.destroy?.();
       fleetService.close();
+      // LAMA-273: stop the pause poller so a quit / Ctrl+C teardown doesn't
+      // leak the interval (the boot promise holds the renderer alive until
+      // the renderer itself fires onDestroy, so the loop never drains while
+      // the interval keeps the event loop busy).
+      pauseService?.stop();
       releaseRuntime();
     },
   });
@@ -110,6 +119,14 @@ export async function bootShell(): Promise<void> {
       : { message: null, kind: "info" };
 
   const fleetService: FleetService = createFleetService(apiBaseUrl, apiKey);
+
+  // LAMA-273: poll the pause snapshot so the status-bar indicator can
+  // reflect "this device is paused" / "fleet is in slow mode" without
+  // waiting for the user to open the dialog. The service is created here
+  // (before the Shell so we can use `ctx.api`) and started once the shell
+  // is ready (otherwise its first caption lands before the renderable
+  // exists).
+  let pauseService: PauseService | null = null;
 
   let pendingShell: Shell | null = null;
   let pendingStatus: { message: string | null; kind: "info" | "error" | "success" } =
@@ -179,6 +196,7 @@ export async function bootShell(): Promise<void> {
     ctxByView: ctx,
     views: () => specs,
     startView: "local",
+    onPauseRequest: () => openPauseDialog(),
   });
   pendingShell = shell;
 
@@ -192,6 +210,49 @@ export async function bootShell(): Promise<void> {
     shell.showView(id);
   };
 
+  // LAMA-273: Ctrl+P opens the pause / resume dialog. The shell hands the
+  // key here, which fetches the current snapshot, picks set-vs-resume, and
+  // mounts the wizard. A best-effort failure (API 401/offline) surfaces
+  // through the status bar and skips the wizard. Hoisted above its first
+  // caller (the Shell ctor closure above) so the reference stays clean.
+  function openPauseDialog(): void {
+    void (async () => {
+      try {
+        const current = await tui.client.getPause();
+        const localHostId = tui.hostname;
+        const hostRow = current.hosts.find((row) => row.hostId === localHostId) ?? null;
+        const hasActive = hostRow !== null || current.global !== null;
+        const mode: PauseDialogMode = hasActive ? "resume" : "set";
+        const wizard = createPauseWizard({
+          ctx,
+          mode,
+          current,
+        });
+        openWizard(wizard);
+        const layout = pendingShell?.getLayout();
+        if (layout && wizard.container) {
+          layout.add(wizard.container);
+        }
+      } catch (err) {
+        ctx.setStatus(
+          `pause dialog failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
+      }
+    })();
+  }
+
+  // LAMA-273: build the pause service now that we have a real shell to
+  // notify. It owns no UI state of its own — just calls shell.setPauseIndicator
+  // whenever the resolved caption changes.
+  pauseService = createPauseService({
+    api: tui.client,
+    localHostId: tui.hostname,
+    onCaption: (caption) => {
+      shell.setPauseIndicator(caption);
+    },
+  });
+
   if (pendingStatus.message) {
     shell.setStatus(pendingStatus.message, pendingStatus.kind);
   }
@@ -203,6 +264,10 @@ export async function bootShell(): Promise<void> {
   // reflect "live" on the first paint (the view also refreshes via
   // getHealth on demand).
   fleetService.start();
+  // LAMA-273: kick off the pause poller last so the very first caption
+  // lands after the shell is mounted (otherwise setPauseIndicator writes
+  // to a Text renderable that isn't yet attached).
+  if (pauseService) pauseService.start();
 
   // Hold the runtime alive until the renderer is destroyed. The OpenTUI
   // renderer keeps the event loop busy on its own; this promise just parks
