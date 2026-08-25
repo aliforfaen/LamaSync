@@ -30,6 +30,7 @@ import {
   swapChildren,
 } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
+import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import { matchHotkey } from "../app/keymap.ts";
 import type {
   View,
@@ -214,7 +215,12 @@ export class GhView implements View {
       // Build a fresh Select per render so the live SelectRenderable is
       // created at the same time as the parent Box — no stale-proxy
       // mutation across re-renders.
-      const select = Select({ options: rows, flexGrow: 1 });
+      const select = Select({
+        options: rows,
+        flexGrow: 1,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
+      });
       select.on("itemSelected", (_i: number, opt: RepoRow) => {
         const repo = this.repos.find((r) => r.nameWithOwner === opt.value);
         if (!repo) return;
@@ -443,7 +449,12 @@ export function renderGhSelector(opts: RenderGhSelectorOpts): VNode {
       description: `${r.nameWithOwner}`,
       value: r.nameWithOwner,
     }));
-    const select = Select({ options: rows, flexGrow: 1 });
+    const select = Select({
+        options: rows,
+        flexGrow: 1,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
+      });
     // Forward Enter (itemSelected) to opts.onSelect — old behaviour.
     if (opts.onSelect) {
       select.on("itemSelected", (_i: number, opt: RepoRow) => {

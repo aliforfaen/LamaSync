@@ -219,16 +219,65 @@ async function runRclone(
  */
 async function runRcloneBinary(
   argv: string[],
-  opts: { cwd?: string } = {},
+  opts: { cwd?: string; maxBytes?: number } = {},
 ): Promise<{ stdout: Buffer; stderr: string; code: number }> {
   const finalOpts = opts.cwd !== undefined ? opts : { ...opts, cwd: process.env.LAMASYNC_BACKUP_DIR ?? "/backups" };
   const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", ...finalOpts });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).arrayBuffer(),
+  // LAMA-247 #4: read stdout in bounded chunks instead of buffering the
+  // whole object first — a >64 MiB download on S3 is rejected mid-stream
+  // (and the process killed) rather than exhausting the heap.
+  let stdout: Buffer;
+  try {
+    stdout = await readStdoutBounded(proc.stdout, opts.maxBytes);
+  } catch (err) {
+    // The producer would keep writing into a pipe nobody drains; stop it
+    // so the stderr/exited tails below resolve instead of hanging.
+    proc.kill();
+    throw err;
+  }
+  const [stderr, code] = await Promise.all([
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  return { stdout: Buffer.from(stdout), stderr, code };
+  return { stdout, stderr, code };
+}
+
+/**
+ * Stream a process stdout into a Buffer, failing fast (and aborting the
+ * source stream) as soon as `maxBytes` is crossed. Exported for hermetic
+ * tests that synthesize oversized streams without spawning real commands.
+ */
+export async function readStdoutBounded(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number | undefined,
+): Promise<Buffer> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (maxBytes !== undefined && total > maxBytes) {
+        throw new BrowseDownloadTooLarge(total);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/** Marker error for the bounded reader — mapped to a 400 naming the cap. */
+export class BrowseDownloadTooLarge extends Error {
+  readonly bytes: number;
+  constructor(bytes: number) {
+    super(`file is ${bytes} bytes; download limit is 64 MiB`);
+    this.name = "BrowseDownloadTooLarge";
+    this.bytes = bytes;
+  }
 }
 
 interface ResolvedFolder {
@@ -1077,16 +1126,22 @@ export async function downloadBrowseFile(
         srcPath: remotePath(ref, name, bucket),
         timeout: "60s",
       };
-      const result = await runRcloneBinary(buildRcloneArgv(argvInput));
+      // LAMA-247 #4: the cap is enforced mid-stream by the bounded reader
+      // so oversized objects never materialize in memory.
+      const result = await runRcloneBinary(buildRcloneArgv(argvInput), {
+        maxBytes: MAX_BROWSE_BYTES,
+      });
       if (result.code !== 0) {
+        // rclone exit 3 = directory not found, 4 = file/object not found:
+        // map to the Swagger-advertised 404 instead of a generic 400.
+        if (result.code === 3 || result.code === 4) {
+          return {
+            ok: false,
+            status: 404,
+            error: "entry not found",
+          } as const;
+        }
         throw rcloneFailure("cat", result);
-      }
-      if (result.stdout.length > MAX_BROWSE_BYTES) {
-        return {
-          ok: false,
-          status: 400,
-          error: `file is ${result.stdout.length} bytes; download limit is 64 MiB`,
-        } as const;
       }
       return {
         ok: true,
@@ -1094,6 +1149,9 @@ export async function downloadBrowseFile(
       } as const;
     });
   } catch (error) {
+    if (error instanceof BrowseDownloadTooLarge) {
+      return { ok: false, status: 400, error: error.message } as const;
+    }
     const msg = error instanceof Error ? error.message : String(error);
     return { ok: false, status: 400, error: msg };
   }

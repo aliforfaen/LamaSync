@@ -1,8 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
-import type { Backend, S3Provider } from "@lamasync/core";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
+import type { Backend, Folder, FolderSize, S3Provider, StorageReport } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { Donut } from "../components/Donut.tsx";
+import { Sparkline } from "../components/Sparkline.tsx";
+import { formatBytes } from "../format-bytes.ts";
 import { BACKEND_KIND_HINTS } from "../concepts.ts";
+import {
+  PROVE_NEEDS_RESTIC,
+  isRestic,
+  proveResultText,
+} from "../backup-health.ts";
+import type {
+  DrillHistory,
+  DrillResult,
+} from "../api.ts";
+import { formatTimeAgo } from "../relative-time.ts";
 
 const PROVIDERS: Array<{ value: S3Provider; label: string }> = [
   { value: "other", label: "Other / S3-compatible" },
@@ -88,12 +103,25 @@ function validateForm(form: FormState): string | null {
 
 export function Backends() {
   const [items, setItems] = useState<BackendRow[] | null>(null);
+  // LAMA-269: data for the per-destination donut + growth sparkline.
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderSizes, setFolderSizes] = useState<Record<string, FolderSize>>({});
+  const [storageHistory, setStorageHistory] = useState<
+    Record<string, Array<{ measuredAt: number; bytes: number | null }>>
+  >({});
+  const [storageReport, setStorageReport] = useState<StorageReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, string>>({});
+  // LAMA-266: "Prove it" + fire-drill buttons per restic destination. Busy
+  // tracks which backend is mid-run (one at a time); resultLines hold the
+  // inline status text per backend id.
+  const [healthBusy, setHealthBusy] = useState<string | null>(null);
+  const [healthResults, setHealthResults] = useState<Record<string, string>>({});
+  const [drills, setDrills] = useState<DrillHistory["drills"] | null>(null);
   // LAMA-238: in-form connection test for an unsaved backend config.
   const [formTesting, setFormTesting] = useState(false);
   const [formTestResult, setFormTestResult] = useState<{
@@ -105,11 +133,29 @@ export function Backends() {
   const [notice, setNotice] = useState<string | null>(null);
   // UX workstream 4: styled delete confirmation.
   const [deleteTarget, setDeleteTarget] = useState<BackendRow | null>(null);
+  // LAMA-271: the empty-state CTA scrolls to (and focuses) the existing
+  // add-storage-destination form at the top of the page.
+  const formRef = useRef<HTMLElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
     try {
-      setItems(await api.listBackends());
+      const [backendList, folderList, sizes, history, report, drillHistory] =
+        await Promise.all([
+          api.listBackends(),
+          api.listFolders().catch(() => [] as Folder[]),
+          api.folderSizes().catch(() => ({}) as Record<string, FolderSize>),
+          api.storageHistory().catch(() => ({ backends: {} })),
+          api.storageReport().catch(() => null),
+          api.listHealthDrills(10).catch(() => ({ drills: [] })),
+        ]);
+      setItems(backendList);
+      setFolders(folderList);
+      setFolderSizes(sizes);
+      setStorageHistory(history.backends);
+      setStorageReport(report);
+      setDrills(drillHistory.drills);
     } catch (err) {
       setError(errorText(err));
     }
@@ -148,7 +194,7 @@ export function Backends() {
           resticRepository: form.resticRepository || undefined,
           resticPassword: form.resticPassword || undefined,
         });
-        setNotice("Backend updated");
+        setNotice("Storage destination updated");
       } else {
         await api.createBackend({
           name: form.name,
@@ -162,7 +208,7 @@ export function Backends() {
           resticRepository: form.resticRepository,
           resticPassword: form.resticPassword,
         });
-        setNotice("Backend created");
+        setNotice("Storage destination created");
       }
       setForm(EMPTY_FORM);
       setEditingId(null);
@@ -248,7 +294,7 @@ export function Backends() {
     setDeleteTarget(null);
     try {
       await api.deleteBackend(b.id);
-      setNotice(`Backend '${b.name}' deleted`);
+      setNotice(`Storage destination '${b.name}' deleted`);
       await refresh();
     } catch (err) {
       setError(errorText(err));
@@ -271,10 +317,119 @@ export function Backends() {
     }
   }
 
+  // LAMA-266: "Prove it" — restore one random file from the destination's
+  // latest restic snapshot and diff it. On success we refresh backends so
+  // the lastProveAt/lastProveOk columns drive the Dashboard badge.
+  async function onProve(b: BackendRow): Promise<void> {
+    if (healthBusy) return;
+    setHealthBusy(b.id);
+    setError(null);
+    try {
+      const res = await api.proveBackend(b.id);
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: proveResultText({
+          kind: "prove",
+          ok: res.ok,
+          file: res.file,
+          durationMs: res.durationMs,
+          detail: res.detail,
+        }),
+      }));
+      await refresh();
+    } catch (err) {
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: `✗ Prove failed: ${errorText(err)}`,
+      }));
+    } finally {
+      setHealthBusy(null);
+    }
+  }
+
+  // LAMA-266: fire drill — liveness probe + prove-it restore + audit row.
+  // Result writes through to the drills history (refreshed here) and the
+  // backend's lastProveAt/_ok columns.
+  async function onDrill(b: BackendRow): Promise<void> {
+    if (healthBusy) return;
+    setHealthBusy(b.id);
+    setError(null);
+    try {
+      const res: DrillResult = await api.runDrill(b.id);
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: proveResultText({
+          kind: "drill",
+          ok: res.ok,
+          file: res.file,
+          durationMs: res.durationMs,
+          detail: res.detail,
+        }),
+      }));
+      await refresh();
+    } catch (err) {
+      setHealthResults((prev) => ({
+        ...prev,
+        [b.id]: `✗ Fire drill failed: ${errorText(err)}`,
+      }));
+    } finally {
+      setHealthBusy(null);
+    }
+  }
+
+  // LAMA-266: clear the inline status once the user has read it (keeps the
+  // Actions cell from growing stale lines after edits).
+  function dismissHealth(b: BackendRow): void {
+    setHealthResults((prev) => {
+      const next = { ...prev };
+      delete next[b.id];
+      return next;
+    });
+  }
+
+  // LAMA-269: per-destination storage picture. The donut composes the
+  // destination from its folders (sized via /folders/sizes); the sparkline
+  // plots the destination's total growth from /stats/storage/history. When
+  // nothing has been measured we show an explicit state rather than a fake
+  // zero (non-S3 backends are never measurable server-side).
+  function renderStorageCell(b: BackendRow) {
+    const destFolders = folders.filter((f) => f.backendId === b.id);
+    const slices = destFolders
+      .map((f) => ({ label: f.name, value: folderSizes[f.id]?.bytes ?? 0 }))
+      .filter((s) => s.value > 0);
+    const measured = destFolders.some((f) => folderSizes[f.id]?.bytes != null);
+    const historyPts = (storageHistory[b.id] ?? [])
+      .map((p) => p.bytes)
+      .filter((v): v is number => v != null);
+    if (!measured && historyPts.length === 0) {
+      return <span className="muted">Not measured yet</span>;
+    }
+    const reportBytes =
+      storageReport?.backends.find((x) => x.backendId === b.id)?.bytes ?? null;
+    const center = reportBytes ?? slices.reduce((acc, s) => acc + s.value, 0);
+    return (
+      <div className="storage-cell">
+        <Donut
+          data={slices}
+          size={56}
+          thickness={9}
+          centerLabel={formatBytes(center)}
+          ariaLabel={`${b.name} storage breakdown`}
+        />
+        <Sparkline
+          data={historyPts}
+          width={96}
+          height={28}
+          ariaLabel={`${b.name} storage growth`}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Backends</h1>
+      <PageHeader title="Storage destinations" purpose="Where your data lives — S3 buckets, local disks, NFS mounts, and restic repositories." />
+<div className="toolbar">
         <span className="muted">
           {items ? `${items.length} configured` : "loading…"}
         </span>
@@ -282,13 +437,14 @@ export function Backends() {
       {error && <div className="error">{error}</div>}
       {notice && <div className="all-quiet">{notice}</div>}
 
-      <section className="section">
-        <h2>{editingId ? `Edit backend: ${form.name}` : "Add backend"}</h2>
+      <section className="section" ref={formRef}>
+        <h2>{editingId ? `Edit destination: ${form.name}` : "Add storage destination"}</h2>
         <form className="form" onSubmit={onSubmit}>
           <div className="form-row">
             <label>
               Name
               <input
+                ref={nameInputRef}
                 value={form.name}
                 onChange={(e) => set("name", e.target.value)}
                 placeholder="e.g. Prod R2, cold-archive"
@@ -470,14 +626,26 @@ export function Backends() {
       </section>
 
       <section className="section">
-        <h2>Configured backends</h2>
+        <h2>Configured destinations</h2>
         {!items ? (
           <div className="skel skel-line" aria-busy="true" />
         ) : items.length === 0 ? (
-          <div className="empty-row">
-            No backends yet. Create one above, then point S3 folders at it —
-            the folder form only asks for the bucket name.
-          </div>
+          <EmptyState
+            variant="storage"
+            title="No storage destinations yet"
+            how="Add where your data lives — S3 buckets, local disks, NFS exports, or a restic repository."
+            ctaLabel="Add a storage destination"
+            onCta={() => {
+              formRef.current?.scrollIntoView({ block: "start" });
+              nameInputRef.current?.focus();
+            }}
+            steps={[
+              "Pick a kind: S3, local, NFS, or restic",
+              "Enter the connection details",
+              "Test it — then point folders at it",
+            ]}
+            timeNote="takes 30s"
+          />
         ) : (
           <table className="data">
             <thead>
@@ -489,6 +657,7 @@ export function Backends() {
                 <th>Access key</th>
                 <th>Secret</th>
                 <th>Folders</th>
+                <th>Storage</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -545,6 +714,7 @@ export function Backends() {
                     )}
                   </td>
                   <td>{b.folderCount ?? 0}</td>
+                  <td>{renderStorageCell(b)}</td>
                   <td>
                     <div className="row-actions">
                       <button type="button" className="action" onClick={() => startEdit(b)}>
@@ -558,10 +728,59 @@ export function Backends() {
                       >
                         {testingId === b.id ? "Testing…" : "Test"}
                       </button>
+                      {isRestic(b.kind) ? (
+                        <>
+                          <button
+                            type="button"
+                            className="action"
+                            disabled={healthBusy !== null}
+                            onClick={() => void onProve(b)}
+                          >
+                            {healthBusy === b.id ? "Proving…" : "Prove it"}
+                          </button>
+                          <button
+                            type="button"
+                            className="action"
+                            disabled={healthBusy !== null}
+                            onClick={() => void onDrill(b)}
+                          >
+                            {healthBusy === b.id ? "Drilling…" : "Run fire drill"}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="action"
+                          disabled
+                          title={PROVE_NEEDS_RESTIC}
+                          aria-label={`Prove it — ${PROVE_NEEDS_RESTIC}`}
+                        >
+                          Prove it
+                        </button>
+                      )}
                       <button type="button" className="action danger" onClick={() => void onDelete(b)}>
                         Delete
                       </button>
                     </div>
+                    {healthResults[b.id] ? (
+                      <div className="row-actions health-result">
+                        <span
+                          className={healthResults[b.id].startsWith("✓") ? "all-quiet-inline" : "error-inline"}
+                          role={healthResults[b.id].startsWith("✓") ? "status" : "alert"}
+                        >
+                          {healthResults[b.id]}
+                        </span>
+                        <button
+                          type="button"
+                          className="copy-btn"
+                          title="Dismiss"
+                          aria-label="Dismiss result"
+                          onClick={() => dismissHealth(b)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : null}
                     {testResult[b.id] ? (
                       <div className="muted">{testResult[b.id]}</div>
                     ) : null}
@@ -573,12 +792,57 @@ export function Backends() {
         )}
       </section>
 
+      <section className="section">
+        <h2>Backup fire-drill history</h2>
+        {drills === null ? (
+          <div className="skel skel-line" aria-busy="true" />
+        ) : drills.length === 0 ? (
+          <p className="muted">
+            No fire drills yet — run one from a restic destination's row above
+            to prove restores work end to end.
+          </p>
+        ) : (
+          <table className="data">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Destination</th>
+                <th>Type</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {drills.map((d) => (
+                <tr key={d.id}>
+                  <td>{formatTimeAgo(new Date(d.ranAt).getTime())}</td>
+                  <td>
+                    <strong>{d.backendName}</strong>
+                  </td>
+                  <td className="muted">{d.kind === "drill" ? "fire drill" : "prove"}</td>
+                  <td>
+                    <span className={`badge ${d.ok ? "badge-success" : "badge-failed"}`}>
+                      {d.ok ? "ok" : "failed"}
+                    </span>
+                    {d.detail ? (
+                      <span className="muted" title={d.detail}>
+                        {" "}
+                        · {d.detail}
+                      </span>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
       {deleteTarget && (
         <ConfirmDialog
-          title="Delete backend"
+          title="Delete storage destination"
           danger
           confirmLabel="Delete"
-          message={`Delete backend "${deleteTarget.name}"?${
+          message={`Delete storage destination "${deleteTarget.name}"?${
             (deleteTarget.folderCount ?? 0) > 0
               ? ` It is used by ${deleteTarget.folderCount} folder(s) — the server will refuse while it is.`
               : ""

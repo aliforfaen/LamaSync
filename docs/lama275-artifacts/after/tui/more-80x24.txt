@@ -1,0 +1,24 @@
+‹Backups & apps      Conflicts           Activity            More
+                                                            ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+More
+Tools & integrations. Use ↑/↓ to move, Enter to open.
+
+ ▶ GitHub
+   adopt a repository — creates a synced git folder
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[g] GitHub
+[ok] Loaded 3 folder(s).

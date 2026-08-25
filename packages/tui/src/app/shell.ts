@@ -9,10 +9,12 @@ import type {
 } from "@opentui/core";
 
 import { matchHotkey, type Hotkey } from "./keymap.ts";
+import { PALETTE_BG, SELECTION } from "./palette.ts";
 import { friendlyError } from "../friendly-error.ts";
 import type { ViewContext, ViewId, ViewSpec } from "./view-manager.ts";
 import { ViewManager } from "./view-manager.ts";
 import { wizardRegistry } from "./wizard.ts";
+import { formatMarkdownTables } from "../markdown.ts";
 
 export interface ShellDeps {
   readonly renderer: CliRenderer;
@@ -20,6 +22,10 @@ export interface ShellDeps {
   /** Late-binding view iterator so slice J can supply concrete views. */
   readonly views: () => Iterable<ViewSpec>;
   readonly startView: ViewId;
+  /** Optional callback the LAMA-273 PauseService uses to open the pause
+   *  dialog when the user presses the global Ctrl+P hotkey. When omitted
+   *  (renderer-less test harnesses) the key is silently ignored. */
+  readonly onPauseRequest?: () => void;
 }
 
 /**
@@ -53,12 +59,22 @@ export class Shell {
   private readonly ctxByView: ViewContext;
   private readonly viewsFn: () => Iterable<ViewSpec>;
   private readonly startView: ViewId;
+  private readonly onPauseRequest: (() => void) | undefined;
   private readonly manager: ViewManager = new ViewManager();
   private readonly tabBar: TabSelectRenderable;
   private readonly statusText: TextRenderable;
-  // WS3 (TUI foundations): persistent key-hint line under the tab bar and
-  // the `?` help overlay (real renderables, added/removed from the layout).
-  private readonly hintText: TextRenderable;
+  // Chrome reduction (LAMA-276): the persistent key-hint line is gone — the
+  // bottom status line doubles as the hint bar: it shows the default hints
+  // until a view/flow calls setStatus, which temporarily replaces them.
+  private static readonly DEFAULT_HINT =
+    "[?] help   [ / ] views   [q] quit";
+  // LAMA-273: persistent pause/slow indicator lives in the same status line
+  // (single chrome — no separate banner). When set, it follows whatever the
+  // status text currently says (transient message OR default hint) so the
+  // user never loses the countdown when a status message lands.
+  private pauseIndicator: string | null = null;
+  // WS3 (TUI foundations): the `?` help overlay (real renderable, added /
+  // removed from the layout). Sized at open time from the renderer dims.
   private readonly helpOverlay: BoxRenderable;
   private readonly helpText: TextRenderable;
   private helpOpen = false;
@@ -72,13 +88,16 @@ export class Shell {
     this.ctxByView = deps.ctxByView;
     this.viewsFn = deps.views;
     this.startView = deps.startView;
+    this.onPauseRequest = deps.onPauseRequest;
 
     // Every node the Shell mutates after mount is instantiated into a real
     // renderable up front (LAMA-181): the tab bar gets setOptions /
     // setSelectedIndex calls on every view switch, the status text is
     // rewritten by setStatus, and the layout receives wizard modals via
     // getLayout().add(). VNode proxies would silently drop all of those.
-    this.statusText = instantiate(this.renderer, Text({ content: "" })) as TextRenderable;
+    // Chrome reduction (LAMA-276): one status/hint line instead of the
+    // separate hint row — the status text starts as the default hint.
+    this.statusText = instantiate(this.renderer, Text({ content: Shell.DEFAULT_HINT })) as TextRenderable;
     this.rootContainer = instantiate(
       this.renderer,
       Box({ flexDirection: "column", flexGrow: 1 }),
@@ -87,15 +106,17 @@ export class Shell {
       this.renderer,
       TabSelect({
         options: [{ name: " ", description: "" }],
+        // Six task-oriented tabs must fit 80 cols with no scroll-arrow
+        // truncation (owner relook 2026-08-23): names are <= 12 chars.
+        tabWidth: 13,
         flexShrink: 0,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
       }),
     ) as TabSelectRenderable;
 
-    // WS3: the key-hint line is muted, one line, under the tab bar.
-    this.hintText = instantiate(
-      this.renderer,
-      Text({ content: "[?] help   [ / ] views   [q] quit", fg: "#767676" }),
-    ) as TextRenderable;
+    // WS3: the `?` help overlay is sized/positioned at open time (adaptive
+    // help, LAMA-276); the placeholder dims are replaced before it is shown.
     this.helpText = instantiate(
       this.renderer,
       Text({ content: "" }),
@@ -122,7 +143,6 @@ export class Shell {
       Box(
         { id: SHELL_LAYOUT_ID, flexDirection: "column", flexGrow: 1 },
         this.tabBar,
-        this.hintText,
         this.rootContainer,
         this.statusText,
       ),
@@ -142,15 +162,23 @@ export class Shell {
       this.rootContainer.add(spec.container);
     }
 
-    const tabOptions = specs.map((spec) => ({
-      name: spec.title,
+    // LAMA-276/D4: the tab bar only lists visible tabs (drill-in views like
+    // GitHub are hidden and opened from the More menu). Views are still all
+    // registered, so indexOf/manager.show work for hidden ids too.
+    const visible = this.visibleSpecs();
+    const tabOptions = visible.map((spec) => ({
+      // Relook (owner, 2026-08-23): the tab bar uses the short label when
+      // given so all six tabs fit at 80 columns without the '›' truncation.
+      name: spec.tabLabel ?? spec.title,
       description: "",
     }));
     this.tabBar.setOptions(tabOptions);
-    const startIndex = this.manager.indexOf(this.startView);
-    this.tabBar.setSelectedIndex(startIndex);
+    const startVisibleIndex = visible.findIndex(
+      (s) => s.id === this.startView,
+    );
+    this.tabBar.setSelectedIndex(startVisibleIndex >= 0 ? startVisibleIndex : 0);
     this.tabBar.on("itemSelected", (index: number) => {
-      const spec = specs[index];
+      const spec = visible[index];
       if (spec) this.manager.show(spec.id);
     });
 
@@ -224,7 +252,19 @@ export class Shell {
       return false;
     }
 
-    // Step 3: cycle keys. OpenTUI does not emit "leftbracket"/"rightbracket"
+    // Step 3: Escape from a drill-in view (hidden from the tab bar, e.g.
+    // GitHub under More) returns to its home tab. Visible views never hit
+    // this branch — their own handleKey owns Escape.
+    if (name === "escape") {
+      const active = this.manager.active();
+      if (active.hiddenFromTabBar && active.homeTab) {
+        this.showView(active.homeTab);
+        e.preventDefault();
+        return true;
+      }
+    }
+
+    // Step 4: cycle keys. OpenTUI does not emit "leftbracket"/"rightbracket"
     // key names — brackets arrive as printable chars — so match both. While
     // a text Input owns focus the brackets are literal text, not navigation.
     if (!this.hasInputFocus()) {
@@ -240,7 +280,7 @@ export class Shell {
       }
     }
 
-    // Step 4 (WS3): open the `?` help overlay (only with no wizard mounted
+    // Step 5 (WS3): open the `?` help overlay (only with no wizard mounted
     // and no text Input focused — otherwise `?` is literal input text).
     if ((char === "?" || name === "questionmark") && !this.hasInputFocus()) {
       this.openHelp();
@@ -248,13 +288,28 @@ export class Shell {
       return true;
     }
 
-    // Step 5: quit.
+    // Step 6: quit.
     if ((char === "q" || char === "Q") && !this.hasInputFocus()) {
       this.destroy();
       return true;
     }
 
-    // Step 6: view-local dispatch.
+    // Step 6.5 (LAMA-273): Ctrl+P opens the pause / resume dialog from any
+    // view (no view-local handler should shadow it). Ctrl arrives as a 0x10
+    // byte with `e.ctrl === true`; matching by name + ctrl is more readable
+    // than by raw byte and survives terminals that emit `\x10` differently.
+    if (
+      !this.hasInputFocus() &&
+      this.onPauseRequest !== undefined &&
+      ((e.ctrl === true && (name === "p" || char === "p")) ||
+        (e.ctrl === true && char === "\x10"))
+    ) {
+      this.onPauseRequest();
+      e.preventDefault();
+      return true;
+    }
+
+    // Step 7: view-local dispatch.
     const active = this.manager.active();
     if (active.handleKey?.(e) === true) return true;
     const matched: Hotkey | undefined = matchHotkey(
@@ -269,9 +324,10 @@ export class Shell {
       return true;
     }
 
-    // Step 7: numeric tab shortcuts. Runs after view-local dispatch so a
-    // view's own digit hotkeys (Local's 1/2/3) take precedence while active.
-    // Digits are literal text while a text Input owns focus.
+    // Step 8: numeric tab shortcuts (visible tabs only). Runs after
+    // view-local dispatch so a view's own digit hotkeys (Local's 1/2/3) take
+    // precedence while active. Digits are literal text while a text Input
+    // owns focus.
     if (
       !this.hasInputFocus() &&
       char.length === 1 &&
@@ -279,9 +335,9 @@ export class Shell {
       char <= "9"
     ) {
       const index = Number.parseInt(char, 10) - 1;
-      const specs = this.manager.all();
+      const specs = this.visibleSpecs();
       if (index >= 0 && index < specs.length) {
-        this.cycleTo(index);
+        this.cycleToIndex(index);
         return true;
       }
     }
@@ -292,7 +348,57 @@ export class Shell {
   setStatus(text: string, kind: "info" | "error" | "success"): void {
     const prefix =
       kind === "error" ? "[!] " : kind === "success" ? "[ok] " : "[i] ";
-    this.statusText.content = `${prefix}${text}`;
+    this.lastBaseLine = `${prefix}${text}`;
+    this.statusText.content = this.composeStatusLine();
+  }
+
+  /** Restore the default hint text in the status/hint bar. */
+  clearStatus(): void {
+    this.lastBaseLine = Shell.DEFAULT_HINT;
+    this.statusText.content = this.composeStatusLine();
+  }
+
+  /**
+   * LAMA-273: install (or clear with `null`) the persistent pause / slow-mode
+   * indicator that rides alongside the default hint / transient status
+   * message. Composed lazily so a clear() on the indicator does not have
+   * to know whether a transient message is in flight.
+   */
+  setPauseIndicator(text: string | null): void {
+    this.pauseIndicator = text && text.length > 0 ? text : null;
+    this.statusText.content = this.composeStatusLine();
+  }
+
+  /**
+   * Compose the final status-line text from the last base line (transient
+   * message or default hint) plus the optional pause indicator. Indicator
+   * sits at the right edge so the default hint / message stays scannable.
+   */
+  private composeStatusLine(): string {
+    const base = this.lastBaseLine;
+    if (this.pauseIndicator === null) return base;
+    return `${base}   ${this.pauseIndicator}`;
+  }
+  private lastBaseLine: string = Shell.DEFAULT_HINT;
+
+  /**
+   * Tab-bar-visible specs only (drill-in/hidden views excluded).
+   */
+  private visibleSpecs(): ViewSpec[] {
+    return this.manager.all().filter((s) => s.hiddenFromTabBar !== true);
+  }
+
+  /**
+   * Show any registered view by id. Visible views also select their tab;
+   * hidden views (GitHub under More) show without touching the tab bar.
+   */
+  showView(id: ViewId): void {
+    const visible = this.visibleSpecs();
+    const tabIndex = visible.findIndex((s) => s.id === id);
+    if (tabIndex !== -1) {
+      this.tabBar.setSelectedIndex(tabIndex);
+    }
+    this.manager.show(id);
   }
 
   private openHelp(): void {
@@ -300,18 +406,32 @@ export class Shell {
     const viewLines = (active?.hotkeys ?? [])
       .map((h) => `[${h.key}] ${h.label}`)
       .join("\n");
+    // Adaptive help (LAMA-276): clamp the overlay to the live renderer
+    // dimensions instead of a hard-coded 64×18 box, so 60×20 terminals
+    // still get a readable dialog without overlapping the status line.
+    const rw = this.renderer.width ?? 80;
+    const rh = this.renderer.height ?? 24;
+    const width = Math.max(40, Math.min(64, rw - 4));
+    const height = Math.max(12, Math.min(18, rh - 4));
+    // OpenTUI Renderable exposes these as property setters on the live
+    // instance (no `options` passthrough on BoxRenderable).
+    this.helpOverlay.width = width;
+    this.helpOverlay.height = height;
+    this.helpOverlay.left = Math.max(0, Math.floor((rw - width) / 2));
+    this.helpOverlay.top = Math.max(0, Math.floor((rh - height) / 2));
     const lines = [
       "Global keys",
       "[ / ]  cycle views",
       "1-6    jump to tab",
       "?      toggle help",
+      "Ctrl+P pause / resume devices",
       "q      quit",
       "Esc    cancel wizard / close help",
       "",
       `Active view — ${active?.title ?? "?"}`,
       viewLines.length > 0 ? viewLines : "(no view hotkeys)",
     ].join("\n");
-    this.helpText.content = lines;
+    this.helpText.content = formatMarkdownTables(lines, width);
     this.layout.add(this.helpOverlay);
     this.helpOpen = true;
   }
@@ -322,15 +442,17 @@ export class Shell {
   }
 
   private cycleBy(delta: number): void {
-    const specs = this.manager.all();
+    const specs = this.visibleSpecs();
     if (specs.length === 0) return;
-    const current = this.manager.indexOf(this.manager.activeId());
-    const next = (current + delta + specs.length) % specs.length;
-    this.cycleTo(next);
+    const current = specs.findIndex((s) => s.id === this.manager.activeId());
+    const base = current === -1 ? 0 : current;
+    const next = (base + delta + specs.length) % specs.length;
+    this.cycleToIndex(next);
   }
 
-  private cycleTo(index: number): void {
-    const specs = this.manager.all();
+  private cycleToIndex(index: number): void {
+    // If a drill-in (hidden) view is active, cycle from its home tab.
+    const specs = this.visibleSpecs();
     const spec = specs[index];
     if (!spec) return;
     this.tabBar.setSelectedIndex(index);

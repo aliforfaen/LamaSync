@@ -58,11 +58,11 @@ function statusLine(entry: OperationLog): string {
  * offset-based paging, so `next`/`prev` advance/retreat the offset.
  */
 export function renderLogs(opts: RenderLogsOpts): VNode {
-  const header = Text({ content: "Operations" });
+  const header = Text({ content: "Activity" });
   const filterLabel = Text({ content: `Filter: ${opts.state.status}` });
   const hostLabel = opts.state.hostId
-    ? Text({ content: `Host: ${opts.state.hostId}` })
-    : Text({ content: "Host: (any)" });
+    ? Text({ content: `Device: ${opts.state.hostId}` })
+    : Text({ content: "Device: (any)" });
   const body = renderEntries(opts.state.entries);
 
   return Box(
@@ -87,7 +87,7 @@ function renderEntries(entries: OperationLog[]): VNode {
   if (entries.length === 0) {
     return Box(
       { flexDirection: "column" },
-      Text({ content: "(no entries)" }),
+      Text({ content: "(no activity yet — syncs and backups appear here once a device runs one)" }),
       Text({ content: "Press r to refresh or f to change filter." }),
     );
   }
@@ -156,7 +156,7 @@ interface LogsInternalState {
  */
 export class LogsView implements View {
   static readonly id: ViewId = "logs";
-  static readonly title = "Logs";
+  static readonly title = "Activity";
 
   readonly id: ViewId = LogsView.id;
   readonly title: string = LogsView.title;
@@ -197,9 +197,9 @@ export class LogsView implements View {
       renderer,
       Box(
         { flexDirection: "column" },
-        Text({ content: "Operations" }),
+        Text({ content: "Activity" }),
         Text({ content: "Filter: all" }),
-        Text({ content: "Host: (any)" }),
+        Text({ content: "Device: (any)" }),
         Text({ content: "Page 1 (0 entries shown)" }),
         Text({ content: "" }),
         this.scrollBox,
@@ -319,9 +319,18 @@ export class LogsView implements View {
       return;
     }
     if (entries.length === 0) {
+      const filtered = this.state.status !== "all";
       swapChildren(this.bodyBox, [
-        Text({ content: "(no entries)" }),
-        Text({ content: "Press r to refresh or f to change filter." }),
+        Text({
+          content: filtered
+            ? `(no ${this.state.status} activity — syncs and backups appear here once a device runs one)`
+            : "(no activity yet — syncs and backups appear here once a device runs one)",
+        }),
+        Text({
+          content: filtered
+            ? "Press f to change filter, r to refresh."
+            : "Press r to refresh or f to change filter.",
+        }),
       ]);
       return;
     }

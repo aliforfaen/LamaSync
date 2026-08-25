@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 import type {
   Backend,
   Conflict,
+  DemoState,
   Folder,
   Host,
   OperationLog,
@@ -13,8 +15,17 @@ import type {
   WSEvent,
 } from "@lamasync/core";
 import { api } from "../api.ts";
+import { EmptyState } from "../components/EmptyState.tsx";
 import { GettingStarted } from "../components/GettingStarted.tsx";
+import { ConfirmDialog } from "../components/Modal.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
+import { usePause } from "../hooks/usePause.ts";
+import { PauseBanner } from "../components/PauseBanner.tsx";
+import { PauseControl } from "../components/PauseControl.tsx";
+import { formatTimeAgo } from "../relative-time.ts";
+import { showVerifiedBadge } from "../backup-health.ts";
+import { OperationSentenceView } from "../components/OperationSentence.tsx";
+import { Donut } from "../components/Donut.tsx";
 
 interface DashboardData {
   hosts: Host[];
@@ -72,23 +83,6 @@ function formatBytes(bytes: number | null | undefined): string {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
-/**
- * Compact "time ago" label for triage cards. Full `toLocaleString()`
- * timestamps wrap to 2-3 lines inside the narrow attention-grid columns;
- * a relative label keeps each entry on a single line.
- */
-function formatTimeAgo(ts: number | null | undefined): string {
-  if (!ts) return "—";
-  const diffMs = Date.now() - ts;
-  if (diffMs < 60_000) return "just now";
-  const min = Math.floor(diffMs / 60_000);
-  if (min < 60) return `${min}m ago`;
-  const hrs = Math.floor(min / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(ts).toLocaleDateString();
-}
 
 /**
  * LAMA-203: the last-visit timestamp used to highlight "what changed since
@@ -138,12 +132,19 @@ export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { state: wsState, event } = useWebSocket();
+  // LAMA-273: global pause / slow mode — banner + control for the fleet.
+  const { overview, refresh: refreshPause } = usePause();
   // LAMA-224: storage report (server-side 5-min cache; refresh button bypasses).
   const [storage, setStorage] = useState<StorageReport | null>(null);
   const [storageBusy, setStorageBusy] = useState(false);
   // UX workstream 4: a failed storage fetch surfaces an inline hint instead
   // of being silently swallowed.
   const [storageError, setStorageError] = useState<string | null>(null);
+  // LAMA-264: demo-mode state (whether a demo fleet is present). Best-effort;
+  // failures are ignored so a missing endpoint never breaks the dashboard.
+  const [demo, setDemo] = useState<DemoState | null>(null);
+  const [demoBusy, setDemoBusy] = useState(false);
+  const [confirmDeleteDemo, setConfirmDeleteDemo] = useState(false);
   // LAMA-203: captured once; highlights are computed against the previous
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
@@ -156,6 +157,48 @@ export function Dashboard() {
     for (const f of data?.folders ?? []) m.set(f.id, f.name);
     return m;
   }, [data?.folders]);
+
+  // LAMA-258: resolve device + storage-destination names for the activity
+  // sentence. Unknown ids fall back to the raw id inside the sentence.
+  const hostNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const h of data?.hosts ?? []) m.set(h.id, h.hostname);
+    return m;
+  }, [data?.hosts]);
+
+  const backendNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const b of data?.backends ?? []) m.set(b.id, b.name);
+    return m;
+  }, [data?.backends]);
+
+  // LAMA-266: backup-health badge. Show "✓ Verified <t> ago" when any
+  // destination was proven ok within 30 days (using the most recent such
+  // prove); otherwise a muted "not verified yet" caption.
+  const backupVerified = useMemo(() => {
+    const now = Date.now();
+    let mostRecent: number | null = null;
+    for (const b of data?.backends ?? []) {
+      if (showVerifiedBadge(b.lastProveAt, b.lastProveOk, now)) {
+        if (mostRecent === null || (b.lastProveAt ?? 0) > mostRecent) {
+          mostRecent = b.lastProveAt ?? null;
+        }
+      }
+    }
+    return mostRecent;
+  }, [data?.backends]);
+
+  // folder id -> its storage destination display name (folder.backendId).
+  const folderBackendNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const f of data?.folders ?? []) {
+      if (f.backendId) {
+        const name = backendNameById.get(f.backendId);
+        if (name) m.set(f.id, name);
+      }
+    }
+    return m;
+  }, [data?.folders, backendNameById]);
 
   useEffect(() => {
     if (typeof localStorage === "undefined") return;
@@ -225,6 +268,8 @@ export function Dashboard() {
         if (cancelled) return;
         setStorageError(err instanceof Error ? err.message : String(err));
       });
+    // LAMA-264: read demo-mode state (best-effort, never blocks render).
+    api.getDemo().then(setDemo).catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -233,6 +278,31 @@ export function Dashboard() {
   useEffect(() => {
     if (event) setData((prev) => (prev ? mergeEvent(prev, event) : prev));
   }, [event]);
+
+  async function onSeedDemo(): Promise<void> {
+    setDemoBusy(true);
+    try {
+      await api.seedDemo();
+      setDemo(await api.getDemo());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDemoBusy(false);
+    }
+  }
+
+  async function onDeleteDemo(): Promise<void> {
+    setConfirmDeleteDemo(false);
+    setDemoBusy(true);
+    try {
+      await api.deleteDemo();
+      setDemo(await api.getDemo());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDemoBusy(false);
+    }
+  }
 
   const counts = useMemo(() => {
     const hosts = data?.hosts ?? [];
@@ -281,15 +351,39 @@ export function Dashboard() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Command Center</h1>
+      <PageHeader title="Dashboard" purpose="See what needs attention across your devices at a glance." />
+<div className="toolbar">
         <span
           className={`ws-pill ws-${wsState}`}
           title="WebSocket connection status"
         >
           <span className="ws-dot" aria-hidden="true" /> {wsState}
         </span>
+        <PauseControl
+          scope="global"
+          active={overview?.global !== null}
+          onChanged={() => void refreshPause()}
+        />
+        {backupVerified !== null ? (
+          <span
+            className="badge badge-success"
+            title="A storage destination was proven within the last 30 days"
+          >
+            ✓ Verified {formatTimeAgo(backupVerified)} ago
+          </span>
+        ) : (
+          <span className="muted" title="Run 'Prove it' on a restic destination">
+            backups not verified yet
+          </span>
+        )}
       </div>
+      {overview?.global ? (
+        <PauseBanner
+          state={overview.global}
+          scope="global"
+          onResumed={() => void refreshPause()}
+        />
+      ) : null}
       {error && <div className="error">{error}</div>}
 
       <section className="section">
@@ -324,7 +418,14 @@ export function Dashboard() {
                     title={`${op.summary ?? op.operation} · ${formatTimestamp(op.timestamp)}`}
                   >
                     <span className="attention-entry-text">
-                      {op.summary ?? op.operation}
+                      <OperationSentenceView
+                        op={op}
+                        ctx={{
+                          folderName: op.folderId ? folderNameById.get(op.folderId) : undefined,
+                          hostName: hostNameById.get(op.hostId),
+                          backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined,
+                        }}
+                      />
                     </span>
                     <span className="attention-entry-time">
                       {formatTimeAgo(op.timestamp)}
@@ -365,6 +466,38 @@ export function Dashboard() {
         />
       ) : null}
 
+      {demo?.hasDemo ? (
+        <section className="section demo-banner">
+          <div className="toolbar">
+            <h2>Demo data is active</h2>
+            <button
+              type="button"
+              className="action danger"
+              disabled={demoBusy}
+              onClick={() => setConfirmDeleteDemo(true)}
+            >
+              {demoBusy ? "Working…" : "Delete demo data"}
+            </button>
+          </div>
+          <p className="muted">
+            You're exploring a demo fleet — 3 fake devices, a timeline, and a
+            browsable snapshot. Nothing here touches a real backend. Delete it
+            any time to start fresh.
+          </p>
+        </section>
+      ) : null}
+
+      {confirmDeleteDemo ? (
+        <ConfirmDialog
+          title="Delete demo data?"
+          message="This permanently removes the demo devices, folders, timeline, and snapshot. Your real data is not affected."
+          confirmLabel="Delete demo data"
+          danger
+          onConfirm={() => void onDeleteDemo()}
+          onCancel={() => setConfirmDeleteDemo(false)}
+        />
+      ) : null}
+
       <section className="section">
         <h2>Fleet</h2>
         {!data ? (
@@ -375,13 +508,34 @@ export function Dashboard() {
             <div className="skel skel-card" />
           </div>
         ) : data.hosts.length === 0 ? (
-          <GettingStarted
-            hosts={data.hosts}
-            backends={data.backends}
-            folders={data.folders}
-            hasAssignments={data.hasAssignments}
-            hasOperations={data.operations.length > 0}
-          />
+          <>
+            <EmptyState
+              variant="devices"
+              title="Pair your first device"
+              how="Register a machine with this server and start syncing folders between your devices."
+              ctaLabel="Pair your first device"
+              ctaTo="/hosts"
+              steps={[
+                "Run the installer on the new machine",
+                "Point it at this server with your API key",
+                "It appears here within a minute",
+              ]}
+              timeNote="takes 30s"
+            />
+            {!demo?.hasDemo ? (
+              <div className="demo-secondary">
+                <span className="muted">Or explore without setting anything up:</span>
+                <button
+                  type="button"
+                  className="action"
+                  disabled={demoBusy}
+                  onClick={() => void onSeedDemo()}
+                >
+                  {demoBusy ? "Seeding…" : "Explore a demo fleet"}
+                </button>
+              </div>
+            ) : null}
+          </>
         ) : (
           <div className="fleet-grid">
             {data.hosts.map((h) => (
@@ -438,6 +592,20 @@ export function Dashboard() {
             {storageError && (
               <div className="error">Storage refresh failed — {storageError}</div>
             )}
+            {storage.backends.some((b) => b.bytes > 0) ? (
+              <div className="storage-overview">
+                <Donut
+                  data={storage.backends
+                    .filter((b) => b.bytes > 0)
+                    .map((b) => ({ label: b.label, value: b.bytes }))}
+                  size={120}
+                  thickness={16}
+                  centerLabel={formatBytes(storage.totalBytes)}
+                  centerSublabel="total"
+                  ariaLabel="Storage by source"
+                />
+              </div>
+            ) : null}
             <table className="data">
             <thead>
               <tr>
@@ -514,7 +682,16 @@ export function Dashboard() {
                       <span className="chip-new">new</span>
                     ) : null}
                   </td>
-                  <td className="muted">{op.summary ?? "—"}</td>
+                  <td className="muted">
+                    <OperationSentenceView
+                      op={op}
+                      ctx={{
+                        folderName: op.folderId ? folderNameById.get(op.folderId) : undefined,
+                        hostName: hostNameById.get(op.hostId),
+                        backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined,
+                      }}
+                    />
+                  </td>
                 </tr>
               ))
             )}

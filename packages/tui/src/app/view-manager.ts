@@ -14,7 +14,7 @@ import type { Wizard } from "./wizard.ts";
  * `gh` is part of the union so the GhView stays a discoverable tab; slice J
  * owns the rest of the integration (menu retirement, wiring, removal).
  */
-export type ViewId = "local" | "fleet" | "dotfiles" | "conflicts" | "logs" | "gh";
+export type ViewId = "local" | "fleet" | "dotfiles" | "conflicts" | "logs" | "gh" | "more";
 
 /**
  * API client, the local hostname, the daemon socket path, the OpenTUI
@@ -25,6 +25,10 @@ export type ViewId = "local" | "fleet" | "dotfiles" | "conflicts" | "logs" | "gh
  * `instantiate()` (via `realize()` in `app/widgets.ts`) so every node they
  * mutate after mount is a real renderable rather than a dead VNode proxy
  * (LAMA-181). It is `null` only in renderer-less unit tests.
+ *
+ * `navigateTo` lets a view drill into another registered view (e.g. the
+ * More menu opening the hidden GitHub view). The Shell wires it after
+ * construction; before then it is a safe no-op.
  */
 export interface ViewContext {
   readonly api: LamaSyncApiClient;
@@ -33,6 +37,7 @@ export interface ViewContext {
   readonly renderer: CliRenderer | null;
   readonly setStatus: (msg: string, kind?: "info" | "error" | "success") => void;
   readonly openWizard: (wizard: Wizard) => void;
+  readonly navigateTo?: (id: ViewId) => void;
 }
 
 /**
@@ -64,6 +69,9 @@ export interface View {
 export interface ViewSpec {
   readonly id: ViewId;
   readonly title: string;
+  /** Shorter label for the tab bar when the full title doesn't fit
+   *  (e.g. "Backups" on the tab vs "Backups & apps" page heading). */
+  readonly tabLabel?: string;
   readonly container: Renderable;
   readonly hotkeys: ReadonlyArray<Hotkey>;
   readonly ctx: ViewContext;
@@ -71,6 +79,10 @@ export interface ViewSpec {
   readonly onHide?: () => void;
   readonly handleKey?: (e: KeyEvent) => boolean;
   readonly destroy?: () => void;
+  /** Hidden from the tab bar (drill-in views, e.g. GitHub under More). */
+  readonly hiddenFromTabBar?: boolean;
+  /** Tab to return to when Esc is pressed inside a `hiddenFromTabBar` view. */
+  readonly homeTab?: ViewId;
 }
 
 /**

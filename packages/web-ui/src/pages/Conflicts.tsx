@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { Conflict, Folder, Host } from "@lamasync/core";
 import { api } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { formatBytes } from "../format-bytes.ts";
 
 type Resolution = "local" | "remote" | "both";
 
@@ -17,6 +19,129 @@ const TABS: { value: ConflictTab; label: string }[] = [
 function formatTs(ts: number | null | undefined): string {
   if (!ts) return "—";
   return new Date(ts).toLocaleString();
+}
+
+/** Text hint for which side is newer — never signalled by colour alone. */
+function newerSide(c: Conflict): string | null {
+  if (c.localMtime == null || c.remoteMtime == null || c.localMtime === c.remoteMtime) {
+    return null;
+  }
+  return c.localMtime > c.remoteMtime
+    ? "Newer on this device"
+    : "Newer on destination";
+}
+
+interface ConflictCardProps {
+  c: Conflict;
+  hostName: (id: string) => string;
+  folderName: (id: string) => string;
+  busy: string | null;
+  onResolve: (id: string, resolution: Resolution) => void;
+}
+
+function ConflictCard({ c, hostName, folderName, busy, onResolve }: ConflictCardProps) {
+  const resolved = c.status === "resolved";
+  const winnerLabel =
+    c.resolution === "local"
+      ? "Kept local"
+      : c.resolution === "remote"
+        ? "Kept remote"
+        : c.resolution === "both"
+          ? "Kept both"
+          : null;
+  const newer = newerSide(c);
+
+  return (
+    <article className={`conflict-card${resolved ? " conflict-card--resolved" : ""}`}>
+      <header className="conflict-card-head">
+        <div className="conflict-card-title">
+          <strong className="conflict-path">{c.path}</strong>
+          <span className="muted conflict-meta">
+            <Link to={`/hosts/${encodeURIComponent(c.hostId)}`}>{hostName(c.hostId)}</Link>
+            {" · "}
+            <Link to="/folders">{folderName(c.folderId)}</Link>
+          </span>
+        </div>
+        <span className={`badge badge-${resolved ? "ok" : "failed"}`}>{c.status}</span>
+      </header>
+
+      <div className="conflict-sides">
+        <div className="conflict-side">
+          <h4>
+            This device
+            {resolved && c.resolution === "local" ? (
+              <span className="conflict-kept">kept</span>
+            ) : null}
+          </h4>
+          <dl className="conflict-dl">
+            <dt>Size</dt>
+            <dd>{formatBytes(c.localSizeBytes)}</dd>
+            <dt>Modified</dt>
+            <dd className="mono">{formatTs(c.localMtime)}</dd>
+          </dl>
+          {!resolved && newer === "Newer on this device" ? (
+            <span className="conflict-note">{newer}</span>
+          ) : null}
+        </div>
+
+        <div className="conflict-side">
+          <h4>
+            Destination
+            {resolved && c.resolution === "remote" ? (
+              <span className="conflict-kept">kept</span>
+            ) : null}
+          </h4>
+          <dl className="conflict-dl">
+            <dt>Size</dt>
+            <dd>{formatBytes(c.remoteSizeBytes)}</dd>
+            <dt>Modified</dt>
+            <dd className="mono">{formatTs(c.remoteMtime)}</dd>
+          </dl>
+          {!resolved && newer === "Newer on destination" ? (
+            <span className="conflict-note">{newer}</span>
+          ) : null}
+        </div>
+      </div>
+
+      <footer className="conflict-card-foot">
+        {resolved ? (
+          <span className="muted">
+            {winnerLabel ?? "Resolved"} · {formatTs(c.resolvedAt)}
+          </span>
+        ) : (
+          <>
+            <span className="muted conflict-pending-note">Both sides changed — choose what to keep.</span>
+            <div className="conflict-actions">
+              <button
+                type="button"
+                className="action"
+                disabled={busy === c.id}
+                onClick={() => onResolve(c.id, "local")}
+              >
+                Keep local
+              </button>
+              <button
+                type="button"
+                className="action"
+                disabled={busy === c.id}
+                onClick={() => onResolve(c.id, "remote")}
+              >
+                Keep remote
+              </button>
+              <button
+                type="button"
+                className="action"
+                disabled={busy === c.id}
+                onClick={() => onResolve(c.id, "both")}
+              >
+                Keep both
+              </button>
+            </div>
+          </>
+        )}
+      </footer>
+    </article>
+  );
 }
 
 export function Conflicts() {
@@ -52,10 +177,10 @@ export function Conflicts() {
   function requestResolve(id: string, resolution: Resolution) {
     const message =
       resolution === "local"
-        ? "Resolve conflict using the local version?"
+        ? "Keep the version on this device?"
         : resolution === "remote"
-          ? "Resolve conflict using the remote version?"
-          : "Resolve conflict by keeping both versions?";
+          ? "Keep the version on the destination?"
+          : "Keep both versions?";
     setPending({ id, resolution, message });
   }
 
@@ -82,8 +207,8 @@ export function Conflicts() {
 
   return (
     <div className="page">
+      <PageHeader title="Conflicts" purpose="When both sides changed, decide what to keep." />
       <div className="toolbar">
-        <h1>Conflicts</h1>
         <div className="tabs" role="tablist">
           {TABS.map((t) => (
             <button
@@ -103,104 +228,31 @@ export function Conflicts() {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
-      <table className="data">
-        <thead>
-          <tr>
-            <th>Path</th>
-            <th>Host</th>
-            <th>Folder</th>
-            <th>Local mtime</th>
-            <th>Remote mtime</th>
-            <th>Status</th>
-            {tab !== "pending" ? <th>Resolution</th> : null}
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {!items ? (
-            <tr aria-busy="true">
-              <td colSpan={tab !== "pending" ? 8 : 7}><div className="skel skel-line" /></td>
-            </tr>
-          ) : items.length === 0 ? (
-            <tr className="empty-row">
-              <td colSpan={tab !== "pending" ? 8 : 7}>
-                {tab === "pending"
-                  ? "No pending conflicts — they appear when both sides changed the same file under the manual strategy."
-                  : tab === "resolved"
-                    ? "No resolved conflicts"
-                    : "No conflicts recorded"}
-              </td>
-            </tr>
-          ) : (
-            items.map((c) => (
-              <tr key={c.id}>
-                <td>{c.path}</td>
-                <td className="muted">
-                  <Link to={`/hosts/${encodeURIComponent(c.hostId)}`}>
-                    {hostName(c.hostId)}
-                  </Link>
-                </td>
-                <td className="muted">
-                  <Link to="/folders">{folderName(c.folderId)}</Link>
-                </td>
-                <td className="muted">{formatTs(c.localMtime)}</td>
-                <td className="muted">{formatTs(c.remoteMtime)}</td>
-                <td>
-                  <span className={`badge badge-${c.status === "resolved" ? "ok" : "failed"}`}>
-                    {c.status}
-                  </span>
-                </td>
-                {tab !== "pending" ? (
-                  <td className="muted">
-                    {c.status === "resolved" ? (
-                      <>
-                        {c.resolution ?? "—"}
-                        {c.resolvedAt ? ` · ${formatTs(c.resolvedAt)}` : ""}
-                      </>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                ) : null}
-                <td className="table-actions table-actions-nowrap">
-                  {c.status === "pending" ? (
-                    <>
-                      <button
-                        type="button"
-                        className="action"
-                        disabled={busy === c.id}
-                        onClick={() => requestResolve(c.id, "local")}
-                      >
-                        Local
-                      </button>
-                      {" "}
-                      <button
-                        type="button"
-                        className="action"
-                        disabled={busy === c.id}
-                        onClick={() => requestResolve(c.id, "remote")}
-                      >
-                        Remote
-                      </button>
-                      {" "}
-                      <button
-                        type="button"
-                        className="action"
-                        disabled={busy === c.id}
-                        onClick={() => requestResolve(c.id, "both")}
-                      >
-                        Both
-                      </button>
-                    </>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+
+      {!items ? (
+        <div className="skel skel-line" aria-busy="true" />
+      ) : items.length === 0 ? (
+        <div className="empty-row">
+          {tab === "pending"
+            ? "No pending conflicts — they appear when both sides changed the same file under the manual strategy."
+            : tab === "resolved"
+              ? "No resolved conflicts"
+              : "No conflicts recorded"}
+        </div>
+      ) : (
+        <div className="conflict-grid">
+          {items.map((c) => (
+            <ConflictCard
+              key={c.id}
+              c={c}
+              hostName={hostName}
+              folderName={folderName}
+              busy={busy}
+              onResolve={(id, resolution) => requestResolve(id, resolution)}
+            />
+          ))}
+        </div>
+      )}
 
       {pending && (
         <ConfirmDialog

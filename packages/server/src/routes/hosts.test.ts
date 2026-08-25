@@ -59,6 +59,8 @@ function loadHostRow(hostId: string): {
   tailnet_ip: string | null;
   last_seen: number | null;
   status: string | null;
+  os: string | null;
+  storage_used_bytes: number | null;
 } {
   const row = db
     .query<
@@ -68,9 +70,11 @@ function loadHostRow(hostId: string): {
         tailnet_ip: string | null;
         last_seen: number | null;
         status: string | null;
+        os: string | null;
+        storage_used_bytes: number | null;
       },
       [string]
-    >("SELECT version, lan_ip, tailnet_ip, last_seen, status FROM hosts WHERE id = ?")
+    >("SELECT version, lan_ip, tailnet_ip, last_seen, status, os, storage_used_bytes FROM hosts WHERE id = ?")
     .get(hostId);
   if (!row) throw new Error(`host ${hostId} not found`);
   return row;
@@ -177,6 +181,29 @@ describe("POST /api/v1/report/health — version field (LAMA-199)", () => {
     expect(row.tailnet_ip).toBe("100.64.0.5");
   });
 
+  // LAMA-247 #8: after the daemon's 5-minute grace expires it reports a
+  // literal empty string — an explicit clear that must wipe the stale
+  // address AND bump config_revision so peers re-pull without it.
+  test("heartbeat with empty-string tailnetIp clears the stored value and bumps (LAMA-247)", async () => {
+    db.run(`UPDATE hosts SET tailnet_ip = '100.64.0.5', config_revision = 2 WHERE id = 'host-a'`);
+
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      tailnetIp: "",
+    });
+    expect(res.status).toBe(204);
+    const row = loadHostRow("host-a");
+    expect(row.tailnet_ip).toBeNull();
+    const rev = db
+      .query<{ config_revision: number | null }, [string]>(
+        "SELECT config_revision FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(rev?.config_revision).toBe(3);
+  });
+
   // LAMA-223 P1-4: tailnet_ip change must bump config_revision so
   // every daemon pulls /config/:hostId with the new peer sections.
   test("heartbeat with a new tailnetIp bumps config_revision", async () => {
@@ -235,6 +262,29 @@ describe("POST /api/v1/report/health — version field (LAMA-199)", () => {
       version: "0.4.0",
     });
     expect(res.status).toBe(422);
+  });
+
+  test("LAMA-282: heartbeat with os + storageUsedBytes stores them on the wire", async () => {
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      os: "Linux 6.8.0",
+      storageUsedBytes: 123456789,
+    });
+    expect(res.status).toBe(204);
+    const row = loadHostRow("host-a");
+    expect(row.os).toBe("Linux 6.8.0");
+    expect(row.storage_used_bytes).toBe(123456789);
+    // The fields surface on the GET /hosts wire shape for the device cards.
+    const list = (await (await app.handle(request("/api/v1/hosts"))).json()) as Array<{
+      id: string;
+      os: string | null;
+      storageUsedBytes: number | null;
+    }>;
+    const wire = list.find((h) => h.id === "host-a");
+    expect(wire?.os).toBe("Linux 6.8.0");
+    expect(wire?.storageUsedBytes).toBe(123456789);
   });
 });
 
@@ -397,6 +447,20 @@ describe("PATCH /api/v1/hosts/:hostId — host rename (LAMA-225)", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("already in use");
+  });
+
+  // LAMA-247 #11: renaming to the host's own current name must not
+  // quietly "succeed" — it is a no-op that used to log a fake
+  // host_rename operation.
+  test("rejects renaming to the unchanged hostname (LAMA-247)", async () => {
+    const res = await patch("/api/v1/hosts/host-a", { hostname: "host-a" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("unchanged");
+    const ops = db
+      .query<{ operation: string }, []>("SELECT operation FROM operation_log")
+      .all();
+    expect(ops.some((o) => o.operation === "host_rename")).toBe(false);
   });
 
   test("returns 409 when the hostname collides with another host's id", async () => {

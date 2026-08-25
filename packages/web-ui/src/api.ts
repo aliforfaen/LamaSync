@@ -27,7 +27,65 @@ import type {
   FolderSize,
   BrowseRef,
   BrowseJob,
+  DemoState,
+  DemoSeedSummary,
+  PauseMode,
+  PauseState,
 } from "@lamasync/core";
+
+/** Wire shape of `GET /api/v1/pause` (LAMA-273). */
+export interface PauseOverview {
+  global: PauseState | null;
+  hosts: PauseState[];
+}
+
+/** Request body shared by the global and per-device pause endpoints. */
+export interface PauseRequest {
+  /** ISO timestamp or epoch ms the window ends at. */
+  until: string | number;
+  mode: PauseMode;
+  /** Single-segment rclone size; honored only when mode === "slow". */
+  bwlimit?: string | null;
+}
+
+// LAMA-266: backup-health wire shapes. `checkedAt` is an ISO string from the
+// server. `detail` is a scrubbed failure summary — never raw stderr/secrets.
+
+/** Result of POST /backends/:id/prove (200 ok | 502 not-ok). */
+export interface ProveResult {
+  ok: boolean;
+  /** Restored relative path; present on success. */
+  file?: string | null;
+  checkedAt: string;
+  durationMs: number;
+  detail?: string | null;
+}
+
+/** Result of POST /backends/:id/drill (201 ok | 502 not-ok). */
+export interface DrillResult extends ProveResult {
+  summary?: string | null;
+  drillId: string;
+  livenessOk?: boolean | null;
+  backendId: string;
+  backendName: string;
+  kind: "prove" | "drill";
+}
+
+/** One row of GET /health/drills history (newest first). */
+export interface HealthDrill {
+  id: string;
+  backendId: string;
+  backendName: string;
+  kind: "prove" | "drill";
+  ranAt: string;
+  ok: boolean;
+  detail?: string | null;
+}
+
+/** Response of GET /health/drills?limit=N. */
+export interface DrillHistory {
+  drills: HealthDrill[];
+}
 
 const API_KEY_STORAGE = "lamasync_api_key";
 const API_KEY_PERSIST_STORAGE = "lamasync_api_key_persist";
@@ -395,6 +453,15 @@ export const api = {
     apiDelete(`/backends/${encodeURIComponent(id)}`),
   testBackend: (id: string) =>
     apiPost<{ ok: boolean; detail?: string }>(`/backends/${encodeURIComponent(id)}/test`),
+  // LAMA-266: backup health — "Prove it" restore tests, fire drills, and the
+  // drill history feed. Both mutating calls refresh backends after success so
+  // lastProveAt/lastProveOk stay current for the Dashboard badge.
+  proveBackend: (id: string) =>
+    apiPost<ProveResult>(`/backends/${encodeURIComponent(id)}/prove`),
+  runDrill: (id: string) =>
+    apiPost<DrillResult>(`/backends/${encodeURIComponent(id)}/drill`),
+  listHealthDrills: (limit = 10) =>
+    apiGet<DrillHistory>(`/health/drills?limit=${limit}`),
   // LAMA-238: connection test for an unsaved backend config (create/edit
   // form). Write-only fields fall back to the stored values server-side
   // when backendId references an existing backend.
@@ -413,6 +480,14 @@ export const api = {
   // LAMA-224: storage statistics.
   storageReport: (refresh = false) =>
     apiGet<StorageReport>(`/stats/storage${refresh ? "?refresh=1" : ""}`),
+  // LAMA-269: bulk last-known working-set sizes for the storage donut.
+  folderSizes: () =>
+    apiGet<Record<string, FolderSize>>("/folders/sizes"),
+  // LAMA-269: per-backend size time series for the growth sparkline.
+  storageHistory: () =>
+    apiGet<{
+      backends: Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
+    }>("/stats/storage/history"),
   folderSize: (id: string) =>
     apiGet<FolderSize>(`/folders/${encodeURIComponent(id)}/size`),
   listShares: () => apiGet<Share[]>("/shares"),
@@ -459,6 +534,11 @@ export const api = {
       "/notifications/test",
       { channelId },
     ),
+  // LAMA-264: demo mode. Read state, seed a demo fleet, or delete all demo
+  // data (the Delete action is confirmed in the UI before calling this).
+  getDemo: () => apiGet<DemoState>("/demo"),
+  seedDemo: () => apiPost<DemoSeedSummary>("/demo/seed"),
+  deleteDemo: () => apiDelete<DemoSeedSummary>("/demo"),
   // LAMA-198: queued-action model. The Web UI uses `enqueueAction` to ask
   // a daemon to do work (sync, backup, check-update, refresh-config); the
   // rest of the endpoints exist for the detail page to render recent
@@ -477,6 +557,16 @@ export const api = {
         ? `/hosts/${encodeURIComponent(hostId)}/actions?status=${encodeURIComponent(status)}`
         : `/hosts/${encodeURIComponent(hostId)}/actions`,
     ),
+  // LAMA-273: pause / slow mode. Global + per-device set/clear; GET returns
+  // the current global row plus every per-device row so the UI can render a
+  // countdown banner and control for the current context.
+  getPause: () => apiGet<PauseOverview>("/pause"),
+  setPause: (body: PauseRequest) => apiPost<PauseState>("/pause", body),
+  clearPause: () => apiDelete<void>("/pause"),
+  setHostPause: (hostId: string, body: PauseRequest) =>
+    apiPost<PauseState>(`/hosts/${encodeURIComponent(hostId)}/pause`, body),
+  clearHostPause: (hostId: string) =>
+    apiDelete<void>(`/hosts/${encodeURIComponent(hostId)}/pause`),
 };
 
 export { ApiError };

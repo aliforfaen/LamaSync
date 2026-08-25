@@ -29,16 +29,22 @@ RUN bun build --compile --target=bun --loader .html:text \
 
 FROM debian:bookworm-slim AS runtime
 ARG RCLONE_VERSION
+ARG RESTIC_VERSION=0.17.3
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip tini \
+      ca-certificates curl unzip bzip2 tini \
  && curl -fsSL "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
       -o /tmp/rclone.zip \
  && unzip /tmp/rclone.zip -d /tmp/ \
  && install -m 0755 /tmp/rclone-v${RCLONE_VERSION}-linux-amd64/rclone /usr/local/bin/rclone \
  && rm -rf /tmp/rclone.zip /tmp/rclone-v${RCLONE_VERSION}-linux-amd64 \
+ && curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2" \
+      -o /tmp/restic.bz2 \
+ && bzip2 -d /tmp/restic.bz2 \
+ && install -m 0755 /tmp/restic /usr/local/bin/restic \
+ && rm -f /tmp/restic \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/lamasync-server /usr/local/bin/lamasync-server

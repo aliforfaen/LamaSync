@@ -30,10 +30,13 @@ import { join } from "path";
 import type {
   DotfileManifest,
   DotfileVersion,
+  Folder,
   LamaSyncApiClient,
 } from "@lamasync/core";
 
 import { hotkeyFooter, pageShell, realize, swapChildren } from "../app/widgets.ts";
+import { formatMarkdownText } from "../markdown.ts";
+import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import { friendlyError } from "../friendly-error.ts";
 import type { Hotkey } from "../app/keymap.ts";
 import { matchHotkey } from "../app/keymap.ts";
@@ -64,6 +67,7 @@ type Step =
 export interface DotfilesState {
   step: Step;
   manifests: DotfileManifest[];
+  backupFolders: BackupFolderRow[];
   apps: string[];
   appName: string | null;
   instructions: string | null;
@@ -127,6 +131,21 @@ interface AppRow {
   value: string;
 }
 
+/** Fleet-wide backup-type folder, rendered as a read-only visibility list. */
+interface BackupFolderRow {
+  name: string;
+  description: string;
+}
+
+/** Storage-destination kind label for a backup folder row (glossary: backend → storage destination). */
+function describeBackupFolder(f: Folder): string {
+  const parts: string[] = [];
+  if (f.backend) parts.push(f.backend);
+  if (f.s3Bucket) parts.push(f.s3Bucket);
+  if (f.encrypted) parts.push("encrypted");
+  return parts.length > 0 ? parts.join(" · ") : "storage destination";
+}
+
 interface VersionRow {
   name: string;
   description: string;
@@ -141,7 +160,7 @@ interface VersionRow {
  */
 export class DotfilesView implements View {
   static readonly id: ViewId = "dotfiles";
-  static readonly title = "Dotfiles";
+  static readonly title = "Backups & apps";
 
   readonly id: ViewId = DotfilesView.id;
   readonly title: string = DotfilesView.title;
@@ -153,6 +172,7 @@ export class DotfilesView implements View {
   private readonly state: DotfilesState = {
     step: "app",
     manifests: [],
+    backupFolders: [],
     apps: [],
     appName: null,
     instructions: null,
@@ -191,7 +211,7 @@ export class DotfilesView implements View {
     this.container = realize<Renderable>(
       opts.ctx.renderer,
       pageShell(
-        "Dotfiles",
+        "Backups & apps",
         Box({ flexDirection: "column", flexGrow: 1 }, this.bodyBox),
       ),
     );
@@ -273,8 +293,17 @@ export class DotfilesView implements View {
     if (!ctx) return;
     const loadId = ++this.loadId;
     try {
-      const manifests = await ctx.api.listDotfileManifests(ctx.hostname);
+      // Manifests are the interactive part; folders are a visibility list, so
+      // a folders-fetch failure must not blank the app picker.
+      const [manifests, folders] = await Promise.all([
+        ctx.api.listDotfileManifests(ctx.hostname),
+        ctx.api.listFolders().catch(() => [] as Folder[]),
+      ]);
       if (loadId !== this.loadId) return;
+      this.state.backupFolders = folders
+        .filter((f) => f.type === "backup")
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((f) => ({ name: f.name, description: describeBackupFolder(f) }));
       const seen = new Set<string>();
       for (const m of manifests) seen.add(m.appName);
       this.state.manifests = manifests;
@@ -286,7 +315,7 @@ export class DotfilesView implements View {
       if (this.state.apps.length === 0 && this.state.step === "app") {
         this.state.step = "setup";
         this.state.extractResult =
-          "No dotfile manifests yet — press n to create one, or run a sync on a dotfile folder.";
+          "No app settings backups yet — press n to create one, or run a sync on an app settings folder.";
       }
       // P1 (TuiDotfilesGh.ReviewDotfilesGh): if we were stuck on setup
       // because manifests were empty, but a new refresh now surfaces some,
@@ -553,7 +582,21 @@ export class DotfilesView implements View {
     }
   }
 
+  /** Read-only fleet-wide backup-folder visibility block (LAMA-276). */
+  private renderBackupFolders(): VNode[] {
+    if (this.state.backupFolders.length === 0) return [];
+    const lines: VNode[] = [
+      Text({ content: `Backup folders (${this.state.backupFolders.length})` }),
+    ];
+    for (const b of this.state.backupFolders) {
+      lines.push(Text({ content: `  ${b.name} — ${b.description}` }));
+    }
+    lines.push(Text({ content: "" }));
+    return lines;
+  }
+
   private renderAppStep(): VNode[] {
+    const backups = this.renderBackupFolders();
     if (this.state.loadError) {
       return [
         Text({ content: `[!] ${this.state.loadError}` }),
@@ -562,8 +605,9 @@ export class DotfilesView implements View {
     }
     if (this.state.apps.length === 0) {
       return [
+        ...backups,
         Text({ content: "Loading apps…" }),
-        Text({ content: "Press n to create a manifest, r to refresh." }),
+        Text({ content: "Press n to create an app settings backup, r to refresh." }),
       ];
     }
     const rows: AppRow[] = [
@@ -583,7 +627,12 @@ export class DotfilesView implements View {
         };
       }),
     ];
-    const select = Select({ options: rows, flexGrow: 1 });
+    const select = Select({
+      options: rows,
+      flexGrow: 1,
+      selectedBackgroundColor: PALETTE_BG.accent,
+      selectedTextColor: SELECTION.fg,
+    });
     select.on("itemSelected", (_i: number, opt: AppRow) => {
       if (opt.value === SETUP_KEY) {
         void this.runRestoreAllLatest();
@@ -592,6 +641,8 @@ export class DotfilesView implements View {
       void this.selectApp(opt.value);
     });
     return [
+      ...backups,
+      Text({ content: "App settings — dotfile snapshots and restore" }),
       Text({ content: "Select an app to browse its snapshots, or choose Setup." }),
       Text({ content: "" }),
       select,
@@ -612,7 +663,12 @@ export class DotfilesView implements View {
       description: v.description ? `${v.id} — ${v.description}` : v.id,
       value: v.id,
     }));
-    const select = Select({ options: rows, flexGrow: 1 });
+    const select = Select({
+      options: rows,
+      flexGrow: 1,
+      selectedBackgroundColor: PALETTE_BG.accent,
+      selectedTextColor: SELECTION.fg,
+    });
     select.on("itemSelected", (_i: number, opt: VersionRow) => {
       const version = this.state.versions.find((v) => v.id === opt.value);
       if (!version) return;
@@ -621,7 +677,7 @@ export class DotfilesView implements View {
     return [
       Text({ content: `App: ${this.state.appName ?? "?"}` }),
       this.state.instructions
-        ? Text({ content: `Instructions: ${this.state.instructions}` })
+        ? Text({ content: `Instructions: ${formatMarkdownText(this.state.instructions, this.renderer?.width ?? 80)}` })
         : Text({ content: "" }),
       Text({ content: "" }),
       select,
@@ -653,7 +709,7 @@ export class DotfilesView implements View {
     return [
       Text({ content: `Preview: ${this.state.version?.id ?? "?"}` }),
       this.state.instructions
-        ? Text({ content: `Instructions: ${this.state.instructions}` })
+        ? Text({ content: `Instructions: ${formatMarkdownText(this.state.instructions, this.renderer?.width ?? 80)}` })
         : Text({ content: "" }),
       Text({ content: "Press Enter to extract, Esc to go back." }),
       ...previewNodes,
@@ -722,9 +778,10 @@ export class DotfilesView implements View {
 
   private renderSetupStep(): VNode[] {
     return [
+      ...this.renderBackupFolders(),
       Text({ content: "Fresh-install setup" }),
       Text({ content: this.state.extractResult ?? "Working…" }),
-      Text({ content: "Press n to add a manifest, r to refresh." }),
+      Text({ content: "Press n to add an app settings backup, r to refresh." }),
       hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
     ];
   }

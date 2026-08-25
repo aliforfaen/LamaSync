@@ -1,0 +1,24 @@
+ This device  All devices  Backups      Conflicts    Activity     More
+                          ▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ Backups & apps                                                               │
+│ Backup folders (3)                                                           │
+│   appdata-backups — sftp                                                     │
+│   home-snapshots — sftp                                                      │
+│   photos-archive — sftp                                                      │
+│                                                                              │
+│ App settings — dotfile snapshots and restore                                 │
+│ Select an app to browse its snapshots, or choose Setup.                      │
+│                                                                              │
+│  ▶ Setup (restore all apps)                                                  │
+│    fresh-install restore                                                     │
+│    nvim                                                                      │
+│    dotfile snapshots                                                         │
+│                                                                              │
+│                                                                              │
+│ Press r to refresh, n for new manifest.                                      │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+[ok] Loaded 0 folder(s).

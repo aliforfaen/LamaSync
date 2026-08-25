@@ -37,6 +37,15 @@ export function friendlyError(
     return "daemon not running — start lamasyncd (systemctl --user start lamasyncd)";
   }
 
+  // LAMA-273: the daemon's belt-and-braces pause refusal emits a
+  // "sync skipped: paused until <iso>" summary through the operation log
+  // and (when surfaced via the socket path) as a thrown error message.
+  // Translate to a one-liner that points at the pause dialog hotkey
+  // instead of dumping the timestamp into the status bar.
+  if (/sync skipped: paused until/i.test(message)) {
+    return "sync skipped — fleet is paused (Ctrl+P to resume)";
+  }
+
   if (/rclone|spawn ENOENT/i.test(message)) {
     return "rclone not installed or not on PATH";
   }

@@ -33,7 +33,7 @@ jobs:
         run: bun test
 
       - name: Drift-check the agent skill (LAMA-230)
-        run: bun run scripts/check-skill-drift.ts
+        run: bun run scripts/check-skill-drift.ts --strict
 
   build:
     name: build

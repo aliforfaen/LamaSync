@@ -1,402 +1,222 @@
 # LamaSync
 
-Personal sync-fleet controller. One server manages folder syncs, backups,
-and dotfile versions across your machines — all orchestrated through **rclone**
-over a tailnet.
+**Your personal sync-fleet controller.** One small server keeps your folders,
+backups, and app settings in sync across every device you own — orchestrated
+through **rclone** over your own tailnet.
 
 ```
- TrueNAS (Docker)          Laptop                 Desktop
- ┌──────────────┐         ┌──────────┐          ┌──────────┐
- │ lamasync-    │◄──REST──┤lamasyncd │          │lamasyncd │
- │ server       │◄──WS────┤Unix sock │◄─────────┤Unix sock │
- │ SQLite       │         │lamasync- │          │lamasync- │
- │ rclone SFTP  │◄──rclone┤   tui    │          │   tui    │
- └──────────────┘         └──────────┘          └──────────┘
+ LXC / Docker server          Laptop                    Desktop
+ ┌──────────────┐         ┌──────────────┐          ┌──────────────┐
+ │ lamasync-    │◄──REST──┤ lamasyncd    │          │ lamasyncd    │
+ │ server       │◄──WS────┤  (daemon)    │◄─────────┤  (daemon)    │
+ │ SQLite       │         │ lamasync-tui │          │ lamasync-tui │
+ │ rclone       │◄──rclone│  (TUI + CLI) │          │  (TUI + CLI) │
+ └──────────────┘         └──────────────┘          └──────────────┘
 ```
 
-The server pushes **folder assignments, schedules, dotfile manifests, and a
-generated rclone config** to each client. The client daemon runs rclone against
-its local paths and reports results back.
+The server is the control plane: it holds your folder definitions, schedules,
+and a generated rclone config per device, and it records every sync/backup
+operation. Each device runs a lightweight daemon that does the actual file
+work and reports back. The terminal UI (`lamasync-tui`) is a fast local
+cockpit; the web UI is the fleet control plane; a scriptable CLI rides on the
+same binary.
+
+## What does this do for me?
+
+![Web dashboard — dark theme](docs/lama275-artifacts/after/web-dashboard-1440-dark.png)
+
+- **Folders that stay in sync everywhere** — pick a folder, decide how it
+  syncs (two-way, one-way backup, read-only mount), and the fleet keeps it
+  that way. Per-folder conflict strategies ("keep newest", "prefer this
+  device", "keep both", "ask me") take the guesswork out of collisions.
+- **Backups with a heartbeat** — backup-type folders push data to your
+  storage destination on a schedule you set in plain language (hourly, daily,
+  on boot). You see every run in the Activity view.
+- **App settings that survive reinstalls** — register which config files
+  belong to which app (nvim, your shell, editor settings…) and restore them
+  from any device after a fresh install.
+- **One web/terminal view of the whole fleet** — devices, storage
+  destinations, pending conflicts, recent activity: everything in one place,
+  reachable from a browser or an SSH terminal.
+- **Self-hosted and tailnet-only** — no cloud account, no third-party sync
+  service. Your data travels over your own Tailscale network, and the API is
+  protected by a pre-shared key you generate.
 
 ## Features
 
-- **Folder types**: `sync` (bidirectional via `rclone bisync`), `mount`
-  (read-only SFTP via `rclone mount`), `backup` (one-way `rclone copy`),
-  `dotfile` (tar.gz + `rclone copyto`)
-- **Conflict strategies** per folder: `newer_wins`, `source_wins`, `keep_both`,
-  `manual` (pauses for UI resolution)
-- **`.lamasyncignore`** per-folder glob exclude patterns
-- **Pre/post hooks** — shell scripts that run before/after each sync
-- **Cron schedules** with `cron-parser`
-- **Live WebSocket** for operation events
-- **TUI** in OpenTUI: menu, local dashboard, fleet view, dotfile restore,
-  log viewer
-- **Systemd user service** with hardened sandbox
-- **One-line install** on clients
-- **Self-update** from GitHub Releases once a release exists (`lamasyncd --update` or `curl | bash update.sh`)
-- **CI/CD** with GitHub Actions (tests, builds, releases, Docker push)
+- **Folder types**: `sync` (two-way, `rclone bisync`), `backup` (one-way
+  `rclone copy`), `mount` (read-only remote mount, VFS-cached), `dotfile`
+  (versioned app settings backups), `git` (repo sync without re-cloning).
+- **Reusable storage destinations** — SFTP, S3, local/NFS paths, and restic
+  repos, referenced by any number of folders.
+- **Conflict strategies** per folder, in plain language.
+- **Schedules** your way: hourly/6-hourly/daily/weekly/monthly presets, on
+  boot, on login, or a custom cron expression.
+- **`.lamasyncignore`** per-folder exclude patterns (plus a mount variant).
+- **Pre/post hooks** — shell scripts that run around each sync.
+- **Versioned app settings backups** with per-version restore, for any device
+  or globally.
+- **Live WebSocket** for operation events (the Activity view updates as runs
+  finish).
+- **Terminal UI + CLI in one binary** — task-oriented tabs (This device, All
+  devices, Backups & apps, Conflicts, Activity, More) and a non-interactive
+  `lamasync <command>` CLI for scripting and agents, with stable exit codes
+  and `--json` everywhere.
+- **Web management UI** — grouped navigation, responsive down to phones.
+- **Hardened systemd user service** on clients and a **one-line install**.
+- **Self-update** from GitHub Releases (`lamasyncd --update`, or the install
+  script keeps the agent-skill bundle in lockstep with the binary).
+- **CI/CD** — tests, builds, releases, and Docker image publishing on every
+  push to `master`.
 
 ![CI](https://github.com/aliforfaen/LamaSync/actions/workflows/ci.yml/badge.svg)
 
-## Getting started
+## 15-minute setup
 
-### 0. Prereqs
+### What you need
 
-- [Bun](https://bun.sh) ≥ 1.3 on the server (for dev/build)
-- [rclone](https://rclone.org/install/) on every client (and the server, if you
-  want it to also be a client)
-- A tailnet (Tailscale, Headscale, …) so all hosts have stable IPs
+- A machine to run the server on — any always-on box with Docker (or just a
+  Linux host with [Bun](https://bun.sh)) works. The reference deployment is a
+  small LXC container on a Proxmox host.
+- [rclone](https://rclone.org/install/) available to the server (and to every
+  device you want to sync).
+- A tailnet ([Tailscale](https://tailscale.com/), Headscale, …) so all your
+  devices can reach the server by a stable address.
+- One pre-shared API key you generate — that's the whole auth model.
 
-### 1. Start the server (Docker on TrueNAS)
+### 1. Start the server
 
 ```bash
 git clone https://github.com/aliforfaen/LamaSync.git
 cd LamaSync
 cp docker/.env.example docker/.env
-$EDITOR docker/.env  # set LAMASYNC_API_KEY and LAMASYNC_TAILNET_IP
-docker compose -f docker/docker-compose.yml up -d
+$EDITOR docker/.env        # set LAMASYNC_API_KEY to a long random string
+docker compose -f docker/docker-compose.yml --env-file docker/.env up -d
 ```
 
-The server listens on `<tailnet-ip>:8080`. Verify:
+Verify it answers (use your server's tailnet address):
 
 ```bash
-curl -H "Authorization: Bearer $LAMASYNC_API_KEY" http://100.64.0.1:8080/api/v1/health
+curl -H "Authorization: Bearer $LAMASYNC_API_KEY" http://<server-tailnet-ip>:8080/api/v1/health
 # → {"status":"ok","hostCount":0,"onlineCount":0,"hosts":[]}
 ```
 
-The Swagger UI is at `http://100.64.0.1:8080/swagger` and the machine-readable
-spec at `http://100.64.0.1:8080/swagger/json`.
+The web UI is at `http://<server-tailnet-ip>:8080/`, Swagger at
+`/swagger`. Production/tailnet-specific operations (updates, Docker
+details, SSH) are documented in `docs/prod-deploy.md` — this README stays
+public-safe.
 
-### 1b. Production server on an LXC container
-
-A dedicated Docker-enabled LXC container can run the same server image. The
-example below matches the current fleet container:
-
-| Setting | Value |
-|---|---|
-| Host | `lamasync` |
-| Tailscale IP | `100.113.52.108` |
-| SSH user | `messhias` |
-| SSH key | `~/.ssh/lamasync_key` |
-| Docker image | `ghcr.io/aliforfaen/lamasync-server:latest` |
-| Deploy dir | `/home/messhias/lamasync` |
-| Exposed port | `0.0.0.0:8080` (so Tailscale can reach it) |
-| Auto-update | daily at 04:00 via cron |
-
-On the container:
+### 2. Install the daemon on each device
 
 ```bash
-mkdir -p /home/messhias/lamasync
-cd /home/messhias/lamasync
-
-# .env holds the pre-shared API key and tailnet IP
-cat > .env <<EOF
-LAMASYNC_API_KEY=$(openssl rand -hex 32)
-LAMASYNC_TAILNET_IP=100.113.52.108
-LAMASYNC_HOST_IP=0.0.0.0
-LAMASYNC_IMAGE=ghcr.io/aliforfaen/lamasync-server:latest
-EOF
-
-# docker-compose.yml — image from GHCR with local build fallback
-cat > docker-compose.yml <<'EOF'
-services:
-  lamasync-server:
-    image: ${LAMASYNC_IMAGE:-ghcr.io/aliforfaen/lamasync-server:latest}
-    build:
-      context: ./src
-      dockerfile: docker/Dockerfile.server
-    container_name: lamasync-server
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      LAMASYNC_DATA_DIR: /data
-      LAMASYNC_BACKUP_DIR: /backups
-    ports:
-      - "${LAMASYNC_HOST_IP:-0.0.0.0}:8080:8080"
-    volumes:
-      - lamasync-data:/data
-      - lamasync-backups:/backups
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "-H", "Authorization: Bearer ${LAMASYNC_API_KEY}", "http://127.0.0.1:8080/api/v1/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
-volumes:
-  lamasync-data:
-  lamasync-backups:
-EOF
-
-# Initial start. For the first deploy, the image may not be on GHCR yet,
-# so build from the local source copy first.
-rsync -avz --delete \
-  --exclude='.git' --exclude='node_modules' --exclude='dist' \
-  --exclude='.env' --exclude='.env.*' --exclude='*.log' \
-  ./ /home/messhias/lamasync/src/
-
-docker compose build lamasync-server
-docker compose up -d lamasync-server
+curl -sSL https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh | \
+  bash -s -- --server-url http://<server-tailnet-ip>:8080 \
+             --api-key "$LAMASYNC_API_KEY" \
+             --with-tui
 ```
 
-Auto-update script (`/home/messhias/lamasync/update.sh`):
+This downloads `lamasyncd` (+ the terminal UI with `--with-tui`), writes
+`~/.config/lamasync/client.toml` (mode 600), installs the systemd **user**
+service, and starts it.
 
-```bash
-#!/bin/bash
-set -euo pipefail
-DEPLOY_DIR="/home/messhias/lamasync"
-LOG_FILE="$DEPLOY_DIR/update.log"
-cd "$DEPLOY_DIR"
-exec >> "$LOG_FILE" 2>&1
+> **No release yet?** The install script pulls binaries from GitHub Releases.
+> Until the first `v*` tag exists, build from source (see
+> [Development](#development)) and copy `packages/daemon/dist/lamasyncd` /
+> `packages/tui/dist/lamasync-tui` to `~/.local/bin/` yourself.
 
-echo "=== $(date -Iseconds) Update check started ==="
-if docker compose pull lamasync-server; then
-  echo "Image pulled. Restarting if changed..."
-  docker compose up -d lamasync-server
-  echo "=== $(date -Iseconds) Update check completed (pulled image) ==="
-else
-  echo "GHCR pull failed; falling back to local build..."
-  docker compose build lamasync-server
-  docker compose up -d lamasync-server
-  echo "=== $(date -Iseconds) Update check completed (local build) ==="
-fi
-```
-
-```bash
-chmod +x /home/messhias/lamasync/update.sh
-# Add daily auto-update cron job
-(crontab -l 2>/dev/null || true; echo "0 4 * * * /home/messhias/lamasync/update.sh") | crontab -
-```
-
-Verify:
-
-```bash
-curl -H "Authorization: Bearer $LAMASYNC_API_KEY" http://100.113.52.108:8080/api/v1/health
-# → {"status":"ok",...}
-```
-
-A persistent tmux session `lamasync` was created on the container during setup
-for live monitoring.
-
-### 2. Install the daemon on a client
-
-The daemon is a single static binary. Build once on the server, copy to clients,
-or use the install script.
-
-> **Release requirement:** the curl-to-bash install path downloads binaries from
-> GitHub Releases. If no release exists yet, build from source (see
-> [Development](#development)) and copy the binaries, or run the install script
-> directly from a local clone.
-
-```bash
-# On the client, with lamasyncd built and the server URL handy:
-# (add --with-tui to also install lamasync-tui)
-curl -sSL https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh | bash -s -- \
-  --server-url http://100.64.0.1:8080 \
-  --api-key "$LAMASYNC_API_KEY" \
-  --with-tui
-
-# Or run from the repo:
-./packaging/install/install.sh \
-  --server-url http://100.64.0.1:8080 \
-  --api-key "$LAMASYNC_API_KEY" \
-  --with-tui
-
-# Update an existing install (requires a GitHub Release):
-curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/update.sh | bash
-```
-
-The script:
-- Downloads the right `lamasyncd` binary into `~/.local/bin`
-- Writes `~/.config/lamasync/client.toml` (mode 600)
-- Installs the systemd **user** unit
-- Enables lingering and starts the service
-
-Verify:
+Check it's alive:
 
 ```bash
 systemctl --user status lamasyncd
 journalctl --user -u lamasyncd -f
 ```
 
-### 3. Open the Management Web UI (optional but recommended)
+### 3. Point a folder at your fleet
 
-The server embeds a React management UI at `/`. After starting the server:
-
-```bash
-xdg-open http://100.64.0.1:8080/   # or open the URL in any browser
-```
-
-Log in with the same `$LAMASYNC_API_KEY`. The UI lets you:
-
-- Browse the dashboard (hosts, recent operations, counts)
-- Create, edit, and delete folders
-- View folder assignments per folder
-- Create and delete dotfile manifests
-- Resolve pending sync conflicts
-- Prune the operation log by age
-
-The UI stores the API key in `sessionStorage` and talks to the same
-`/api/v1/*` endpoints as the curl examples below.
-
-### 4. Register a folder assignment
-
-You can create folders and assignments through the Web UI, the TUI's GitHub
-repo selector, or directly via the API:
+- **Web UI** — log in with the API key, open **Synced folders** → new folder,
+  pick the type, choose a storage destination, and set it up on a device.
+- **TUI** — tab to **This device**, press `w` for a guided new-backup wizard.
+- **CLI** — scriptable, same thing:
 
 ```bash
-# Create a folder
-curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"name":"LamaFiles","type":"sync"}' \
-  http://100.64.0.1:8080/api/v1/folders
-# → {"id":"<FOLDER_ID>","name":"LamaFiles","type":"sync","createdAt":...}
-
-# Assign it to your host
-curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{
-    "hostId":"'"$(hostname)"'",
-    "role":"both",
-    "localPath":"/home/'"$USER"'/LamaFiles",
-    "syncExpr":"*/15 * * * *",
-    "conflictStrategy":"newer_wins"
-  }' \
-  http://100.64.0.1:8080/api/v1/folders/<FOLDER_ID>/assign
+lamasync-tui folders create --name LamaFiles --type sync
+lamasync-tui folders assign LamaFiles --host <device-id> --path /home/you/LamaFiles
 ```
 
-Within 5 minutes (the daemon's config refresh interval), the daemon will pick
-up the new assignment, write a temp rclone config, and start syncing on the
-schedule.
+(Any subcommand after `lamasync-tui` runs the CLI; bare `lamasync-tui` on a
+TTY boots the terminal UI. On an installed client, tab to **Backups & apps**
+to see fleet-wide backup folders + restore app settings, and **More** for
+GitHub repo adoption.)
 
-### 5. Open the TUI
-
-```bash
-# Build the TUI binary (or copy from server)
-bun run build
-
-# Local mode (talks to lamasyncd over Unix socket)
-./packages/tui/dist/lamasync-tui
-
-# Or, if the daemon isn't running on this machine, point at the server:
-LAMASYNC_SERVER_URL=http://100.64.0.1:8080 \
-LAMASYNC_API_KEY="$LAMASYNC_API_KEY" \
-  ./packages/tui/dist/lamasync-tui
-
-# CLI fallback (no OpenTUI native renderer required)
-LAMASYNC_NO_TUI=1 LAMASYNC_SERVER_URL=http://100.64.0.1:8080 LAMASYNC_API_KEY="$KEY" \
-  ./packages/tui/dist/lamasync-tui
-```
-
-The TUI has five views: **Local**, **Fleet**, **Dotfiles**, **Logs**, **Quit**.
-Hotkeys per view are shown in the bottom row.
-
-### 6. Restore a dotfile version
-
-1. Open the TUI, choose **Dotfiles**.
-2. Pick an app (e.g. `nvim`) → pick a version → see the file list preview.
-3. Confirm and choose an extraction directory. The tarball is downloaded from
-   the server and extracted locally.
+Within one daemon config refresh (≤5 min), the device picks up the folder and
+starts syncing on schedule. Watch it happen in the **Activity** view.
 
 ## Architecture
 
 | Component | Purpose |
 |-----------|---------|
-| `lamasync-server` | REST API + WebSocket + SQLite + embedded React Management Web UI. Generates rclone config fragments per host. |
-| `lamasyncd` | Per-host systemd user daemon. Manages rclone processes, schedules, ignore patterns, hooks, and exposes a Unix socket for the TUI. |
-| `lamasync-tui` | OpenTUI terminal UI. Connects to local daemon over Unix socket, or directly to the server. |
+| `lamasync-server` | REST + WebSocket + SQLite + embedded React web UI. Owns folder definitions, schedules, per-device generated rclone configs, and the operation log. |
+| `lamasyncd` | One per device (systemd user service). Runs the scheduled rclone operations, mounts, hooks, and ignore patterns; exposes a Unix socket for the local TUI. |
+| `lamasync-tui` | Terminal UI **and** CLI in one binary. Local mode talks to the daemon over its socket; fleet mode talks to the server; any positional command is a headless CLI (stable exit codes, `--json`). |
 
-Server endpoints are documented via Swagger at `/swagger` and the `lamasync`
-agent skill (CLI-first with a REST/WS escape hatch — `packages/agent-skill/
-SKILL.md` + `reference/api.md`).
+The terminal UI (task-oriented tabs, 80-column-friendly):
 
-### Configuration flow
+```
+ This device  All devices  Backups      Conflicts    Activity     More
+▬▬▬▬▬▬▬▬▬▬▬▬▬
 
-1. Client registers via `POST /api/v1/register` with `{id, hostname, tailnetIp}`
-2. Server returns 201; client appears in `GET /api/v1/health`
-3. Daemon polls `GET /api/v1/config/:hostId` every 5 min (also on startup)
-4. Response includes: folder assignments (with cron, hooks, ignore, conflict
-   strategy), dotfile manifests, generated `rcloneConfig` string, server
-   tailnet IP
-5. Daemon writes the config to `~/.config/lamasync/config-cache.json`
-6. Scheduler arms timers; on each fire, executor builds the rclone command,
-   honors hooks, parses JSON log, reports to `POST /api/v1/report`
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Backups & apps                                                               │
+│ Backup folders (3)                                                           │
+│   appdata-backups — sftp                                                     │
+│   home-snapshots — sftp                                                      │
+│   photos-archive — sftp                                                      │
+│                                                                              │
+│ App settings — dotfile snapshots and restore                                 │
+│ Select an app to browse its snapshots, or choose Setup.                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
-### rclone config
+(More captures: `docs/lama275-artifacts/`.)
 
-The server generates one rclone remote per folder assignment. Backends are
-pluggable per folder:
+### How a sync happens
 
-- **SFTP** (default) — points at the server's tailnet IP (`LAMASYNC_TAILNET_IP`)
-- **S3** — uses the folder's `s3Endpoint`, `s3Bucket`, and credentials
-- **local** — for dotfile storage on the server backup directory
+1. A device registers itself (`POST /api/v1/register`) and reports health on a
+   heartbeat.
+2. The daemon pulls its config (`GET /api/v1/config/:deviceId`) — folder
+   assignments with schedules/hooks/conflict strategy, app settings backup
+   manifests, and a generated rclone config fragment. A `config_revision`
+   bump makes devices re-pull immediately instead of waiting for the 5-minute
+   timer.
+3. The scheduler fires (cron preset, custom expression, `@reboot`, or
+   `@login`), the executor builds the rclone command per folder type, honors
+   hooks and ignore files, and streams a JSON log back for real transfer
+   counts.
+4. Every run lands in the operation log and broadcasts over WebSocket to the
+   TUI/web Activity views (and to your notification channels, if configured).
 
-The daemon assembles these into a temp rclone config file per operation,
-invokes rclone with `--config <path>`, and cleans up afterwards.
+### Storage destinations
+
+`rclone` is the file engine — the server generates a small per-operation
+rclone config. Today the built-in destination kinds are **SFTP**, **S3**,
+**local/NFS server paths**, and **restic** repositories; because everything is
+an rclone remote under the hood, other backends slot in the same way.
 
 ## Development
 
 ```bash
-# Install
 bun install
-
-# Type check (always green before commit)
-bun x tsc --noEmit
-
-# Build the web UI before tests (the server test imports dist/index.html)
-bun run build:web-ui
-
-# Unit tests
+bun x tsc --noEmit        # type check — always green before committing
+bun run build:web-ui      # needed before bun test (server test imports dist/index.html)
 bun test
-
-# Build all binaries
-bun run build
-
-# Run the full Docker dogfood test (server + MinIO + daemon + TUI CLI fallback)
-# 1. Build the test base image (one-time, needs outbound network):
-./docker/build-test-base.sh
-# 2. Run the full stack test:
-./docker/test-stack.sh
-# 3. Clean up when done:
-# docker compose -f docker/docker-compose.test.yml --env-file docker/.env.test down -v
-
-# Run individual services in dev mode
-bun run dev:server     # Elysia with --watch
-bun run dev:daemon     # uses ~/.config/lamasync/client.toml
-bun run dev:tui        # OpenTUI
-bun run dev:web-ui     # Vite dev server with API proxy to :8080
+bun run build             # → standalone binaries in packages/*/dist/
 ```
 
-### End-to-end test harness
-
-Run a fully isolated server + daemon on a random free port, with the Web UI,
-Swagger, and TUI ready to use:
-
-```bash
-# Use existing binaries (or build first with bun run build)
-./scripts/e2e-harness.sh
-
-# Force a rebuild before starting
-./scripts/e2e-harness.sh --rebuild
-```
-
-The harness prints the URL, API key, socket path, and example commands. Press
-Ctrl+C to stop the server and daemon. Logs and temp data are left in
-`./tmp/e2e/` for inspection.
-
-### Installer / updater smoke tests
-
-Test the `curl | bash` install and update paths in isolated Docker sandboxes:
-
-```bash
-# Test the one-line client install (requires a local build first)
-./scripts/test-install.sh
-
-# Test the standalone updater
-./scripts/test-update.sh
-```
-
-Both scripts spin up a local nginx "release" server and run the scripts in a
-fresh Debian container.
+Dev servers (`dev:server` / `dev:daemon` / `dev:tui` / `dev:web-ui`), the
+E2E harness (`scripts/e2e-harness.sh`), and the installer/updater smoke
+tests (`scripts/test-install.sh`, `scripts/test-update.sh`) are described in
+`docs/development.md`. The repo layout, design notes, and the rolling status
+log live in `docs/` — `docs/agent-start.md` is the entry point for agents.
 
 ## License
 

@@ -122,6 +122,12 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
 
 ## Gotchas (all hit in production at least once)
 
+- **Socket path**: the daemon socket defaults to
+  `$XDG_RUNTIME_DIR/lamasync.sock` (`~/.lamasync/lamasync.sock` fallback);
+  override with `LAMASYNC_SOCKET_PATH` (env) or `socketPath` in
+  `~/.config/lamasync/client.toml` (`defaultSocketPath` in `@lamasync/core`
+  is the single source of truth).
+
 - **"rclone binary not found in PATH"** in operation results: rclone is
   installed somewhere outside the unit's PATH (see Prereqs). Move/symlink
   it into `/usr/local/bin` or adjust `Environment=PATH=` in
@@ -135,9 +141,8 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
 - Dotfile manifests **hard-fail the whole run if any listed path is
   missing** on the host — keep host-specific manifests host-specific
   (create them with `hostId` set), or use `backup`-type folders instead.
-- Backup-operation summaries currently misreport `0 transfers, 0 B` even
-  when data copied (rclone JSON-log parsing bug) — check `stderrTail` in
-  the operation's details before believing a zero.
+  (Former "backup summaries show 0 transfers" gotcha is fixed in LAMA-247:
+  the JSON-log accumulator now reads both rclone stdout and stderr.)
 - Don't run a bare `lamasyncd` to "test" it — the systemd service owns the
   daemon; a second instance just fights over the socket.
 

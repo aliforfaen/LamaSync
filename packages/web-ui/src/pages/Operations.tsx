@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
+import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { useSearchParams } from "react-router-dom";
-import type { Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
+import type { Backend, Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
 
 const PAGE_SIZE = 50;
@@ -29,6 +32,7 @@ export function Operations() {
   // folder filter + ?folderId=/?hostId= URL preselect so History links on
   // folder rows land pre-filtered.
   const [hosts, setHosts] = useState<Host[]>([]);
+  const [backends, setBackends] = useState<Backend[]>([]);
   const [hostFilter, setHostFilter] = useState("");
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderFilter, setFolderFilter] = useState("");
@@ -39,14 +43,16 @@ export function Operations() {
 
   async function loadLocks(): Promise<void> {
     try {
-      const [lockList, hostList, folderList] = await Promise.all([
+      const [lockList, hostList, folderList, backendList] = await Promise.all([
         api.listLocks(),
         api.listHosts().catch(() => [] as Host[]),
         api.listFolders().catch(() => [] as Folder[]),
+        api.listBackends().catch(() => [] as Backend[]),
       ]);
       setLocks(lockList);
       setHosts(hostList);
       setFolders(folderList);
+      setBackends(backendList);
     } catch {
       // Locks are best-effort; a failure must not break the log view.
       setLocks([]);
@@ -123,6 +129,13 @@ export function Operations() {
     return folders.find((f) => f.id === id)?.name ?? id;
   }
 
+  function backendNameForFolder(folderId: string | null | undefined): string | undefined {
+    if (!folderId) return undefined;
+    const folder = folders.find((f) => f.id === folderId);
+    if (!folder?.backendId) return undefined;
+    return backends.find((b) => b.id === folder.backendId)?.name;
+  }
+
   function lockLabel(hostId: string): string {
     return hosts.find((h) => h.id === hostId)?.hostname ?? hostId;
   }
@@ -132,8 +145,8 @@ export function Operations() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Operations</h1>
+      <PageHeader title="Activity" purpose="Recent sync and backup activity across your fleet, including locks and results." />
+<div className="toolbar">
         <label className="scope-filter">
           Status
           <select value={status} onChange={onStatusChange}>
@@ -145,9 +158,9 @@ export function Operations() {
           </select>
         </label>
         <label className="scope-filter">
-          Host
+          Device
           <select value={hostFilter} onChange={onHostFilterChange}>
-            <option value="">All hosts</option>
+            <option value="">All devices</option>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.hostname}
@@ -191,7 +204,7 @@ export function Operations() {
             <thead>
               <tr>
                 <th>Folder</th>
-                <th>Host</th>
+                <th>Device</th>
                 <th>Acquired at</th>
                 <th>TTL</th>
               </tr>
@@ -209,11 +222,27 @@ export function Operations() {
           </table>
         )}
       </section>
+      {items !== null && items.length === 0 && status === "" ? (
+        <EmptyState
+          variant="activity"
+          title="Nothing here yet"
+          how="Every sync and backup your devices run lands here — set one up and the results will show up."
+          ctaLabel="Set up a synced folder"
+          ctaTo="/folders"
+          steps={[
+            "Create a folder on the Folders page",
+            "Set it up on a device",
+            "Run a sync — the result appears here",
+          ]}
+          timeNote="takes 30s"
+        />
+      ) : (
+      <>
       <table className="data">
         <thead>
           <tr>
             <th>Time</th>
-            <th>Host</th>
+            <th>Device</th>
             <th>Folder</th>
             <th>Operation</th>
             <th>Status</th>
@@ -227,11 +256,7 @@ export function Operations() {
             </tr>
           ) : items.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={6}>
-                {status
-                  ? `No ${status} operations`
-                  : "No operations yet — every sync and backup the daemons run is logged here."}
-              </td>
+              <td colSpan={6}>No {status} operations</td>
             </tr>
           ) : (
             items.map((op) => (
@@ -243,7 +268,16 @@ export function Operations() {
                 <td>
                   <span className={`badge badge-${op.status}`}>{op.status}</span>
                 </td>
-                <td className="muted">{op.summary ?? "—"}</td>
+                <td className="muted">
+                  <OperationSentenceView
+                    op={op}
+                    ctx={{
+                      folderName: op.folderId ? folderLabel(op.folderId) : null,
+                      hostName: lockLabel(op.hostId),
+                      backendName: backendNameForFolder(op.folderId),
+                    }}
+                  />
+                </td>
               </tr>
             ))
           )}
@@ -270,6 +304,8 @@ export function Operations() {
           Next ›
         </button>
       </div>
+      </>
+      )}
     </div>
   );
 }

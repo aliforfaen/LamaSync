@@ -1,0 +1,24 @@
+ This device  All devices  Backups      Conflicts    Activity     More
+▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ This device — localhost                                                      │
+│                                                                              │
+│ (no folders configured)                                                      │
+│ Press 3 to refresh, w to create a new backup.                                │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ [1] sync all [3] refresh [w] new backup…                                     │
+│ [ok] Sync queued for all assigned folders.                                   │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+[ok] Sync queued for all assigned folders.

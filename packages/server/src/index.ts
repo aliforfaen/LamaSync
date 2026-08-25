@@ -18,9 +18,18 @@ import { notificationsRoutes } from "./routes/notifications.ts";
 import { browseRoutes } from "./routes/browse.ts";
 import { backendsRoutes } from "./routes/backends.ts";
 import { statsRoutes } from "./routes/stats.ts";
+import { healthDrillRoutes } from "./routes/health-drill.ts";
+import { demoRoutes } from "./routes/demo.ts";
+import { pauseRoutes } from "./routes/pause.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
+import {
+  DEFAULT_DRILL_CHECK_INTERVAL_MS,
+  DEFAULT_DRILL_INTERVAL_MS,
+  parseDrillIntervalMs,
+  runDrillScheduler,
+} from "./health-drill.ts";
 import { VERSION, type ErrorResponse } from "@lamasync/core";
 import { wsRoutes } from "./ws.ts";
 import { SERVER_KNOWN_FLAGS, serverUsage } from "./usage.ts";
@@ -100,6 +109,18 @@ const app = new Elysia()
             name: "Data Browser",
             description: "Read-only browsing of local backups, S3 folders, and restic snapshots",
           },
+          {
+            name: "Demo",
+            description: "Demo-mode fleet seeding and deletion",
+          },
+          {
+            name: "Pause",
+            description: "LAMA-273 pause/slow mode toggle (global + per-device)",
+          },
+          {
+            name: "Health",
+            description: "LAMA-266 backup prove-it + monthly fire-drill endpoints",
+          },
         ],
         components: {
           securitySchemes: {
@@ -133,7 +154,10 @@ const app = new Elysia()
   .use(notificationsRoutes)
   .use(backendsRoutes)
   .use(statsRoutes)
+  .use(demoRoutes)
   .use(browseRoutes)
+  .use(pauseRoutes)
+  .use(healthDrillRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;
@@ -239,4 +263,51 @@ if (
     }
   }, lockReaperMs);
   lockReaperTimer.unref?.();
+}
+
+// LAMA-266: server-side monthly backup fire drills. The interval is the
+// per-backend cadence (default 30 days); the check interval is how often
+// the server looks for due backends (default 1 hour — every newly-due
+// backend could be up to 1h late, which is fine for a monthly cadence).
+// A boot pass also runs immediately, but the scheduler itself skips
+// backends whose last 'drill' row is newer than the cadence window so a
+// fresh restart never re-fires everything at once.
+const drillIntervalMs = parseDrillIntervalMs(
+  process.env.LAMASYNC_DRILL_INTERVAL_MS,
+  DEFAULT_DRILL_INTERVAL_MS,
+);
+const drillCheckIntervalMs = parseDrillIntervalMs(
+  process.env.LAMASYNC_DRILL_CHECK_INTERVAL_MS,
+  DEFAULT_DRILL_CHECK_INTERVAL_MS,
+);
+
+if (
+  process.env.LAMASYNC_TEST !== "1" &&
+  process.env.NODE_ENV !== "test" &&
+  drillIntervalMs > 0 &&
+  drillCheckIntervalMs > 0
+) {
+  const runDrillPass = (): void => {
+    // Fire-and-forget: the scheduler reports nothing into the request
+    // path, and the drill engine writes its own audit row + notification
+    // so a failure here never silently disappears.
+    runDrillScheduler({ intervalMs: drillIntervalMs, now: Date.now() })
+      .then((result) => {
+        if (result.ran > 0) {
+          console.log(
+            `[drill] pass: inspected ${result.inspected}, due ${result.due}, ran ${result.ran}, failed ${result.failed}`,
+          );
+        }
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[drill] pass crashed: ${msg}`);
+      });
+  };
+  // Boot pass: the scheduler's own due-check skips recent drills, so
+  // a restart never re-fires immediately. The setInterval handles every
+  // subsequent pass.
+  runDrillPass();
+  const drillTimer = setInterval(runDrillPass, drillCheckIntervalMs);
+  drillTimer.unref?.();
 }

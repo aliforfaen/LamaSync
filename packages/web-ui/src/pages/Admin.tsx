@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
 import type {
   NotificationChannel,
   NotificationEvent,
@@ -143,18 +144,30 @@ export function Admin() {
     void refreshNotifications();
     void refreshChannels();
     // UX workstream 4: server self-description + latest release.
-    void Promise.all([api.health().catch(() => null), api.latestRelease().catch(() => null)])
-      .then(([health, release]) => {
-        if (health) {
-          setServerVersion(health.serverVersion);
-          setDbSizeBytes(health.dbSizeBytes);
-        }
-        if (release) setLatestVersion(release.version);
-        setServerInfoError(null);
-      })
-      .catch((err: unknown) => {
-        setServerInfoError(err instanceof Error ? err.message : String(err));
-      });
+    // LAMA-247 #9: each probe fails independently — a dead /health must not
+    // blank the whole block into “—” placeholders nor hide why. The caption
+    // below the table carries the failure instead.
+    void (async () => {
+      const problems: string[] = [];
+      try {
+        const health = await api.health();
+        setServerVersion(health.serverVersion);
+        setDbSizeBytes(health.dbSizeBytes);
+      } catch (err: unknown) {
+        problems.push(
+          `health: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      try {
+        const release = await api.latestRelease();
+        setLatestVersion(release.version);
+      } catch (err: unknown) {
+        problems.push(
+          `release: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      setServerInfoError(problems.length > 0 ? problems.join(" — ") : null);
+    })();
   }, []);
 
   async function onSubmit(e: React.FormEvent) {
@@ -339,16 +352,16 @@ export function Admin() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Admin</h1>
+      <PageHeader title="Admin" purpose="Server health, log retention, and housekeeping." />
+<div className="toolbar">
       </div>
 
       <section className="section">
         <h2>Server</h2>
         {serverInfoError ? (
-          <div className="error">{serverInfoError}</div>
-        ) : (
-          <table className="data">
+          <p className="muted">[!] {serverInfoError}</p>
+        ) : null}
+        <table className="data">
             <tbody>
               <tr>
                 <td className="muted">Server version</td>
@@ -374,7 +387,6 @@ export function Admin() {
               </tr>
             </tbody>
           </table>
-        )}
       </section>
 
       <section className="section">

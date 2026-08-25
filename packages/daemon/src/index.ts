@@ -36,7 +36,7 @@ import {
   type SocketState,
 } from "./socket.ts";
 import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
-import { detectTailnetIp } from "./lan-peer.ts";
+import { detectTailnetIp, TailnetReportTracker } from "./lan-peer.ts";
 import {
   acquireLock,
   heartbeatLock,
@@ -55,6 +55,7 @@ import {
   stopAllMounts,
   stopMount,
 } from "./mounts.ts";
+import { osLabel, storageUsedBytes } from "./device-info.ts";
 import {
   disableMountUnit,
   isMountUnitActive,
@@ -575,6 +576,9 @@ async function main(): Promise<void> {
 
   const client = new LamaSyncApiClient(clientConfig.serverUrl, clientConfig.apiKey);
   const reportQueue = createReportQueue(clientConfig.dataDir, client);
+  // LAMA-247 #8: tailnet address lifecycle — sustained detection failure
+  // clears the stored address after a 5-minute grace.
+  const tailnetTracker = new TailnetReportTracker();
 
   let hostConfig: HostConfig | null = loadCache();
   const operations: OperationLog[] = [];
@@ -954,6 +958,10 @@ async function main(): Promise<void> {
     getAssignments: () => hostConfig?.assignments ?? [],
     getFolders: () => hostConfig?.folders ?? [],
     getManifests: () => hostConfig?.manifests ?? [],
+    // LAMA-273: scheduler skips scheduled runs while the effective pause
+    // window is active (host row if present, else global row). Resolved
+    // server-side; the daemon just reads the cached `hostConfig.pause`.
+    getEffectivePause: () => hostConfig?.pause ?? null,
   });
 
   setSwitchContext({
@@ -989,8 +997,10 @@ async function main(): Promise<void> {
       timestamp: Date.now(),
       status: "online",
       lanIp,
-      tailnetIp,
+      tailnetIp: tailnetTracker.value(tailnetIp, Date.now()),
       version: VERSION,
+      os: osLabel(),
+      storageUsedBytes: storageUsedBytes(clientConfig.dataDir),
     });
     lastHeartbeatAt = Date.now();
     await reportQueue.flush();
@@ -1069,8 +1079,10 @@ async function main(): Promise<void> {
           timestamp: now,
           status: "online",
           lanIp: getLocalLanIp(),
-          tailnetIp,
+          tailnetIp: tailnetTracker.value(tailnetIp, now),
           version: VERSION,
+          os: osLabel(),
+          storageUsedBytes: storageUsedBytes(clientConfig.dataDir),
         });
         lastHeartbeatAt = now;
         await reportQueue.flush();

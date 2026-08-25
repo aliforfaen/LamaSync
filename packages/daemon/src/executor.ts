@@ -1,7 +1,7 @@
 import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
-import type { ConflictStrategy, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
+import type { ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
@@ -20,6 +20,60 @@ export interface ExecuteOptions {
 
 interface TransferStats {
   files: number; bytes: number; errors: number; checks: number; transfers: number;
+}
+
+/**
+ * LAMA-247 #12: aggregated rclone JSON-log state + dry-run candidates.
+ * `files` counts per-file "Copied …" messages; the rest mirror the final
+ * `stats` block rclone emits (transfers/bytes/checks/errors).
+ */
+export interface RcloneLogStats extends TransferStats {
+  wouldCopy: string[];
+  wouldDelete: string[];
+  wouldMkdir: string[];
+}
+
+/**
+ * Feed one chunk of raw rclone `--use-json-log` output into `acc` (returns
+ * it for chaining). Stat lines update cumulative counters; per-file messages
+ * count copied files and dry-run candidates. Non-JSON lines are skipped.
+ *
+ * Exported for the fixture test (LAMA-247 #12): modern rclone (>= 1.63)
+ * writes the JSON log to stderr while older writers use stdout, so the
+ * daemon feeds BOTH streams through this accumulator.
+ */
+export function accumulateRcloneJsonLog(
+  text: string,
+  acc: RcloneLogStats,
+): RcloneLogStats {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("{")) continue;
+    try {
+      const obj = JSON.parse(line) as {
+        stats?: {
+          bytes?: unknown;
+          checks?: unknown;
+          errors?: unknown;
+          transfers?: unknown;
+        };
+        msg?: unknown;
+        object?: unknown;
+      };
+      const s = obj.stats;
+      if (s) {
+        if (typeof s.bytes === "number") acc.bytes = s.bytes;
+        if (typeof s.errors === "number") acc.errors = s.errors;
+        if (typeof s.checks === "number") acc.checks = s.checks;
+        if (typeof s.transfers === "number") acc.transfers = s.transfers;
+      }
+      const msg = obj.msg;
+      if (msg === "Copied (new)" || msg === "Copied (server-side copy)") acc.files += 1;
+      if (msg === "Would copy" && typeof obj.object === "string") acc.wouldCopy.push(obj.object);
+      if (msg === "Would delete" && typeof obj.object === "string") acc.wouldDelete.push(obj.object);
+      if (msg === "Would make directory" && typeof obj.object === "string") acc.wouldMkdir.push(obj.object);
+    } catch {}
+  }
+  return acc;
 }
 interface CommandResult {
   exitCode: number; timedOut: boolean; aborted: boolean; abortReason?: string;
@@ -214,6 +268,18 @@ interface ParsedConflict {
   remoteMtime?: number;
 }
 
+/** Best-effort size of the local conflict file. stat can race with a
+ *  deletion/rename, so unknown sizes stay null (the card renders "—").
+ *  The remote size is deliberately NOT measured here — it would need an
+ *  extra rclone call per conflict; null is the honest value. */
+function localConflictSize(localPath: string, relPath: string): number | null {
+  try {
+    return statSync(join(localPath, relPath)).size;
+  } catch {
+    return null;
+  }
+}
+
 function parseBisyncConflicts(stdout: string, stderr: string): ParsedConflict[] {
   const text = `${stdout}\n${stderr}`;
   const lines = text.split(/\r?\n/);
@@ -369,9 +435,56 @@ async function applyAutomaticConflicts(
 // ---------------------------------------------------------------------------
 // Main executor
 // ---------------------------------------------------------------------------
+
+// LAMA-273: pause / slow-mode helpers. The server resolves the effective
+// pause (host row if present, else global row, else null) and embeds it on
+// `hostConfig.pause`. The daemon uses it two ways:
+//   1. refuse fresh runs while the pause window is active (belt-and-braces
+//      against manual / queued-action invocations that bypass the scheduler)
+//   2. slow mode injects a `--bwlimit` override through the existing
+//      `assignment.bandwidthSchedule` plumbing — we reuse that argv builder
+//      path rather than introducing a new rclone argument stream.
+export function effectiveBandwidthSchedule(
+  assignment: Pick<FolderAssignment, "bandwidthSchedule">,
+  pause: EffectivePause | null | undefined,
+  now: number = Date.now(),
+): string | null {
+  if (pause && pause.mode === "slow") {
+    const until = Date.parse(pause.until);
+    if (Number.isFinite(until) && until > now && pause.bwlimit && pause.bwlimit.trim().length > 0) {
+      return pause.bwlimit.trim();
+    }
+  }
+  const schedule = assignment.bandwidthSchedule;
+  return schedule && schedule.trim().length > 0 ? schedule.trim() : null;
+}
+
+/** True when `hostConfig.pause` is currently active. Pure helper so
+ *  scheduler/executor tests can assert the rule without composing a
+ *  full HostConfig. */
+export function isPauseActive(
+  pause: EffectivePause | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!pause) return false;
+  const until = Date.parse(pause.until);
+  return Number.isFinite(until) && until > now;
+}
+
 export async function executeAssignment(opts: ExecuteOptions): Promise<OperationReport> {
   const { assignment, folder, hostConfig, hostId, client } = opts;
   const start = Date.now();
+
+  // LAMA-273: belt-and-braces pause refusal. The scheduler is the primary
+  // gate; this catches manual / queued-action runs that bypass it.
+  if (isPauseActive(hostConfig.pause)) {
+    const summary = `sync skipped: paused until ${hostConfig.pause!.until}`;
+    console.log(`[executor] folder=${folder.name} ${summary}`);
+    return report(hostId, folder.id, folder.type, "failed", start, {
+      summary,
+      details: { reason: "paused", mode: hostConfig.pause!.mode, until: hostConfig.pause!.until },
+    });
+  }
 
   if (!Bun.which("rclone")) {
     return report(hostId, folder.id, folder.type, "failed", start, { summary: "rclone binary not found in PATH", details: { reason: "rclone-missing" } });
@@ -446,9 +559,15 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
 
   if (exclude) command.push("--filter-from", exclude.path);
 
-  // LAMA-114: bandwidth schedule
-  if (assignment.bandwidthSchedule && assignment.bandwidthSchedule.trim().length > 0) {
-    command.push("--bwlimit", assignment.bandwidthSchedule.trim());
+  // LAMA-114 + LAMA-273: bandwidth schedule. Slow-mode pause (resolved
+  // server-side into hostConfig.pause) wins over the per-assignment
+  // schedule — the pause window caps the whole fleet, so the cap must
+  // be applied here rather than per-folder. The pause check at the top
+  // of executeAssignment guarantees we're outside the "pause" mode
+  // window before reaching this branch.
+  const effectiveBwlimit = effectiveBandwidthSchedule(assignment, hostConfig.pause);
+  if (effectiveBwlimit) {
+    command.push("--bwlimit", effectiveBwlimit);
   }
 
   // LAMA-116: disk-space pre-flight
@@ -571,6 +690,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
               path: c.path,
               localMtime: c.localMtime,
               remoteMtime: c.remoteMtime,
+              localSizeBytes: localConflictSize(assignment.localPath, c.path),
+              remoteSizeBytes: null,
             })),
           );
         } catch (err) {
@@ -604,6 +725,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
               path: c.path,
               localMtime: c.localMtime,
               remoteMtime: c.remoteMtime,
+              localSizeBytes: localConflictSize(assignment.localPath, c.path),
+              remoteSizeBytes: null,
             })),
           );
         } catch (err) {
@@ -726,29 +849,20 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
       signal.addEventListener("abort", onAbort, { once: true });
     }
   }
-  const stats: TransferStats = { files: 0, bytes: 0, errors: 0, checks: 0, transfers: 0 };
-  const wouldCopy: string[] = [], wouldDelete: string[] = [], wouldMkdir: string[] = [];
-  const parse = (line: string): void => {
-    if (!line.startsWith("{")) return;
-    try {
-      const obj = JSON.parse(line);
-      const s = obj.stats;
-      if (s) {
-        if (typeof s.bytes === "number") stats.bytes = s.bytes;
-        if (typeof s.errors === "number") stats.errors = s.errors;
-        if (typeof s.checks === "number") stats.checks = s.checks;
-        if (typeof s.transfers === "number") stats.transfers = s.transfers;
-      }
-      const msg = obj.msg;
-      if (msg === "Copied (new)" || msg === "Copied (server-side copy)") stats.files += 1;
-      if (msg === "Would copy" && typeof obj.object === "string") wouldCopy.push(obj.object);
-      if (msg === "Would delete" && typeof obj.object === "string") wouldDelete.push(obj.object);
-      if (msg === "Would make directory" && typeof obj.object === "string") wouldMkdir.push(obj.object);
-    } catch {}
+  const acc: RcloneLogStats = {
+    files: 0, bytes: 0, errors: 0, checks: 0, transfers: 0,
+    wouldCopy: [], wouldDelete: [], wouldMkdir: [],
   };
-  const rdr = (async () => { const t = await new Response(proc.stdout).text(); t.split(/\r?\n/).forEach(parse); return t; })();
-  const stderrText = await new Response(proc.stderr).text();
-  const stdoutText = await rdr;
+  const [stdoutText, stderrText] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  // LAMA-247 #12: rclone >= 1.63 writes --use-json-log lines to STDERR;
+  // older writers used stdout. Feed both so per-file/stats counters are not
+  // silently zeroed on modern rclone (the "0 transfers, 0 B" misreport).
+  accumulateRcloneJsonLog(stdoutText, acc);
+  accumulateRcloneJsonLog(stderrText, acc);
+  const { wouldCopy, wouldDelete, wouldMkdir, ...stats } = acc;
   const exitCode = await proc.exited;
   clearTimeout(timer);
   if (signal) {

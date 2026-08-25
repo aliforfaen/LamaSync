@@ -1,9 +1,15 @@
 import { Fragment, useEffect, useState } from "react";
+import { PageHeader } from "../components/PageHeader.tsx";
+import { EmptyState } from "../components/EmptyState.tsx";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
+// LAMA-267: shared presets (single source of truth for labels) and the
+// client-side "Next: …" sentence helper.
+import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
+import { nextRunSentence } from "../next-run.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { HintText } from "../components/Hint.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
@@ -21,25 +27,6 @@ interface FolderWithAssignments {
 type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
 type AssignRole = "source" | "target" | "both";
-
-// Mirrors the Dotfiles page + AssignmentEditor presets so the assign form
-// offers the same schedule shortcuts.
-const SCHEDULE_PRESETS: { label: string; value: string; cron: string }[] = [
-  { label: "Custom", value: "custom", cron: "" },
-  { label: "Every hour", value: "hourly", cron: "0 * * * *" },
-  { label: "Every 6 hours", value: "6h", cron: "0 */6 * * *" },
-  { label: "Daily", value: "daily", cron: "0 0 * * *" },
-  { label: "Weekly", value: "weekly", cron: "0 0 * * 0" },
-  { label: "Monthly", value: "monthly", cron: "0 0 1 * *" },
-  { label: "On boot", value: "@reboot", cron: "@reboot" },
-  { label: "On login", value: "@login", cron: "@login" },
-];
-
-function schedulePresetForCron(cron: string | null | undefined): string {
-  if (!cron) return "custom";
-  const preset = SCHEDULE_PRESETS.find((p) => p.cron === cron);
-  return preset ? preset.value : "custom";
-}
 
 interface AssignForm {
   hostId: string;
@@ -132,7 +119,7 @@ function buildCreateBody(form: FolderForm): Record<string, unknown> {
 function validateFolderForm(form: FolderForm): string | null {
   if (form.backend === "s3") {
     if (form.s3Bucket.trim() === "") return "s3 bucket name is required";
-    if (form.backendId.trim() === "") return "pick an S3 backend for this folder";
+    if (form.backendId.trim() === "") return "pick an S3 storage destination for this folder";
   }
   return null;
 }
@@ -246,6 +233,22 @@ export function Folders() {
       ? true
       : assignments.some((a) => a.hostId === hostFilter),
   );
+
+  // LAMA-271: shared with the empty state — the toolbar "New folder" button
+  // and the empty-state CTA open the same existing in-page flow.
+  function openNewFolder(): void {
+    // LAMA-241: preselect the first configured backend instead of the
+    // credential-less sftp default.
+    if (!showForm) {
+      const first = backends[0];
+      setForm(
+        first
+          ? { ...DEFAULT_FORM, backend: first.kind, backendId: first.id }
+          : DEFAULT_FORM,
+      );
+    }
+    setShowForm((s) => !s);
+  }
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -422,13 +425,13 @@ export function Folders() {
     return (
       <>
         <label>
-          Backend
+          Storage destination
           <select
             required
             value={current.backendId}
             onChange={(e) => setter({ ...current, backendId: e.target.value })}
           >
-            <option value="">Select a backend…</option>
+            <option value="">Select a storage destination…</option>
             {backends
               .filter((b) => b.kind === "s3")
               .map((b) => (
@@ -450,8 +453,8 @@ export function Folders() {
         </label>
         {backends.length === 0 ? (
           <p className="muted">
-            No backends configured yet — create one on the{" "}
-            <a href="#/backends">Backends</a> page first.
+            No storage destinations configured yet — create one on the{" "}
+            <a href="#/backends">Storage</a> page first.
           </p>
         ) : null}
       </>
@@ -472,13 +475,13 @@ export function Folders() {
     return (
       <>
         <label>
-          Backend
+          Storage destination
           <select
             required
             value={current.backendId}
             onChange={(e) => setter({ ...current, backendId: e.target.value })}
           >
-            <option value="">Select a {current.backend} backend…</option>
+            <option value="">Select a {current.backend} destination…</option>
             {matching.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.name}
@@ -529,7 +532,7 @@ export function Folders() {
           <HintText>{FOLDER_TYPE_HINTS[current.type]}</HintText>
         </label>
         <label>
-          Backend
+          Storage destination
           <select
             value={current.backend}
             onChange={(e) => updateFormBackend(e.target.value, current, setter)}
@@ -567,19 +570,22 @@ export function Folders() {
       ),
     );
     const availableHosts = hosts.filter((h) => !assignedHostIds.has(h.id));
+    // LAMA-267: "Next: …" preview for the schedule being set up. Computed
+    // once per render; null when nothing schedulable is set yet.
+    const assignNextRun = nextRunSentence(assignForm.syncExpr);
     return (
       <form className="form" onSubmit={onAssign}>
-        <h2 className="form-title">Assign “{assigningFolder.name}” to a host</h2>
+        <h2 className="form-title">Set up “{assigningFolder.name}” on a device</h2>
         {availableHosts.length === 0 ? (
           <p className="muted">
             {hosts.length === 0
-              ? "No hosts registered yet — add one from the Hosts page first."
-              : "Every registered host already has this folder assigned."}
+              ? "No devices registered yet — add one from the Devices page first."
+              : "Every device already has this folder set up."}
           </p>
         ) : (
           <>
             <label>
-              Host
+              Device
               <select
                 required
                 value={assignForm.hostId}
@@ -618,7 +624,7 @@ export function Folders() {
               />
             </label>
             <label>
-              Schedule (cron, optional)
+              Schedule
               <select
                 value={schedulePresetForCron(assignForm.syncExpr)}
                 onChange={(e) => {
@@ -631,29 +637,39 @@ export function Folders() {
                   <option key={p.value} value={p.value}>{p.label}</option>
                 ))}
               </select>
+              {/* LAMA-267: plain-sentence preview of the next fire. */}
+              {assignNextRun && <span className="muted next-run">{assignNextRun}</span>}
             </label>
-            <label>
-              Custom cron (optional)
-              <input
-                placeholder="*/15 * * * *"
-                value={assignForm.syncExpr}
-                onChange={(e) => {
-                  setAssignForm({ ...assignForm, syncExpr: e.target.value });
-                  setAssignCronError(null);
-                }}
-              />
-              <HintText>
-                Cron expression, e.g. <code>0 * * * *</code> = every hour. Leave
-                empty to sync on the daemon's default schedule.
-              </HintText>
-              {assignCronError && <div className="error">{assignCronError}</div>}
-            </label>
+            {/* LAMA-267: the raw cron input hides behind a reveal toggle and
+                only auto-opens when the selected preset is "Custom". */}
+            <details
+              className="schedule-custom-reveal"
+              open={schedulePresetForCron(assignForm.syncExpr) === "custom"}
+            >
+              <summary>Advanced: custom cron</summary>
+              <label>
+                Custom schedule
+                <input
+                  placeholder="*/15 * * * *"
+                  value={assignForm.syncExpr}
+                  onChange={(e) => {
+                    setAssignForm({ ...assignForm, syncExpr: e.target.value });
+                    setAssignCronError(null);
+                  }}
+                />
+                <HintText>
+                  Schedule in cron format, e.g. <code>0 * * * *</code> = every
+                  hour. Leave empty to use this device's default schedule.
+                </HintText>
+                {assignCronError && <div className="error">{assignCronError}</div>}
+              </label>
+            </details>
           </>
         )}
         <div className="actions">
           {availableHosts.length > 0 && (
             <button type="submit" className="action primary" disabled={busy}>
-              Assign
+              Set up
             </button>
           )}
           <button
@@ -671,10 +687,10 @@ export function Folders() {
 
   return (
     <div className="page">
-      <div className="toolbar">
-        <h1>Folders</h1>
-        <label className="scope-filter" title="Show only folders assigned to a specific host">
-          Host
+      <PageHeader title="Synced folders" purpose="Folders kept in sync or backed up across your devices." />
+<div className="toolbar">
+        <label className="scope-filter" title="Show only folders set up on a specific device">
+          Device
           <select
             value={hostFilter ?? "__all__"}
             onChange={(e) => {
@@ -694,7 +710,7 @@ export function Folders() {
               }
             }}
           >
-            <option value="__all__">All hosts</option>
+            <option value="__all__">All devices</option>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.hostname}
@@ -705,19 +721,7 @@ export function Folders() {
         <button
           type="button"
           className="action primary"
-          onClick={() => {
-            // LAMA-241: preselect the first configured backend instead of
-            // the credential-less sftp default.
-            if (!showForm) {
-              const first = backends[0];
-              setForm(
-                first
-                  ? { ...DEFAULT_FORM, backend: first.kind, backendId: first.id }
-                  : DEFAULT_FORM,
-              );
-            }
-            setShowForm((s) => !s);
-          }}
+          onClick={openNewFolder}
         >
           {showForm ? "Cancel" : "New folder"}
         </button>
@@ -745,6 +749,21 @@ export function Folders() {
         />
       ) : null}
 
+      {items !== null && filteredItems.length === 0 && !hostFilter ? (
+        <EmptyState
+          variant="folders"
+          title="No synced folders yet"
+          how="Create a folder, choose where its data lives, and set it up on a device to start syncing."
+          ctaLabel="New folder"
+          onCta={openNewFolder}
+          steps={[
+            "Name the folder and pick a storage destination",
+            "Choose which devices it's set up on",
+            "Pick a schedule — or sync it now",
+          ]}
+          timeNote="takes 30s"
+        />
+      ) : (
       <table className="data data-folders">
         <colgroup>
           {/* LAMA-240: pinned widths so the row geometry stays stable when
@@ -762,9 +781,9 @@ export function Folders() {
           <tr>
             <th>Name</th>
             <th>Type</th>
-            <th>Backend</th>
+            <th>Storage</th>
             <th>Size</th>
-            <th>Assignments</th>
+            <th>Set up on</th>
             <th>Created</th>
             <th />
           </tr>
@@ -778,8 +797,8 @@ export function Folders() {
             <tr className="empty-row">
               <td colSpan={7}>
                 {hostFilter
-                  ? `No folders assigned to ${hostLabel(hostFilter)} yet.`
-                  : "No folders yet — create one, then assign it to a host to start syncing."}
+                  ? `No folders set up on ${hostLabel(hostFilter)} yet.`
+                  : "No synced folders yet — create one, then set it up on a device to start syncing."}
               </td>
             </tr>
           ) : (
@@ -842,7 +861,7 @@ export function Folders() {
                     onClick={() => beginAssign(folder, assignments)}
                     disabled={busy}
                   >
-                    Assign
+                    Set up on device…
                   </button>
                   <Link
                     className="action"
@@ -874,13 +893,13 @@ export function Folders() {
                   <td colSpan={7}>
                     {assignments.length === 0 ? (
                       <p className="muted">
-                        No assignments yet — pick a host from the “Assign” button above.
+                        Not set up on any device yet — use “Set up” above to add one.
                       </p>
                     ) : (
                       <table className="data data-nested">
                         <thead>
                           <tr>
-                            <th>Host</th>
+                            <th>Device</th>
                             <th>Role</th>
                             <th>Local path</th>
                             <th>Schedule</th>
@@ -914,8 +933,20 @@ export function Folders() {
                                   {assignment.localPath}
                                 </code>
                               </td>
-                              <td className="mono muted assignment-schedule">
-                                {assignment.syncExpr ?? "—"}
+                              <td className="muted assignment-schedule">
+                                {/* LAMA-267: human sentence instead of raw
+                                    cron; the raw expression stays available
+                                    as a hover tooltip. */}
+                                {assignment.syncExpr ? (
+                                  <span
+                                    className="next-run"
+                                    title={assignment.syncExpr}
+                                  >
+                                    {nextRunSentence(assignment.syncExpr) ?? "—"}
+                                  </span>
+                                ) : (
+                                  "—"
+                                )}
                               </td>
                               <td>
                                 {effectiveMode ? (
@@ -972,13 +1003,14 @@ export function Folders() {
           )}
         </tbody>
       </table>
+      )}
 
       {deletingFolderId && (
         <ConfirmDialog
           title="Delete folder"
           danger
           confirmLabel="Delete"
-          message="Delete this folder and all its assignments?"
+          message="Delete this folder and remove it from every device it is set up on?"
           onConfirm={() => void confirmDeleteFolder()}
           onCancel={() => setDeletingFolderId(null)}
         />
@@ -986,10 +1018,10 @@ export function Folders() {
 
       {unassign && (
         <ConfirmDialog
-          title="Unassign folder"
+          title="Remove from device"
           danger
-          confirmLabel="Unassign"
-          message={`Unassign this folder from ${unassign.hostId}?`}
+          confirmLabel="Remove"
+          message={`Remove this folder from ${unassign.hostId}?`}
           onConfirm={() => void confirmUnassign()}
           onCancel={() => setUnassign(null)}
         />

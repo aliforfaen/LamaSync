@@ -42,6 +42,7 @@ All paths are under `/api/v1/` unless noted.
 | Method   | Path                                       | Purpose                                          |
 |----------|--------------------------------------------|--------------------------------------------------|
 | GET      | `/health`                                  | Fleet summary + per-host status + `serverVersion`, `dbSizeBytes` |
+| GET      | `/health/drills`                           | Recent backup fire-drill history (newest first, joined with destination names) (LAMA-266) |
 | POST     | `/register`                                | Register or update a host                        |
 | GET      | `/hosts`                                   | List every registered host                       |
 | GET      | `/hosts/:hostId`                           | Get one host by id                               |
@@ -52,6 +53,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/hosts/:hostId/actions`                   | Enqueue a control-plane action                   |
 | GET      | `/hosts/:hostId/actions`                   | Action history for the host                      |
 | GET      | `/actions/pending`                         | Daemon poll: claim pending actions               |
+| GET      | `/actions/taken?hostId=...`                | Daemon boot-time reclaim: a host's taken actions |
 | POST     | `/actions/:id/complete`                    | Daemon ack: mark action done/failed              |
 | GET      | `/release/latest`                          | Latest GitHub release info (proxy)               |
 | GET      | `/folders`                                 | List folders                                     |
@@ -63,13 +65,20 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/folders/:id/assignments`                 | List assignments for a folder                    |
 | PATCH    | `/folders/:id/assign/:hostId`              | Update one assignment (role, schedule, ...)      |
 | DELETE   | `/folders/:id/assign/:hostId`              | Unassign                                         |
+| PUT      | `/assignments/:id`                         | Intentional 405 — assignments are addressed by folder+host; use `/folders/:folderId/assign/:hostId` |
+| PATCH    | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
+| DELETE   | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only; 15-min cache) |
+| GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only; 15-min cache) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
-| GET      | `/backends/:backendId`                     | Read one backend                                 |
+| GET      | `/backends/:backendId`                     | Read one backend (additive `lastProveAt`/`lastProveOk` for the badge) |
 | PATCH    | `/backends/:backendId`                     | Update/rotate backend credentials                |
 | DELETE   | `/backends/:backendId`                     | Delete backend (409 while folders use it)        |
 | POST     | `/backends/:backendId/test`                | Test connection (rclone lsd, 5s timeout)         |
+| POST     | `/backends/:backendId/prove`               | Run a "Prove it" restore test against the backend's latest restic snapshot into a private tempdir (LAMA-266) |
+| POST     | `/backends/:backendId/drill`               | Run a full fire drill (liveness probe + prove-it + audit row + notification) (LAMA-266) |
+| POST     | `/backends/test`                           | Test a backend DRAFT without persisting (write-only secret fields may fall back to the stored value via `backendId`) |
 | GET      | `/dotfiles/manifests`                      | List dotfile manifests                           |
 | POST     | `/dotfiles/manifests`                      | Create a manifest                                |
 | PUT      | `/dotfiles/manifests/:id`                  | Update a manifest                                |
@@ -87,6 +96,14 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/operations/release`                      | Release folder lock                              |
 | GET      | `/shares`                                  | List NFS / SMB shares                            |
 | POST     | `/admin/prune?olderThanMs=<ms>`            | Manually trim operation_log                      |
+| GET      | `/demo`                                   | Demo-mode state (whether demo data is present)  |
+| POST     | `/demo/seed`                              | Seed a demo fleet (fake devices, timeline, snapshot) |
+| DELETE   | `/demo`                                   | Delete all demo data (confirmed by caller)      |
+| GET      | `/pause`                                  | Current pause/slow state: `{ global: PauseState\|null, hosts: PauseState[] }` (LAMA-273) |
+| POST     | `/pause`                                  | Set a global pause/slow window `{ until, mode, bwlimit? }`; bumps every host's `config_revision` (LAMA-273) |
+| DELETE   | `/pause`                                  | Resume (clear the global pause) (LAMA-273)      |
+| POST     | `/hosts/:hostId/pause`                    | Set a per-device pause/slow window; bumps that host's `config_revision` (LAMA-273) |
+| DELETE   | `/hosts/:hostId/pause`                    | Resume (clear the per-device pause) (LAMA-273)  |
 | GET      | `/notifications`                           | Durable notification history                      |
 | GET      | `/notifications/channels`                  | List delivery channels                           |
 | POST     | `/notifications/channels`                  | Create channel                                   |
@@ -105,6 +122,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/browse/delete`                           | Delete entries (job)                              |
 | GET      | `/browse/jobs`                             | Recent browse write jobs                         |
 | GET      | `/stats/storage`                           | Storage report (5-min cache)                     |
+| GET      | `/stats/storage/history`                   | Per-backend size time series for the growth sparkline (LAMA-269) |
 | GET      | `/restic/snapshots`                        | List restic snapshots                            |
 | POST     | `/restic/snapshots`                        | Daemon reports a new snapshot                    |
 | GET      | `/restic/restore`                          | List restore jobs                                |
@@ -151,8 +169,9 @@ spec. The high-level shapes (verbose commentary):
 - `Host { id, hostname, tailnetIp?, lanIp?, lastSeen?, status, version?, updateAvailable?, configRevision? }`
 - `Folder { id, name, type, createdAt?, encrypted?, cryptPassword?, backend?, backendId?, s3Bucket?, gitProvider?, gitRemote? }`
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }`
-- `Backend { id, name, kind, s3Provider?, s3Endpoint?, s3Region?, s3AccessKeyId?, hasSecret?, s3SecretAccessKey? (write-only), localPath?, resticRepository?, hasResticPassword?, resticPassword? (write-only), createdAt }`
-- `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details?, durationMs? }`
+- `Backend { id, name, kind, s3Provider?, s3Endpoint?, s3Region?, s3AccessKeyId?, hasSecret?, s3SecretAccessKey? (write-only), localPath?, resticRepository?, hasResticPassword?, resticPassword? (write-only), createdAt, lastProveAt?, lastProveOk? }` — `lastProveAt`/`lastProveOk` are epoch ms + boolean; null/null means "never proven". LAMA-266
+- `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details?, durationMs? }` — drill runs use `host_id = "_backup-health-drill"`, `operation = "backup_drill"`, `folder_id = NULL`. LAMA-266
+- `HealthDrill { id, backendId, kind: "prove"|"drill", ranAt, ok, detail? }` — one row per prove/drill run; `detail` is a scrubbed failure summary (never raw restic stderr and never secrets). LAMA-266
 - `DotfileManifest { id, hostId, appName, paths[], excludes[]?, schedule?, instructions?, lastSyncAt?, lastSyncDirection?, originalUploaderHostId? }`
 - `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum?, description? }`
 - `ResticSnapshot { id, snapshotId, folderId, hostId, timestamp, paths[], sizeBytes?, tags? }`
@@ -160,6 +179,8 @@ spec. The high-level shapes (verbose commentary):
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
 - `QueuedAction { id, hostId, type, payload?, status, createdAt, takenAt?, completedAt?, result? }`
 - `LockInfo { folderId, lockedBy, lockedAt, lockTtl }`
+- `PauseState { scope: "global"|"host", hostId?, until (ISO), mode: "pause"|"slow", bwlimit? }` — `bwlimit` is a single-segment rclone size (e.g. "1M"); honored only when `mode === "slow"` (LAMA-273)
+- `EffectivePause { until (ISO), mode: "pause"|"slow", bwlimit: string|null }` — embedded on the `/config/:hostId` payload as `pause`; resolved server-side as the host row if present, else the global row, else null (LAMA-273)
 
 `?`-marked fields are nullable. Timestamps are milliseconds since epoch.
 
@@ -173,6 +194,29 @@ spec. The high-level shapes (verbose commentary):
   rule 5: explicit intent for any destructive API call).
 - The `/api/v1/browse/*` write endpoints (copy/move/rename/mkdir/upload/
   delete) all run as async jobs; track via `/api/v1/browse/jobs`.
+- Backup health (LAMA-266):
+  - **Prove it** (`POST /api/v1/backends/:backendId/prove`) restores ONE
+    random small file from the backend's latest restic snapshot into a
+    private `mkdtemp` directory under `os.tmpdir()`, verifies the
+    restored file matches the snapshot listing's recorded size + is
+    non-empty, and cleans up the tempdir in a `finally`. Never writes to
+    a real folder. On failure the response `detail` is a SCRUBBED summary
+    (stage + exit code only) — never raw restic stderr, never secrets.
+    Backend must be a restic backend with at least one snapshot; otherwise
+    the route returns `409 {"error":"prove requires a restic backend with snapshots"}`.
+  - **Fire drill** (`POST /api/v1/backends/:backendId/drill`) wraps prove
+    with a liveness probe (`restic snapshots --json`) and writes an
+    audit row to `operation_log` (host_id = `_backup-health-drill`,
+    operation = `backup_drill`) + a `health_drills` row + a notification
+    through the existing engine (LAMA-200). The same path runs on a
+    monthly cadence inside the server process — see env vars below.
+    Backend must be a restic backend; otherwise the route returns
+    `409 {"error":"backend is not a restic backend (missing repository or password)"}`.
+  - Cadence env vars (both default to a monthly pass + a 1h server-side
+    check tick): `LAMASYNC_DRILL_INTERVAL_MS` (per-backend due interval,
+    default `30 * 24 * 60 * 60 * 1000`) and `LAMASYNC_DRILL_CHECK_INTERVAL_MS`
+    (how often the server looks for due backends, default `60 * 60 * 1000`).
+    Set either to `0` to opt out.
 
 ## See also
 

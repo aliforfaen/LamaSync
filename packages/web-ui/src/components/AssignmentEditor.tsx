@@ -10,23 +10,10 @@ import { api } from "../api.ts";
 // Workstream 2: hint copy lives in the shared glossary now.
 import { CONFLICT_STRATEGY_HINTS, ROLE_HINTS } from "../concepts.ts";
 import { validateCronExpression } from "../cron.ts";
-
-const SCHEDULE_PRESETS: { label: string; value: string; cron: string }[] = [
-  { label: "Custom", value: "custom", cron: "" },
-  { label: "Every hour", value: "hourly", cron: "0 * * * *" },
-  { label: "Every 6 hours", value: "6h", cron: "0 */6 * * *" },
-  { label: "Daily", value: "daily", cron: "0 0 * * *" },
-  { label: "Weekly", value: "weekly", cron: "0 0 * * 0" },
-  { label: "Monthly", value: "monthly", cron: "0 0 1 * *" },
-  { label: "On boot", value: "@reboot", cron: "@reboot" },
-  { label: "On login", value: "@login", cron: "@login" },
-];
-
-function schedulePresetForCron(cron: string | null | undefined): string {
-  if (!cron) return "custom";
-  const preset = SCHEDULE_PRESETS.find((p) => p.cron === cron);
-  return preset ? preset.value : "custom";
-}
+// LAMA-267: presets + the "Next: …" sentence live in shared helpers so every
+// web-ui surface (and the TUI copy) stays in lock-step.
+import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
+import { nextRunSentence } from "../next-run.ts";
 
 function toStr(v: string | number | null | undefined): string {
   return v === null || v === undefined ? "" : String(v);
@@ -208,11 +195,14 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
   const conflictHint = CONFLICT_STRATEGY_HINTS.find(
     (c) => c.value === state.conflictStrategy,
   )?.hint;
+  // LAMA-267: "Next: …" preview of the schedule being edited. Computed once
+  // per render; null when nothing schedulable is set yet.
+  const nextRun = nextRunSentence(state.syncExpr);
 
   return (
     <form className="form assignment-editor" onSubmit={onSave}>
       <h2 className="form-title">
-        Edit assignment — {folderName ?? assignment.folderId} on {hostName ?? assignment.hostId}
+        Edit “{folderName ?? assignment.folderId}” on {hostName ?? assignment.hostId}
       </h2>
       {error && <div className="error">{error}</div>}
 
@@ -249,10 +239,19 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
             <option key={p.value} value={p.value}>{p.label}</option>
           ))}
         </select>
+        {/* LAMA-267: a plain-sentence preview of the next fire instead of
+            the raw cron, matching what the daemon will actually do. */}
+        {nextRun && <span className="muted next-run">{nextRun}</span>}
       </label>
-      {state.schedulePreset === "custom" && (
+      {/* LAMA-267: the raw cron input hides behind a reveal toggle and only
+          auto-opens when "Custom" is the selected preset. */}
+      <details
+        className="schedule-custom-reveal"
+        open={state.schedulePreset === "custom"}
+      >
+        <summary>Advanced: custom cron</summary>
         <label>
-          Cron expression
+          Custom schedule
           <input
             placeholder="*/15 * * * *"
             value={state.syncExpr}
@@ -260,15 +259,15 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
             aria-invalid={cronError !== null}
           />
           <span className="muted">
-            Cron expression, e.g. <code>0 * * * *</code> = every hour. Leave
-            empty to use the daemon's default schedule.
+            Schedule in cron format, e.g. <code>0 * * * *</code> = every hour.
+            Leave empty for this device's default schedule.
           </span>
           {cronError && <div className="error">{cronError}</div>}
         </label>
-      )}
+      </details>
 
       <label>
-        Conflict strategy
+        When both sides changed
         <select
           value={state.conflictStrategy}
           onChange={(e) => set({ conflictStrategy: e.target.value })}
@@ -295,14 +294,14 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
               }
             }}
           >
-            <option value="inherit">Inherit</option>
+            <option value="inherit">Use folder default</option>
             <option value="sync">Sync</option>
-            <option value="mount">Mount</option>
+            <option value="mount">Read-only mount</option>
           </select>
           <span className="muted">
-            Override the folder type for this host. "Inherit" uses the
-            folder's type; "Sync" / "Mount" forces this host to sync or
-            mount regardless. Other hosts are unaffected.
+            Override how this device uses the folder. "Use folder default"
+            follows the folder's type; the other two force syncing or a
+            read-only mount on this device only. Other devices are unaffected.
           </span>
         </label>
       ) : null}

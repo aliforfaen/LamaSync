@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a bug in LamaSync (server, daemon, TUI/CLI, or web UI).
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Fill in what you know — a clear title and a
+        copy-paste way to reproduce beat a long essay.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Which part of LamaSync is affected?
+      options:
+        - Web UI
+        - TUI / CLI (lamasync-tui)
+        - Daemon (lamasyncd)
+        - Server (API / sync engine)
+        - Install / update / packaging
+        - Docs / agent skill
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: What did you run, click, or type? Include the exact command(s) if CLI.
+      placeholder: |
+        1. ...
+        2. ...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What should happen, and what actually happens?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `lamasync-tui --version` / `lamasyncd --version`, or the release tag.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: journalctl lines, `--json` output, web console errors. Redact any API keys.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked `docs/status.md` / existing issues for a known cause
+        - label: I redacted API keys and any secrets from the logs above

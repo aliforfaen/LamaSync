@@ -16,6 +16,8 @@ import type {
   NotificationEvent,
   OperationLog,
   OperationReport,
+  PauseMode,
+  PauseState,
   QueuedAction,
   QueuedActionType,
   ReleaseInfo,
@@ -757,6 +759,56 @@ export class LamaSyncApiClient {
       `/api/v1/conflicts/${encodeURIComponent(id)}/resolve`,
       JSON.stringify({ resolution }),
       "application/json",
+    );
+  }
+
+  // LAMA-273: pause / slow-mode toggle. Three reads / writes per scope pair
+  // (get + set + clear × {global, per-host}). Server semantics (LAMA-273):
+  //   - POST sets the row; DELETE clears it.
+  //   - POST with a past `until` is rejected (4xx) — pause/refusal must
+  //     happen via DELETE so a network race can't silently clear state.
+  //   - Set/clear bumps the affected hosts' `config_revision` so daemons
+  //     re-pull and observe the new effective pause on the next heartbeat.
+  getPause(): Promise<{ global: PauseState | null; hosts: PauseState[] }> {
+    return this.request<{ global: PauseState | null; hosts: PauseState[] }>(
+      "GET",
+      "/api/v1/pause",
+    );
+  }
+
+  setPause(body: {
+    until: string | number;
+    mode: PauseMode;
+    bwlimit?: string | null;
+  }): Promise<PauseState> {
+    return this.request<PauseState>(
+      "POST",
+      "/api/v1/pause",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  clearPause(): Promise<void> {
+    return this.request<void>("DELETE", "/api/v1/pause");
+  }
+
+  setHostPause(
+    hostId: string,
+    body: { until: string | number; mode: PauseMode; bwlimit?: string | null },
+  ): Promise<PauseState> {
+    return this.request<PauseState>(
+      "POST",
+      `/api/v1/hosts/${encodeURIComponent(hostId)}/pause`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  clearHostPause(hostId: string): Promise<void> {
+    return this.request<void>(
+      "DELETE",
+      `/api/v1/hosts/${encodeURIComponent(hostId)}/pause`,
     );
   }
 }

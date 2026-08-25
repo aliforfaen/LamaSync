@@ -20,6 +20,7 @@ import {
 } from "../app/widgets.ts";
 import { friendlyError } from "../friendly-error.ts";
 import type { Hotkey } from "../app/keymap.ts";
+import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import type {
   View,
   ViewContext,
@@ -126,7 +127,7 @@ export interface FleetViewOpts {
 
 export class FleetView implements View {
   static readonly id: ViewId = "fleet";
-  static readonly title = "Fleet";
+  static readonly title = "All devices";
 
   readonly id: ViewId = FleetView.id;
   readonly title: string = FleetView.title;
@@ -167,7 +168,12 @@ export class FleetView implements View {
     );
     this.selectRef = realize<SelectRenderable>(
       renderer,
-      Select({ options: [], flexGrow: 1 }),
+      Select({
+        options: [],
+        flexGrow: 1,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
+      }),
     );
     this.selectContainer = realize<BoxRenderable>(
       renderer,
@@ -240,10 +246,10 @@ export class FleetView implements View {
     const now = Date.now();
 
     const titleText: VNode = Text({
-      content: `Fleet — ${status === "live" ? "live" : "offline"}`,
+      content: `All devices — ${status === "live" ? "live" : "offline"}`,
     });
     const countText: VNode = Text({
-      content: `${hosts.length} host(s) known`,
+      content: `${hosts.length} device(s) known`,
     });
 
     const rows = toRows(hosts, now);
@@ -253,7 +259,7 @@ export class FleetView implements View {
       hosts.length === 0
         ? Box(
             { flexDirection: "column" },
-            Text({ content: "(no hosts registered yet — press r to refresh)" }),
+            Text({ content: "(no devices registered yet — press r to refresh)" }),
           )
         : this.selectContainer;
 

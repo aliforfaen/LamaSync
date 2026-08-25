@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Login } from "./components/Login.tsx";
 import { Nav } from "./components/Nav.tsx";
+import { CommandPalette } from "./components/CommandPalette.tsx";
 import { Dashboard } from "./pages/Dashboard.tsx";
 import { Hosts } from "./pages/Hosts.tsx";
 import { HostDetail } from "./pages/HostDetail.tsx";
 import { Folders } from "./pages/Folders.tsx";
 import { Backends } from "./pages/Backends.tsx";
 import { Dotfiles } from "./pages/Dotfiles.tsx";
+import { Presets } from "./pages/Presets.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
 import { Operations } from "./pages/Operations.tsx";
 import { Admin } from "./pages/Admin.tsx";
@@ -44,6 +46,9 @@ export function App() {
             authed ? (
               <div className="app">
                 <Nav />
+                {/* LAMA-270: cmd+k palette — authed sessions only, mounted
+                    inside the router so it can use useNavigate(). */}
+                <CommandPalette />
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/hosts" element={<Hosts />} />
@@ -51,6 +56,7 @@ export function App() {
                   <Route path="/folders" element={<Folders />} />
                   <Route path="/backends" element={<Backends />} />
                   <Route path="/dotfiles" element={<Dotfiles />} />
+                  <Route path="/presets" element={<Presets />} />
                   <Route path="/conflicts" element={<Conflicts />} />
                   <Route path="/operations" element={<Operations />} />
                   <Route path="/data" element={<DataBrowser />} />

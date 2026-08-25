@@ -126,3 +126,18 @@ export function IconSearch(props: SVGProps<SVGSVGElement>) {
     ...props,
   });
 }
+
+// LAMA-263: app-presets gallery (a 2x2 grid). Mirrors the iconBase style.
+export function IconPresets(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+      </>
+    ),
+    ...props,
+  });
+}

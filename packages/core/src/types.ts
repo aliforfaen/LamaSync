@@ -48,6 +48,13 @@ export interface Backend {
   /** Write-only: accepted on create/update, never returned. */
   resticPassword?: string | null;
   createdAt: number;
+  // LAMA-266: most recent successful-or-not "prove it" restore stamp.
+  // `lastProveAt` is epoch ms (null = never proven); `lastProveOk` is the
+  // boolean outcome of that run. The UI renders a "Verified 2h ago" badge
+  // from this pair without re-running the test. Additive: existing rows
+  // report null/null and the badge shows "not yet verified".
+  lastProveAt?: number | null;
+  lastProveOk?: boolean | null;
 }
 
 // LAMA-221: configurable notification delivery channels (ntfy / webhook).
@@ -134,6 +141,12 @@ export interface Host {
   // assignment, or dotfile change so daemons can detect "config drift" and
   // pull a fresh `/config/:hostId` without waiting for the 5-min refresh.
   configRevision?: number | null;
+  // LAMA-282: device OS label + storage used, reported by the daemon on
+  // each heartbeat for the device cards. `os` is a display string
+  // (e.g. "Linux 6.8.0"); `storageUsedBytes` is the bytes used on the
+  // device's primary filesystem.
+  os?: string | null;
+  storageUsedBytes?: number | null;
 }
 
 // LAMA-198: queued-action model. The control plane (Web UI) enqueues actions
@@ -274,6 +287,11 @@ export interface Conflict {
   path: string;
   localMtime?: number | null;
   remoteMtime?: number | null;
+  // LAMA-268: per-side file sizes for the side-by-side conflict cards.
+  // The daemon stats the local file; `remoteSizeBytes` is null when the
+  // remote size is unknown (no extra rclone call) — the UI renders "—".
+  localSizeBytes?: number | null;
+  remoteSizeBytes?: number | null;
   status: ConflictStatus;
   resolution?: ConflictResolution | null;
   createdAt: number;
@@ -342,6 +360,39 @@ export interface NotificationEvent {
   webhookDelivered: boolean;
 }
 
+// LAMA-264: demo-mode state. Returned by GET /api/v1/demo so the web UI
+// can decide between a "See a demo fleet" entry point and an active-demo
+// banner with a "Delete demo data" action. `counts` reflects only rows
+// flagged demo = 1; real data is never counted here.
+export interface DemoState {
+  hasDemo: boolean;
+  counts: {
+    hosts: number;
+    folders: number;
+    assignments: number;
+    backends: number;
+    operations: number;
+    snapshots: number;
+    manifests: number;
+  };
+}
+
+// LAMA-264: summary returned after a demo seed, so the UI can confirm what
+// was created. Mirrors the per-table demo counts.
+export interface DemoSeedSummary {
+  hosts: number;
+  folders: number;
+  assignments: number;
+  backends: number;
+  operations: number;
+  snapshots: number;
+  manifests: number;
+  /** Number of seeded pending conflicts (LAMA-268). */
+  conflicts?: number;
+  /** Server-side seed directory the demo file viewer reads from. */
+  seedDir: string;
+}
+
 // API request/response shapes
 export interface HealthResponse {
   status: "ok";
@@ -381,6 +432,14 @@ export interface HostConfig {
   // can sync directly. When the role is "use", the daemon can swap the
   // server-relayed remote for `peerRemote` for the listed folder ids.
   peers: Peer[];
+  // LAMA-273: effective pause for this host. Resolved by the server as
+  // (host row if present, else global row); expired rows are pruned on
+  // read so daemons see `null` for past windows. The daemon honors this
+  // by skipping scheduled runs while `until > now` and (in slow mode)
+  // appending `--bwlimit` to its rclone argv via the existing
+  // bandwidthSchedule plumbing. Additive: existing daemons without the
+  // pause handler ignore it without any change in behavior.
+  pause?: EffectivePause | null;
 }
 
 // LAN direct peer entry — server-detected same-/24 host that can be reached
@@ -413,6 +472,10 @@ export interface HealthReport {
   // preserve whatever the daemon reported last, so transient blank reports
   // don't downgrade the stored value.
   version?: string | null;
+  // LAMA-282: device OS label + bytes used on the primary filesystem,
+  // reported by the daemon on each heartbeat.
+  os?: string | null;
+  storageUsedBytes?: number | null;
 }
 
 export interface OperationReport {
@@ -539,5 +602,54 @@ export interface BrowseRef {
   kind: "local" | "s3";
   folderId?: string | null;
   path: string;
+}
+
+// LAMA-273: pause / slow mode toggle. The fleet can be paused globally or
+// per-device for a fixed window; slow mode caps rclone bandwidth via the
+// existing `bandwidthSchedule` plumbing (single value, not a schedule).
+// `until` is an ISO timestamp; the daemon treats rows past that instant as
+// absent. `bwlimit` is a single rclone size string (e.g. "1M") — there's no
+// support for schedules, only a flat cap, so the field is reused by the
+// executor as a single-segment `--bwlimit` value.
+export type PauseMode = "pause" | "slow";
+export type PauseScope = "global" | "host";
+
+export interface PauseState {
+  scope: PauseScope;
+  /** Present when scope === "host"; absent when scope === "global". */
+  hostId?: string;
+  /** ISO timestamp the pause window ends at. Past = effectively no pause. */
+  until: string;
+  mode: PauseMode;
+  /** Single-segment bandwidth cap; honored only when mode === "slow". */
+  bwlimit?: string | null;
+}
+
+/**
+ * LAMA-273: effective pause for one host as resolved by the server. A daemon
+ * pulls this from `/config/:hostId`; the server picks the host row when
+ * present and falls back to the global row. `null` means "no pause applies"
+ * (expired, absent, or a host row that's explicitly been cleared).
+ */
+export interface EffectivePause {
+  until: string;
+  mode: PauseMode;
+  /** Single-segment bandwidth cap (e.g. "1M"); honored only when mode === "slow". */
+  bwlimit: string | null;
+}
+
+// LAMA-266: one row in the `health_drills` table. `kind` distinguishes a
+// manual "Prove it" (POST /backends/:id/prove) from a scheduled fire-drill
+// (POST /backends/:id/drill or the monthly scheduler). `detail` is a
+// scrubbed server-side summary — never raw restic stderr and never
+// secrets. The summary shown to the UI is `summary` (kept inline on
+// operation_log + health_drills.detail) plus `durationMs`/`checkedAt`.
+export interface HealthDrill {
+  id: string;
+  backendId: string;
+  kind: "prove" | "drill";
+  ranAt: number;
+  ok: boolean;
+  detail: string | null;
 }
 

@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a new capability or user-facing improvement for LamaSync.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Larger feature ideas are tracked as Multica work orders (LAMA-xxx,
+        see docs/status.md). This template is for proposals you want
+        discussed here first — include the "why" as much as the "what".
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do, and what makes it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: How should it work? Sketch the user flow or the API/CLI shape.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you try or think of? (rclone flags, scripts, other tools…)
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affects
+      options:
+        - Web UI
+        - TUI / CLI
+        - Daemon
+        - Server / API
+        - Docs / onboarding
+      multiple: true
+  - type: markdown
+    attributes:
+      value: |
+        **Design note:** user-facing naming follows the vocabulary in
+        `docs/terminology.md` (devices, storage destinations, app settings
+        backups). API routes/CLI commands/config keys are stable contracts —
+        a proposal may touch them, but that needs an explicit callout.

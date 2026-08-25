@@ -293,19 +293,29 @@ script is a standalone `curl | bash` updater for clients.
   the duration of the sync; the other connects SFTP to the peer's LAN IP.
 - On 5s connection timeout, fall back to the standard server relay.
 
-### `lamasync-tui` (OpenTUI)
+### `lamasync` (CLI + TUI, LAMA-229/276)
 
-**Local mode** (default, connects to Unix socket):
-- Folder list with hotkeys `1`–`6`: sync-all, sync-one, refresh, fleet, logs,
-  dotfiles; `c` conflicts, `p` cache profile (mount), `s` switch type,
-  `n` network shares, `g` GitHub repos, `q` quit.
-- Selecting a folder in the list updates the active folder used by sync-one,
-  cache-profile, and switch-type.
+The `lamasync` binary is BOTH the OpenTUI shell AND a non-interactive CLI:
+any positional subcommand (`lamasync status`, `lamasync folders list …`)
+routes to non-interactive dispatch (exit codes 0/1/2/3/4 = ok/runtime/
+usage/auth-failure/unreachable; `--json` everywhere); bare invocation with a
+TTY boots the shell; `LAMASYNC_NO_TUI=1` keeps the legacy CLI fallback.
 
-**Fleet mode** (connects to server REST + WS):
-- Host list with hotkeys `r/l/d/b/q`: refresh, logs, dotfiles, local, quit.
-- The fleet view subscribes to `/api/v1/ws` and merges incoming `host` events
-  into the displayed host list.
+The shell's tabs are task-oriented (LAMA-275 D3/D4, approved):
+
+- **This device** — folder list for the local host (hotkeys `1` sync all,
+  `2` sync one, `3` refresh, `p` cache profile, `s` switch type,
+  `n` network shares, `w` new backup; the footer repaints per-folder
+  actions for the selected row).
+- **All devices** — live fleet via `/api/v1/ws` host events.
+- **Backups & apps** — fleet-wide backup folders + dotfile restores.
+- **Conflicts** / **Activity** — pending resolutions / operation log.
+- **More** — tools & integrations; GitHub (repo adoption via `gh`) is a
+  drill-in view hidden from the tab bar, reached from More or the `g`
+  hotkey, Esc returns to More.
+
+**Local mode** (default, connects to Unix socket); **Fleet mode** connects
+to server REST + WS and subscribes to `/api/v1/ws` host events.
 
 ---
 
@@ -375,6 +385,12 @@ When a new client registers (`POST /api/v1/register`):
    - Server's tailnet IP for SFTP remotes.
 3. Client writes local config cache, sets up timers for schedules.
 4. Client runs initial sync for each assigned folder.
+
+Every config-affecting change (assignment updates, host rename,
+`tailnet_ip` set/clear, write of a cached value) bumps `config_revision`;
+clients compare it on every 30s heartbeat and re-pull immediately when it
+moves, so peer remotes (tailnet + LAN sections) and schedules stay fresh
+without waiting for the 5-minute refresh timer.
 
 ---
 

@@ -9,7 +9,10 @@ CREATE TABLE IF NOT EXISTS hosts (
     status      TEXT DEFAULT 'unknown',
     lan_ip      TEXT,
     version     TEXT,
-    config_revision INTEGER DEFAULT 0
+    config_revision INTEGER DEFAULT 0,
+    os          TEXT,
+    storage_used_bytes INTEGER,
+    demo        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -23,7 +26,8 @@ CREATE TABLE IF NOT EXISTS folders (
     git_remote            TEXT,
     backend               TEXT DEFAULT 'sftp',
     backend_id            TEXT REFERENCES backends(id),
-    s3_bucket             TEXT
+    s3_bucket             TEXT,
+    demo                  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS folder_assignments (
@@ -55,6 +59,7 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     cache_max_size      TEXT,
     restic_repository   TEXT,
     restic_password     TEXT,
+    demo                INTEGER NOT NULL DEFAULT 0,
     UNIQUE(folder_id, host_id)
 );
 
@@ -69,6 +74,7 @@ CREATE TABLE IF NOT EXISTS dotfile_manifests (
     last_sync_at  INTEGER,
     last_sync_direction TEXT,
     original_uploader_host_id TEXT,
+    demo                    INTEGER NOT NULL DEFAULT 0,
     UNIQUE(host_id, app_name)
 );
 
@@ -90,7 +96,8 @@ CREATE TABLE IF NOT EXISTS restic_snapshots (
     timestamp     INTEGER NOT NULL,
     paths         TEXT NOT NULL, -- JSON array
     size_bytes    INTEGER,
-    tags          TEXT -- JSON array
+    tags          TEXT, -- JSON array
+    demo          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_restic_snapshots_folder_host
@@ -106,7 +113,8 @@ CREATE TABLE IF NOT EXISTS restic_restore_jobs (
     status        TEXT NOT NULL DEFAULT 'pending',
     created_at    INTEGER NOT NULL,
     resolved_at   INTEGER,
-    error         TEXT
+    error         TEXT,
+    demo          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_restic_restore_jobs_target
@@ -119,10 +127,13 @@ CREATE TABLE IF NOT EXISTS conflicts (
     path          TEXT NOT NULL,
     local_mtime   INTEGER,
     remote_mtime  INTEGER,
+    local_size    INTEGER,
+    remote_size   INTEGER,
     status        TEXT NOT NULL DEFAULT 'pending',
     resolution    TEXT,
     created_at    INTEGER NOT NULL,
     resolved_at   INTEGER,
+    demo          INTEGER NOT NULL DEFAULT 0,
     UNIQUE(host_id, folder_id, path)
 );
 
@@ -138,7 +149,8 @@ CREATE TABLE IF NOT EXISTS operation_log (
     status      TEXT NOT NULL,
     summary     TEXT,
     details     TEXT,
-    duration_ms INTEGER
+    duration_ms INTEGER,
+    demo        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS notification_events (
@@ -189,7 +201,14 @@ CREATE TABLE IF NOT EXISTS backends (
     local_path         TEXT,
     restic_repository  TEXT,
     restic_password_enc TEXT,
-    created_at         INTEGER NOT NULL
+    demo               INTEGER NOT NULL DEFAULT 0,
+    created_at         INTEGER NOT NULL,
+    -- LAMA-266: most recent "prove it" restore for this destination.
+    -- Stamped on every POST /backends/:id/prove run so the UI can render
+    -- a "Verified 2h ago" badge and the scheduler can show last-known
+    -- liveness without re-running the test.
+    last_prove_at      INTEGER,
+    last_prove_ok      INTEGER
 );
 
 -- LAMA-226: Data Browser write operations (copy/move/upload/rename/mkdir).
@@ -248,6 +267,54 @@ CREATE TABLE IF NOT EXISTS queued_actions (
 
 CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status
     ON queued_actions(host_id, status);
+
+-- LAMA-269: size time series for the storage donut + growth sparkline.
+-- folder-scoped rows record each measured folder working set; backend-
+-- scoped rows aggregate a destination's total so the sparkline can plot
+-- growth without re-aggregating per-folder history on every request.
+CREATE TABLE IF NOT EXISTS size_history (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope         TEXT NOT NULL,        -- 'folder' | 'backend'
+    ref_id        TEXT NOT NULL,        -- folder id or backend id
+    bytes         INTEGER,
+    object_count  INTEGER,
+    measured_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope
+    ON size_history(ref_id, scope, measured_at);
+
+-- LAMA-273: pause / slow mode. One row per scope ('global' or one per
+-- host_id). The PK is the scope for global rows and the hostId for host
+-- rows, so a single UPSERT replaces the prior state without leaving stale
+-- duplicates. The server prunes expired rows on every read so daemons
+-- never observe a past "until" timestamp.
+CREATE TABLE IF NOT EXISTS pause_state (
+    id          TEXT PRIMARY KEY,    -- 'global' for the fleet-wide pause, otherwise hostId
+    scope       TEXT NOT NULL,      -- 'global' | 'host'
+    host_id     TEXT,               -- non-null only when scope = 'host'
+    until_ms    INTEGER NOT NULL,   -- epoch ms; rows where until_ms <= now are pruned on read
+    mode        TEXT NOT NULL,      -- 'pause' | 'slow'
+    bwlimit     TEXT,               -- rclone size string, honored only when mode = 'slow'
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pause_state_host
+    ON pause_state(host_id);
+
+-- LAMA-266: monthly backup "fire drills". One row per (backend, kind)
+-- attempt; kind distinguishes a manual prove-it run ('prove') from a
+-- scheduled drill ('drill'). The scheduler reads the most recent 'drill'
+-- row per backend to decide whether the next pass is due, which survives
+-- a server restart without immediately re-firing.
+CREATE TABLE IF NOT EXISTS health_drills (
+    id         TEXT PRIMARY KEY,
+    backend_id TEXT NOT NULL REFERENCES backends(id),
+    kind       TEXT NOT NULL,    -- 'prove' | 'drill'
+    ran_at     INTEGER NOT NULL,
+    ok         INTEGER NOT NULL,
+    detail     TEXT              -- scrubbed failure summary (no stderr/secrets)
+);
+CREATE INDEX IF NOT EXISTS idx_health_drills_backend_ran_at
+    ON health_drills(backend_id, ran_at);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -270,6 +337,11 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE dotfile_manifests ADD COLUMN instructions TEXT",
   "ALTER TABLE restic_restore_jobs ADD COLUMN include TEXT",
   "CREATE INDEX IF NOT EXISTS idx_conflicts_host_folder ON conflicts(host_id, folder_id, status)",
+  // LAMA-268: per-side sizes for the conflict cards + demo flag so seeded
+  // demo conflicts are wiped by the demo-delete.
+  "ALTER TABLE conflicts ADD COLUMN local_size INTEGER",
+  "ALTER TABLE conflicts ADD COLUMN remote_size INTEGER",
+  "ALTER TABLE conflicts ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE folders ADD COLUMN git_provider TEXT",
   "ALTER TABLE folders ADD COLUMN git_remote TEXT",
   "CREATE TABLE IF NOT EXISTS folder_locks (folder_id TEXT PRIMARY KEY, locked_by TEXT, locked_at INTEGER, lock_ttl INTEGER DEFAULT 1200, lock_id TEXT)",
@@ -288,6 +360,9 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE dotfile_manifests ADD COLUMN original_uploader_host_id TEXT",
   "ALTER TABLE hosts ADD COLUMN version TEXT",
   "ALTER TABLE hosts ADD COLUMN config_revision INTEGER DEFAULT 0",
+  // LAMA-282: device OS label + storage used for the device cards.
+  "ALTER TABLE hosts ADD COLUMN os TEXT",
+  "ALTER TABLE hosts ADD COLUMN storage_used_bytes INTEGER",
   "CREATE TABLE IF NOT EXISTS queued_actions (id TEXT PRIMARY KEY, host_id TEXT NOT NULL REFERENCES hosts(id), type TEXT NOT NULL, payload TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, taken_at INTEGER, completed_at INTEGER, result TEXT)",
   "CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status ON queued_actions(host_id, status)",
   "CREATE TABLE IF NOT EXISTS notification_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, severity TEXT NOT NULL, message TEXT NOT NULL, host_id TEXT, folder_id TEXT, payload TEXT, created_at INTEGER NOT NULL, ntfy_delivered INTEGER DEFAULT 0, webhook_delivered INTEGER DEFAULT 0)",
@@ -308,6 +383,39 @@ export const MIGRATIONS: string[] = [
   // today's behavior so existing assignments (and existing dev databases)
   // need no migration other than this ADD COLUMN.
   "ALTER TABLE folder_assignments ADD COLUMN mode TEXT NOT NULL DEFAULT 'inherit'",
+  // LAMA-264: demo-mode flag on every table the demo seeder writes. Demo
+  // rows are flagged (demo = 1) so a single confirmed DELETE wipes them
+  // without touching any real data, and a real daemon never acts on them
+  // (demo hosts have no heartbeat; a daemon only pulls its own host id).
+  "ALTER TABLE hosts ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE folders ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE folder_assignments ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE backends ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE operation_log ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE restic_snapshots ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE dotfile_manifests ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  // LAMA-264: restic_restore_jobs can reference demo folders/hosts; flag it
+  // too so a demo delete is exhaustive. No seeder writes restore jobs yet,
+  // but the column keeps the demo-cleanup contract complete.
+  "ALTER TABLE restic_restore_jobs ADD COLUMN demo INTEGER NOT NULL DEFAULT 0",
+  // LAMA-269: size time series for the storage donut + growth sparkline.
+  "CREATE TABLE IF NOT EXISTS size_history (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, ref_id TEXT NOT NULL, bytes INTEGER, object_count INTEGER, measured_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope ON size_history(ref_id, scope, measured_at)",
+  // LAMA-273: pause / slow mode toggle. PK is the scope for the global row
+  // and the hostId for per-host rows so a single UPSERT replaces prior
+  // state. The schema lives in SERVER_SCHEMA for fresh DBs; the CREATE
+  // TABLE here is idempotent for existing ones ("already exists" is
+  // swallowed by initDb's "duplicate column" try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS pause_state (id TEXT PRIMARY KEY, scope TEXT NOT NULL, host_id TEXT, until_ms INTEGER NOT NULL, mode TEXT NOT NULL, bwlimit TEXT, created_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_pause_state_host ON pause_state(host_id)",
+  // LAMA-266: monthly backup fire drills + per-backend last-prove stamp.
+  // Add columns first (for pre-LAMA-266 backends), then the table + index.
+  // The CREATE TABLE here is the idempotent safety net for the same
+  // "already exists" reason pause_state uses.
+  "ALTER TABLE backends ADD COLUMN last_prove_at INTEGER",
+  "ALTER TABLE backends ADD COLUMN last_prove_ok INTEGER",
+  "CREATE TABLE IF NOT EXISTS health_drills (id TEXT PRIMARY KEY, backend_id TEXT NOT NULL REFERENCES backends(id), kind TEXT NOT NULL, ran_at INTEGER NOT NULL, ok INTEGER NOT NULL, detail TEXT)",
+  "CREATE INDEX IF NOT EXISTS idx_health_drills_backend_ran_at ON health_drills(backend_id, ran_at)",
 ];
 
 /**

@@ -1,5 +1,5 @@
 import { CronExpressionParser } from "cron-parser";
-import type { DotfileManifest, Folder, FolderAssignment } from "@lamasync/core";
+import type { DotfileManifest, EffectivePause, Folder, FolderAssignment } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core";
 
 const DEFAULT_REBOOT_DELAY_MS = 30_000;
@@ -13,6 +13,12 @@ export interface SchedulerOptions {
   getManifests?: () => DotfileManifest[];
   /** Delay before firing @reboot assignments (default 30s). */
   rebootDelayMs?: number;
+  /** LAMA-273: effective pause for the host. When `until > now` the
+   *  scheduler logs a "sync skipped: paused until <iso>" line and
+   *  reschedules the fire (one-shots stay pending; cron re-arms
+   *  normally). Optional so older callers that don't care about
+   *  pause can keep working. */
+  getEffectivePause?: () => EffectivePause | null;
 }
 
 type ScheduleKind = "cron" | "@reboot" | "@login" | "unknown";
@@ -132,6 +138,18 @@ export class Scheduler {
     }
   }
 
+  // LAMA-273: pause check shared by the one-shot + cron fire paths.
+  // Returns the active pause when one applies (so the caller can decide
+  // whether to log once or to wait until expiry); null when no pause is
+  // active and the fire should proceed.
+  private currentPause(): { until: string } | null {
+    const pause = this.opts.getEffectivePause?.();
+    if (!pause) return null;
+    const until = Date.parse(pause.until);
+    if (!Number.isFinite(until) || until <= Date.now()) return null;
+    return { until: pause.until };
+  }
+
   private scheduleOneShot(
     assignment: FolderAssignment,
     kind: "@reboot" | "@login",
@@ -147,6 +165,27 @@ export class Scheduler {
     }
 
     const timer = setTimeout(() => {
+      const pause = this.currentPause();
+      if (pause) {
+        // One-shot: don't mark fired — let a future refresh pick this up
+        // once the pause window closes. Re-arm a short retry so a long
+        // pause doesn't lose the fire forever.
+        console.log(
+          `[scheduler] sync skipped: paused until ${pause.until} (assignment=${assignment.id})`,
+        );
+        this.timers.delete(assignment.id);
+        const retryDelay = Math.max(
+          1_000,
+          Math.min(60_000, Date.parse(pause.until) - Date.now()),
+        );
+        const retry = setTimeout(() => {
+          this.timers.delete(assignment.id);
+          if (this.running) this.schedule(assignment);
+        }, retryDelay);
+        retry.unref?.();
+        this.timers.set(assignment.id, retry);
+        return;
+      }
       this.timers.delete(assignment.id);
       this.firedSpecial.add(assignment.id);
       void Promise.resolve(this.opts.onTick(assignment)).catch((err) => {
@@ -175,6 +214,16 @@ export class Scheduler {
     }
     const delay = Math.max(0, next.getTime() - Date.now());
     const timer = setTimeout(() => {
+      const pause = this.currentPause();
+      if (pause) {
+        console.log(
+          `[scheduler] sync skipped: paused until ${pause.until} (assignment=${assignment.id})`,
+        );
+        // Reschedule via the existing .finally path — the next cron tick
+        // (or refresh) will re-evaluate the pause state.
+        if (this.running) this.schedule(assignment);
+        return;
+      }
       this.timers.delete(assignment.id);
       void Promise.resolve(this.opts.onTick(assignment))
         .catch((err) => {

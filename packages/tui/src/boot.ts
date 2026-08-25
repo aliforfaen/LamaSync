@@ -5,10 +5,14 @@
  * Slice J (LAMA-173) integrates the six foundation views:
  *   - Local      (folder list + sync/cache/wizard hotkeys)
  *   - Fleet      (live hosts via FleetService WebSocket)
- *   - Dotfiles   (manifest browser + restore wizard)
+ *   - Dotfiles   (app-settings manifests + backup-folder visibility)
  *   - Conflicts  (pending-conflict resolution)
  *   - Logs       (paginated operation log)
  *   - Gh         (GitHub repo selector for `gh` CLI adoption)
+ *
+ * LAMA-276/D4 additions: a `more` tab is the entry point for tools /
+ * integrations and the `gh` view is hidden from the tab bar, reachable
+ * only via the More menu (`hiddenFromTabBar` + `homeTab`).
  *
  * `bootShell` resolves the API client, the FleetService, the OpenTUI
  * renderer, and the daemon socket path, then constructs the view instances
@@ -23,10 +27,14 @@ import { buildClient, writeClientConfig } from "./api.ts";
 import type { TuiClient } from "./api.ts";
 import { createFleetService } from "./app/fleet-service.ts";
 import type { FleetService } from "./app/fleet-service.ts";
+import { createPauseService } from "./app/pause-service.ts";
+import type { PauseService } from "./app/pause-service.ts";
 import { Shell } from "./app/shell.ts";
-import type { View, ViewContext, ViewSpec } from "./app/view-manager.ts";
+import type { View, ViewContext, ViewId, ViewSpec } from "./app/view-manager.ts";
 import { openWizard } from "./app/wizard.ts";
 import { runSetupFlow } from "./flows/setup.ts";
+import { createPauseWizard } from "./flows/pause.ts";
+import type { PauseDialogMode } from "./flows/pause.ts";
 
 import { ConflictsView } from "./views/conflicts.ts";
 import { DotfilesView } from "./views/dotfiles.ts";
@@ -34,6 +42,7 @@ import { FleetView } from "./views/fleet.ts";
 import { GhView } from "./views/gh-selector.ts";
 import { LocalView } from "./views/local.ts";
 import { LogsView } from "./views/logs.ts";
+import { MoreView } from "./views/more.ts";
 
 /**
  * Compose the runtime, wire the six views through the Shell, and start the
@@ -50,12 +59,22 @@ export async function bootShell(): Promise<void> {
   // promise; `main()` then returns and Bun exits once the loop drains.
   const { promise: runtimeHeld, resolve: releaseRuntime } =
     Promise.withResolvers<void>();
+  // `specs` is populated later in boot (after the views are constructed);
+  // it must be initialized here so the renderer's onDestroy can never hit a
+  // temporal-dead-zone access on early-teardown paths (setup-wizard cancel
+  // or a renderer failure before the views exist) — LAMA-254 audit finding.
+  let specs: ViewSpec[] = [];
   const renderer: CliRenderer = await createCliRenderer({
     exitOnCtrlC: true,
     autoFocus: true,
     onDestroy: () => {
       for (const spec of specs) spec.destroy?.();
       fleetService.close();
+      // LAMA-273: stop the pause poller so a quit / Ctrl+C teardown doesn't
+      // leak the interval (the boot promise holds the renderer alive until
+      // the renderer itself fires onDestroy, so the loop never drains while
+      // the interval keeps the event loop busy).
+      pauseService?.stop();
       releaseRuntime();
     },
   });
@@ -101,6 +120,14 @@ export async function bootShell(): Promise<void> {
 
   const fleetService: FleetService = createFleetService(apiBaseUrl, apiKey);
 
+  // LAMA-273: poll the pause snapshot so the status-bar indicator can
+  // reflect "this device is paused" / "fleet is in slow mode" without
+  // waiting for the user to open the dialog. The service is created here
+  // (before the Shell so we can use `ctx.api`) and started once the shell
+  // is ready (otherwise its first caption lands before the renderable
+  // exists).
+  let pauseService: PauseService | null = null;
+
   let pendingShell: Shell | null = null;
   let pendingStatus: { message: string | null; kind: "info" | "error" | "success" } =
     initialStatus;
@@ -141,14 +168,23 @@ export async function bootShell(): Promise<void> {
     new ConflictsView({ renderer }),
     new LogsView({ renderer }),
     new GhView({ ctx }),
+    new MoreView({ ctx }),
   ];
 
-  const specs: ViewSpec[] = views.map((view) => ({
+  specs = views.map((view) => ({
     id: view.id,
     title: view.title,
     container: view.container,
     hotkeys: view.hotkeys(),
     ctx,
+    // LAMA-276/D4: GitHub is an integration, not a core destination — it
+    // hides from the tab bar and is opened from the More menu. Esc returns
+    // to More via the Shell's drill-in handling.
+    hiddenFromTabBar: view.id === "gh" ? true : undefined,
+    homeTab: view.id === "gh" ? "more" : undefined,
+    // Relook (owner, 2026-08-23): tab bar uses the short label so six tabs
+    // fit at 80 cols; the page heading + help keep the full approved name.
+    tabLabel: view.id === "dotfiles" ? "Backups" : undefined,
     onShow: () => view.onShow(ctx),
     onHide: view.onHide?.bind(view),
     handleKey: view.handleKey?.bind(view),
@@ -160,12 +196,62 @@ export async function bootShell(): Promise<void> {
     ctxByView: ctx,
     views: () => specs,
     startView: "local",
+    onPauseRequest: () => openPauseDialog(),
   });
   pendingShell = shell;
 
   (ctx as { setStatus: (m:string, k?:"info"|"error"|"success") => void }).setStatus = (msg, kind = "info") => {
     shell.setStatus(msg, kind);
   };
+
+  // LAMA-276/D4: wire the drill-in navigation so the More menu can open the
+  // hidden GitHub view (and Esc returns to More via the Shell).
+  (ctx as { navigateTo?: (id: ViewId) => void }).navigateTo = (id: ViewId) => {
+    shell.showView(id);
+  };
+
+  // LAMA-273: Ctrl+P opens the pause / resume dialog. The shell hands the
+  // key here, which fetches the current snapshot, picks set-vs-resume, and
+  // mounts the wizard. A best-effort failure (API 401/offline) surfaces
+  // through the status bar and skips the wizard. Hoisted above its first
+  // caller (the Shell ctor closure above) so the reference stays clean.
+  function openPauseDialog(): void {
+    void (async () => {
+      try {
+        const current = await tui.client.getPause();
+        const localHostId = tui.hostname;
+        const hostRow = current.hosts.find((row) => row.hostId === localHostId) ?? null;
+        const hasActive = hostRow !== null || current.global !== null;
+        const mode: PauseDialogMode = hasActive ? "resume" : "set";
+        const wizard = createPauseWizard({
+          ctx,
+          mode,
+          current,
+        });
+        openWizard(wizard);
+        const layout = pendingShell?.getLayout();
+        if (layout && wizard.container) {
+          layout.add(wizard.container);
+        }
+      } catch (err) {
+        ctx.setStatus(
+          `pause dialog failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
+      }
+    })();
+  }
+
+  // LAMA-273: build the pause service now that we have a real shell to
+  // notify. It owns no UI state of its own — just calls shell.setPauseIndicator
+  // whenever the resolved caption changes.
+  pauseService = createPauseService({
+    api: tui.client,
+    localHostId: tui.hostname,
+    onCaption: (caption) => {
+      shell.setPauseIndicator(caption);
+    },
+  });
 
   if (pendingStatus.message) {
     shell.setStatus(pendingStatus.message, pendingStatus.kind);
@@ -178,6 +264,10 @@ export async function bootShell(): Promise<void> {
   // reflect "live" on the first paint (the view also refreshes via
   // getHealth on demand).
   fleetService.start();
+  // LAMA-273: kick off the pause poller last so the very first caption
+  // lands after the shell is mounted (otherwise setPauseIndicator writes
+  // to a Text renderable that isn't yet attached).
+  if (pauseService) pauseService.start();
 
   // Hold the runtime alive until the renderer is destroyed. The OpenTUI
   // renderer keeps the event loop busy on its own; this promise just parks

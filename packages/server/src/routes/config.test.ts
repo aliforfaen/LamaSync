@@ -800,6 +800,118 @@ describe("peer SFTP emission (LAMA-223 tailnet preference)", () => {
   });
 });
 
+// LAMA-273: the daemon reads its effective pause from /config/:hostId.
+// Resolution: host row if present (and unexpired), else global row, else
+// null. Expired rows are pruned on read so a daemon never observes a
+// past `until`. slow mode carries the bwlimit; pause mode never does
+// (the executor ignores it for non-slow).
+describe("GET /api/v1/config/:hostId — effective pause (LAMA-273)", () => {
+  test("returns null when nothing is paused", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    expect(body.pause ?? null).toBeNull();
+  });
+
+  test("falls back to the global pause when the host has no row", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    const untilMs = Date.now() + 60 * 60_000;
+    db.run(
+      `INSERT INTO pause_state (id, scope, host_id, until_ms, mode, bwlimit, created_at)
+       VALUES ('global', 'global', NULL, ?, 'pause', NULL, ?)`,
+      [untilMs, Date.now()],
+    );
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    expect(body.pause).not.toBeNull();
+    expect(body.pause?.mode).toBe("pause");
+    expect(body.pause?.until).toBe(new Date(untilMs).toISOString());
+    expect(body.pause?.bwlimit ?? null).toBeNull();
+  });
+
+  test("the host row wins over the global row", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    const untilMs = Date.now() + 60 * 60_000;
+    db.run(
+      `INSERT INTO pause_state (id, scope, host_id, until_ms, mode, bwlimit, created_at)
+       VALUES ('global', 'global', NULL, ?, 'pause', NULL, ?)`,
+      [untilMs, Date.now()],
+    );
+    db.run(
+      `INSERT INTO pause_state (id, scope, host_id, until_ms, mode, bwlimit, created_at)
+       VALUES ('host-1', 'host', 'host-1', ?, 'slow', '5M', ?)`,
+      [untilMs, Date.now()],
+    );
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    expect(body.pause?.mode).toBe("slow");
+    expect(body.pause?.bwlimit).toBe("5M");
+  });
+
+  test("expired rows are pruned on read and the daemon sees null", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
+    db.run(
+      `INSERT INTO pause_state (id, scope, host_id, until_ms, mode, bwlimit, created_at)
+       VALUES ('global', 'global', NULL, ?, 'pause', NULL, ?)`,
+      [Date.now() - 1, Date.now()],
+    );
+    const before = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pause_state").get();
+    expect(before?.count).toBe(1);
+
+    process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
+    const { Elysia } = await import("elysia");
+    const { getAuthPlugin } = await import("../auth.ts");
+    const { configRoutes } = await import("./config.ts");
+    const app = new Elysia().use(getAuthPlugin()).use(configRoutes);
+
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/config/host-1", {
+        headers: { Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HostConfig;
+    expect(body.pause ?? null).toBeNull();
+    const after = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pause_state").get();
+    expect(after?.count).toBe(0);
+  });
+});
+
 // --- helpers --------------------------------------------------------------
 function setConfigDb(next: Database): void {
   const mod = require("./config.ts") as { __setDb?: (db: Database) => void };

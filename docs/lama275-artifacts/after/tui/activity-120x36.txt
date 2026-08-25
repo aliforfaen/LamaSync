@@ -1,0 +1,36 @@
+ This device         All devices         App settings        Conflicts           Activity            GitHub
+                                                                                ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+[?] help   [ / ] views   [q] quit
+Filter:oall
+Host: (any)
+Page 1 (0 entries shown)
+
+(no entries)
+Press r to refresh or f to change filter.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[ok]rLoaded 0nfolder(s).e [p] prev page [f] filter

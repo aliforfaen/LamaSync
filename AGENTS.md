@@ -54,6 +54,7 @@ API endpoints and TUI views, release process): `docs/development.md`.
 - Tests use `bun:test`, placed alongside source as `*.test.ts`
 - E2E sandbox requires Docker + rclone installed on host
 - Never install rclone inside a worktree — it's a system-level tool
+- **Skill-drift check is `--strict`** — CI runs `scripts/check-skill-drift.ts --strict` (LAMA-283); every new route, command, or flag must be documented under `packages/agent-skill/reference/` or CI fails. Document before you ship, don't defer.
 
 ## Code conventions
 

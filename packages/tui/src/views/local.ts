@@ -20,6 +20,7 @@ import {
   swapChildren,
 } from "../app/widgets.ts";
 import type { Hotkey } from "../app/keymap.ts";
+import { PALETTE_BG, SELECTION } from "../app/palette.ts";
 import type {
   View,
   ViewContext,
@@ -149,13 +150,14 @@ interface FolderRow {
 
 export class LocalView implements View {
   static readonly id: ViewId = "local";
-  static readonly title = "Local";
+  static readonly title = "This device";
 
   readonly id: ViewId = LocalView.id;
   readonly title: string = LocalView.title;
 
   private readonly bodyBox: BoxRenderable;
   private readonly statusBlock: BoxRenderable;
+  private readonly actionFooter: BoxRenderable;
   private readonly selectRef: SelectRenderable;
   private readonly selectContainer: BoxRenderable;
 
@@ -183,24 +185,40 @@ export class LocalView implements View {
     );
     this.selectRef = realize<SelectRenderable>(
       renderer,
-      Select({ options: [], flexGrow: 1 }),
+      Select({
+        options: [],
+        flexGrow: 1,
+        selectedBackgroundColor: PALETTE_BG.accent,
+        selectedTextColor: SELECTION.fg,
+      }),
     );
     this.selectRef.on("itemSelected", (_index: number, option: FolderRow) => {
       if (option.value) {
         this.selectedFolderId = option.value;
+        // LAMA-276 contextual actions: the footer reflects the newly
+        // selected folder without re-rendering (and re-focusing) the Select.
+        this.renderActionFooter();
       }
     });
     this.selectContainer = realize<BoxRenderable>(
       renderer,
       Box({ flexDirection: "column", flexGrow: 1 }, this.selectRef),
     );
+    // Contextual action area: a real renderable kept separate from the
+    // bodyBox so selection changes can repaint it without touching the
+    // focusable Select (LAMA-181).
+    this.actionFooter = realize<BoxRenderable>(
+      renderer,
+      Box({ flexDirection: "column" }),
+    );
     this.container = realize<Renderable>(
       renderer,
       pageShell(
-        "Local",
+        null, // dynamic heading rendered in renderBody ("This device — hostname")
         Box(
           { flexDirection: "column", flexGrow: 1 },
           this.bodyBox,
+          this.actionFooter,
           this.statusBlock,
         ),
       ),
@@ -251,29 +269,57 @@ export class LocalView implements View {
   // ---------------------------------------------------------------------------
 
   private renderBody(): void {
-    const titleText: VNode = Text({ content: `Local — ${this.hostname || "—"}` });
+    const titleText: VNode = Text({ content: `This device — ${this.hostname || "—"}` });
     const listContent: VNode | Renderable =
       this.folders.length === 0
         ? Box(
             { flexDirection: "column" },
-            Text({ content: "(no folders configured)" }),
-            Text({ content: "Press 3 to refresh, w to create a new backup." }),
+            Text({ content: "No folders set up on this device yet." }),
+            Text({ content: "Press w to create a backup, 3 to refresh." }),
           )
         : this.selectContainer;
-
-    const footerItems = this.hotkeys().map((h) => ({ key: h.key, label: h.label }));
-    const footer: VNode = hotkeyFooter(footerItems);
 
     const bodyChildren: Array<VNode | Renderable> = [
       titleText,
       Text({ content: "" }),
       listContent,
       Text({ content: "" }),
-      footer,
     ];
     swapChildren(this.bodyBox, bodyChildren);
     this.refreshSelectOptions();
+    this.renderActionFooter();
     this.renderStatus();
+  }
+
+  /**
+   * LAMA-276 contextual actions: the footer area names the actions for the
+   * selected folder (sync, cache profile, switch type, shares) above the
+   * always-visible global row, so a newcomer sees what each key does for the
+   * highlighted item instead of memorizing hotkeys. Fast one-key dispatch is
+   * unchanged (hotkeys() drives handleKey).
+   */
+  private renderActionFooter(): void {
+    const selected = this.selectedFolder();
+    const lines: Array<VNode | Renderable> = [];
+    if (selected) {
+      lines.push(
+        Text({ content: `Selected: ${selected.name}` }),
+        hotkeyFooter([
+          { key: "2", label: `sync ${selected.name}` },
+          { key: "p", label: "cache profile" },
+          { key: "s", label: "switch type" },
+          { key: "n", label: "network shares" },
+        ]),
+      );
+    }
+    lines.push(
+      hotkeyFooter([
+        { key: "1", label: "sync all" },
+        { key: "3", label: "refresh" },
+        { key: "w", label: "new backup…" },
+      ]),
+    );
+    swapChildren(this.actionFooter, lines);
   }
 
   private refreshSelectOptions(): void {

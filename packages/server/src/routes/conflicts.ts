@@ -22,6 +22,8 @@ interface ConflictRow {
   path: string;
   local_mtime: number | null;
   remote_mtime: number | null;
+  local_size: number | null;
+  remote_size: number | null;
   status: string;
   resolution: string | null;
   created_at: number;
@@ -36,6 +38,8 @@ function rowToConflict(r: ConflictRow): Conflict {
     path: r.path,
     localMtime: r.local_mtime,
     remoteMtime: r.remote_mtime,
+    localSizeBytes: r.local_size,
+    remoteSizeBytes: r.remote_size,
     status: r.status as Conflict["status"],
     resolution: (r.resolution as ConflictResolution | null) ?? null,
     createdAt: r.created_at,
@@ -67,7 +71,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
         args.push(status);
       }
       const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-      const sql = `SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, status, resolution, created_at, resolved_at
+      const sql = `SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, local_size, remote_size, status, resolution, created_at, resolved_at
                    FROM conflicts
                    ${whereSql}
                    ORDER BY created_at DESC`;
@@ -100,6 +104,8 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
           path: string;
           localMtime?: number | null;
           remoteMtime?: number | null;
+          localSizeBytes?: number | null;
+          remoteSizeBytes?: number | null;
         }>;
       };
       const created: Conflict[] = [];
@@ -113,11 +119,13 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
         const id = crypto.randomUUID();
         activeDb.run(
           `INSERT INTO conflicts
-             (id, host_id, folder_id, path, local_mtime, remote_mtime, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (id, host_id, folder_id, path, local_mtime, remote_mtime, local_size, remote_size, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(host_id, folder_id, path) DO UPDATE SET
              local_mtime = excluded.local_mtime,
              remote_mtime = excluded.remote_mtime,
+             local_size = excluded.local_size,
+             remote_size = excluded.remote_size,
              status = 'pending',
              resolution = NULL,
              resolved_at = NULL`,
@@ -128,6 +136,8 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
             c.path,
             c.localMtime ?? null,
             c.remoteMtime ?? null,
+            c.localSizeBytes ?? null,
+            c.remoteSizeBytes ?? null,
             "pending",
             now,
           ],
@@ -147,7 +157,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
         }
         const row = activeDb
           .query<ConflictRow, [string]>(
-            "SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, status, resolution, created_at, resolved_at FROM conflicts WHERE id = ?",
+            "SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, local_size, remote_size, status, resolution, created_at, resolved_at FROM conflicts WHERE id = ?",
           )
           .get(id);
         if (row) {
@@ -169,6 +179,8 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
             path: t.String(),
             localMtime: t.Optional(t.Union([t.Number(), t.Null()])),
             remoteMtime: t.Optional(t.Union([t.Number(), t.Null()])),
+            localSizeBytes: t.Optional(t.Union([t.Number(), t.Null()])),
+            remoteSizeBytes: t.Optional(t.Union([t.Number(), t.Null()])),
           }),
         ),
       }),
@@ -188,7 +200,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
       const { resolution } = body as { resolution: ConflictResolution };
       const existing = activeDb
         .query<ConflictRow, [string]>(
-          "SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, status, resolution, created_at, resolved_at FROM conflicts WHERE id = ?",
+          "SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, local_size, remote_size, status, resolution, created_at, resolved_at FROM conflicts WHERE id = ?",
         )
         .get(params.id);
       if (!existing) {
@@ -201,7 +213,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
       );
       const row = activeDb
         .query<ConflictRow, [string]>(
-          "SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, status, resolution, created_at, resolved_at FROM conflicts WHERE id = ?",
+          "SELECT id, host_id, folder_id, path, local_mtime, remote_mtime, local_size, remote_size, status, resolution, created_at, resolved_at FROM conflicts WHERE id = ?",
         )
         .get(params.id);
       const conflict = rowToConflict(row!);

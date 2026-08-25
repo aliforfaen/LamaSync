@@ -30,6 +30,8 @@ interface HostRow {
   lan_ip: string | null;
   version: string | null;
   config_revision: number | null;
+  os: string | null;
+  storage_used_bytes: number | null;
 }
 
 /**
@@ -53,10 +55,12 @@ function rowToHost(row: HostRow, latestVersion: string | null): Host {
     version,
     updateAvailable,
     configRevision: row.config_revision ?? 0,
+    os: row.os,
+    storageUsedBytes: row.storage_used_bytes,
   };
 }
 
-const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision FROM hosts";
+const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, os, storage_used_bytes FROM hosts";
 
 /**
  * LAMA-225: DNS-safe hostname for rename — lowercase a-z0-9 plus internal
@@ -185,6 +189,13 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       if (!isDnsSafeHostname(newHostname)) {
         set.status = 400;
         return { error: "invalid hostname" };
+      }
+      // LAMA-247 #11: renaming to the same display label was a silent
+      // no-op that still logged a fake `host_rename` success — reject it
+      // explicitly instead.
+      if (newHostname === (row.hostname ?? "").toLowerCase()) {
+        set.status = 400;
+        return { error: `hostname unchanged ('${newHostname}')` };
       }
       // LAMA-225: the display label must not collide with another host's
       // id or hostname (case-insensitive). A host may rename to its own
@@ -400,13 +411,15 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/report/health",
     async ({ body, set }) => {
-      const { hostId, timestamp, status, lanIp, tailnetIp, version } = body as {
+      const { hostId, timestamp, status, lanIp, tailnetIp, version, os, storageUsedBytes } = body as {
         hostId: string;
         timestamp: number;
         status: HostStatus;
         lanIp?: string | null;
         tailnetIp?: string | null;
         version?: string | null;
+        os?: string | null;
+        storageUsedBytes?: number | null;
       };
       const previous = activeDb
         .query<{ status: string | null }, [string]>(
@@ -435,17 +448,38 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
           "SELECT tailnet_ip FROM hosts WHERE id = ?",
         )
         .get(hostId)?.tailnet_ip ?? null;
-      const tailnetChanged =
-        typeof tailnetIp === "string" &&
-        tailnetIp !== "" &&
-        tailnetIp !== previousTailnet;
-      if (tailnetIp) {
+      // LAMA-247 #8: `null` preserves the last address (transient tailscale
+      // drop / older daemons), but `""` is an explicit clear sentinel the
+      // daemon sends only after its 5-minute grace expired — a dead address
+      // must not stick in the fleet UI nor pin stale rclone peer configs.
+      let tailnetWrite: "set" | "clear" | "keep" = "keep";
+      if (typeof tailnetIp === "string" && tailnetIp !== "") {
+        if (tailnetIp !== previousTailnet) {
+          tailnetWrite = "set";
+          sets.push("tailnet_ip = ?");
+          params.push(tailnetIp);
+        }
+      } else if (tailnetIp === "" && previousTailnet !== null) {
+        // Only clear when there was something to clear; the tailnetChanged
+        // bump below then fires so daemons re-pull without the stale peer.
+        tailnetWrite = "clear";
         sets.push("tailnet_ip = ?");
-        params.push(tailnetIp);
+        params.push(null);
       }
       if (typeof version === "string" && version.length > 0) {
         sets.push("version = ?");
         params.push(version);
+      }
+      // LAMA-282: device OS + storage used, reported by the daemon on each
+      // heartbeat. Persist only when present so an older/blank report never
+      // wipes a previously stored value (mirrors the `version` rule).
+      if (typeof os === "string" && os.length > 0) {
+        sets.push("os = ?");
+        params.push(os);
+      }
+      if (typeof storageUsedBytes === "number" && Number.isFinite(storageUsedBytes)) {
+        sets.push("storage_used_bytes = ?");
+        params.push(storageUsedBytes);
       }
       params.push(hostId);
       const result = activeDb.run(
@@ -479,7 +513,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       // Bump config_revision after the row is written so the diff between
       // the cached and server-side value drives the daemon's heartbeat
       // refresh check (see packages/daemon/src/index.ts `recordRevision`).
-      if (tailnetChanged) {
+      // Covers both sets and clears (LAMA-247 #8).
+      if (tailnetWrite !== "keep") {
         bumpConfigRevision([hostId]);
       }
       set.status = 204;
@@ -498,6 +533,11 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         lanIp: t.Optional(t.Union([t.String(), t.Null()])),
         tailnetIp: t.Optional(t.Union([t.String(), t.Null()])),
         version: t.Optional(t.Union([t.String(), t.Null()])),
+        // LAMA-282: device OS + storage used, reported by the daemon on
+        // each heartbeat for the device cards. Optional so older daemons
+        // (and transient blanks) don't break the report.
+        os: t.Optional(t.Union([t.String(), t.Null()])),
+        storageUsedBytes: t.Optional(t.Union([t.Number(), t.Null()])),
       }),
       detail: {
         summary: "Update host heartbeat",
