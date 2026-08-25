@@ -425,6 +425,14 @@ export interface HostConfig {
   // can sync directly. When the role is "use", the daemon can swap the
   // server-relayed remote for `peerRemote` for the listed folder ids.
   peers: Peer[];
+  // LAMA-273: effective pause for this host. Resolved by the server as
+  // (host row if present, else global row); expired rows are pruned on
+  // read so daemons see `null` for past windows. The daemon honors this
+  // by skipping scheduled runs while `until > now` and (in slow mode)
+  // appending `--bwlimit` to its rclone argv via the existing
+  // bandwidthSchedule plumbing. Additive: existing daemons without the
+  // pause handler ignore it without any change in behavior.
+  pause?: EffectivePause | null;
 }
 
 // LAN direct peer entry — server-detected same-/24 host that can be reached
@@ -587,5 +595,39 @@ export interface BrowseRef {
   kind: "local" | "s3";
   folderId?: string | null;
   path: string;
+}
+
+// LAMA-273: pause / slow mode toggle. The fleet can be paused globally or
+// per-device for a fixed window; slow mode caps rclone bandwidth via the
+// existing `bandwidthSchedule` plumbing (single value, not a schedule).
+// `until` is an ISO timestamp; the daemon treats rows past that instant as
+// absent. `bwlimit` is a single rclone size string (e.g. "1M") — there's no
+// support for schedules, only a flat cap, so the field is reused by the
+// executor as a single-segment `--bwlimit` value.
+export type PauseMode = "pause" | "slow";
+export type PauseScope = "global" | "host";
+
+export interface PauseState {
+  scope: PauseScope;
+  /** Present when scope === "host"; absent when scope === "global". */
+  hostId?: string;
+  /** ISO timestamp the pause window ends at. Past = effectively no pause. */
+  until: string;
+  mode: PauseMode;
+  /** Single-segment bandwidth cap; honored only when mode === "slow". */
+  bwlimit?: string | null;
+}
+
+/**
+ * LAMA-273: effective pause for one host as resolved by the server. A daemon
+ * pulls this from `/config/:hostId`; the server picks the host row when
+ * present and falls back to the global row. `null` means "no pause applies"
+ * (expired, absent, or a host row that's explicitly been cleared).
+ */
+export interface EffectivePause {
+  until: string;
+  mode: PauseMode;
+  /** Single-segment bandwidth cap (e.g. "1M"); honored only when mode === "slow". */
+  bwlimit: string | null;
 }
 

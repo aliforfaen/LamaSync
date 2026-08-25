@@ -276,6 +276,23 @@ CREATE TABLE IF NOT EXISTS size_history (
 );
 CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope
     ON size_history(ref_id, scope, measured_at);
+
+-- LAMA-273: pause / slow mode. One row per scope ('global' or one per
+-- host_id). The PK is the scope for global rows and the hostId for host
+-- rows, so a single UPSERT replaces the prior state without leaving stale
+-- duplicates. The server prunes expired rows on every read so daemons
+-- never observe a past "until" timestamp.
+CREATE TABLE IF NOT EXISTS pause_state (
+    id          TEXT PRIMARY KEY,    -- 'global' for the fleet-wide pause, otherwise hostId
+    scope       TEXT NOT NULL,      -- 'global' | 'host'
+    host_id     TEXT,               -- non-null only when scope = 'host'
+    until_ms    INTEGER NOT NULL,   -- epoch ms; rows where until_ms <= now are pruned on read
+    mode        TEXT NOT NULL,      -- 'pause' | 'slow'
+    bwlimit     TEXT,               -- rclone size string, honored only when mode = 'slow'
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pause_state_host
+    ON pause_state(host_id);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -362,6 +379,13 @@ export const MIGRATIONS: string[] = [
   // LAMA-269: size time series for the storage donut + growth sparkline.
   "CREATE TABLE IF NOT EXISTS size_history (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, ref_id TEXT NOT NULL, bytes INTEGER, object_count INTEGER, measured_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope ON size_history(ref_id, scope, measured_at)",
+  // LAMA-273: pause / slow mode toggle. PK is the scope for the global row
+  // and the hostId for per-host rows so a single UPSERT replaces prior
+  // state. The schema lives in SERVER_SCHEMA for fresh DBs; the CREATE
+  // TABLE here is idempotent for existing ones ("already exists" is
+  // swallowed by initDb's "duplicate column" try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS pause_state (id TEXT PRIMARY KEY, scope TEXT NOT NULL, host_id TEXT, until_ms INTEGER NOT NULL, mode TEXT NOT NULL, bwlimit TEXT, created_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_pause_state_host ON pause_state(host_id)",
 ];
 
 /**

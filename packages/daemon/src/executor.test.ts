@@ -1,7 +1,13 @@
 // Tests for the rclone argv builder. Pure function — no subprocess, no DB.
 
 import { describe, expect, test } from "bun:test";
-import { buildRcloneCommand, pickConflictAction } from "./executor.ts";
+import type { EffectivePause, FolderAssignment } from "@lamasync/core";
+import {
+  buildRcloneCommand,
+  effectiveBandwidthSchedule,
+  isPauseActive,
+  pickConflictAction,
+} from "./executor.ts";
 
 describe("buildRcloneCommand", () => {
   test("sync emits bisync with resilient flags and workdir", () => {
@@ -169,5 +175,130 @@ describe("pickConflictAction", () => {
   test("keep_both always keeps both", () => {
     expect(pickConflictAction("keep_both", 200, 100, "source")).toEqual({ kind: "keep_both" });
     expect(pickConflictAction("keep_both", 100, 200, "target")).toEqual({ kind: "keep_both" });
+  });
+});
+
+// LAMA-273: pause / slow-mode helpers. The helpers are pure so we can
+// exercise them without touching rclone or the hostConfig cache.
+describe("effectiveBandwidthSchedule (LAMA-273)", () => {
+  const baseAssignment: Pick<FolderAssignment, "bandwidthSchedule"> = {
+    bandwidthSchedule: "10M",
+  };
+  const now = 1_700_000_000_000;
+
+  test("returns null with no pause and no schedule", () => {
+    expect(effectiveBandwidthSchedule({ bandwidthSchedule: null }, null, now)).toBeNull();
+  });
+
+  test("returns the assignment schedule when no pause is active", () => {
+    expect(effectiveBandwidthSchedule(baseAssignment, null, now)).toBe("10M");
+  });
+
+  test("slow-mode pause bwlimit wins over the assignment schedule", () => {
+    const pause: EffectivePause = {
+      until: new Date(now + 60_000).toISOString(),
+      mode: "slow",
+      bwlimit: "1M",
+    };
+    expect(effectiveBandwidthSchedule(baseAssignment, pause, now)).toBe("1M");
+  });
+
+  test("pause-mode bwlimit is ignored — only slow mode injects --bwlimit", () => {
+    const pause: EffectivePause = {
+      until: new Date(now + 60_000).toISOString(),
+      mode: "pause",
+      // Defensive: even if a pause row carried bwlimit, the executor
+      // must not throttle. The route layer rejects this combo, but the
+      // helper is the second line of defense.
+      bwlimit: "1M",
+    };
+    expect(effectiveBandwidthSchedule(baseAssignment, pause, now)).toBe("10M");
+  });
+
+  test("expired pause falls back to the assignment schedule", () => {
+    const pause: EffectivePause = {
+      until: new Date(now - 1).toISOString(),
+      mode: "slow",
+      bwlimit: "1M",
+    };
+    expect(effectiveBandwidthSchedule(baseAssignment, pause, now)).toBe("10M");
+  });
+
+  test("slow pause without a bwlimit falls back to the assignment schedule", () => {
+    const pause: EffectivePause = {
+      until: new Date(now + 60_000).toISOString(),
+      mode: "slow",
+      bwlimit: null,
+    };
+    expect(effectiveBandwidthSchedule(baseAssignment, pause, now)).toBe("10M");
+  });
+
+  test("trims whitespace from either source", () => {
+    const pause: EffectivePause = {
+      until: new Date(now + 60_000).toISOString(),
+      mode: "slow",
+      bwlimit: "  512K  ",
+    };
+    expect(effectiveBandwidthSchedule({ bandwidthSchedule: "  10M  " }, pause, now)).toBe("512K");
+    expect(effectiveBandwidthSchedule({ bandwidthSchedule: "  10M  " }, null, now)).toBe("10M");
+  });
+});
+
+describe("isPauseActive (LAMA-273)", () => {
+  const now = 1_700_000_000_000;
+  test("null / undefined pauses are inactive", () => {
+    expect(isPauseActive(null, now)).toBe(false);
+    expect(isPauseActive(undefined, now)).toBe(false);
+  });
+  test("future until is active", () => {
+    expect(isPauseActive({ until: new Date(now + 1).toISOString(), mode: "pause", bwlimit: null }, now)).toBe(true);
+  });
+  test("past until is inactive", () => {
+    expect(isPauseActive({ until: new Date(now - 1).toISOString(), mode: "pause", bwlimit: null }, now)).toBe(false);
+  });
+  test("garbage until is treated as inactive (fail-safe)", () => {
+    expect(isPauseActive({ until: "not-a-date", mode: "pause", bwlimit: null }, now)).toBe(false);
+  });
+});
+
+// LAMA-273: belt-and-braces — executeAssignment must short-circuit with
+// a clear "paused until <iso>" report when hostConfig.pause is active,
+// without spawning rclone. We exercise the helper directly via a tiny
+// fake ExecuteOptions shape to assert the refusal path.
+describe("executeAssignment pause refusal (LAMA-273)", () => {
+  test("refuses with a paused summary when hostConfig.pause is active", async () => {
+    const { executeAssignment } = await import("./executor.ts");
+    const futureIso = new Date(Date.now() + 60 * 60_000).toISOString();
+    const report = await executeAssignment({
+      assignment: {
+        id: "a1",
+        folderId: "f1",
+        hostId: "h1",
+        role: "source",
+        localPath: "/tmp/lamasync-test",
+        enabled: true,
+      },
+      folder: { id: "f1", name: "MySync", type: "sync" },
+      hostConfig: {
+        host: { id: "h1", hostname: "h1", status: "online" },
+        assignments: [],
+        folders: [],
+        manifests: [],
+        rcloneConfig: "[fake]\ntype = local\n",
+        serverTailnetIp: null,
+        peers: [],
+        pause: { until: futureIso, mode: "pause", bwlimit: null },
+      },
+      client: {} as never, // pause refusal returns before any client call
+      hostId: "h1",
+      configPath: "/tmp/none",
+    });
+    expect(report.status).toBe("failed");
+    expect(report.summary).toContain("sync skipped: paused until");
+    expect(report.summary).toContain(futureIso);
+    // No rclone was invoked — the rclone-missing error path would
+    // produce a different summary, so the presence of the "paused"
+    // marker is sufficient.
+    expect(report.summary).not.toContain("rclone binary not found");
   });
 });

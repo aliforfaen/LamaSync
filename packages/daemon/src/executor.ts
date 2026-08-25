@@ -1,7 +1,7 @@
 import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
-import type { ConflictStrategy, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
+import type { ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
@@ -435,9 +435,56 @@ async function applyAutomaticConflicts(
 // ---------------------------------------------------------------------------
 // Main executor
 // ---------------------------------------------------------------------------
+
+// LAMA-273: pause / slow-mode helpers. The server resolves the effective
+// pause (host row if present, else global row, else null) and embeds it on
+// `hostConfig.pause`. The daemon uses it two ways:
+//   1. refuse fresh runs while the pause window is active (belt-and-braces
+//      against manual / queued-action invocations that bypass the scheduler)
+//   2. slow mode injects a `--bwlimit` override through the existing
+//      `assignment.bandwidthSchedule` plumbing — we reuse that argv builder
+//      path rather than introducing a new rclone argument stream.
+export function effectiveBandwidthSchedule(
+  assignment: Pick<FolderAssignment, "bandwidthSchedule">,
+  pause: EffectivePause | null | undefined,
+  now: number = Date.now(),
+): string | null {
+  if (pause && pause.mode === "slow") {
+    const until = Date.parse(pause.until);
+    if (Number.isFinite(until) && until > now && pause.bwlimit && pause.bwlimit.trim().length > 0) {
+      return pause.bwlimit.trim();
+    }
+  }
+  const schedule = assignment.bandwidthSchedule;
+  return schedule && schedule.trim().length > 0 ? schedule.trim() : null;
+}
+
+/** True when `hostConfig.pause` is currently active. Pure helper so
+ *  scheduler/executor tests can assert the rule without composing a
+ *  full HostConfig. */
+export function isPauseActive(
+  pause: EffectivePause | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!pause) return false;
+  const until = Date.parse(pause.until);
+  return Number.isFinite(until) && until > now;
+}
+
 export async function executeAssignment(opts: ExecuteOptions): Promise<OperationReport> {
   const { assignment, folder, hostConfig, hostId, client } = opts;
   const start = Date.now();
+
+  // LAMA-273: belt-and-braces pause refusal. The scheduler is the primary
+  // gate; this catches manual / queued-action runs that bypass it.
+  if (isPauseActive(hostConfig.pause)) {
+    const summary = `sync skipped: paused until ${hostConfig.pause!.until}`;
+    console.log(`[executor] folder=${folder.name} ${summary}`);
+    return report(hostId, folder.id, folder.type, "failed", start, {
+      summary,
+      details: { reason: "paused", mode: hostConfig.pause!.mode, until: hostConfig.pause!.until },
+    });
+  }
 
   if (!Bun.which("rclone")) {
     return report(hostId, folder.id, folder.type, "failed", start, { summary: "rclone binary not found in PATH", details: { reason: "rclone-missing" } });
@@ -512,9 +559,15 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
 
   if (exclude) command.push("--filter-from", exclude.path);
 
-  // LAMA-114: bandwidth schedule
-  if (assignment.bandwidthSchedule && assignment.bandwidthSchedule.trim().length > 0) {
-    command.push("--bwlimit", assignment.bandwidthSchedule.trim());
+  // LAMA-114 + LAMA-273: bandwidth schedule. Slow-mode pause (resolved
+  // server-side into hostConfig.pause) wins over the per-assignment
+  // schedule — the pause window caps the whole fleet, so the cap must
+  // be applied here rather than per-folder. The pause check at the top
+  // of executeAssignment guarantees we're outside the "pause" mode
+  // window before reaching this branch.
+  const effectiveBwlimit = effectiveBandwidthSchedule(assignment, hostConfig.pause);
+  if (effectiveBwlimit) {
+    command.push("--bwlimit", effectiveBwlimit);
   }
 
   // LAMA-116: disk-space pre-flight

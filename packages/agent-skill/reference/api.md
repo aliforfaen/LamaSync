@@ -96,6 +96,11 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/demo`                                   | Demo-mode state (whether demo data is present)  |
 | POST     | `/demo/seed`                              | Seed a demo fleet (fake devices, timeline, snapshot) |
 | DELETE   | `/demo`                                   | Delete all demo data (confirmed by caller)      |
+| GET      | `/pause`                                  | Current pause/slow state: `{ global: PauseState\|null, hosts: PauseState[] }` (LAMA-273) |
+| POST     | `/pause`                                  | Set a global pause/slow window `{ until, mode, bwlimit? }`; bumps every host's `config_revision` (LAMA-273) |
+| DELETE   | `/pause`                                  | Resume (clear the global pause) (LAMA-273)      |
+| POST     | `/hosts/:hostId/pause`                    | Set a per-device pause/slow window; bumps that host's `config_revision` (LAMA-273) |
+| DELETE   | `/hosts/:hostId/pause`                    | Resume (clear the per-device pause) (LAMA-273)  |
 | GET      | `/notifications`                           | Durable notification history                      |
 | GET      | `/notifications/channels`                  | List delivery channels                           |
 | POST     | `/notifications/channels`                  | Create channel                                   |
@@ -170,6 +175,8 @@ spec. The high-level shapes (verbose commentary):
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
 - `QueuedAction { id, hostId, type, payload?, status, createdAt, takenAt?, completedAt?, result? }`
 - `LockInfo { folderId, lockedBy, lockedAt, lockTtl }`
+- `PauseState { scope: "global"|"host", hostId?, until (ISO), mode: "pause"|"slow", bwlimit? }` — `bwlimit` is a single-segment rclone size (e.g. "1M"); honored only when `mode === "slow"` (LAMA-273)
+- `EffectivePause { until (ISO), mode: "pause"|"slow", bwlimit: string|null }` — embedded on the `/config/:hostId` payload as `pause`; resolved server-side as the host row if present, else the global row, else null (LAMA-273)
 
 `?`-marked fields are nullable. Timestamps are milliseconds since epoch.
 

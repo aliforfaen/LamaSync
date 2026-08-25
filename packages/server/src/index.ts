@@ -19,6 +19,7 @@ import { browseRoutes } from "./routes/browse.ts";
 import { backendsRoutes } from "./routes/backends.ts";
 import { statsRoutes } from "./routes/stats.ts";
 import { demoRoutes } from "./routes/demo.ts";
+import { pauseRoutes } from "./routes/pause.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -105,6 +106,10 @@ const app = new Elysia()
             name: "Demo",
             description: "Demo-mode fleet seeding and deletion",
           },
+          {
+            name: "Pause",
+            description: "LAMA-273 pause/slow mode toggle (global + per-device)",
+          },
         ],
         components: {
           securitySchemes: {
@@ -140,6 +145,7 @@ const app = new Elysia()
   .use(statsRoutes)
   .use(demoRoutes)
   .use(browseRoutes)
+  .use(pauseRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;

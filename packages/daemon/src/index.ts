@@ -958,6 +958,10 @@ async function main(): Promise<void> {
     getAssignments: () => hostConfig?.assignments ?? [],
     getFolders: () => hostConfig?.folders ?? [],
     getManifests: () => hostConfig?.manifests ?? [],
+    // LAMA-273: scheduler skips scheduled runs while the effective pause
+    // window is active (host row if present, else global row). Resolved
+    // server-side; the daemon just reads the cached `hostConfig.pause`.
+    getEffectivePause: () => hostConfig?.pause ?? null,
   });
 
   setSwitchContext({

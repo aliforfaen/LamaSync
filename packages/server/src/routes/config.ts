@@ -3,9 +3,11 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type {
   DotfileManifest,
+  EffectivePause,
   Folder,
   FolderAssignment,
   HostConfig,
+  PauseMode,
   Peer,
 } from "@lamasync/core";
 import { resolveFolderLocalConfig, resolveFolderResticConfig, resolveFolderS3Config } from "../backends.ts";
@@ -163,6 +165,49 @@ function rowToManifest(r: ManifestRow): DotfileManifest {
     excludes,
     schedule: r.schedule,
     instructions: r.instructions,
+  };
+}
+
+// LAMA-273: shared helper that resolves the effective pause for one host.
+// Used by /config/:hostId; exported so unit tests can assert the
+// host-row-wins-over-global-fallback rule without composing the whole
+// route. Prunes expired rows inline so a daemon never observes a stale
+// "until" timestamp.
+export interface PauseRowLite {
+  id: string;
+  scope: string;
+  host_id: string | null;
+  until_ms: number;
+  mode: string;
+  bwlimit: string | null;
+}
+
+export function resolveEffectivePause(
+  database: Database,
+  hostId: string,
+  now: number = Date.now(),
+): EffectivePause | null {
+  // Inline prune — keeps the helper self-contained for tests that
+  // exercise the rule against an isolated database.
+  database.run("DELETE FROM pause_state WHERE until_ms <= ?", [now]);
+  const hostRow = database
+    .query<PauseRowLite, [string, number]>(
+      "SELECT id, scope, host_id, until_ms, mode, bwlimit FROM pause_state WHERE id = ? AND scope = 'host' AND until_ms > ?",
+    )
+    .get(hostId, now);
+  const source = hostRow
+    ? hostRow
+    : database
+        .query<PauseRowLite, [number]>(
+          "SELECT id, scope, host_id, until_ms, mode, bwlimit FROM pause_state WHERE id = 'global' AND scope = 'global' AND until_ms > ?",
+        )
+        .get(now);
+  if (!source) return null;
+  const mode: PauseMode = source.mode === "slow" ? "slow" : "pause";
+  return {
+    until: new Date(source.until_ms).toISOString(),
+    mode,
+    bwlimit: mode === "slow" ? (source.bwlimit ?? null) : null,
   };
 }
 
@@ -570,6 +615,13 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
       apiKey,
     );
 
+    // LAMA-273: additive pause field. Resolved server-side as the host
+    // row if present, else the global row, else null (also null when
+    // the row was expired — the helper prunes inline). Daemons
+    // gracefully ignore the new field until they pick up the slow-mode
+    // / pause-skip logic; older daemons keep working.
+    const pause = resolveEffectivePause(activeDb, hostId);
+
     const response: HostConfig = {
       host: {
         id: host.id,
@@ -586,6 +638,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
       rcloneConfig: generated.rcloneConfig,
       serverTailnetIp,
       peers: generated.peers,
+      pause,
     };
     return response;
   },
