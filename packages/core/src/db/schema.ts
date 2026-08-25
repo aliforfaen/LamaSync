@@ -202,7 +202,13 @@ CREATE TABLE IF NOT EXISTS backends (
     restic_repository  TEXT,
     restic_password_enc TEXT,
     demo               INTEGER NOT NULL DEFAULT 0,
-    created_at         INTEGER NOT NULL
+    created_at         INTEGER NOT NULL,
+    -- LAMA-266: most recent "prove it" restore for this destination.
+    -- Stamped on every POST /backends/:id/prove run so the UI can render
+    -- a "Verified 2h ago" badge and the scheduler can show last-known
+    -- liveness without re-running the test.
+    last_prove_at      INTEGER,
+    last_prove_ok      INTEGER
 );
 
 -- LAMA-226: Data Browser write operations (copy/move/upload/rename/mkdir).
@@ -293,6 +299,22 @@ CREATE TABLE IF NOT EXISTS pause_state (
 );
 CREATE INDEX IF NOT EXISTS idx_pause_state_host
     ON pause_state(host_id);
+
+-- LAMA-266: monthly backup "fire drills". One row per (backend, kind)
+-- attempt; kind distinguishes a manual prove-it run ('prove') from a
+-- scheduled drill ('drill'). The scheduler reads the most recent 'drill'
+-- row per backend to decide whether the next pass is due, which survives
+-- a server restart without immediately re-firing.
+CREATE TABLE IF NOT EXISTS health_drills (
+    id         TEXT PRIMARY KEY,
+    backend_id TEXT NOT NULL REFERENCES backends(id),
+    kind       TEXT NOT NULL,    -- 'prove' | 'drill'
+    ran_at     INTEGER NOT NULL,
+    ok         INTEGER NOT NULL,
+    detail     TEXT              -- scrubbed failure summary (no stderr/secrets)
+);
+CREATE INDEX IF NOT EXISTS idx_health_drills_backend_ran_at
+    ON health_drills(backend_id, ran_at);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -386,6 +408,14 @@ export const MIGRATIONS: string[] = [
   // swallowed by initDb's "duplicate column" try/catch wrapper).
   "CREATE TABLE IF NOT EXISTS pause_state (id TEXT PRIMARY KEY, scope TEXT NOT NULL, host_id TEXT, until_ms INTEGER NOT NULL, mode TEXT NOT NULL, bwlimit TEXT, created_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_pause_state_host ON pause_state(host_id)",
+  // LAMA-266: monthly backup fire drills + per-backend last-prove stamp.
+  // Add columns first (for pre-LAMA-266 backends), then the table + index.
+  // The CREATE TABLE here is the idempotent safety net for the same
+  // "already exists" reason pause_state uses.
+  "ALTER TABLE backends ADD COLUMN last_prove_at INTEGER",
+  "ALTER TABLE backends ADD COLUMN last_prove_ok INTEGER",
+  "CREATE TABLE IF NOT EXISTS health_drills (id TEXT PRIMARY KEY, backend_id TEXT NOT NULL REFERENCES backends(id), kind TEXT NOT NULL, ran_at INTEGER NOT NULL, ok INTEGER NOT NULL, detail TEXT)",
+  "CREATE INDEX IF NOT EXISTS idx_health_drills_backend_ran_at ON health_drills(backend_id, ran_at)",
 ];
 
 /**

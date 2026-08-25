@@ -201,7 +201,14 @@ function withinWindow(
 
 function isBackupFailure(input: NotificationInput): boolean {
   const operation = input.payload?.operation;
-  if (typeof operation === "string") return operation === "backup";
+  // LAMA-266: backup fire drills are an out-of-band signal that a
+  // destination's backup pipeline is broken. Recognize them alongside
+  // the existing 'backup' op so the second-consecutive-failure
+  // escalation to "critical" applies to drill failures too (a single
+  // miss on a destination's fire drill is enough to warrant attention).
+  if (typeof operation === "string") {
+    if (operation === "backup" || operation === "backup_drill") return true;
+  }
   if (!input.folderId) return false;
   try {
     const folder = activeDb

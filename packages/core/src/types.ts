@@ -48,6 +48,13 @@ export interface Backend {
   /** Write-only: accepted on create/update, never returned. */
   resticPassword?: string | null;
   createdAt: number;
+  // LAMA-266: most recent successful-or-not "prove it" restore stamp.
+  // `lastProveAt` is epoch ms (null = never proven); `lastProveOk` is the
+  // boolean outcome of that run. The UI renders a "Verified 2h ago" badge
+  // from this pair without re-running the test. Additive: existing rows
+  // report null/null and the badge shows "not yet verified".
+  lastProveAt?: number | null;
+  lastProveOk?: boolean | null;
 }
 
 // LAMA-221: configurable notification delivery channels (ntfy / webhook).
@@ -629,5 +636,20 @@ export interface EffectivePause {
   mode: PauseMode;
   /** Single-segment bandwidth cap (e.g. "1M"); honored only when mode === "slow". */
   bwlimit: string | null;
+}
+
+// LAMA-266: one row in the `health_drills` table. `kind` distinguishes a
+// manual "Prove it" (POST /backends/:id/prove) from a scheduled fire-drill
+// (POST /backends/:id/drill or the monthly scheduler). `detail` is a
+// scrubbed server-side summary — never raw restic stderr and never
+// secrets. The summary shown to the UI is `summary` (kept inline on
+// operation_log + health_drills.detail) plus `durationMs`/`checkedAt`.
+export interface HealthDrill {
+  id: string;
+  backendId: string;
+  kind: "prove" | "drill";
+  ranAt: number;
+  ok: boolean;
+  detail: string | null;
 }
 

@@ -28,10 +28,15 @@ export interface BackendRow {
   restic_repository: string | null;
   restic_password_enc: string | null;
   created_at: number;
+  // LAMA-266: most recent "prove it" outcome. null on rows that have
+  // never been proven; the column pair lets the UI render a "Verified
+  // 2h ago" badge without re-running restic.
+  last_prove_at: number | null;
+  last_prove_ok: number | null;
 }
 
 export const BACKEND_SELECT =
-  "SELECT id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, local_path, restic_repository, restic_password_enc, created_at FROM backends";
+  "SELECT id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, local_path, restic_repository, restic_password_enc, created_at, last_prove_at, last_prove_ok FROM backends";
 
 export function isBackendKind(value: string | null): value is BackendKind {
   return value === "s3" || value === "local" || value === "nfs" || value === "restic";
@@ -42,7 +47,9 @@ export function isS3Provider(value: string | null): value is S3Provider {
 }
 
 /** Map a backends row to the wire shape. Secrets never leave the server:
- *  `hasSecret` reports whether one is stored; the ciphertext stays local. */
+ *  `hasSecret` reports whether one is stored; the ciphertext stays local.
+ *  LAMA-266: pass through the additive last-prove fields so the web/TUI
+ *  can render a "Verified 2h ago" badge without an extra endpoint. */
 export function rowToBackend(row: BackendRow): Backend {
   return {
     id: row.id,
@@ -58,6 +65,8 @@ export function rowToBackend(row: BackendRow): Backend {
     hasResticPassword:
       row.restic_password_enc !== null && row.restic_password_enc !== "",
     createdAt: row.created_at,
+    lastProveAt: row.last_prove_at,
+    lastProveOk: row.last_prove_ok === null ? null : row.last_prove_ok === 1,
   };
 }
 
