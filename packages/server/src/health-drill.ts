@@ -312,12 +312,14 @@ export async function runProve(args: RunProveArgs): Promise<ProveOutcome> {
   const startedAt = now();
   const backend = resolveBackend(args.backendId);
   if (!backend) {
-    return {
-      ok: false,
-      checkedAt: startedAt,
-      durationMs: 0,
-      detail: "backend is not a restic backend (missing repository or password)",
-    };
+    // LAMA-266: non-restic backends (s3/local/nfs without a restic
+    // repository + password) cannot be proven — the route layer maps
+    // this throw to 409 with the api.md-documented message. Mirrors
+    // the same throw pattern runDrill uses so callers can rely on a
+    // single shape for "this backend cannot be drilled".
+    throw new HealthDrillError(
+      "prove requires a restic backend with snapshots",
+    );
   }
   const runner = args.runner ?? activeRunner;
 

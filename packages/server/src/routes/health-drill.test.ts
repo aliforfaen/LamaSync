@@ -359,18 +359,19 @@ describe("runProve", () => {
     expect(outcome.detail).toContain("no restic snapshots");
   });
 
-  test("returns 409-style outcome for a non-restic backend without throwing", async () => {
-    // An s3 backend with no restic_repository — must NOT throw, and must
-    // surface a clear "not a restic backend" detail. The route layer
-    // maps this to 409.
+  test("throws HealthDrillError for non-restic backends (route → 409)", async () => {
+    // LAMA-266: an s3 backend with no restic_repository must NOT return
+    // ok=false (that's reserved for genuine restic-run failures which
+    // surface as 502). Instead it must throw HealthDrillError so the
+    // route layer can map it to 409 with the api.md-documented wording.
     db.run(
       `INSERT INTO backends (id, name, kind, s3_endpoint, s3_access_key_id, created_at)
        VALUES ('s3-1', 'just-s3', 's3', 's3.example.com', 'AK', ?)`,
       [Date.now()],
     );
-    const outcome = await runProve({ backendId: "s3-1" });
-    expect(outcome.ok).toBe(false);
-    expect(outcome.detail).toContain("not a restic backend");
+    await expect(
+      runProve({ backendId: "s3-1" }),
+    ).rejects.toThrow("prove requires a restic backend with snapshots");
   });
 
   test("cleans up the temp dir even on the error path", async () => {
@@ -795,7 +796,31 @@ describe("health-drill routes", () => {
     );
     expect(res.status).toBe(409);
     const body = await responseObject(res);
-    expect(String(body["error"])).toContain("not a restic backend");
+    expect(body["ok"]).toBeUndefined(); // 409 envelope is { error }, not the { ok:false, detail } 502 envelope
+    expect(String(body["error"])).toBe(
+      "backend is not a restic backend (missing repository or password)",
+    );
+  });
+
+  test("POST /prove → 409 with api.md-documented message for non-restic backends", async () => {
+    // LAMA-266: live verification caught this returning 502 with
+    // { ok:false, detail:"..." }. The doc + the implementing commit's
+    // intent were always 409 with this exact error message; this test
+    // pins the contract so a future refactor can't drift back to 502.
+    db.run(
+      `INSERT INTO backends (id, name, kind, s3_endpoint, s3_access_key_id, created_at)
+       VALUES ('s3-1', 'just-s3', 's3', 's3.example.com', 'AK', ?)`,
+      [Date.now()],
+    );
+    const res = await app.handle(
+      request("/api/v1/backends/s3-1/prove", { method: "POST" }),
+    );
+    expect(res.status).toBe(409);
+    const body = await responseObject(res);
+    expect(body["ok"]).toBeUndefined(); // 409 envelope is { error }, not the { ok:false, detail } 502 envelope
+    expect(String(body["error"])).toBe(
+      "prove requires a restic backend with snapshots",
+    );
   });
 
   test("POST /drill → 201 with audit row on success", async () => {

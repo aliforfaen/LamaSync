@@ -203,13 +203,15 @@ spec. The high-level shapes (verbose commentary):
     a real folder. On failure the response `detail` is a SCRUBBED summary
     (stage + exit code only) — never raw restic stderr, never secrets.
     Backend must be a restic backend with at least one snapshot; otherwise
-    the route returns `409 prove requires a restic backend with snapshots`.
+    the route returns `409 {"error":"prove requires a restic backend with snapshots"}`.
   - **Fire drill** (`POST /api/v1/backends/:backendId/drill`) wraps prove
     with a liveness probe (`restic snapshots --json`) and writes an
     audit row to `operation_log` (host_id = `_backup-health-drill`,
     operation = `backup_drill`) + a `health_drills` row + a notification
     through the existing engine (LAMA-200). The same path runs on a
     monthly cadence inside the server process — see env vars below.
+    Backend must be a restic backend; otherwise the route returns
+    `409 {"error":"backend is not a restic backend (missing repository or password)"}`.
   - Cadence env vars (both default to a monthly pass + a 1h server-side
     check tick): `LAMASYNC_DRILL_INTERVAL_MS` (per-backend due interval,
     default `30 * 24 * 60 * 60 * 1000`) and `LAMASYNC_DRILL_CHECK_INTERVAL_MS`

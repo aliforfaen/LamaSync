@@ -63,6 +63,15 @@ export const healthDrillRoutes = new Elysia({ prefix: "/api/v1" })
           detail: outcome.detail,
         };
       } catch (err) {
+        // LAMA-266: non-restic backends surface as 409 (per api.md),
+        // distinct from genuine restic-run failures which stay 502.
+        // runDrill throws the same error class for the same condition;
+        // we keep one error message per endpoint so each route's
+        // documented wording stays unambiguous.
+        if (err instanceof HealthDrillError) {
+          set.status = 409;
+          return { error: err.message };
+        }
         // runProve swallows its own restic errors into the outcome;
         // anything reaching here is a true unexpected failure (e.g. the
         // DB closing mid-run). Log + return 500 with a generic message.
@@ -80,7 +89,7 @@ export const healthDrillRoutes = new Elysia({ prefix: "/api/v1" })
         responses: {
           200: { description: "Prove succeeded; `file` is the restored relative path" },
           404: { description: "Backend not found" },
-          409: { description: "Prove requires a restic backend with snapshots" },
+          409: { description: "Prove requires a restic backend with snapshots (missing repository or password)" },
           502: { description: "restic reported an error; `detail` is a scrubbed summary" },
           401: { description: "Unauthorized" },
         },
