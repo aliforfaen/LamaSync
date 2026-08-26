@@ -70,8 +70,8 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only; 15-min cache) |
 | GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only; 15-min cache) |
-| GET      | `/folders/:folderId/snapshots`             | Folder-scoped restic snapshot history for the time-travel slider; empty for non-restic folders (LAMA-259) |
-| GET      | `/folders/:folderId/snapshots/:snapshotId/files?path=...&limit=...` | Files inside a restic snapshot at a given path (`BrowseResponse` with `backend: "restic-snapshot"`); 409 for non-restic folders (LAMA-259) |
+| GET      | `/folders/:id/snapshots`             | Folder-scoped restic snapshot history for the time-travel slider; empty for non-restic folders (LAMA-259) |
+| GET      | `/folders/:id/snapshots/:snapshotId/files?path=...&limit=...` | Files inside a restic snapshot at a given path (`BrowseResponse` with `backend: "restic-snapshot"`); 409 for non-restic folders (LAMA-259) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
 | GET      | `/backends/:backendId`                     | Read one backend (additive `lastProveAt`/`lastProveOk` for the badge) |
