@@ -3,6 +3,29 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Coding-agent batch 2 + polish run — LAMA-259/265/288 (2026-08-26)
+
+All of `docs/handoff-agent-batch2-2026-08-25.md` shipped via subagents
+(waves kept to disjoint packages; one cancelled TUI agent's half-finished
+tree was inspected and salvaged rather than reverted). Gates at end:
+`tsc --noEmit`, drift `--strict` OK, **911 pass / 4 skip / 0 fail** (882+
+with `LAMASYNC_TUI_TEST_VIEWS=1`). All issues done on Multica with ship
+comments.
+
+- **LAMA-259 time-travel browser**: server snapshot surface (`cb5aa2a`) +
+  DataBrowser chip scrubber (`5957b07`). Its route-param mixing broke
+  server boot (Elysia rejects `/folders/:folderId/...` next to
+  `/folders/:id/...`) — caught by smoke-booting the server, fixed in
+  `2c2d805` + docs `b711fac`. Lesson: gates now include a bare
+  `bun run packages/server/src/index.ts` boot check before any deploy.
+- **LAMA-265 delight pass** (`021165f`): llama SVG glyph + once-per-
+  milestone confetti, reduced-motion safe.
+- **LAMA-288 polish run 2**: TUI diff preview + smoke tests +
+  op-log archival export + ntfy removal (`3519479`, `91f1e68`); P-A a11y/
+  motion/error-states/responsive/glossary sweep (`eb324db`).
+- Not yet deployed to prod: branch is ~10 commits ahead of master again.
+  Deploy via merge → CI image → `update.sh` when convenient.
+
 ## Live-LXC session — LAMA-263/264 verified, LAMA-273/266 shipped (2026-08-25)
 
 Orchestrator ran with prod SSH authority (`docs/prod-deploy.md`; branch
