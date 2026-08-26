@@ -1558,6 +1558,48 @@ button.action:disabled {
   justify-content: flex-end;
 }
 
+/* LAMA-260: file content preview (image/text) inside the modal. */
+.file-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.file-preview-image {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--surface-elevated);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+}
+.file-preview-image img {
+  max-width: 100%;
+  max-height: 56vh;
+  object-fit: contain;
+}
+.file-preview-text {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: auto;
+  max-height: 50vh;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+.file-preview-truncate-note {
+  font-size: var(--font-size-sm);
+}
+
+/* LAMA-260: folder-upload modal keeps the optional path field tidy. */
+
 .browser-dir-name,
 .browser-file-name {
   display: inline-flex;

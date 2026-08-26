@@ -264,6 +264,22 @@ async function apiBlob(path: string): Promise<Blob> {
   return res.blob();
 }
 
+/**
+ * Shared LAMA-260 / browse-download helper: POST /browse/download and decode
+ * the base64 payload into a Blob. Reused by the Download action (which
+ * triggers a save) and the Preview action (which renders the bytes).
+ */
+async function browseDownloadBlob(ref: BrowseRef, name: string): Promise<Blob> {
+  const data = await apiPost<{ name: string; content: string }>(
+    "/browse/download",
+    { ref, name },
+  );
+  const binary = atob(data.content);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes]);
+}
+
 // Typed domain helpers.
 
 export const api = {
@@ -442,28 +458,59 @@ export const api = {
   browseDelete: (ref: BrowseRef, names: string[]) =>
     apiPost<BrowseJob>("/browse/delete", { ref, names }),
   browseDownload: async (ref: BrowseRef, name: string) => {
-    const data = await apiPost<{ name: string; content: string }>(
-      "/browse/download",
-      { ref, name },
-    );
-    const binary = atob(data.content);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([bytes]));
+    const blob = await browseDownloadBlob(ref, name);
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = data.name;
+    a.download = name;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
   },
+  // LAMA-260: fetch a file's bytes for preview via the same /browse/download
+  // auth+flow the Download action uses. The server returns base64 content,
+  // so we decode it into a Blob the caller can turn into a preview.
+  browsePreviewBlob: (ref: BrowseRef, name: string) => browseDownloadBlob(ref, name),
   browseRename: (ref: BrowseRef, from: string, to: string) =>
     apiPost<BrowseJob>("/browse/rename", { ref, from, to }),
   browseMkdir: (ref: BrowseRef, name: string) =>
     apiPost<BrowseJob>("/browse/mkdir", { ref, name }),
   browseUpload: (destination: BrowseRef, name: string, content: string) =>
     apiPost<BrowseJob>("/browse/upload", { destination, name, content }),
+  // LAMA-260: multipart upload into a folder's destination backend
+  // (POST /folders/:id/files). Synchronous — no job to poll. Uses the raw
+  // fetch (not apiFetch) so the browser sets the multipart boundary instead
+  // of a forced JSON content-type.
+  uploadFolderFile: async (
+    folderId: string,
+    file: Blob,
+    opts: { path?: string } = {},
+  ) => {
+    const key = getApiKey();
+    if (!key) {
+      notifyUnauthorized();
+      throw new ApiError(401, "missing api key");
+    }
+    const form = new FormData();
+    const filename = (file as { name?: unknown }).name;
+    form.append(
+      "file",
+      file,
+      typeof filename === "string" && filename.length > 0 ? filename : "upload.bin",
+    );
+    if (opts.path) form.append("path", opts.path);
+    const res = await fetch(
+      `/api/v1/folders/${encodeURIComponent(folderId)}/files`,
+      { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: form },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 401) notifyUnauthorized();
+      throw new ApiError(res.status, text);
+    }
+    return (await res.json()) as { ok: boolean; name: string; path: string; size: number };
+  },
   listBrowseJobs: (limit = 50) =>
     apiGet<BrowseJob[]>(`/browse/jobs?limit=${limit}`),
   // LAMA-222: reusable backends. Secrets are write-only (hasSecret flags

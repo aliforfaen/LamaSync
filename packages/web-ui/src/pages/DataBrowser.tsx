@@ -20,10 +20,19 @@ import {
   snapshotChipLabel,
   sortSnapshotsChronological,
 } from "../snapshot-history.ts";
-import { ConfirmDialog, PromptDialog } from "../components/Modal.tsx";
+import { ConfirmDialog, Modal, PromptDialog } from "../components/Modal.tsx";
 import { InlineError } from "../components/InlineError.tsx";
 import { useOverlayA11y } from "../hooks/useOverlayA11y.ts";
 import { IconFolder, IconStorage } from "../components/icons.tsx";
+import {
+  TEXT_PREVIEW_MAX_BYTES,
+  extensionOf,
+  previewKindForName,
+  sniffPreviewKind,
+  truncateText,
+  type PreviewKind,
+} from "../file-preview.ts";
+import { isValidUploadPath, normalizeUploadPath } from "../upload-path.ts";
 
 type Tab = "local" | "s3" | "restic";
 
@@ -39,6 +48,10 @@ interface TabContext {
   // LAMA-259: true when the context is a backup folder being browsed in
   // snapshot mode — the write toolbar must offer no edit ops, ever.
   readOnly?: boolean;
+  // LAMA-260: present when this context supports server-side folder uploads
+  // (a writable s3 / local / nfs folder, not restic/sftp or snapshot mode).
+  // The Data Browser uses it to choose the folder-scoped upload flow.
+  uploadFolderId?: string;
 }
 
 function formatBytes(bytes: number): string {
@@ -110,16 +123,19 @@ interface EntriesTableProps {
   onRename?: (name: string) => void;
   // UX workstream 4: per-file download.
   onDownload?: (name: string) => void;
+  // LAMA-260: per-file content preview (image/text) when writable. Receives
+  // the whole entry so the caller can classify by size.
+  onPreview?: (entry: BrowseEntry) => void;
   // LAMA-271: empty-directory teaching CTA (opens an existing flow such as
   // the upload picker). Omitted → message-only empty state.
   emptyCtaLabel?: string;
   emptyCta?: () => void;
 }
 
-function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename, onDownload, emptyCtaLabel, emptyCta }: EntriesTableProps) {
+function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selection, onToggleSelect, onRename, onDownload, onPreview, emptyCtaLabel, emptyCta }: EntriesTableProps) {
   const parent = parentPath(path);
   const selectable = Boolean(selection && onToggleSelect);
-  const hasActions = Boolean(onRename || onDownload);
+  const hasActions = Boolean(onRename || onDownload || onPreview);
   const sorted = useMemo(() => {
     const entries = response?.entries ?? [];
     const dirs = entries.filter((e) => e.type === "dir");
@@ -225,6 +241,15 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
             )}
             {hasActions && (
               <td>
+                {onPreview && entry.type === "file" && previewKindForName(entry.name, entry.size) !== null && (
+                  <button
+                    type="button"
+                    className="action"
+                    onClick={() => onPreview(entry)}
+                  >
+                    Preview
+                  </button>
+                )}
                 {onDownload && entry.type === "file" && (
                   <button
                     type="button"
@@ -258,6 +283,7 @@ function RefBrowser({
   onToggleSelect,
   onRename,
   onDownload,
+  onPreview,
   emptyCtaLabel,
   emptyCta,
 }: {
@@ -267,6 +293,7 @@ function RefBrowser({
   onToggleSelect?: (name: string) => void;
   onRename?: (name: string) => void;
   onDownload?: (name: string) => void;
+  onPreview?: (entry: BrowseEntry) => void;
   emptyCtaLabel?: string;
   emptyCta?: () => void;
 }) {
@@ -342,6 +369,7 @@ function RefBrowser({
         onToggleSelect={onToggleSelect}
         onRename={onRename}
         onDownload={onDownload}
+        onPreview={onPreview}
         emptyCtaLabel={emptyCtaLabel}
         emptyCta={emptyCta}
       />
@@ -528,6 +556,18 @@ export function DataBrowser() {
   const [uploadConfirm, setUploadConfirm] = useState<File | null>(null);
   const [jobs, setJobs] = useState<BrowseJob[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // LAMA-260: file content preview — the ref+name of the file being viewed
+  // and the preview kind decided at click time (image vs text).
+  const [previewTarget, setPreviewTarget] = useState<{
+    ref: BrowseRef;
+    name: string;
+    kind: PreviewKind;
+  } | null>(null);
+  // LAMA-260: folder-scoped upload dialog state (folderId + target path).
+  const [uploadOpen, setUploadOpen] = useState<{
+    folderId: string;
+    path: string;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const jobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -615,9 +655,23 @@ export function DataBrowser() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 
+  // LAMA-260: open the preview modal for a file. The kind was decided at
+  // render time (extension + size) so the modal can fetch the right bytes.
+  function onPreview(entry: BrowseEntry): void {
+    if (!current || entry.type !== "file") return;
+    const kind = previewKindForName(entry.name, entry.size);
+    if (kind === null) return;
+    setPreviewTarget({ ref: current.ref, name: entry.name, kind });
+  }
+
   // LAMA-271: the empty-directory teaching CTA opens the existing upload
-  // picker (same flow as the toolbar "Upload" button).
+  // picker (same flow as the toolbar "Upload" button). For a writable
+  // folder-scoped context it opens the folder upload modal instead.
   function openUpload(): void {
+    if (current?.uploadFolderId) {
+      setUploadOpen({ folderId: current.uploadFolderId, path: current.ref.path });
+      return;
+    }
     fileInputRef.current?.click();
   }
 
@@ -850,12 +904,28 @@ export function DataBrowser() {
           onToggleSelect={toggleSelect}
           onRename={onRename}
           onDownload={onDownload}
+          onPreview={onPreview}
           emptyCtaLabel="Upload a file"
           emptyCta={openUpload}
         />
       )}
-      {tab === "s3" && <S3Browser onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} emptyCtaLabel="Upload a file" emptyCta={openUpload} />}
+      {tab === "s3" && <S3Browser onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} onPreview={onPreview} emptyCtaLabel="Upload a file" emptyCta={openUpload} />}
       {tab === "restic" && <ResticBrowser />}
+
+      {previewTarget && current && (
+        <FilePreviewModal
+          target={previewTarget}
+          onClose={() => setPreviewTarget(null)}
+        />
+      )}
+      {uploadOpen && (
+        <FolderUploadModal
+          folderId={uploadOpen.folderId}
+          initialPath={uploadOpen.path}
+          onClose={() => setUploadOpen(null)}
+          onUploaded={() => current?.reload()}
+        />
+      )}
 
       {picker && (
         <DestinationPicker
@@ -946,12 +1016,231 @@ export function DataBrowser() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// LAMA-260: file preview (image/text) + folder-scoped upload.
+// ---------------------------------------------------------------------------
+
+/**
+ * Modal that fetches a file's bytes via the browse-download auth flow and
+ * renders an image (object URL, max-height box) or text (<pre>, capped with
+ * a truncated note). Esc / backdrop close via the shared Modal a11y.
+ */
+function FilePreviewModal({
+  target,
+  onClose,
+}: {
+  target: { ref: BrowseRef; name: string; kind: PreviewKind };
+  onClose: () => void;
+}) {
+  const [text, setText] = useState<{ text: string; truncated: boolean } | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [bump, setBump] = useState(0);
+  // Resolved kind after sniffing an extension-less file's bytes.
+  const [resolvedKind, setResolvedKind] = useState<PreviewKind | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setText(null);
+    setImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setResolvedKind(null);
+    void api
+      .browsePreviewBlob(target.ref, target.name)
+      .then(async (nextBlob) => {
+        if (cancelled) return;
+        const kind =
+          target.kind === "text" && extensionOf(target.name) === ""
+            ? (sniffPreviewKind(new Uint8Array(await nextBlob.slice(0, 16).arrayBuffer())) ?? null)
+            : target.kind;
+        if (kind === null) {
+          setError("This file doesn't look like previewable text or an image.");
+          setLoading(false);
+          return;
+        }
+        setResolvedKind(kind);
+        if (kind === "image") {
+          setImageUrl(URL.createObjectURL(nextBlob));
+        } else {
+          const content = await nextBlob.text();
+          setText(truncateText(content, TEXT_PREVIEW_MAX_BYTES));
+        }
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target.ref, target.name, target.kind, bump]);
+
+  useEffect(() => {
+    return () => {
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+    };
+  }, [imageUrl]);
+
+  return (
+    <Modal title={`Preview — ${target.name}`} onClose={onClose}>
+      {loading ? (
+        <div className="browser-skel" aria-busy="true">
+          <div className="skel skel-line" />
+          <div className="skel skel-line" />
+          <div className="skel skel-line" />
+        </div>
+      ) : error ? (
+        <InlineError message={error} onRetry={() => setBump((n) => n + 1)} />
+      ) : (
+        <div className="file-preview">
+          {(resolvedKind ?? target.kind) === "image" && imageUrl ? (
+            <div className="file-preview-image">
+              <img src={imageUrl} alt={target.name} />
+            </div>
+          ) : text ? (
+            <>
+              {text.truncated ? (
+                <p className="muted file-preview-truncate-note">
+                  Preview truncated at 256 KB — this file is larger.
+                </p>
+              ) : null}
+              <pre className="file-preview-text">{text.text}</pre>
+            </>
+          ) : (
+            <p className="muted">No preview available for this file.</p>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/**
+ * Modal for the folder-scoped upload (POST /folders/:id/files). Validates the
+ * optional target path client-side, disables the submit while busy, and maps
+ * the server's 409/413/502 responses to friendly copy.
+ */
+function FolderUploadModal({
+  folderId,
+  initialPath,
+  onClose,
+  onUploaded,
+}: {
+  folderId: string;
+  initialPath: string;
+  onClose: () => void;
+  onUploaded: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [path, setPath] = useState(initialPath);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pathValid = isValidUploadPath(path);
+
+  function submit(): void {
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    void api
+      .uploadFolderFile(folderId, file, { path: normalizeUploadPath(path) })
+      .then(() => {
+        onUploaded();
+        onClose();
+      })
+      .catch((err: unknown) => {
+        setError(uploadErrorMessage(err));
+        setBusy(false);
+      });
+  }
+
+  return (
+    <Modal
+      title="Upload to folder"
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="action" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="action primary"
+            disabled={busy || !file || !pathValid}
+            onClick={submit}
+          >
+            {busy ? "Uploading…" : "Upload"}
+          </button>
+        </>
+      }
+    >
+      <p className="muted">
+        Upload into this storage destination. Files land under{" "}
+        <code>{path.trim() || "the root"}</code>.
+      </p>
+      {error ? <div className="error">{error}</div> : null}
+      <label className="form-field">
+        <span className="form-label">File</span>
+        <input
+          type="file"
+          onChange={(e) => {
+            const picked = e.target.files?.[0] ?? null;
+            setFile(picked);
+            setError(null);
+          }}
+        />
+      </label>
+      <label className="form-field">
+        <span className="form-label">Subdirectory (optional)</span>
+        <input
+          type="text"
+          value={path}
+          placeholder="e.g. photos/2026"
+          onChange={(e) => {
+            setPath(e.target.value);
+            setError(null);
+          }}
+        />
+        {!pathValid ? (
+          <span className="form-error">
+            Path can't be absolute or contain "..".
+          </span>
+        ) : null}
+      </label>
+    </Modal>
+  );
+}
+
+/** Map a folder-upload failure to friendly, glossary-safe copy. */
+function uploadErrorMessage(err: unknown): string {
+  const status = err instanceof Error && "status" in err ? (err as { status?: unknown }).status : undefined;
+  if (status === 409) {
+    return "This destination doesn't support uploads from here.";
+  }
+  if (status === 413) {
+    return "File too large (limit 100 MB).";
+  }
+  if (status === 502) {
+    return "Upload failed — try again.";
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 function S3Browser({
   onContext,
   selection,
   onToggleSelect,
   onRename,
   onDownload,
+  onPreview,
   emptyCtaLabel,
   emptyCta,
 }: {
@@ -960,6 +1249,7 @@ function S3Browser({
   onToggleSelect?: (name: string) => void;
   onRename?: (name: string) => void;
   onDownload?: (name: string) => void;
+  onPreview?: (entry: BrowseEntry) => void;
   emptyCtaLabel?: string;
   emptyCta?: () => void;
 }) {
@@ -1007,7 +1297,10 @@ function S3Browser({
   useEffect(() => {
     if (!state || isResticHistory) return;
     const { folderId, path } = state;
-    onContext({ ref: { kind: "s3", folderId, path }, reload: () => setBump((n) => n + 1) });
+    // LAMA-260: live s3 folders are server-writable, so expose the folder id
+    // for the folder-scoped upload flow (restic/snapshot mode never reaches
+    // this branch and stays read-only).
+    onContext({ ref: { kind: "s3", folderId, path }, reload: () => setBump((n) => n + 1), uploadFolderId: folderId });
   }, [state?.folderId, state?.path, isResticHistory, onContext]);
 
   if (!state) {
@@ -1068,6 +1361,7 @@ function S3Browser({
           onToggleSelect={onToggleSelect}
           onRename={onRename}
           onDownload={onDownload}
+          onPreview={onPreview}
           emptyCtaLabel={emptyCtaLabel}
           emptyCta={emptyCta}
         />
