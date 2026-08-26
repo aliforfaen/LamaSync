@@ -897,6 +897,13 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         role?: string | null;
         localPath?: string | null;
         bandwidthSchedule?: string | null;
+        // LAMA-259 follow-up: per-host restic repository/password
+        // override. null on the wire CLEARS the override (back to the
+        // folder/backend default). Both fields must travel together —
+        // resolveFolderResticConfigForHost refuses a partial override
+        // and falls back, matching daemon-side behavior.
+        resticRepository?: string | null;
+        resticPassword?: string | null;
       };
       const sets: string[] = [];
       const args: (string | number | null)[] = [];
@@ -957,6 +964,33 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       if (b.bandwidthSchedule !== undefined) {
         sets.push("bandwidth_schedule = ?");
         args.push(b.bandwidthSchedule);
+      }
+      if (b.resticRepository !== undefined) {
+        // Trim so leading/trailing whitespace doesn't poison the
+        // later-LAMA-259 override check (resolveFolderResticConfigForHost
+        // refuses a repository whose trimmed form is ""). null is the
+        // documented "clear the override" shape — store NULL so the
+        // helper falls back to the folder-level default.
+        sets.push("restic_repository = ?");
+        args.push(
+          b.resticRepository === null
+            ? null
+            : b.resticRepository.trim() === ""
+            ? null
+            : b.resticRepository.trim(),
+        );
+      }
+      if (b.resticPassword !== undefined) {
+        sets.push("restic_password = ?");
+        // Password is opaque (encrypted at rest server-side); we keep
+        // an empty string honest — the per-host resolver treats "" as
+        // "fall back", which is what an empty PATCH payload should do
+        // rather than overwriting a real password.
+        args.push(
+          b.resticPassword === null || b.resticPassword === ""
+            ? null
+            : b.resticPassword,
+        );
       }
       if (sets.length === 0) {
         set.status = 400;
@@ -1021,6 +1055,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         role: t.Optional(t.Union([t.String(), t.Null()])),
         localPath: t.Optional(t.Union([t.String(), t.Null()])),
         bandwidthSchedule: t.Optional(t.Union([t.String(), t.Null()])),
+        // LAMA-259 follow-up: per-host restic override. null clears the
+        // override (back to folder/backend defaults). Both fields
+        // must travel together; resolveFolderResticConfigForHost treats
+        // a partial override as "no override".
+        resticRepository: t.Optional(t.Union([t.String(), t.Null()])),
+        resticPassword: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Update an existing assignment",

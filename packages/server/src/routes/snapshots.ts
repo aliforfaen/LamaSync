@@ -9,7 +9,7 @@
 //     restic repository return `{ snapshots: [] }` so the UI can hide the
 //     slider cleanly. Folder-not-found → 404.
 //
-//   GET /api/v1/folders/:id/snapshots/:snapshotId/files?path=...
+//   GET /api/v1/folders/:id/snapshots/:snapshotId/files?path=...&hostId=...
 //     → BrowseResponse (backend: "restic-snapshot")
 //     Spawns `restic ls --json <snap>[:<path>]` against the folder's
 //     configured restic repository, parses the JSON-lines output (sharing
@@ -17,6 +17,12 @@
 //     DataBrowser can render with the same component as live folders.
 //     Limit caps the entry count (default 500, max 5000). Non-restic
 //     folders → 409 with the same wording the prove/drill routes use.
+//     LAMA-259 follow-up: the optional `?hostId=` query honors a
+//     per-host assignment's resticRepository/resticPassword override
+//     (LAMA-239) so a host that backs up to its own repo can browse its
+//     own history without copying the central password around. The
+//     no-hostId path is byte-identical to today (folder-level
+//     `backends.restic_*` resolution only).
 //
 // Read-only: never writes to a real folder, never opens a tempdir. The
 // restic password lives in `RESTIC_PASSWORD` env of the spawned process;
@@ -31,7 +37,7 @@ import type {
   FolderSnapshot,
   FolderSnapshotsResponse,
 } from "@lamasync/core";
-import { resolveFolderResticConfig } from "../backends.ts";
+import { resolveFolderResticConfigForHost } from "../backends.ts";
 import {
   parseLsJsonRich,
   scrubFailureSummary,
@@ -258,9 +264,14 @@ interface FolderListingContext {
 
 /** Resolve a folder to its restic repository + password. Returns null
  *  for non-restic folders so the route layer can decide on an empty
- *  snapshot list (for /snapshots) vs a 409 (for /files). */
+ *  snapshot list (for /snapshots) vs a 409 (for /files). The optional
+ *  `hostId` (LAMA-259 follow-up) routes the resolution through the
+ *  per-host aware path — a populated override on the host's assignment
+ *  wins, otherwise we fall through to the folder/backend default. No
+ *  `hostId` → identical to the pre-existing folder-level path. */
 function resolveContextForFolder(
   folderId: string,
+  hostId: string | null,
 ): FolderListingContext | null {
   const row = activeDb
     .query<
@@ -276,11 +287,15 @@ function resolveContextForFolder(
     .get(folderId);
   if (!row) return null;
   if (row.backend !== "restic" || !row.backend_id) return null;
-  const cfg = resolveFolderResticConfig(activeDb, {
-    id: row.id,
-    backend: row.backend,
-    backendId: row.backend_id,
-  });
+  const cfg = resolveFolderResticConfigForHost(
+    activeDb,
+    {
+      id: row.id,
+      backend: row.backend,
+      backendId: row.backend_id,
+    },
+    hostId,
+  );
   if (!cfg) return null;
   return {
     backendId: cfg.backendId,
@@ -366,6 +381,12 @@ export const folderSnapshotsRoutes = new Elysia({ prefix: "/api/v1" })
       const pathPrefix = (query.path ?? "/").trim();
       const safePath = pathPrefix === "" ? "/" : pathPrefix;
       const limit = clampFilesLimit(query.limit);
+      // LAMA-259 follow-up: `?hostId=` resolves through the per-host
+      // override path when populated (see backends.ts). Trim + treat
+      // empty-string as "not supplied" so the no-hostId path stays
+      // byte-identical to the pre-implementation behavior.
+      const hostIdRaw = typeof query.hostId === "string" ? query.hostId.trim() : "";
+      const hostId = hostIdRaw === "" ? null : hostIdRaw;
 
       const folderRow = activeDb
         .query<
@@ -379,7 +400,7 @@ export const folderSnapshotsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Folder not found" };
       }
-      const ctx = resolveContextForFolder(folderId);
+      const ctx = resolveContextForFolder(folderId, hostId);
       if (!ctx) {
         set.status = 409;
         return {
@@ -432,6 +453,12 @@ export const folderSnapshotsRoutes = new Elysia({ prefix: "/api/v1" })
         limit: t.Optional(
           t.Union([t.Number(), t.String()]),
         ),
+        // LAMA-259 follow-up: optional per-host restic resolution. When
+        // set, the assignment's resticRepository/resticPassword override
+        // (LAMA-239) wins for that host; absent or unknown hosts fall
+        // through to the folder/backend-level default. The no-hostId
+        // path is unchanged from the LAMA-259 baseline.
+        hostId: t.Optional(t.String()),
       }),
       detail: {
         summary: "List files inside a folder's restic snapshot at a given path",

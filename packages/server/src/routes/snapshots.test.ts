@@ -727,6 +727,343 @@ describe("GET /api/v1/folders/:folderId/snapshots/:snapshotId/files", () => {
     const res = await app.handle(noAuth);
     expect(res.status).toBe(401);
   });
+
+  // ----- LAMA-259 follow-up: per-host restic override ---------------
+  // These tests verify that ?hostId= causes the snapshot files
+  // endpoint to use the assignment's resticRepository/resticPassword
+  // override (when both are populated) and otherwise falls back to the
+  // folder/backend-level config.
+
+  /** Insert a host + a folder assignment row pointing at `folderId`.
+   *  `overrides` carries optional resticRepository/resticPassword. */
+  function insertAssignment(opts: {
+    folderId: string;
+    hostId: string;
+    resticRepository?: string | null;
+    resticPassword?: string | null;
+  }): void {
+    db.run(
+      `INSERT INTO hosts (id, hostname, status, last_seen) VALUES (?, ?, 'online', 1)`,
+      [opts.hostId, opts.hostId],
+    );
+    // mode defaults to 'inherit' to mirror real assignments.
+    db.run(
+      `INSERT INTO folder_assignments
+         (id, folder_id, host_id, role, local_path, enabled,
+          mode, restic_repository, restic_password)
+       VALUES (?, ?, ?, 'both', '/tmp/x', 1, 'inherit', ?, ?)`,
+      [
+        `as-${opts.folderId}-${opts.hostId}`,
+        opts.folderId,
+        opts.hostId,
+        opts.resticRepository ?? null,
+        opts.resticPassword ?? null,
+      ],
+    );
+  }
+
+  test("no hostId: uses the folder/backend repo (backward-compat — LAMA-259 baseline)", async () => {
+    const { folderId } = insertResticFolder(
+      "f1",
+      "docs",
+      "s3:restic/central",
+      "central-pw",
+    );
+    db.run(
+      "INSERT INTO hosts (id, hostname, status, last_seen) VALUES ('h1', 'alpha', 'online', 1)",
+    );
+    insertSnapshotRow({
+      id: "row-1",
+      folderId,
+      snapshotId: "snap-1",
+      timestamp: 1_700_000_000_000,
+      hostId: "h1",
+      paths: ["/data"],
+    });
+    const captured: ResticSpawnInput[] = [];
+    const runner: ResticSpawnFn = async (input) => {
+      captured.push(input);
+      return {
+        code: 0,
+        stdout: resticLsJson([
+          { name: "a.txt", path: "/a.txt", type: "file", size: 1 },
+        ]),
+        stderr: "",
+      };
+    };
+    __setResticRunnerForTests(runner);
+    const res = await app.handle(
+      request("/api/v1/folders/f1/snapshots/snap-1/files?path=/"),
+    );
+    expect(res.status).toBe(200);
+    expect(captured[0]?.args).toEqual([
+      "ls",
+      "--json",
+      "snap-1",
+      "-r",
+      "s3:restic/central",
+    ]);
+    expect(captured[0]?.env?.["RESTIC_PASSWORD"]).toBe("central-pw");
+  });
+
+  test("?hostId= on a host with a full override: uses the override's repo + password", async () => {
+    const { folderId } = insertResticFolder(
+      "f1",
+      "docs",
+      "s3:restic/central",
+      "central-pw",
+    );
+    insertAssignment({
+      folderId,
+      hostId: "host-1",
+      resticRepository: "sftp:nas:/srv/restic/host-1",
+      resticPassword: "host-1-pw",
+    });
+    insertSnapshotRow({
+      id: "row-1",
+      folderId,
+      snapshotId: "snap-1",
+      timestamp: 1_700_000_000_000,
+      hostId: "host-1",
+      paths: ["/data"],
+    });
+    const captured: ResticSpawnInput[] = [];
+    const runner: ResticSpawnFn = async (input) => {
+      captured.push(input);
+      return {
+        code: 0,
+        stdout: resticLsJson([
+          { name: "private.txt", path: "/private.txt", type: "file", size: 1 },
+        ]),
+        stderr: "",
+      };
+    };
+    __setResticRunnerForTests(runner);
+    const res = await app.handle(
+      request(
+        "/api/v1/folders/f1/snapshots/snap-1/files?path=/&hostId=host-1",
+      ),
+    );
+    expect(res.status).toBe(200);
+    // The override wins: the per-host repo + password reach restic, not
+    // the folder/backend defaults.
+    expect(captured[0]?.args).toEqual([
+      "ls",
+      "--json",
+      "snap-1",
+      "-r",
+      "sftp:nas:/srv/restic/host-1",
+    ]);
+    expect(captured[0]?.env?.["RESTIC_PASSWORD"]).toBe("host-1-pw");
+    // Defense-in-depth: the central password never reaches restic when
+    // an override is honored.
+    expect(captured[0]?.args.join(" ")).not.toContain("central-pw");
+    expect(captured[0]?.env?.["RESTIC_PASSWORD"]).not.toBe("central-pw");
+  });
+
+  test("?hostId= on a host without an assignment: falls back to folder-level", async () => {
+    // Operator typo'd a hostId. The endpoint shouldn't 404 — a missing
+    // assignment is identical to "no override" and the folder-level
+    // config is the safe default.
+    const { folderId } = insertResticFolder(
+      "f1",
+      "docs",
+      "s3:restic/central",
+      "central-pw",
+    );
+    db.run(
+      "INSERT INTO hosts (id, hostname, status, last_seen) VALUES ('h-other','beta','online',1)",
+    );
+    insertSnapshotRow({
+      id: "row-1",
+      folderId,
+      snapshotId: "snap-1",
+      timestamp: 1_700_000_000_000,
+      hostId: "h-other",
+      paths: ["/data"],
+    });
+    const captured: ResticSpawnInput[] = [];
+    const runner: ResticSpawnFn = async (input) => {
+      captured.push(input);
+      return {
+        code: 0,
+        stdout: resticLsJson([
+          { name: "a.txt", path: "/a.txt", type: "file", size: 1 },
+        ]),
+        stderr: "",
+      };
+    };
+    __setResticRunnerForTests(runner);
+    const res = await app.handle(
+      request(
+        "/api/v1/folders/f1/snapshots/snap-1/files?path=/&hostId=h-other",
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(captured[0]?.args).toEqual([
+      "ls",
+      "--json",
+      "snap-1",
+      "-r",
+      "s3:restic/central",
+    ]);
+    expect(captured[0]?.env?.["RESTIC_PASSWORD"]).toBe("central-pw");
+  });
+
+  test("?hostId= on a host whose assignment has only a partial override: falls back", async () => {
+    // Partial overrides (only repo, no password) are treated as "no
+    // override" by resolveFolderResticConfigForHost — matches the
+    // daemon-side behavior where a half-set assignment degrades to
+    // the backend defaults rather than handing restic a missing
+    // argument.
+    const { folderId } = insertResticFolder(
+      "f1",
+      "docs",
+      "s3:restic/central",
+      "central-pw",
+    );
+    db.run(
+      "INSERT INTO hosts (id, hostname, status, last_seen) VALUES ('h-half','h-half','online',1)",
+    );
+    db.run(
+      `INSERT INTO folder_assignments
+         (id, folder_id, host_id, role, local_path, enabled,
+          mode, restic_repository, restic_password)
+       VALUES ('as-half', 'f1', 'h-half', 'both', '/tmp/x', 1, 'inherit', 'sftp:half:/r', NULL)`,
+    );
+    insertSnapshotRow({
+      id: "row-1",
+      folderId,
+      snapshotId: "snap-1",
+      timestamp: 1_700_000_000_000,
+      hostId: "h-half",
+      paths: ["/data"],
+    });
+    const captured: ResticSpawnInput[] = [];
+    const runner: ResticSpawnFn = async (input) => {
+      captured.push(input);
+      return {
+        code: 0,
+        stdout: resticLsJson([
+          { name: "a.txt", path: "/a.txt", type: "file", size: 1 },
+        ]),
+        stderr: "",
+      };
+    };
+    __setResticRunnerForTests(runner);
+    const res = await app.handle(
+      request(
+        "/api/v1/folders/f1/snapshots/snap-1/files?path=/&hostId=h-half",
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(captured[0]?.args).toEqual([
+      "ls",
+      "--json",
+      "snap-1",
+      "-r",
+      "s3:restic/central",
+    ]);
+    expect(captured[0]?.env?.["RESTIC_PASSWORD"]).toBe("central-pw");
+  });
+
+  test("?hostId= on a non-existent host: falls back to folder-level (no 404)", async () => {
+    // Same rationale as the missing-assignment case: predictable and
+    // forgiving beats a 404 that hides whether the hostId is wrong
+    // or the folder genuinely has no history.
+    const { folderId } = insertResticFolder(
+      "f1",
+      "docs",
+      "s3:restic/central",
+      "central-pw",
+    );
+    insertSnapshotRow({
+      id: "row-1",
+      folderId,
+      snapshotId: "snap-1",
+      timestamp: 1_700_000_000_000,
+      hostId: "h",
+      paths: ["/data"],
+    });
+    const captured: ResticSpawnInput[] = [];
+    const runner: ResticSpawnFn = async (input) => {
+      captured.push(input);
+      return {
+        code: 0,
+        stdout: resticLsJson([
+          { name: "a.txt", path: "/a.txt", type: "file", size: 1 },
+        ]),
+        stderr: "",
+      };
+    };
+    __setResticRunnerForTests(runner);
+    const res = await app.handle(
+      request(
+        "/api/v1/folders/f1/snapshots/snap-1/files?path=/&hostId=ghost",
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(captured[0]?.args).toEqual([
+      "ls",
+      "--json",
+      "snap-1",
+      "-r",
+      "s3:restic/central",
+    ]);
+    expect(captured[0]?.env?.["RESTIC_PASSWORD"]).toBe("central-pw");
+  });
+
+  test("empty ?hostId= is treated as no hostId (no behavior change)", async () => {
+    const { folderId } = insertResticFolder(
+      "f1",
+      "docs",
+      "s3:restic/central",
+      "central-pw",
+    );
+    insertAssignment({
+      folderId,
+      hostId: "host-1",
+      resticRepository: "sftp:nas:/srv/restic/host-1",
+      resticPassword: "host-1-pw",
+    });
+    insertSnapshotRow({
+      id: "row-1",
+      folderId,
+      snapshotId: "snap-1",
+      timestamp: 1_700_000_000_000,
+      hostId: "host-1",
+      paths: ["/data"],
+    });
+    const captured: ResticSpawnInput[] = [];
+    const runner: ResticSpawnFn = async (input) => {
+      captured.push(input);
+      return {
+        code: 0,
+        stdout: resticLsJson([
+          { name: "a.txt", path: "/a.txt", type: "file", size: 1 },
+        ]),
+        stderr: "",
+      };
+    };
+    __setResticRunnerForTests(runner);
+    // An empty-string hostId MUST behave like the no-hostId path —
+    // a UI bug that ships `?hostId=` (empty) must not silently switch
+    // to the per-host repo.
+    const res = await app.handle(
+      request(
+        "/api/v1/folders/f1/snapshots/snap-1/files?path=/&hostId=",
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(captured[0]?.args).toEqual([
+      "ls",
+      "--json",
+      "snap-1",
+      "-r",
+      "s3:restic/central",
+    ]);
+    expect(captured[0]?.env?.["RESTIC_PASSWORD"]).toBe("central-pw");
+  });
 });
 
 // Belt-and-braces: prove the custom runner seam really substitutes. A future
