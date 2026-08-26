@@ -1541,6 +1541,43 @@ button.action:disabled {
   background: var(--surface-elevated);
 }
 
+/* LAMA-259: time-travel browser — snapshot history scrubber. Instant
+   swap only (no transitions) so reduced-motion needs nothing extra. */
+.snapshot-history {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+
+.snapshot-scrubber {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.snapshot-chip {
+  white-space: nowrap;
+}
+
+.snapshot-caption {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--accent-info-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
 /* --- Add-host guide + folder assignment UI --- */
 
 .guide-panel {

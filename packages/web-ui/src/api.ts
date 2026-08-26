@@ -29,6 +29,7 @@ import type {
   BrowseJob,
   DemoState,
   DemoSeedSummary,
+  FolderSnapshotsResponse,
   PauseMode,
   PauseState,
 } from "@lamasync/core";
@@ -401,6 +402,29 @@ export const api = {
     return apiGet<BrowseResponse>(`/browse/s3${qs}`);
   },
   browseRestic: () => apiGet<ResticSnapshot[]>("/browse/restic"),
+  // LAMA-259: time-travel browser — folder-scoped backup history and per-
+  // snapshot file listings. Additive GETs over the existing browse surface:
+  // /snapshots returns an empty list for non-restic folders (so the UI hides
+  // the scrubber); /files 404s unknown (folder, snapshot) tuples and 409s
+  // non-restic folders (server route: packages/server/src/routes/snapshots.ts).
+  listFolderSnapshots: (folderId: string) =>
+    apiGet<FolderSnapshotsResponse>(
+      `/folders/${encodeURIComponent(folderId)}/snapshots`,
+    ),
+  listSnapshotFiles: (
+    folderId: string,
+    snapshotId: string,
+    path?: string,
+    limit?: number,
+  ) => {
+    const qs = new URLSearchParams();
+    if (path !== undefined && path.length > 0) qs.set("path", path);
+    if (limit !== undefined) qs.set("limit", String(limit));
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : "";
+    return apiGet<BrowseResponse>(
+      `/folders/${encodeURIComponent(folderId)}/snapshots/${encodeURIComponent(snapshotId)}/files${suffix}`,
+    );
+  },
   // UX workstream 4: restic restore jobs (server routes already exist).
   listResticRestoreJobs: () => apiGet<ResticRestoreJob[]>("/restic/restore"),
   createResticRestore: (opts: {

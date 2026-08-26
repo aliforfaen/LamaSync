@@ -8,11 +8,18 @@ import type {
   BrowseRef,
   BrowseResponse,
   Folder,
+  FolderSnapshot,
   Host,
   ResticRestoreJob,
   ResticSnapshot,
 } from "@lamasync/core";
-import { api } from "../api.ts";
+import { api, errorText } from "../api.ts";
+import {
+  moveChipFocus,
+  snapshotCaptionLabel,
+  snapshotChipLabel,
+  sortSnapshotsChronological,
+} from "../snapshot-history.ts";
 import { ConfirmDialog, PromptDialog } from "../components/Modal.tsx";
 import { IconFolder, IconStorage } from "../components/icons.tsx";
 
@@ -27,6 +34,9 @@ interface S3PickerState {
 interface TabContext {
   ref: BrowseRef;
   reload: () => void;
+  // LAMA-259: true when the context is a backup folder being browsed in
+  // snapshot mode — the write toolbar must offer no edit ops, ever.
+  readOnly?: boolean;
 }
 
 function formatBytes(bytes: number): string {
@@ -494,6 +504,9 @@ export function DataBrowser() {
   const jobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const current = context[tab];
+  // LAMA-259: browsing a restic backup folder is read-only — the write
+  // toolbar collapses to a note (same treatment as the Restic tab).
+  const readOnly = current?.readOnly ?? false;
 
   const refreshJobs = useCallback(async (): Promise<void> => {
     try {
@@ -706,7 +719,9 @@ export function DataBrowser() {
       <PageHeader title="Data browser" purpose="Browse and manage files inside storage destinations directly." />
 <div className="toolbar">
         <span className="muted">
-          {tab === "restic" ? "Read-only" : "Copy / move / rename / upload"}
+          {tab === "restic" || readOnly
+            ? "Read-only"
+            : "Copy / move / rename / upload"}
         </span>
       </div>
       {error && <div className="error">{error}</div>}
@@ -724,7 +739,7 @@ export function DataBrowser() {
           className={`action ${tab === "s3" ? "primary" : ""}`}
           onClick={() => setTab("s3")}
         >
-          <IconStorage /> S3
+          <IconStorage /> Folders
         </button>
         <button
           type="button"
@@ -735,8 +750,16 @@ export function DataBrowser() {
         </button>
       </div>
 
-      {tab !== "restic" ? (
-        <div className="browser-toolbar">
+      {tab !== "restic" &&
+        (readOnly ? (
+          <div className="browser-toolbar">
+            <span className="muted">
+              Backups are read-only — scrub the history above to look back in
+              time.
+            </span>
+          </div>
+        ) : (
+          <div className="browser-toolbar">
           <button
             type="button"
             className="action"
@@ -788,8 +811,8 @@ export function DataBrowser() {
               </button>
             </span>
           ) : null}
-        </div>
-      ) : null}
+          </div>
+        ))}
 
       {tab === "local" && (
         <RefBrowser
@@ -917,16 +940,26 @@ function S3Browser({
   const [error, setError] = useState<string | null>(null);
   const [bump, setBump] = useState(0);
 
+  // LAMA-259: the folder picker also offers backup-type folders whose
+  // destination is a restic repository — those render the time-travel
+  // browser instead of a live listing.
+  const selectedFolder = folders.find((f) => f.id === state?.folderId) ?? null;
+  const isResticHistory = selectedFolder?.backend === "restic";
+
   useEffect(() => {
     let cancelled = false;
     api
       .listFolders()
       .then((res) => {
         if (!cancelled) {
-          const s3 = res.filter((f) => f.backend === "s3");
-          setFolders(s3);
-          if (!state && s3.length > 0) {
-            setState({ folderId: s3[0].id, path: "" });
+          const browseable = res.filter(
+            (f) =>
+              f.backend === "s3" ||
+              (f.type === "backup" && f.backend === "restic"),
+          );
+          setFolders(browseable);
+          if (!state && browseable.length > 0) {
+            setState({ folderId: browseable[0].id, path: "" });
           }
         }
       })
@@ -938,14 +971,14 @@ function S3Browser({
     };
   }, []);
 
+  // Report an s3 context only for live s3 folders; restic backup folders
+  // get their read-only context from <SnapshotBrowser> (child effects run
+  // before this one, so the write toolbar never sees a stale s3 ref).
   useEffect(() => {
-    if (!state) return;
+    if (!state || isResticHistory) return;
     const { folderId, path } = state;
     onContext({ ref: { kind: "s3", folderId, path }, reload: () => setBump((n) => n + 1) });
-    // Phase 1 (WS6): depend on the primitive ref fields so a parent
-    // re-render that supplies a fresh `onContext` identity does not
-    // re-fire this effect in a loop.
-  }, [state?.folderId, state?.path, onContext]);
+  }, [state?.folderId, state?.path, isResticHistory, onContext]);
 
   if (!state) {
     return (
@@ -955,8 +988,8 @@ function S3Browser({
         ) : (
           <EmptyState
             variant="data"
-            title="No S3 folders to browse"
-            how="Create an S3 folder on the Folders page and its contents become browsable here."
+            title="No folders to browse"
+            how="Create a cloud or backup folder on the Folders page and its contents become browsable here."
             ctaLabel="Go to Folders"
             ctaTo="/folders"
           />
@@ -978,25 +1011,269 @@ function S3Browser({
         >
           {folders.map((f) => (
             <option key={f.id} value={f.id}>
-              {f.name} ({f.s3Bucket ?? "no bucket"})
+              {f.name} ({f.backend === "restic" ? "backup" : f.s3Bucket ?? "no bucket"})
             </option>
           ))}
         </select>
       </div>
-      <RefBrowser
-        key={state.folderId}
-        browseRef={{ kind: "s3", folderId: state.folderId, path: state.path }}
-        onContext={(ctx) => {
-          onContext(ctx);
-          setState({ folderId: state.folderId, path: ctx.ref.path });
-        }}
-        selection={selection}
-        onToggleSelect={onToggleSelect}
-        onRename={onRename}
-        onDownload={onDownload}
-        emptyCtaLabel={emptyCtaLabel}
-        emptyCta={emptyCta}
-      />
+      {isResticHistory ? (
+        <SnapshotBrowser
+          key={state.folderId}
+          folderId={state.folderId}
+          folderName={selectedFolder?.name ?? state.folderId}
+          onContext={onContext}
+        />
+      ) : (
+        <RefBrowser
+          key={state.folderId}
+          browseRef={{ kind: "s3", folderId: state.folderId, path: state.path }}
+          onContext={(ctx) => {
+            onContext(ctx);
+            setState({ folderId: state.folderId, path: ctx.ref.path });
+          }}
+          selection={selection}
+          onToggleSelect={onToggleSelect}
+          onRename={onRename}
+          onDownload={onDownload}
+          emptyCtaLabel={emptyCtaLabel}
+          emptyCta={emptyCta}
+        />
+      )}
+    </div>
+  );
+}
+
+// LAMA-259: time-travel browsing of one restic backup folder. A "History"
+// affordance reveals a horizontal time-scrubber of the folder's snapshots;
+// selecting one switches the file listing into snapshot mode (entries come
+// from listSnapshotFiles). The default ("live") view is the newest
+// snapshot — the current state of the backup. Esc always exits snapshot
+// mode back to live; chips are arrow-key navigable (roving tabindex).
+function SnapshotBrowser({
+  folderId,
+  folderName,
+  onContext,
+}: {
+  folderId: string;
+  folderName: string;
+  onContext: (ctx: TabContext) => void;
+}) {
+  const [snapshots, setSnapshots] = useState<FolderSnapshot[] | null>(null);
+  const [snapshotsError, setSnapshotsError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // null = live view (newest snapshot); a snapshot id = snapshot mode.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [path, setPath] = useState("");
+  const [data, setData] = useState<BrowseResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [bump, setBump] = useState(0);
+  // Roving-tabindex chip focus for arrow-key navigation (-1 = none).
+  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const chipRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const ordered = useMemo(
+    () => sortSnapshotsChronological(snapshots ?? []),
+    [snapshots],
+  );
+  const newest = ordered.length > 0 ? ordered[ordered.length - 1] : null;
+  const selected =
+    selectedId === null
+      ? null
+      : ordered.find((s) => s.id === selectedId) ?? null;
+  const active = selected ?? newest;
+  const inSnapshotMode = selectedId !== null && selected !== null;
+
+  // Load the folder's snapshot history once per folder (and on reload).
+  useEffect(() => {
+    let cancelled = false;
+    setSnapshotsError(null);
+    api
+      .listFolderSnapshots(folderId)
+      .then((res) => {
+        if (!cancelled) setSnapshots(res.snapshots);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setSnapshotsError(errorText(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [folderId, bump]);
+
+  // Load the file listing for the active snapshot (live = newest).
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    setError(null);
+    setLoading(true);
+    api
+      .listSnapshotFiles(folderId, active.id, path)
+      .then((res) => {
+        if (!cancelled) {
+          setData(res);
+          setLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setLoading(false);
+          setError(errorText(err));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [folderId, active?.id, path, bump]);
+
+  // Report the read-only browsing context upward. The ref is
+  // informational only (kind "s3" keeps the union happy); writes are
+  // gated off by `readOnly`, which the Data Browser checks before
+  // rendering any write toolbar.
+  const lastReportedRef = useRef<BrowseRef | null>(null);
+  useEffect(() => {
+    const prev = lastReportedRef.current;
+    if (prev === null || prev.folderId !== folderId || prev.path !== path) {
+      lastReportedRef.current = { kind: "s3", folderId, path };
+      onContext({
+        ref: lastReportedRef.current,
+        reload: () => setBump((n) => n + 1),
+        readOnly: true,
+      });
+    }
+  }, [folderId, path, onContext]);
+
+  function navigate(nextPath: string): void {
+    setPath(nextPath);
+  }
+
+  function selectSnapshot(s: FolderSnapshot, index: number): void {
+    setData(null);
+    setSelectedId(s.id);
+    setPath("");
+    setFocusedIndex(index);
+  }
+
+  function exitSnapshotMode(): void {
+    setData(null);
+    setSelectedId(null);
+    setPath("");
+  }
+
+  return (
+    <div
+      className="browser-tab"
+      onKeyDown={(e) => {
+        // Esc exits snapshot mode back to the live view; when already
+        // live it collapses the scrubber instead.
+        if (e.key !== "Escape") return;
+        if (selectedId !== null) exitSnapshotMode();
+        else if (historyOpen) setHistoryOpen(false);
+      }}
+    >
+      {snapshotsError ? (
+        <div className="snapshot-history">
+          <div className="error">{snapshotsError}</div>
+        </div>
+      ) : snapshots === null ? (
+        <div className="snapshot-history">
+          <span className="muted">Loading backup history…</span>
+        </div>
+      ) : ordered.length === 0 ? (
+        <div className="snapshot-history">
+          <span className="muted">No backups yet for this folder</span>
+        </div>
+      ) : (
+        <div className="snapshot-history">
+          <button
+            type="button"
+            className={`action ${historyOpen ? "primary" : ""}`}
+            aria-expanded={historyOpen}
+            onClick={() => setHistoryOpen((open) => !open)}
+          >
+            History
+          </button>
+          {historyOpen && (
+            <div
+              className="snapshot-scrubber"
+              role="group"
+              aria-label={`Backup history for ${folderName}`}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                  e.preventDefault();
+                  const direction = e.key === "ArrowRight" ? "right" : "left";
+                  const next = moveChipFocus(
+                    ordered.length,
+                    focusedIndex,
+                    direction,
+                  );
+                  setFocusedIndex(next);
+                  chipRefs.current[next]?.focus();
+                } else if (e.key === "Home") {
+                  e.preventDefault();
+                  setFocusedIndex(0);
+                  chipRefs.current[0]?.focus();
+                } else if (e.key === "End") {
+                  e.preventDefault();
+                  const last = ordered.length - 1;
+                  setFocusedIndex(last);
+                  chipRefs.current[last]?.focus();
+                }
+              }}
+            >
+              {ordered.map((s, index) => {
+                const isSelected = s.id === selectedId;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    ref={(el) => {
+                      chipRefs.current[index] = el;
+                    }}
+                    className={`action snapshot-chip ${isSelected ? "primary" : ""}`}
+                    tabIndex={focusedIndex === index ? 0 : -1}
+                    aria-pressed={isSelected}
+                    title={`${snapshotCaptionLabel(s.time)}${s.host ? ` · ${s.host}` : ""}`}
+                    onClick={() => selectSnapshot(s, index)}
+                    onFocus={() => setFocusedIndex(index)}
+                  >
+                    {snapshotChipLabel(s.time)}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {ordered.length > 0 && inSnapshotMode && active && (
+        <div className="snapshot-caption">
+          <span className="badge badge-restic">snapshot</span>
+          <span>
+            Viewing <strong>{snapshotCaptionLabel(active.time)}</strong>{" "}
+            snapshot{active.host ? (
+              <>
+                {" "}
+                from <code>{active.host}</code>
+              </>
+            ) : null}
+          </span>
+          <button type="button" className="action" onClick={exitSnapshotMode}>
+            Back to live
+          </button>
+        </div>
+      )}
+
+      {error && <div className="error">{error}</div>}
+      <Breadcrumbs path={path} onNavigate={navigate} />
+      {ordered.length > 0 && (
+        <EntriesTable
+          response={data}
+          loading={loading}
+          path={path}
+          onNavigate={navigate}
+        />
+      )}
     </div>
   );
 }
