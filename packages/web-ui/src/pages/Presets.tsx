@@ -12,6 +12,7 @@ import type { DotfileManifest, Host } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { Confetti, useMilestoneConfetti } from "../components/Confetti.tsx";
 import {
   APP_PRESETS,
   detectOs,
@@ -34,6 +35,10 @@ export function Presets() {
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<BackupDraft | null>(null);
   const [busy, setBusy] = useState(false);
+  // LAMA-265: once-per-milestone confetti for the first app-settings backup
+  // created from this page (localStorage-gated, reload-safe).
+  const { fire: fireFirstPresetBackup, visible: showPresetConfetti } =
+    useMilestoneConfetti("first-preset-backup");
 
   async function refresh(): Promise<void> {
     setLoading(true);
@@ -116,6 +121,8 @@ export function Presets() {
       });
       setDraft(null);
       await refresh();
+      // Only on the success path — never on failures or repeat events.
+      fireFirstPresetBackup();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -129,6 +136,12 @@ export function Presets() {
         title="App presets"
         purpose="Back up an app's settings in one click. Pick an app, choose a device, and LamaSync stores its appdata as an app-settings backup."
       />
+
+      {showPresetConfetti ? (
+        <Confetti
+          fallback={<span>✓ Nice work — first app-settings backup created.</span>}
+        />
+      ) : null}
 
       {error ? <div className="error">{error}</div> : null}
 

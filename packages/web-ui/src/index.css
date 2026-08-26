@@ -1876,6 +1876,33 @@ button.action:disabled {
   }
 }
 
+/* LAMA-265: the hopping-llama glyph slot (EmptyState `glyph="llama"`).
+   Same footprint as the CSS orbit glyph so the layout doesn't jump; the
+   llama is a delight accent at first boot, so the hop is a gentle bob and
+   is disabled under prefers-reduced-motion. */
+.estate-glyph--llama {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.estate-glyph--llama .estate-llama {
+  color: var(--estate-accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .estate-glyph--llama .estate-llama {
+    animation: llama-hop 2.4s ease-in-out infinite;
+  }
+}
+@keyframes llama-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
 .estate-title {
   margin: 0;
   font-size: var(--font-size-lg);
@@ -2469,4 +2496,61 @@ button.action:disabled {
 .form-error {
   color: var(--color-error);
   font-size: var(--font-size-sm);
+}
+
+/* --- Confetti (LAMA-265) ---
+   Once-per-milestone celebration burst. Particles are fixed-position spans
+   launched from the viewport centre with transform keyframes (~1.2s) and
+   auto-cleanup; colours come from the semantic accent tokens so they adapt
+   to both themes. The whole animation lives under
+   prefers-reduced-motion: no-preference — the component already renders a
+   static fallback line instead, and this is the CSS-side guarantee. */
+.confetti {
+  position: fixed;
+  inset: 0;
+  z-index: 90; /* above the drawer family (80) — celebrations top the stack */
+  pointer-events: none;
+  overflow: hidden;
+}
+.confetti-bit {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 1px;
+  opacity: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .confetti-bit {
+    animation: confetti-fly 1.2s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+    animation-delay: var(--delay);
+  }
+  @keyframes confetti-fly {
+    0% {
+      opacity: 1;
+      transform: translate(-50%, -50%) rotate(0deg) scale(1);
+    }
+    100% {
+      opacity: 0;
+      transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy)))
+        rotate(var(--rot)) scale(var(--scale));
+    }
+  }
+}
+
+/* Reduced-motion fallback: a short, quiet confirmation line instead of the
+   burst (role="status" in the component announces it politely). */
+.confetti-static {
+  position: fixed;
+  top: 18%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  pointer-events: none;
+  color: var(--text-dim);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--font-size-md);
 }

@@ -26,6 +26,17 @@ import { formatTimeAgo } from "../relative-time.ts";
 import { showVerifiedBadge } from "../backup-health.ts";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { Donut } from "../components/Donut.tsx";
+import { Confetti, useMilestoneConfetti } from "../components/Confetti.tsx";
+
+/** LAMA-265: "first backup ever seen" — a successful folder or app-settings
+ *  backup in the feed (terminology: `backup` = Backup, `dotfile` = App
+ *  settings backup). Never fires on failures. */
+function isSuccessfulBackup(op: OperationLog): boolean {
+  return (
+    op.status === "success" &&
+    (op.operation === "backup" || op.operation === "dotfile")
+  );
+}
 
 interface DashboardData {
   hosts: Host[];
@@ -148,6 +159,10 @@ export function Dashboard() {
   // LAMA-203: captured once; highlights are computed against the previous
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
+  // LAMA-265: once-per-milestone confetti — first successful backup ever
+  // seen in the operations feed (flag lives in localStorage, reload-safe).
+  const { fire: fireFirstBackup, visible: showFirstBackup } =
+    useMilestoneConfetti("first-backup-seen");
 
   // WS6 P4: resolve folder ids to display names for the needs-attention
   // conflict list. Memoized so the map is rebuilt only when the folders
@@ -279,6 +294,16 @@ export function Dashboard() {
     if (event) setData((prev) => (prev ? mergeEvent(prev, event) : prev));
   }, [event]);
 
+  // LAMA-265: fire the once-ever milestone the moment the feed shows any
+  // successful backup — including backups that arrive via WebSocket. The
+  // localStorage gate makes repeat runs no-ops, so this is safe to re-check
+  // on every data change.
+  useEffect(() => {
+    if (data && (data.operations ?? []).some(isSuccessfulBackup)) {
+      fireFirstBackup();
+    }
+  }, [data, fireFirstBackup]);
+
   async function onSeedDemo(): Promise<void> {
     setDemoBusy(true);
     try {
@@ -385,6 +410,10 @@ export function Dashboard() {
         />
       ) : null}
       {error && <div className="error">{error}</div>}
+
+      {showFirstBackup ? (
+        <Confetti fallback={<span>✓ Nice work — your first backup is in.</span>} />
+      ) : null}
 
       <section className="section">
         <h2>Needs attention{newTotal > 0 ? ` · ${newTotal} new` : ""}</h2>
@@ -511,6 +540,7 @@ export function Dashboard() {
           <>
             <EmptyState
               variant="devices"
+              glyph="llama"
               title="Pair your first device"
               how="Register a machine with this server and start syncing folders between your devices."
               ctaLabel="Pair your first device"

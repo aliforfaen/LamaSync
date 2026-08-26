@@ -9,6 +9,7 @@
 // can reuse it for the device-card grid.
 
 import { Link } from "react-router-dom";
+import { Llama } from "./Llama.tsx";
 
 export type EmptyStateVariant =
   | "devices"
@@ -33,6 +34,9 @@ interface EmptyStateProps {
   timeNote?: string;
   /** Picks the accent tint from the existing semantic tokens. */
   variant?: EmptyStateVariant;
+  /** LAMA-265: swap the CSS orbit glyph for the hopping-llama SVG where it
+   *  earns its place (delight accent, not a mascot invasion). */
+  glyph?: "llama";
 }
 
 export function EmptyState({
@@ -44,6 +48,7 @@ export function EmptyState({
   steps,
   timeNote,
   variant = "devices",
+  glyph,
 }: EmptyStateProps) {
   const cta =
     onCta !== undefined ? (
@@ -58,10 +63,19 @@ export function EmptyState({
 
   return (
     <section className={`estate estate--${variant}`}>
-      <div className="estate-glyph" aria-hidden="true">
-        <span className="estate-orbit" />
-        <span className="estate-core" />
-        <span className="estate-node" />
+      <div
+        className={`estate-glyph${glyph === "llama" ? " estate-glyph--llama" : ""}`}
+        aria-hidden="true"
+      >
+        {glyph === "llama" ? (
+          <Llama className="estate-llama" size={48} />
+        ) : (
+          <>
+            <span className="estate-orbit" />
+            <span className="estate-core" />
+            <span className="estate-node" />
+          </>
+        )}
       </div>
       <h3 className="estate-title">{title}</h3>
       <p className="estate-how">{how}</p>
