@@ -46,6 +46,7 @@ import type {
   ViewId,
 } from "../app/view-manager.ts";
 import { createDotfileManifestWizard } from "../flows/dotfile-manifest.ts";
+import { computeRestoreDiff, formatDiffPreview } from "../dotfiles-diff.ts";
 
 // -----------------------------------------------------------------------------
 // Public types — kept stable for any consumer still importing the pre-slice
@@ -61,6 +62,7 @@ type Step =
   | "preview"
   | "extract"
   | "subpaths"
+  | "confirm"
   | "done"
   | "setup";
 
@@ -75,6 +77,20 @@ export interface DotfilesState {
   version: DotfileVersion | null;
   previewText: string;
   previewError: string | null;
+  /**
+   * Absolute path to the downloaded tarball on disk. Populated by
+   * `selectVersion` once the preview step has a successful tar -tzf read;
+   * reused by the confirm-step diff and the actual extract so we never
+   * re-download. Cleared on a fresh version pick.
+   */
+  extractStagingDir: string | null;
+  /**
+   * Body text shown on the confirm step: `null` while the diff is still
+   * computing, a short multi-line string once `runConfirmStep` finishes.
+   */
+  confirmPreview: string | null;
+  /** Surface message when the diff lookup fails (e.g. tar -tzf exit≠0). */
+  confirmError: string | null;
   extractTarget: string;
   extractSubpaths: string;
   extractResult: string | null;
@@ -104,6 +120,7 @@ const STEP_BACK: Record<Step, Step> = {
   preview: "version",
   extract: "preview",
   subpaths: "extract",
+  confirm: "subpaths",
   done: "app",
   setup: "app",
 };
@@ -180,6 +197,9 @@ export class DotfilesView implements View {
     version: null,
     previewText: "",
     previewError: null,
+    extractStagingDir: null,
+    confirmPreview: null,
+    confirmError: null,
     extractTarget: "/",
     extractSubpaths: "",
     extractResult: null,
@@ -268,6 +288,20 @@ export class DotfilesView implements View {
       if (this.state.step === "preview") {
         this.state.step = "extract";
         this.renderBody();
+        return true;
+      }
+      if (this.state.step === "confirm") {
+        // Read-only until the user explicitly confirms. LAMA-173 semantics:
+        // the body Text on the confirm step is the focused widget, so its
+        // Enter handler is what actually fires `extractTarball`. Esc from
+        // confirm already steps back via STEP_BACK at the top of handleKey.
+        if (
+          this.state.confirmError === null &&
+          this.state.version !== null &&
+          this.state.extractStagingDir !== null
+        ) {
+          void this.runConfirmedExtract();
+        }
         return true;
       }
       if (this.state.step === "done") {
@@ -359,6 +393,9 @@ export class DotfilesView implements View {
     if (!ctx || !appName) return;
     this.state.version = version;
     this.state.previewError = null;
+    this.state.confirmPreview = null;
+    this.state.confirmError = null;
+    this.state.extractStagingDir = null;
     this.state.previewText = "Downloading tarball…";
     this.state.step = "preview";
     const loadId = ++this.loadId;
@@ -385,6 +422,11 @@ export class DotfilesView implements View {
         this.state.previewText = "";
       } else {
         this.state.previewText = text.trim();
+        // P-B item #15: cache the staging dir + tarball path so the
+        // confirm-step diff preview (and the actual extract) can reuse
+        // the download. Both halves read from this dir; the actual
+        // extract overwrites files in the user's chosen target.
+        this.state.extractStagingDir = tarPath;
       }
     } catch (err) {
       this.state.previewError =
@@ -437,6 +479,30 @@ export class DotfilesView implements View {
     }
     this.state.extractResult = results.join("\n");
     this.renderBody();
+  }
+
+  /**
+   * Step-bound extract: invoked from the confirm step's Enter handler.
+   * Parses the comma-separated subpaths from `state.extractSubpaths`, jumps
+   * to the done step on success, and surfaces a copy-level error if the
+   * user typed junk like an empty string. The actual tarball download +
+   * spawn lives in `extractTarball` (LAMA-173 reviewer contract).
+   */
+  private async runConfirmedExtract(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const version = this.state.version;
+    if (!version) return;
+    const subpaths = this.state.extractSubpaths
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    await this.extractTarball(
+      this.state.appName ?? "",
+      version,
+      this.state.extractTarget,
+      subpaths,
+    );
   }
 
   private async extractTarball(
@@ -575,6 +641,8 @@ export class DotfilesView implements View {
         return this.renderExtractStep();
       case "subpaths":
         return this.renderSubpathsStep();
+      case "confirm":
+        return this.renderConfirmStep();
       case "done":
         return this.renderDoneStep();
       case "setup":
@@ -745,16 +813,13 @@ export class DotfilesView implements View {
       onEnter: (value) => {
         if (!this.state.version) return;
         this.state.extractSubpaths = value;
-        const subpaths = value
-          .split(",")
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
-        void this.extractTarball(
-          this.state.appName ?? "",
-          this.state.version,
-          this.state.extractTarget,
-          subpaths,
-        );
+        // P-B item #15: instead of extracting immediately, jump to the
+        // confirm step where the user sees what restore would change.
+        // `runConfirmStep` computes the diff against the chosen target +
+        // subpaths filter and transitions to "confirm" (or — when the
+        // download failed and there's no tarball to diff against —
+        // bounces back to the version picker).
+        void this.runConfirmStep();
       },
     });
     return [
@@ -766,6 +831,73 @@ export class DotfilesView implements View {
       }),
       Text({ content: "Press Esc to cancel." }),
       input as unknown as VNode,
+    ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Confirm-step diff preview (P-B item #15).
+  //
+  // Runs the tarball listing against the chosen target directory and
+  // renders a short NEW / CHANGED / SAME summary. The user must press
+  // Enter to actually extract; Esc steps back to the subpaths step. This
+  // is the wired-up "where confirmation currently happens" gesture per the
+  // polish brief — focused widget (the body Text) owns Enter, Esc cancels
+  // via the standard STEP_BACK transition.
+  // ---------------------------------------------------------------------------
+
+  private async runConfirmStep(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const version = this.state.version;
+    const tarball = this.state.extractStagingDir;
+    if (!version || !tarball) {
+      // Missing staging dir = tar download failed earlier; bounce back so
+      // the user can pick a different version.
+      this.state.confirmError = "tarball preview not available — return to version list.";
+      this.state.step = "version";
+      this.renderBody();
+      return;
+    }
+    this.state.confirmPreview = "Computing diff against disk…";
+    this.state.confirmError = null;
+    this.state.step = "confirm";
+    const loadId = ++this.loadId;
+    this.renderBody();
+    try {
+      const result = await computeRestoreDiff(
+        tarball,
+        this.state.extractTarget,
+      );
+      if (this.loadId !== loadId) return;
+      this.state.confirmPreview = formatDiffPreview(result);
+    } catch (err) {
+      if (this.loadId !== loadId) return;
+      this.state.confirmError =
+        err instanceof Error ? err.message : String(err);
+      this.state.confirmPreview = null;
+    }
+    this.renderBody();
+  }
+
+  private renderConfirmStep(): VNode[] {
+    if (this.state.confirmError) {
+      return [
+        Text({ content: `Confirm: ${this.state.version?.id ?? "?"}` }),
+        Text({ content: `[!] ${this.state.confirmError}` }),
+        Text({ content: "Press Esc to step back." }),
+      ];
+    }
+    const preview = this.state.confirmPreview ?? "(no preview)";
+    return [
+      Text({
+        content: `Confirm restore: ${this.state.version?.id ?? "?"} → ${this.state.extractTarget}`,
+      }),
+      Text({
+        content:
+          "Press Enter to extract, Esc to cancel (diff is preview-only; nothing written yet).",
+      }),
+      Text({ content: "" }),
+      Text({ content: preview }),
     ];
   }
 
