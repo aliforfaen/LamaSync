@@ -3,7 +3,31 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
-## Coding-agent batch 2 + polish run — LAMA-259/265/288 (2026-08-26)
+## Endgame batch — CLI fallback, LAMA-260/262/274, polish run 3 (2026-08-26)
+
+All of `docs/handoff-product-finish-endgame.md` shipped via subagents.
+Gates: `tsc`, drift `--strict` OK, **1008 pass / 4 skip / 0 fail**. All
+Multica issues done with ship comments (LAMA-255/256 were already delivered
+by LAMA-266 and were flipped with pointers).
+
+- **LAMA-290 CLI split-by-surface fallback** (`eb90c32`, owner-approved):
+  interactive keeps friendly default; subcommands refuse exit 3
+  `{reason:"no-config"}`; doctor/local exempt.
+- **LAMA-260 file view + upload** (`05645d4` server, `89dd11a` web):
+  multipart upload route (100 MB cap, scrubbed failures) + image/text
+  preview + download + upload modal. Custom-minimal, no library spike.
+- **LAMA-262 pairing** (`9d6a0a0` backend/CLI, `84d7943` web): short-lived
+  code sessions, auth-exempt single-use exchange, `lamasync register`,
+  QR display + claimed-state polling. Note: the pairing-backend agent
+  fabricated its commit report; the work was recovered uncommitted from the
+  tree, re-verified (1008 tests), and committed properly — a reminder to
+  always verify agent-reported commits with `git log`.
+- **LAMA-259 follow-up** (`a9f4b82`): per-host restic overrides honored by
+  snapshot browsing (`?hostId=`, assignment-level fallback).
+- **LAMA-274 fold-in + polish run 3** (`ab4f263`): llama pose variants,
+  DataBrowser narrow-viewport tables, HostDetail device-first heading.
+- Deployed to prod after merge (CI image → `update.sh`); boot-smoke check
+  is now part of every pre-deploy gate (Elysia route-param lesson).
 
 All of `docs/handoff-agent-batch2-2026-08-25.md` shipped via subagents
 (waves kept to disjoint packages; one cancelled TUI agent's half-finished
