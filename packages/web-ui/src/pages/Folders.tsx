@@ -493,8 +493,8 @@ export function Folders() {
         <p className="muted">{hint}</p>
         {matching.length === 0 ? (
           <p className="muted">
-            No {current.backend} backends yet — create one on the{" "}
-            <a href="#/backends">Backends</a> page first.
+            No {current.backend} storage destinations yet — create one on the{" "}
+            <a href="#/backends">Storage</a> page first.
           </p>
         ) : null}
       </>

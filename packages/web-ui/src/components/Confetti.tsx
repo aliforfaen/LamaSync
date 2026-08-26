@@ -14,6 +14,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { prefersReducedMotion } from "../motion.ts";
+
+// Re-exported so callers/tests keep importing the motion gate from one
+// obvious place; the implementation lives in ../motion.ts (P-A).
+export { prefersReducedMotion };
 
 export const MILESTONE_PREFIX = "lamasync.milestone.";
 const PARTICLE_COUNT = 28;
@@ -47,14 +52,6 @@ export function tryFireMilestone(id: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** Conservative motion gate: without a browser to honour it, no animation. */
-export function prefersReducedMotion(): boolean {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-    return true;
-  }
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 /**

@@ -382,6 +382,33 @@ td.num {
     border: none;
     cursor: pointer;
   }
+
+  /* P-A (2026-08-26): touch targets — interactive controls get a ~40px
+     minimum height below the rail→drawer breakpoint. Tiny in-row chrome
+     (breadcrumbs, drawer close, the rail theme toggle) keeps its compact
+     footprint. */
+  button.action,
+  a.action {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    vertical-align: middle;
+  }
+  .browser-breadcrumb .action,
+  .drawer-close,
+  .theme-toggle {
+    min-height: 0;
+    display: inline-block;
+  }
+  .rail-footer .action {
+    justify-content: flex-start;
+    text-align: left;
+  }
+  .pause-chip,
+  .snapshot-chip {
+    min-height: 40px;
+  }
 }
 
 /* WS5 P5: wordmark — mono, tracked, two-tone; keep the layout role. */
@@ -570,6 +597,20 @@ button.action.theme-toggle {
   border-radius: var(--radius-sm);
   padding: var(--space-2) var(--space-3);
   margin-bottom: var(--space-3);
+}
+
+/* P-A (2026-08-26): inline fetch-failure caption with a retry button
+   (InlineError) — the antidote to pages collapsing failed loads into silent
+   "—" placeholders. */
+.error-with-retry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.error-with-retry .action {
+  flex-shrink: 0;
 }
 
 /* Error text rendered inside an empty state stays bare text. */
@@ -887,8 +928,13 @@ a.action:hover {
   text-decoration: none;
 }
 
-button.action:active {
-  transform: translateY(1px);
+/* P-A: the 1px press shift is movement — suppressed under reduced motion
+   (colour hover transitions above are exempt: they animate colour, not
+   position). */
+@media (prefers-reduced-motion: no-preference) {
+  button.action:active {
+    transform: translateY(1px);
+  }
 }
 
 button.action.primary {
@@ -2553,4 +2599,19 @@ button.action:disabled {
   box-shadow: var(--shadow-lg);
   padding: var(--space-3) var(--space-5);
   font-size: var(--font-size-md);
+}
+
+/* P-A (2026-08-26): responsive overrides that MUST win the cascade — they
+   come after the base rules (the 340px min column would overflow a ~320px
+   phone; the this-device/destination sides get too cramped below 560px). */
+@media (max-width: 899px) {
+  .conflict-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 559px) {
+  .conflict-sides {
+    grid-template-columns: 1fr;
+  }
 }

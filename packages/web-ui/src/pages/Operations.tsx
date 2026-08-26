@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
+import { InlineError } from "../components/InlineError.tsx";
 import { useSearchParams } from "react-router-dom";
 import type { Backend, Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -37,6 +38,9 @@ export function Operations() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderFilter, setFolderFilter] = useState("");
   const [locks, setLocks] = useState<LockInfo[] | null>(null);
+  // P-A: a failed locks/dropdowns fetch must not silently render "No active
+  // folder locks" — surface an inline caption + retry instead.
+  const [locksError, setLocksError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -53,9 +57,12 @@ export function Operations() {
       setHosts(hostList);
       setFolders(folderList);
       setBackends(backendList);
-    } catch {
-      // Locks are best-effort; a failure must not break the log view.
+      setLocksError(null);
+    } catch (err) {
+      // Locks are best-effort; a failure must not break the log view — but
+      // it must not silently read as "no locks" either (P-A).
       setLocks([]);
+      setLocksError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -195,6 +202,12 @@ export function Operations() {
 
       <section className="section">
         <h2>Active locks</h2>
+        {locksError ? (
+          <InlineError
+            message={`Couldn't load locks — ${locksError}`}
+            onRetry={() => void loadLocks()}
+          />
+        ) : null}
         {locks === null ? (
           <div className="skel skel-line" aria-busy="true" />
         ) : locks.length === 0 ? (

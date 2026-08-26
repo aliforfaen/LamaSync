@@ -7,6 +7,7 @@ import { api } from "../api.ts";
 import { AddHostGuide } from "../components/AddHostGuide.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { InlineError } from "../components/InlineError.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 import { formatTimeAgo } from "../relative-time.ts";
 import { formatBytes } from "../format-bytes.ts";
@@ -292,7 +293,12 @@ export function Hosts() {
           {showGuide ? "Hide guide" : "Add device"}
         </button>
       </div>
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <InlineError
+          message={`Couldn't load devices — ${error}`}
+          onRetry={() => void refresh()}
+        />
+      )}
       {renamedBanner ? (
         <div className="banner">
           <span>{renamedBanner}</span>
@@ -358,9 +364,9 @@ export function Hosts() {
               Remove device “{deletingHost.hostname}” ({deletingHost.id})?
               <br />
               <br />
-              This removes its assignments, dotfile manifests, and operation
-              history. Stop/uninstall the daemon on that machine too, or it
-              will re-register.
+              This removes its folder setups, app settings backups, and
+              history. Stop/uninstall the LamaSync service on that machine
+              too, or it will re-register.
             </>
           }
           onConfirm={() => void confirmDeleteHost()}

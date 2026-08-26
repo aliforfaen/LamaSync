@@ -21,6 +21,8 @@ import {
   sortSnapshotsChronological,
 } from "../snapshot-history.ts";
 import { ConfirmDialog, PromptDialog } from "../components/Modal.tsx";
+import { InlineError } from "../components/InlineError.tsx";
+import { useOverlayA11y } from "../hooks/useOverlayA11y.ts";
 import { IconFolder, IconStorage } from "../components/icons.tsx";
 
 type Tab = "local" | "s3" | "restic";
@@ -329,7 +331,7 @@ function RefBrowser({
   return (
     <div className="browser-tab">
       <Breadcrumbs path={ref.path} onNavigate={navigate} />
-      {error && <div className="error">{error}</div>}
+      {error && <InlineError message={error} onRetry={reload} />}
       <EntriesTable
         response={data}
         loading={loading}
@@ -370,25 +372,43 @@ function DestinationPicker({
   const [s3Folders, setS3Folders] = useState<Folder[]>([]);
   const [s3FolderId, setS3FolderId] = useState("");
   const [path, setPath] = useState("");
+  // P-A: a failed folder-list fetch must not silently render an empty S3
+  // picker — surface an inline caption + retry instead.
+  const [foldersError, setFoldersError] = useState<string | null>(null);
+  const [bump, setBump] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    setFoldersError(null);
     api
       .listFolders()
       .then((res) => {
+        if (cancelled) return;
         const s3 = res.filter((f) => f.backend === "s3");
         setS3Folders(s3);
         if (s3.length > 0) setS3FolderId(s3[0].id);
       })
-      .catch(() => {
-        // ignore
+      .catch((err: unknown) => {
+        if (!cancelled) setFoldersError(err instanceof Error ? err.message : String(err));
       });
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [bump]);
 
   const ref: BrowseRef = kind === "local" ? { kind: "local", path } : { kind: "s3", folderId: s3FolderId, path };
 
+  const containerRef = useOverlayA11y<HTMLDivElement>({ open: true, onClose });
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div ref={containerRef} className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={state.mode === "copy" ? "Copy to…" : "Move to…"}
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2>{state.mode === "copy" ? "Copy to…" : "Move to…"}</h2>
         <p className="muted">
           {state.names.length} entr{state.names.length === 1 ? "y" : "ies"} from{" "}
@@ -403,17 +423,25 @@ function DestinationPicker({
           </button>
         </div>
         {kind === "s3" ? (
-          <select
-            className="browser-select"
-            value={s3FolderId}
-            onChange={(e) => setS3FolderId(e.target.value)}
-          >
-            {s3Folders.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name} ({f.s3Bucket ?? "no bucket"})
-              </option>
-            ))}
-          </select>
+          <>
+            <select
+              className="browser-select"
+              value={s3FolderId}
+              onChange={(e) => setS3FolderId(e.target.value)}
+            >
+              {s3Folders.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name} ({f.s3Bucket ?? "no bucket"})
+                </option>
+              ))}
+            </select>
+            {foldersError ? (
+              <InlineError
+                message={`Couldn't load destination folders — ${foldersError}`}
+                onRetry={() => setBump((n) => n + 1)}
+              />
+            ) : null}
+          </>
         ) : null}
         <RefBrowser
           browseRef={ref}
@@ -969,7 +997,9 @@ function S3Browser({
     return () => {
       cancelled = true;
     };
-  }, []);
+    // P-A: `bump` re-runs this fetch for the inline retry button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bump]);
 
   // Report an s3 context only for live s3 folders; restic backup folders
   // get their read-only context from <SnapshotBrowser> (child effects run
@@ -984,7 +1014,10 @@ function S3Browser({
     return (
       <div className="browser-tab">
         {error ? (
-          <div className="error">{error}</div>
+          <InlineError
+            message={`Couldn't load folders — ${error}`}
+            onRetry={() => setBump((n) => n + 1)}
+          />
         ) : (
           <EmptyState
             variant="data"
@@ -1173,7 +1206,10 @@ function SnapshotBrowser({
     >
       {snapshotsError ? (
         <div className="snapshot-history">
-          <div className="error">{snapshotsError}</div>
+          <InlineError
+            message={`Couldn't load backup history — ${snapshotsError}`}
+            onRetry={() => setBump((n) => n + 1)}
+          />
         </div>
       ) : snapshots === null ? (
         <div className="snapshot-history">
@@ -1264,7 +1300,12 @@ function SnapshotBrowser({
         </div>
       )}
 
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <InlineError
+          message={`Couldn't load this snapshot's files — ${error}`}
+          onRetry={() => setBump((n) => n + 1)}
+        />
+      )}
       <Breadcrumbs path={path} onNavigate={navigate} />
       {ordered.length > 0 && (
         <EntriesTable
@@ -1285,6 +1326,8 @@ function ResticBrowser() {
   const [restoreTarget, setRestoreTarget] = useState<ResticSnapshot | null>(null);
   const [jobs, setJobs] = useState<ResticRestoreJob[]>([]);
   const [jobsError, setJobsError] = useState<string | null>(null);
+  // P-A: re-runs the snapshot listing for the inline retry button.
+  const [bump, setBump] = useState(0);
 
   async function loadJobs(): Promise<void> {
     try {
@@ -1308,7 +1351,7 @@ function ResticBrowser() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [bump]);
 
   // Poll restore jobs while this tab is mounted; the server broadcasts
   // `restic_restore` events, but polling keeps this page self-sufficient.
@@ -1320,7 +1363,12 @@ function ResticBrowser() {
 
   return (
     <div className="browser-tab">
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <InlineError
+          message={`Couldn't load snapshots — ${error}`}
+          onRetry={() => setBump((n) => n + 1)}
+        />
+      )}
       {snapshots.length === 0 ? (
         error ? null : (
           <EmptyState
@@ -1343,7 +1391,7 @@ function ResticBrowser() {
           <tr>
             <th>Snapshot</th>
             <th>Folder</th>
-            <th>Host</th>
+            <th>Device</th>
             <th>Time</th>
             <th>Paths</th>
             <th>Size</th>
@@ -1382,7 +1430,7 @@ function ResticBrowser() {
         {jobs.length === 0 ? (
           <div className="empty-row">
             No restore jobs — restore a snapshot above to queue one for the
-            target host's daemon.
+            target device's service.
           </div>
         ) : (
           <table className="data">
@@ -1390,7 +1438,7 @@ function ResticBrowser() {
               <tr>
                 <th>Status</th>
                 <th>Snapshot</th>
-                <th>Target host</th>
+                <th>Target device</th>
                 <th>Target path</th>
                 <th>Created</th>
                 <th>Error</th>
@@ -1440,11 +1488,15 @@ function RestoreModal({
   const [targetHostId, setTargetHostId] = useState("");
   const [targetPath, setTargetPath] = useState("");
   const [includeText, setIncludeText] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // P-A: re-runs the online-device fetch so a failed load has a retry path.
+  const [bump, setBump] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadError(null);
     api
       .health()
       .then((health) => {
@@ -1455,12 +1507,12 @@ function RestoreModal({
         }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [bump]);
 
   function submit(): void {
     if (!targetHostId) return;
@@ -1469,7 +1521,7 @@ function RestoreModal({
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
     setBusy(true);
-    setError(null);
+    setSubmitError(null);
     void api
       .createResticRestore({
         snapshotId: snapshot.snapshotId,
@@ -1483,28 +1535,42 @@ function RestoreModal({
         onClose();
       })
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
+        setSubmitError(err instanceof Error ? err.message : String(err));
         setBusy(false);
       });
   }
 
+  const containerRef = useOverlayA11y<HTMLDivElement>({ open: true, onClose });
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div ref={containerRef} className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Restore snapshot"
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2>Restore snapshot</h2>
         <p className="muted">
           Snapshot <code>{snapshot.snapshotId}</code> of folder{" "}
           <code>{snapshot.folderId}</code> will be restored by the target
-          host's daemon.
+          device's service.
         </p>
-        {error && <div className="error">{error}</div>}
+        {loadError ? (
+          <InlineError
+            message={`Couldn't load online devices — ${loadError}`}
+            onRetry={() => setBump((n) => n + 1)}
+          />
+        ) : null}
+        {submitError ? <div className="error">{submitError}</div> : null}
         <label className="form-field">
-          Target host
+          Target device
           <select
             value={targetHostId}
             onChange={(e) => setTargetHostId(e.target.value)}
           >
-            <option value="">Select a host…</option>
+            <option value="">Select a device…</option>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.hostname}

@@ -2,9 +2,14 @@
 // used to live in DataBrowser.tsx (`.modal-backdrop` / `.modal` /
 // `.modal-actions` CSS in index.css). Replaces every native prompt() /
 // confirm() call in the web UI.
+//
+// P-A (2026-08-26): the whole family now sits on `useOverlayA11y` — focus
+// trap, Escape-to-close, focus return to the invoker, and dialog semantics
+// (role="dialog" / aria-modal / aria-label) all live in one place.
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { useOverlayA11y } from "../hooks/useOverlayA11y.ts";
 
 export function Modal({
   title,
@@ -17,9 +22,17 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
 }) {
+  // Modal is only rendered while open, so `open` is a constant true.
+  const containerRef = useOverlayA11y<HTMLDivElement>({ open: true, onClose });
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div ref={containerRef} className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2>{title}</h2>
         {children}
         {footer ? <div className="modal-actions">{footer}</div> : null}
