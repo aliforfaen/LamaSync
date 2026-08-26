@@ -714,3 +714,34 @@ export interface HealthDrill {
   detail: string | null;
 }
 
+// LAMA-262: pairing-session model. The web UI shows a short human code
+// (`lama-72B4-9PQ1`) plus an optional QR; the device operator runs
+// `lamasync register --code lama-72B4-9PQ1 --server URL` to exchange the
+// code for an API key. Sessions are single-use: a successful
+// `POST /pairing/:code/exchange` marks the row `used` and any second
+// exchange returns 409. Expired sessions read as `expired` and cannot be
+// exchanged (410 / 409 per the spec — see route for the exact contract).
+// The code is the public identifier; the id is the row PK.
+export type PairingSessionStatus = "pending" | "used" | "expired";
+
+export interface PairingSessionCreateResponse {
+  /** Human-readable code, e.g. `lama-72B4-9PQ1`. */
+  code: string;
+  /** TTL in seconds — operators can show a countdown from this. */
+  expiresInSeconds: number;
+}
+
+export interface PairingSessionStatusResponse {
+  status: PairingSessionStatus;
+  /** ISO timestamp when the session expires (UTC). */
+  expiresAt: string;
+}
+
+export interface PairingSessionExchangeResponse {
+  /** The pre-shared API key. Today this is always the server's
+   *  `LAMASYNC_API_KEY` env value (see server's pairing route). The
+   *  field is named so a future per-device rotation can swap the
+   *  issuer without changing the wire. */
+  apiKey: string;
+}
+

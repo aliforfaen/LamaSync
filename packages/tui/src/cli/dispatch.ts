@@ -20,9 +20,11 @@
  *     --json) a `{ok:false, reason:"no-config", ...}` envelope on stdout
  *     that scripts can `jq .reason` to distinguish from auth failures
  *     (the existing `auth-failure` envelope, LAMA-247 #14).
- *   - `doctor` and the `local` subtree are exempt: `doctor` is
- *     diagnostic by definition; `local.*` talks to the daemon Unix socket
- *     and never touches server credentials.
+ *   - `doctor`, the `local` subtree, and `register` (LAMA-262) are
+ *     exempt: `doctor` is diagnostic by definition; `local.*` talks to
+ *     the daemon Unix socket and never touches server credentials;
+ *     `register` writes the client.toml as its first side-effect, so
+ *     refusing (exit 3) without one would be a chicken/egg.
  */
 
 import { existsSync } from "fs";
@@ -57,6 +59,7 @@ import * as snapshots from "./snapshots.ts";
 import * as browse from "./browse.ts";
 import * as notifications from "./notifications.ts";
 import * as hosts from "./hosts.ts";
+import * as registerCmd from "./register.ts";
 import * as admin from "./admin.ts";
 
 export interface CliContext {
@@ -134,7 +137,7 @@ Commands:
   notifications test      Send a test notification (--channel for one channel)
   hosts list              List registered devices
   hosts rename            Rename a device (DESTRUCTIVE)
-  register                Register or update a device in the fleet
+  register                Pair this device with the fleet via a web UI code (LAMA-262)
   shares list             List NFS / SMB shares
   admin prune             Manually prune operation_log (DESTRUCTIVE)
   local status            Local daemon status (Unix socket)
@@ -593,14 +596,21 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
   register: {
     command: {
       help: {
-        summary: "Register or update a device in the fleet.",
+        summary:
+          "Pair this device with the fleet by exchanging a web UI code for a client.toml (LAMA-262).",
         usage:
-          `Usage: lamasync register --hostname <name> [--tailnet-ip <ip>]\n\n` +
-          `  This is the agent fallback for the install script's web UI flow.\n` +
-          `  Idempotent: POSTs to /api/v1/register with the chosen name; existing\n` +
-          `  rows are updated in place.`,
+          `Usage: lamasync register --code <lama-XXXX-XXXX> --server URL [--hostname <name>] [--force]\n\n` +
+          `  Refuses (exit 1) when a client.toml already exists at the default path; pass\n` +
+          `  --force to overwrite it. Prompts for the code on a TTY; --code is required in\n` +
+          `  non-interactive contexts (exit 2 if missing).\n\n` +
+          `  Flags:\n` +
+          `    --code <lama-XXXX-XXXX>   the pairing code from the web UI (case-insensitive)\n` +
+          `    --server URL              server URL (also: LAMASYNC_SERVER_URL)\n` +
+          `    --hostname <name>         client.toml hostname (defaults to os.hostname())\n` +
+          `    --force                   overwrite an existing client.toml\n` +
+          `    --json                    machine-readable output`,
       },
-      run: async (ctx) => hosts.runRegister(ctx),
+      run: async (ctx) => registerCmd.runRegister(ctx),
     },
   },
   shares: {
@@ -849,8 +859,13 @@ export class CliNoConfigError extends Error {
  *    case is part of its job.
  *  - `local` talks to the daemon's Unix socket, not the server, so server
  *    credentials are irrelevant to its `status / folders / ops / sync /
- *    sync-all / mount / unmount` surface. */
-const NO_CONFIG_EXEMPT = new Set(["doctor", "local"]);
+ *    sync-all / mount / unmount` surface.
+ *  - `register` (LAMA-262) writes the client.toml as its first
+ *    side-effect, so refusing (exit 3) without one would be a
+ *    chicken/egg — that's the whole point of the flow. The command
+ *    itself refuses (exit 1) if a config already exists without
+ *    --force, which is the right kind of refusal at the right layer. */
+const NO_CONFIG_EXEMPT = new Set(["doctor", "local", "register"]);
 
 /** True when an explicit subcommand was issued AND no usable server
  *  credentials are reachable AND no client.toml exists on disk. Used to

@@ -316,6 +316,24 @@ CREATE TABLE IF NOT EXISTS health_drills (
 );
 CREATE INDEX IF NOT EXISTS idx_health_drills_backend_ran_at
     ON health_drills(backend_id, ran_at);
+
+-- LAMA-262: pairing sessions for the no-copy-paste registration flow.
+-- The web UI creates a row with a short human code (lama-XXXX-XXXX),
+-- shows it to the operator, and the device CLI exchanges it for an API
+-- key. Single-use: the exchange handler atomically flips status to
+-- used; a second exchange returns 409. Expired rows read as expired
+-- (never deleted on the spot) so audit trails stay intact. A light
+-- periodic sweep (server/src/index.ts) prunes rows whose expires_at
+-- has elapsed by more than the audit window.
+CREATE TABLE IF NOT EXISTS pairing_sessions (
+    id         TEXT PRIMARY KEY,
+    code       TEXT NOT NULL UNIQUE,
+    status     TEXT NOT NULL DEFAULT 'pending',   -- pending|used|expired
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_sessions_expires_at
+    ON pairing_sessions(expires_at);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -417,6 +435,13 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE backends ADD COLUMN last_prove_ok INTEGER",
   "CREATE TABLE IF NOT EXISTS health_drills (id TEXT PRIMARY KEY, backend_id TEXT NOT NULL REFERENCES backends(id), kind TEXT NOT NULL, ran_at INTEGER NOT NULL, ok INTEGER NOT NULL, detail TEXT)",
   "CREATE INDEX IF NOT EXISTS idx_health_drills_backend_ran_at ON health_drills(backend_id, ran_at)",
+  // LAMA-262: pairing sessions. Schema is in SERVER_SCHEMA for fresh
+  // databases; the CREATE TABLE here is the idempotent safety net for
+  // existing databases so a first boot after upgrade applies the table
+  // (CREATE TABLE IF NOT EXISTS swallows "already exists" errors via
+  // initDb's try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS pairing_sessions (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending', expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_pairing_sessions_expires_at ON pairing_sessions(expires_at)",
 ];
 
 /**

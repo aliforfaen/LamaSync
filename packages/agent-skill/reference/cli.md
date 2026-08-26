@@ -35,9 +35,11 @@ this file stays curated prose on top of the help texts).
   `localhost/dev-key` default + the LAMA-254 loud warning when no
   `client.toml` exists — that's a local-dev affordance. Any explicit
   subcommand (`lamasync folders list`, `lamasync doctor`, …) refuses
-  fast instead. Two exemptions: `lamasync doctor` (diagnosing the
-  missing-config state is its job) and the `lamasync local *` subtree
-  (talks to the daemon Unix socket, not the server).
+  fast instead. Three exemptions: `lamasync doctor` (diagnosing the
+  missing-config state is its job), the `lamasync local *` subtree
+  (talks to the daemon Unix socket, not the server), and `lamasync
+  register` (LAMA-262 — writes the `client.toml` as its first
+  side-effect, so refusing without one would be a chicken/egg).
 - **API key masking**: all output, including diagnostics, masks the key as
   `lamasync_…xxxx` (first 8 + last 4). The CLI's `--doctor` re-masks
   whatever it found in the chosen source.
@@ -473,11 +475,37 @@ the daemon re-keys on its next registration under the new name).
 ## `lamasync register`
 
 ```
-Usage: lamasync register --hostname <name> [--tailnet-ip <ip>]
+Usage: lamasync register --code <lama-XXXX-XXXX> --server URL [--hostname <name>] [--force] [--json]
+
+  --code <lama-XXXX-XXXX>   pairing code from the web UI (case-insensitive)
+  --server URL              server URL (also: LAMASYNC_SERVER_URL env)
+  --hostname <name>         client.toml hostname (defaults to os.hostname())
+  --force                   overwrite an existing client.toml
+  --json                    machine-readable JSON output
 ```
 
-The agent fallback for the install script's web UI flow. Idempotent;
-existing rows are updated in place.
+Pair this device with the fleet by exchanging a short code from the web
+UI for a `client.toml` so the daemon can talk to the server. Replaces
+the previous "agent fallback for the install script" flow (LAMA-262).
+
+The pairing exchange is intentionally **exempt from the LAMA-248
+no-config refusal** (alongside `doctor` and `local.*`): the whole point
+is to *write* the file, so refusing without one would be a chicken/egg.
+The command itself refuses (exit 1) if a `client.toml` already exists at
+the default path; pass `--force` to overwrite.
+
+Failure modes (exit codes):
+
+- `1` runtime / API error (code already used, expired, server misconfig, etc.)
+- `2` usage error (missing `--code` non-interactively, missing `--server`,
+  malformed code shape)
+- `4` server unreachable (network / DNS / TLS)
+
+Wire contract (mirrors `reference/api.md`): the exchange endpoint is
+auth-exempt by design — the code itself proves intent. Single-use; the
+second exchange returns 409 and the operator must mint a new code. The
+returned `apiKey` is the server's pre-shared `LAMASYNC_API_KEY` (the
+`--api-key` mask in any echo is `real-key…7890`-style).
 
 ## `lamasync shares list`
 

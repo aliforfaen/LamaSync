@@ -1,9 +1,14 @@
 /**
- * `lamasync hosts list|rename|register` (LAMA-231).
+ * `lamasync hosts list|rename` (LAMA-231).
  *
- * `register` is the agent fallback for the install script's web UI flow.
  * `rename` is patch-only (id stays stable; the daemon re-keys when it
  * next heartbeats under the new name).
+ *
+ * `register` (the daemon-side /api/v1/register POST that pairs a hostname
+ * with a fleet) is now a daemon-only concern — the device-side
+ * `lamasync register` command moved to its own module under
+ * `register.ts` for the LAMA-262 pairing flow (web UI code → client.toml).
+ * The POST endpoint itself is unchanged; only the CLI surface moved.
  */
 
 import type { Host } from "@lamasync/core";
@@ -70,28 +75,6 @@ export async function runRename(ctx: CliContext): Promise<void> {
     return;
   }
   console.log(`renamed ${id} → ${hostname}`);
-}
-
-export async function runRegister(ctx: CliContext): Promise<void> {
-  const { client, json, flags } = ctx;
-  const id = flagString(flags, "hostname");
-  if (!id) throw new CliUsageError("register requires --hostname <name>");
-  const tailnetIp = flagString(flags, "tailnet-ip") ?? null;
-  let host: Host;
-  try {
-    host = await client.client.registerHost({
-      id,
-      hostname: id,
-      ...(tailnetIp ? { tailnetIp } : {}),
-    });
-  } catch (err) {
-    throw wrapApiError(err, "register");
-  }
-  if (json) {
-    printJson(host);
-    return;
-  }
-  console.log(`registered ${host.hostname} (id=${host.id})`);
 }
 
 function formatLastSeen(ts: number | null): string {

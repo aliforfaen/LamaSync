@@ -17,6 +17,9 @@ import type {
   NotificationEvent,
   OperationLog,
   OperationReport,
+  PairingSessionCreateResponse,
+  PairingSessionExchangeResponse,
+  PairingSessionStatusResponse,
   PauseMode,
   PauseState,
   QueuedAction,
@@ -870,6 +873,37 @@ export class LamaSyncApiClient {
     return this.request<void>(
       "DELETE",
       `/api/v1/hosts/${encodeURIComponent(hostId)}/pause`,
+    );
+  }
+
+  // LAMA-262: pairing-session endpoints. The `create` call is admin-auth
+  // (the web UI shows the code to a logged-in operator); `lookup` and
+  // `exchange` are auth-light — `lookup` reveals only status + expiresAt
+  // (never the key), `exchange` is what returns the key itself.
+  // `ttlSeconds` is an admin-only override for the default 600s window.
+  createPairingSession(opts: { ttlSeconds?: number } = {}): Promise<PairingSessionCreateResponse> {
+    const body = opts.ttlSeconds !== undefined ? { ttlSeconds: opts.ttlSeconds } : {};
+    return this.request<PairingSessionCreateResponse>(
+      "POST",
+      "/api/v1/pairing",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  lookupPairingSession(code: string): Promise<PairingSessionStatusResponse> {
+    return this.request<PairingSessionStatusResponse>(
+      "GET",
+      `/api/v1/pairing/${encodeURIComponent(code)}`,
+    );
+  }
+
+  exchangePairingSession(code: string): Promise<PairingSessionExchangeResponse> {
+    return this.request<PairingSessionExchangeResponse>(
+      "POST",
+      `/api/v1/pairing/${encodeURIComponent(code)}/exchange`,
+      "",
+      "application/json",
     );
   }
 }
