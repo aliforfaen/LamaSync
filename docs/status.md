@@ -29,6 +29,8 @@ by LAMA-266 and were flipped with pointers).
 - Deployed to prod after merge (CI image → `update.sh`); boot-smoke check
   is now part of every pre-deploy gate (Elysia route-param lesson).
 
+## Coding-agent batch 2 + polish run — LAMA-259/265/288 (2026-08-26)
+
 All of `docs/handoff-agent-batch2-2026-08-25.md` shipped via subagents
 (waves kept to disjoint packages; one cancelled TUI agent's half-finished
 tree was inspected and salvaged rather than reverted). Gates at end:
