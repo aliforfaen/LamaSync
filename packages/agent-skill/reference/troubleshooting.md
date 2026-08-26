@@ -29,6 +29,36 @@ curl -sS -H "Authorization: Bearer <api-key>" \
 # ECONNREFUSED → wrong port / server down.
 ```
 
+## Symptom: `lamasync <subcommand>` exits 3 with `No client.toml found at …`
+
+**Cause.** No `~/.config/lamasync/client.toml` AND no `--server/--api-key`
+flag AND no `LAMASYNC_SERVER_URL/LAMASYNC_API_KEY` env pair. Since
+LAMA-248 / endgame (split-by-surface), every explicit subcommand refuses
+fast with exit 3 before any network attempt — running against the
+fake `localhost/dev-key` default is no longer the silent failure mode.
+
+**Fix.** Either pass inline credentials for this one invocation:
+
+```bash
+lamasync folders list --server "$LAMASYNC_SERVER_URL" --api-key "$LAMASYNC_API_KEY"
+```
+
+…or persist them via the installer / hand-written `client.toml`. On a
+daemon host the installer already populated the file — you should never
+see this.
+
+With `--json`, the envelope distinguishes this from an auth failure at
+the same exit code:
+
+```bash
+lamasync folders list --json
+# exit 3, stdout: {"ok":false,"reason":"no-config",...}
+```
+
+Exemptions (still run without `client.toml`):
+- `lamasync doctor` — diagnosing this state is its job
+- `lamasync local *` — talks to the daemon Unix socket, not the server
+
 ## Symptom: `lamasync doctor` reports `FAIL` on `auth: source`
 
 **Cause.** No `--server`/`--api-key` flag, no `LAMASYNC_SERVER_URL`/
@@ -39,6 +69,12 @@ anything real.
 **Fix.** Run the installer (or hand-write `client.toml`); see
 `lamasync-client.md`. On a daemon host, the installer already populated
 the file — you should never see this.
+
+> LAMA-248: this row's advice now reads "default (localhost/dev-key) —
+> only used for bare-TTY (subcommands refuse exit 3 without client.toml)".
+> The bare `lamasync` interactive shell (and `LAMASYNC_NO_TUI=1`) still
+> uses the localhost/dev-key default with the loud fake-key warning —
+> that's the local-dev loop. Everything else refuses.
 
 ## Symptom: `lamasync doctor` reports `FAIL` on `socket: daemon`
 
