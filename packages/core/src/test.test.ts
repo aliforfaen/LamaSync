@@ -113,17 +113,16 @@ describe("parseServerConfig", () => {
       port: 8080,
       dataDir: "/data",
       backupDir: "/backups",
-      ntfyUrl: undefined,
     });
   });
 
   test("respects overrides", () => {
     const cfg = parseServerConfig(
-      'apiKey = "k"\nport = 9090\ndataDir = "/srv/data"\nntfyUrl = "https://ntfy.sh/x"\n',
+      'apiKey = "k"\nport = 9090\ndataDir = "/srv/data"\n',
     );
     expect(cfg.port).toBe(9090);
     expect(cfg.dataDir).toBe("/srv/data");
-    expect(cfg.ntfyUrl).toBe("https://ntfy.sh/x");
+    expect(cfg.backupDir).toBe("/backups");
   });
 });
 

@@ -94,8 +94,7 @@
 
 ### Server
 - **User management / OAuth** — the API key is the only auth mechanism. Multi-user setups would need a `tokens` table, roles, and key rotation.
-- **Ntfy notifications** — server config has `ntfyUrl` but it's unused.
-- **Operation log retention beyond daily pruning** — retention is configurable; long-term archival is not.
+- **Operation log archival** — `POST /api/v1/admin/export` (P-B cleanup #6) writes gzip'd NDJSON to `$LAMASYNC_BACKUP_DIR` (or `os.tmpdir()`) before the DB delete so the audit trail survives retention pruning.
 
 ### TUI
 - **Dotfile diff preview** — restore does not yet show a diff against current disk files before extraction.

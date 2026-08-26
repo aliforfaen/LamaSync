@@ -536,6 +536,19 @@ export interface PruneResult {
   olderThanMs: number;
 }
 
+// P-B op-log archival (cleanup #6): count of rows included in an export,
+// the on-disk path of the resulting archive, and the rows removed from
+// the DB after a successful archive write. `file` is `null` when nothing
+// was exported (zero rows in the cutoff window — the call is still 200
+// and idempotent so the daily timer can re-fire safely).
+export interface OperationLogExport {
+  archived: number;
+  file: string | null;
+  deleted: number;
+  olderThanMs: number;
+  targetDir: string;
+}
+
 // Network share definition (NFS / SMB). The server exposes its list via
 // GET /api/v1/shares; the TUI renders an fstab line per share.
 export interface Share {

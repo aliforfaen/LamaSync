@@ -166,9 +166,10 @@ CREATE TABLE IF NOT EXISTS notification_events (
     webhook_delivered   INTEGER DEFAULT 0
 );
 
--- LAMA-221: configurable delivery channels. Replaces the env-only
--- LAMASYNC_NTFY_URL / LAMASYNC_LAMADB_WEBHOOK_URL gates; the env values
--- seed a channel row on first boot (see notifications.ts).
+-- LAMA-221: configurable delivery channels. The LAMASYNC_LAMADB_WEBHOOK_URL
+-- env var seeds a webhook channel row on first boot (see notifications.ts);
+-- the legacy LAMASYNC_NTFY_URL gate was removed in P-B cleanup #7 —
+-- ntfy channels are configured at runtime from the Admin UI instead.
 CREATE TABLE IF NOT EXISTS notification_channels (
     id                   TEXT PRIMARY KEY,
     kind                 TEXT NOT NULL,      -- 'ntfy' | 'webhook'

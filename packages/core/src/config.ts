@@ -5,7 +5,6 @@ export interface ServerConfig {
   port: number;
   dataDir: string;
   backupDir: string;
-  ntfyUrl?: string;
 }
 
 export interface ClientConfig {
@@ -42,10 +41,6 @@ export function parseServerConfig(buf: string): ServerConfig {
       typeof raw.backupDir === "string"
         ? raw.backupDir
         : DEFAULT_SERVER.backupDir,
-    ntfyUrl:
-      typeof raw.ntfyUrl === "string" && raw.ntfyUrl.length > 0
-        ? raw.ntfyUrl
-        : undefined,
   };
 }
 

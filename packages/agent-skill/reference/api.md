@@ -98,6 +98,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/operations/release`                      | Release folder lock                              |
 | GET      | `/shares`                                  | List NFS / SMB shares                            |
 | POST     | `/admin/prune?olderThanMs=<ms>`            | Manually trim operation_log                      |
+| POST     | `/admin/export`                            | Archive operation_log rows older than cutoff to a gzip'd NDJSON file, then prune them (P-B cleanup #6) |
 | GET      | `/demo`                                   | Demo-mode state (whether demo data is present)  |
 | POST     | `/demo/seed`                              | Seed a demo fleet (fake devices, timeline, snapshot) |
 | DELETE   | `/demo`                                   | Delete all demo data (confirmed by caller)      |
@@ -186,6 +187,7 @@ spec. The high-level shapes (verbose commentary):
 - `LockInfo { folderId, lockedBy, lockedAt, lockTtl }`
 - `PauseState { scope: "global"|"host", hostId?, until (ISO), mode: "pause"|"slow", bwlimit? }` — `bwlimit` is a single-segment rclone size (e.g. "1M"); honored only when `mode === "slow"` (LAMA-273)
 - `EffectivePause { until (ISO), mode: "pause"|"slow", bwlimit: string|null }` — embedded on the `/config/:hostId` payload as `pause`; resolved server-side as the host row if present, else the global row, else null (LAMA-273)
+- `OperationLogExport { archived, file: string|null, deleted, olderThanMs, targetDir }` — response of `POST /api/v1/admin/export` (P-B cleanup #6). `file` is the absolute path of the `.ndjson.gz` archive on the server; `null` when nothing was archived.
 
 `?`-marked fields are nullable. Timestamps are milliseconds since epoch.
 
@@ -197,6 +199,22 @@ spec. The high-level shapes (verbose commentary):
 - `operation_log` retention is `LAMASYNC_LOG_RETENTION_DAYS` (default 90).
   Prune manually via `POST /api/v1/admin/prune?olderThanMs=<ms>` (safety
   rule 5: explicit intent for any destructive API call).
+  - **Archived export** (`POST /api/v1/admin/export`) writes every
+    operation_log row older than the cutoff to a gzip'd NDJSON file and
+    THEN deletes them — preserving the safety-rule invariant that no row
+    vanishes before its archive is durable. Body: `{ olderThanMs? (default
+    90d), targetDir? (default `LAMASYNC_BACKUP_DIR`, falls back to
+    `os.tmpdir()`) }`. Response: `{ archived, file, deleted, olderThanMs,
+    targetDir }` — `file` is `null` when nothing was archived so a daily
+    timer can re-fire without producing extra files. Archive file name:
+    `lamasync-oplog-<unix-epoch-seconds>.ndjson.gz`. Format: one JSON
+    object per line in the DB's column order (camelCase keys: `id`,
+    `timestamp`, `hostId`, `folderId`, `operation`, `status`, `summary`,
+    `details`, `durationMs`, `demo`), rows sorted by `id` ASC so the file
+    is replay-friendly. The archive write goes to a `.ndjson.gz.tmp`
+    sibling first, is fsync'd, and atomically renamed before the DB
+    delete; an interrupted write therefore leaves rows in the DB for the
+    next call.
 - The `/api/v1/browse/*` write endpoints (copy/move/rename/mkdir/upload/
   delete) all run as async jobs; track via `/api/v1/browse/jobs`.
 - Backup health (LAMA-266):

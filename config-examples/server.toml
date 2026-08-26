@@ -27,15 +27,15 @@ dataDir = "/data"
 # Set via LAMASYNC_BACKUP_DIR.
 backupDir = "/backups"
 
-# Optional: ntfy topic URL for critical/default notification events.
-# The running server is env-driven: set LAMASYNC_NTFY_URL. The TOML key is
-# retained as reference for tooling but is not loaded by the server binary.
-# ntfyUrl = "https://ntfy.sh/lamasync-my-host"
-
 # Optional: POST every notification severity as JSON to a LamaDB webhook.
 # The running server reads this only from LAMASYNC_LAMADB_WEBHOOK_URL.
 # Leave unset to disable webhook delivery. Example shell configuration:
 # export LAMASYNC_LAMADB_WEBHOOK_URL="https://lamadb.example/api/events"
+#
+# Ntfy notification channels are configured at runtime from the Admin UI
+# (Notification channels → Add channel). There is no TOML key — and no
+# legacy `LAMASYNC_NTFY_URL` env gate — for the URL; channels live in the
+# `notification_channels` table managed by the LAMA-200/221 engine.
 
 # How many days of `operation_log` rows to keep. The server prunes older
 # rows daily on the first health request after midnight. Default: 90

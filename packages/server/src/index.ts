@@ -70,9 +70,11 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 }
 
 
-// LAMA-221: first boot with legacy env vars (LAMASYNC_NTFY_URL /
-// LAMASYNC_LAMADB_WEBHOOK_URL) seeds the notification_channels table once;
+// LAMA-221 + P-B cleanup #7: first boot with the legacy
+// `LAMASYNC_LAMADB_WEBHOOK_URL` env var seeds the webhook channel once;
 // later config is managed from the Admin page and survives restarts.
+// (The legacy `LAMASYNC_NTFY_URL` env var hookup was removed — ntfy
+// channels are configured at runtime from the Admin UI instead.)
 seedChannelsFromEnv(db);
 
 const app = new Elysia()

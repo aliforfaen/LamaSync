@@ -332,8 +332,11 @@ function topicFromUrl(rawUrl: string): string | null {
     const topic = segments[segments.length - 1];
     return topic ? decodeURIComponent(topic) : null;
   } catch (error) {
+    // P-B cleanup #7: drop the misleading `LAMASYNC_NTFY_URL` env-var hint
+    // — channels are now configured at runtime from the Admin UI, not via
+    // the env. The URL here was the ntfy channel's own `url` column.
     console.error(
-      `[notifications] invalid LAMASYNC_NTFY_URL: ${errorMessage(error)}`,
+      `[notifications] invalid ntfy channel URL: ${errorMessage(error)}`,
     );
     return null;
   }
@@ -439,10 +442,14 @@ function scheduleDeliveries(event: NotificationEvent, database: Database): void 
 }
 
 /**
- * LAMA-221: seed the channels table from the legacy env vars on first boot.
- * Only runs when the table is empty so restarts never duplicate channels.
- * The ntfy seed keeps the historic info-suppression behavior by defaulting
- * to ["critical","default"]; the LamaDB webhook seed delivers everything.
+ * LAMA-221: seed the channels table from the `LAMASYNC_LAMADB_WEBHOOK_URL`
+ * env var on first boot. Only runs when the table is empty so restarts
+ * never duplicate channels. The seed delivers every severity.
+ *
+ * The legacy `LAMASYNC_NTFY_URL` env-var hookup was removed in P-B cleanup
+ * #7 — ntfy channels are configured at runtime from the Admin UI (Add
+ * channel) and live in the `notification_channels` table without env-var
+ * bridging.
  */
 export function seedChannelsFromEnv(database: Database): void {
   const { count } = database
@@ -453,15 +460,6 @@ export function seedChannelsFromEnv(database: Database): void {
   if (count > 0) return;
 
   const now = Date.now();
-  const ntfyUrl = process.env.LAMASYNC_NTFY_URL;
-  if (ntfyUrl) {
-    database.run(
-      `INSERT INTO notification_channels
-         (id, kind, name, url, enabled, severities, created_at)
-       VALUES (?, 'ntfy', 'ntfy', ?, 1, ?, ?)`,
-      [crypto.randomUUID(), ntfyUrl, JSON.stringify(["critical", "default"]), now],
-    );
-  }
   const webhookUrl = process.env.LAMASYNC_LAMADB_WEBHOOK_URL;
   if (webhookUrl) {
     database.run(

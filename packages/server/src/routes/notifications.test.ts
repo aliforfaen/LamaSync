@@ -42,7 +42,6 @@ async function responseObjects(
 }
 
 beforeEach(() => {
-  delete process.env.LAMASYNC_NTFY_URL;
   delete process.env.LAMASYNC_LAMADB_WEBHOOK_URL;
   db = new Database(":memory:");
   db.exec(SERVER_SCHEMA);
@@ -173,13 +172,34 @@ describe("notification event router", () => {
     });
 
     try {
-      // LAMA-221: channels come from the DB, not env. The seed mirrors the
-      // legacy behavior: ntfy skips info, the webhook gets everything.
-      process.env.LAMASYNC_NTFY_URL =
-        `http://127.0.0.1:${server.port}/lamasync-test`;
-      process.env.LAMASYNC_LAMADB_WEBHOOK_URL =
-        `http://127.0.0.1:${server.port}/webhook`;
-      seedChannelsFromEnv(db);
+      // LAMA-221 + P-B cleanup #7: channels come from the DB. The legacy
+      // `LAMASYNC_NTFY_URL` env var was removed (ntfy channels are added
+      // via the Admin UI), so both channels are inserted directly here
+      // — mirrors the legacy behavior: ntfy skips info, the webhook
+      // gets everything.
+      const now = Date.now();
+      db.run(
+        `INSERT INTO notification_channels
+           (id, kind, name, url, enabled, severities, created_at)
+         VALUES (?, 'ntfy', 'ntfy', ?, 1, ?, ?)`,
+        [
+          crypto.randomUUID(),
+          `http://127.0.0.1:${server.port}/lamasync-test`,
+          JSON.stringify(["critical", "default"]),
+          now,
+        ],
+      );
+      db.run(
+        `INSERT INTO notification_channels
+           (id, kind, name, url, enabled, severities, created_at)
+         VALUES (?, 'webhook', 'LamaDB webhook', ?, 1, ?, ?)`,
+        [
+          crypto.randomUUID(),
+          `http://127.0.0.1:${server.port}/webhook`,
+          JSON.stringify(["critical", "default", "info"]),
+          now,
+        ],
+      );
 
       emitNotification({ type: "restore_failed", message: "critical event" });
       emitNotification({ type: "test", message: "default event" });
@@ -257,8 +277,6 @@ describe("notification event router", () => {
         .get();
       expect(ntfyChannel?.last_delivery_status).toBe("success");
     } finally {
-      delete process.env.LAMASYNC_NTFY_URL;
-      delete process.env.LAMASYNC_LAMADB_WEBHOOK_URL;
       server.stop(true);
     }
   });
@@ -326,8 +344,10 @@ describe("notification event router", () => {
     }
   });
 
-  test("seedChannelsFromEnv seeds only an empty table (idempotent)", () => {
-    process.env.LAMASYNC_NTFY_URL = "https://ntfy.sh/seeded-topic";
+  test("seedChannelsFromEnv seeds only an empty table with the LamaDB webhook URL (P-B cleanup #7)", () => {
+    // The legacy `LAMASYNC_NTFY_URL` env var was removed in P-B cleanup
+    // #7 — ntfy channels are now configured at runtime from the Admin
+    // UI, never via env. Only the webhook env var is honored here.
     process.env.LAMASYNC_LAMADB_WEBHOOK_URL = "https://lamadb.local/webhook";
 
     seedChannelsFromEnv(db);
@@ -336,13 +356,7 @@ describe("notification event router", () => {
         "SELECT kind, url, severities FROM notification_channels ORDER BY kind",
       )
       .all();
-    expect(rows).toHaveLength(2);
-    const ntfy = rows.find((row) => row.kind === "ntfy");
-    expect(ntfy?.url).toBe("https://ntfy.sh/seeded-topic");
-    expect(JSON.parse(ntfy?.severities ?? "[]")).toEqual([
-      "critical",
-      "default",
-    ]);
+    expect(rows).toHaveLength(1);
     const webhook = rows.find((row) => row.kind === "webhook");
     expect(webhook?.url).toBe("https://lamadb.local/webhook");
     expect(JSON.parse(webhook?.severities ?? "[]")).toEqual([
@@ -350,6 +364,8 @@ describe("notification event router", () => {
       "default",
       "info",
     ]);
+    // No ntfy row was created from env.
+    expect(rows.find((row) => row.kind === "ntfy")).toBeUndefined();
 
     // Second call (restart) must not duplicate.
     seedChannelsFromEnv(db);
@@ -358,7 +374,18 @@ describe("notification event router", () => {
         "SELECT COUNT(*) AS count FROM notification_channels",
       )
       .get();
-    expect(count?.count).toBe(2);
+    expect(count?.count).toBe(1);
+  });
+
+  test("seedChannelsFromEnv is a no-op when the webhook URL is unset", () => {
+    delete process.env.LAMASYNC_LAMADB_WEBHOOK_URL;
+    seedChannelsFromEnv(db);
+    const count = db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM notification_channels",
+      )
+      .get();
+    expect(count?.count).toBe(0);
   });
 });
 

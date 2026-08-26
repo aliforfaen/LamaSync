@@ -515,6 +515,31 @@ export class LamaSyncApiClient {
     );
   }
 
+  // P-B cleanup #6: archival export — writes a gzip-compressed NDJSON of
+  // every operation_log row older than the cutoff to `targetDir`, then
+  // prunes the same set. Returns null `file` when there were zero rows in
+  // the window (idempotent — safe for a daily timer). Mirror of
+  // OperationLogExport in core/types.ts.
+  exportOperations(
+    opts: { olderThanMs?: number; targetDir?: string } = {},
+  ): Promise<{
+    archived: number;
+    file: string | null;
+    deleted: number;
+    olderThanMs: number;
+    targetDir: string;
+  }> {
+    const body: Record<string, unknown> = {};
+    if (typeof opts.olderThanMs === "number") body["olderThanMs"] = opts.olderThanMs;
+    if (typeof opts.targetDir === "string") body["targetDir"] = opts.targetDir;
+    return this.request(
+      "POST",
+      "/api/v1/admin/export",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
   renameHost(hostId: string, hostname: string): Promise<Host> {
     return this.request<Host>(
       "PATCH",
