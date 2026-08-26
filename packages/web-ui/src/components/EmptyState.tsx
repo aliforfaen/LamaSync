@@ -34,9 +34,12 @@ interface EmptyStateProps {
   timeNote?: string;
   /** Picks the accent tint from the existing semantic tokens. */
   variant?: EmptyStateVariant;
-  /** LAMA-265: swap the CSS orbit glyph for the hopping-llama SVG where it
-   *  earns its place (delight accent, not a mascot invasion). */
-  glyph?: "llama";
+  /** LAMA-265/274: swap the CSS orbit glyph for the llama SVG where it earns
+   *  its place (delight accent, not a mascot invasion). "llama" is the
+   *  original mid-hop pose (first-boot moment); "llama-sit" is the calmer
+   *  resting pose for secondary empty states (first destinations, etc.).
+   *  Do NOT use a llama in error states that carry real failure detail. */
+  glyph?: "llama" | "llama-sit";
 }
 
 export function EmptyState({
@@ -67,8 +70,12 @@ export function EmptyState({
         className={`estate-glyph${glyph === "llama" ? " estate-glyph--llama" : ""}`}
         aria-hidden="true"
       >
-        {glyph === "llama" ? (
-          <Llama className="estate-llama" size={48} />
+        {glyph === "llama" || glyph === "llama-sit" ? (
+          <Llama
+            className="estate-llama"
+            size={48}
+            pose={glyph === "llama-sit" ? "sit" : "hop"}
+          />
         ) : (
           <>
             <span className="estate-orbit" />

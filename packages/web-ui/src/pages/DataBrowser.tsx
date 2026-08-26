@@ -184,7 +184,12 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
   }
 
   return (
-    <table className="data browser-table">
+    // P-A fix: a scroll container keeps the wide data table from blowing the
+    // page width on narrow viewports (~375px) and from fighting the off-canvas
+    // rail's negative translate. The wrapper is width:100% inside the rail's
+    // content column; the table keeps a min-width so columns don't crush.
+    <div className="browser-table-scroll">
+      <table className="data browser-table">
       <thead>
         <tr>
           {selectable && <th />}
@@ -270,6 +275,7 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 

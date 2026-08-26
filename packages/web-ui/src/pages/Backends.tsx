@@ -659,6 +659,7 @@ export function Backends() {
         ) : items.length === 0 ? (
           <EmptyState
             variant="storage"
+            glyph="llama-sit"
             title="No storage destinations yet"
             how="Add where your data lives — S3 buckets, local disks, NFS exports, or a restic repository."
             ctaLabel="Add a storage destination"

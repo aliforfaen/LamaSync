@@ -1521,6 +1521,19 @@ button.action:disabled {
   margin-bottom: var(--space-3);
 }
 
+/* P-A fix: the data-browser listing is a wide table. On narrow viewports
+   (~375px) it must scroll horizontally rather than push the page wide or
+   fight the off-canvas rail's negative translate. The wrapper is width:100%
+   inside the rail's content column; the table keeps a floor so its columns
+   don't crush into illegibility. */
+.browser-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+.browser-table-scroll .browser-table {
+  min-width: 40rem;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

@@ -406,7 +406,7 @@ export function HostDetail() {
       </section>
 
       <section className="section">
-        <h2>Assigned folders ({assignments.length})</h2>
+        <h2>Folders on this device ({assignments.length})</h2>
         {editingAssignment ? (
           <AssignmentEditor
             assignment={editingAssignment}
@@ -421,7 +421,7 @@ export function HostDetail() {
           />
         ) : null}
         {assignmentRows.length === 0 ? (
-          <div className="empty-row">No folder assignments</div>
+          <div className="empty-row">No folders on this device yet</div>
         ) : (
           <table className="data">
             <thead>
