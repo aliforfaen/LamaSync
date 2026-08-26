@@ -75,7 +75,14 @@ describe("runCli dispatch (LAMA-229)", () => {
     try {
       // `lamasync folders create` without --name triggers CliUsageError;
       // the dispatcher catches it inside run() and routes to exit(2).
-      await runCli(["folders", "create", "--type", "sync"]);
+      // --server/--api-key bypass the no-config refusal so the test is
+      // deterministic regardless of whether the dev machine has a
+      // ~/.config/lamasync/client.toml (CI does not).
+      await runCli([
+        "folders", "create", "--type", "sync",
+        "--server", "http://lamasync.test",
+        "--api-key", "good-key-1234567890",
+      ]);
     } catch (err) {
       caught = err;
     }
