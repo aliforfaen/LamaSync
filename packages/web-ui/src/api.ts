@@ -32,6 +32,8 @@ import type {
   FolderSnapshotsResponse,
   PauseMode,
   PauseState,
+  PairingSessionCreateResponse,
+  PairingSessionStatusResponse,
 } from "@lamasync/core";
 
 /** Wire shape of `GET /api/v1/pause` (LAMA-273). */
@@ -638,6 +640,17 @@ export const api = {
     apiPost<PauseState>(`/hosts/${encodeURIComponent(hostId)}/pause`, body),
   clearHostPause: (hostId: string) =>
     apiDelete<void>(`/hosts/${encodeURIComponent(hostId)}/pause`),
+  // LAMA-262: pairing sessions. `createPairingSession` issues a fresh short
+  // code (admin-only); `lookupPairingSession` polls status + expiry so the UI
+  // can flip to a "claimed" state when a device exchanges the code. The
+  // exchange itself is intentionally NOT exposed here — it's the no-auth
+  // endpoint the CLI calls, and the browser operator never needs the key.
+  createPairingSession: (opts: { ttlSeconds?: number } = {}) =>
+    apiPost<PairingSessionCreateResponse>("/pairing", opts),
+  lookupPairingSession: (code: string) =>
+    apiGet<PairingSessionStatusResponse>(
+      `/pairing/${encodeURIComponent(code)}`,
+    ),
 };
 
 export { ApiError };

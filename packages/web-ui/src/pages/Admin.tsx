@@ -7,6 +7,7 @@ import type {
 } from "@lamasync/core";
 import { api } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { PairingModal } from "../components/PairingModal.tsx";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SEVERITY_LEVELS: NotificationSeverity[] = ["critical", "default", "info"];
@@ -82,6 +83,9 @@ export function Admin() {
   const [pruneBusy, setPruneBusy] = useState(false);
   // UX workstream 4: prune requires explicit confirmation (destructive).
   const [pruneConfirmDays, setPruneConfirmDays] = useState<number | null>(null);
+  // LAMA-262: "Pair a device" modal — short-lived code + QR for adding a
+  // device without copy-pasting the API key.
+  const [showPairing, setShowPairing] = useState(false);
   const [deleteChannel, setDeleteChannel] = useState<NotificationChannel | null>(null);
   const [notifications, setNotifications] = useState<NotificationEvent[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
@@ -387,6 +391,23 @@ export function Admin() {
               </tr>
             </tbody>
           </table>
+      </section>
+
+      <section className="section">
+        <div className="toolbar">
+          <h2>Pair a device</h2>
+          <button
+            type="button"
+            className="action primary"
+            onClick={() => setShowPairing(true)}
+          >
+            Pair a device
+          </button>
+        </div>
+        <p className="muted">
+          Generate a short code a new device can scan or type to join the
+          fleet — no copying the API key.
+        </p>
       </section>
 
       <section className="section">
@@ -739,6 +760,7 @@ export function Admin() {
           onCancel={() => setDeleteChannel(null)}
         />
       )}
+      {showPairing && <PairingModal onClose={() => setShowPairing(false)} />}
     </div>
   );
 }
