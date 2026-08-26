@@ -274,6 +274,84 @@ export function sha256Hex(buf: Buffer): string {
 }
 
 /**
+ * LAMA-259: rich variant of `parseLsJson` that also preserves `mtime`
+ * (epoch ms). Used by the snapshot browser to feed a `BrowseEntry` mtime
+ * without re-parsing the raw JSON-lines stream. Same classify + filter
+ * semantics as `parseLsJson` — only difference is the additional
+ * `mtime: number | null` field on each returned entry. `mtime` is null
+ * when the source node doesn't carry the field (older restic builds or
+ * node types restic omits it for), so callers must fall back to a stable
+ * "unknown" sentinel (we use `0`, matching how `BrowseEntry.mtime === 0`
+ * is the convention for "not measured").
+ */
+export interface LsLongEntryWithMtime {
+  path: string;
+  size: number;
+  isDir: boolean;
+  /** Epoch ms, or null when the source node doesn't carry `mtime`. */
+  mtime: number | null;
+}
+
+function parseResticMtimeIso(value: unknown): number | null {
+  // Older restic builds sometimes emit an object form (`{"sec": n, "nsec": m}`)
+  // rather than an ISO string. We accept either; missing / unparseable /
+  // non-finite values return null so the caller can show "unknown".
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  } else if (typeof value === "object" && value !== null) {
+    const sec = (value as { sec?: unknown }).sec;
+    const nsec = (value as { nsec?: unknown }).nsec;
+    if (typeof sec === "number" && Number.isFinite(sec)) {
+      const ns = typeof nsec === "number" && Number.isFinite(nsec) ? nsec : 0;
+      return Math.floor(sec * 1000 + ns / 1_000_000);
+    }
+  }
+  return null;
+}
+
+export function parseLsJsonRich(stdout: string): LsLongEntryWithMtime[] {
+  const out: LsLongEntryWithMtime[] = [];
+  for (const rawLine of stdout.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const obj = parsed as Record<string, unknown>;
+    const structType = obj["struct_type"];
+    const messageType = obj["message_type"];
+    if (structType !== undefined && structType !== "node") continue;
+    if (messageType !== undefined && messageType !== "node") continue;
+    const typeField = obj["type"];
+    let isDir: boolean;
+    if (typeField === "file") isDir = false;
+    else if (typeField === "dir") isDir = true;
+    else if (typeField === undefined) {
+      const perms = obj["permissions"];
+      if (typeof perms !== "string" || perms.length === 0) continue;
+      isDir = perms[0] === "d";
+    } else {
+      continue;
+    }
+    const path = obj["path"];
+    if (typeof path !== "string" || path.trim() === "") continue;
+    const sizeRaw = obj["size"];
+    const size =
+      typeof sizeRaw === "number" && Number.isFinite(sizeRaw)
+        ? Math.max(0, sizeRaw)
+        : 0;
+    const mtime = parseResticMtimeIso(obj["mtime"]);
+    out.push({ path, size, isDir, mtime });
+  }
+  return out;
+}
+
+/**
  * LAMA-226 / LAMA-266: build a SAFE failure summary for the wire. The
  * raw restic stderr can carry endpoint / bucket / host fragments we do
  * NOT want in API responses or report cards, so this function only

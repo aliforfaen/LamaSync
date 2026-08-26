@@ -57,6 +57,28 @@ export interface Backend {
   lastProveOk?: boolean | null;
 }
 
+// LAMA-259: one row in the folder-scoped backup-history slider. Shape is
+// intentionally thinner than `ResticSnapshot` so the wire is small (the
+// Data Browser may render hundreds of these in a scrubber) and so we can
+// rearrange internals without a contract change. `id` is restic's own
+// snapshot id (matches the `restic_snapshots.snapshot_id` column) — that
+// is what the slider feeds back into
+// `GET /folders/:folderId/snapshots/:snapshotId/files` to drill in.
+export interface FolderSnapshot {
+  /** Restic's snapshot id (NOT the LamaSync internal `restic_snapshots.id`). */
+  id: string;
+  /** Epoch ms when the snapshot was taken. */
+  time: number;
+  /** Host that produced the snapshot (matches `ResticSnapshot.hostId`). */
+  host?: string | null;
+  /** Source paths recorded by restic at backup time. */
+  paths?: string[];
+}
+
+export interface FolderSnapshotsResponse {
+  snapshots: FolderSnapshot[];
+}
+
 // LAMA-221: configurable notification delivery channels (ntfy / webhook).
 export type NotificationChannelKind = "ntfy" | "webhook";
 
@@ -534,10 +556,20 @@ export interface BrowseEntry {
   folderId?: string;
 }
 
+// LAMA-259: the Data Browser's "history" mode renders files from inside a
+// restic snapshot instead of from a live filesystem. `backend` discriminates
+// the source so the UI can render either shape with a single switch.
+export type BrowseBackend = "local" | "s3" | "restic-snapshot";
+
 export interface BrowseResponse {
-  backend: "local" | "s3";
+  backend: BrowseBackend;
   path: string;
   entries: BrowseEntry[];
+  // LAMA-259: present only when backend === "restic-snapshot". Tells the
+  // slider UI which snapshot (and folder) this listing came from so it can
+  // re-fetch on path navigation without an extra round-trip.
+  snapshotId?: string;
+  folderId?: string;
 }
 
 // LAMA-224: storage statistics. The server computes each entry lazily and

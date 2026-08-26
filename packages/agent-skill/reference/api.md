@@ -70,6 +70,8 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only; 15-min cache) |
 | GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only; 15-min cache) |
+| GET      | `/folders/:folderId/snapshots`             | Folder-scoped restic snapshot history for the time-travel slider; empty for non-restic folders (LAMA-259) |
+| GET      | `/folders/:folderId/snapshots/:snapshotId/files?path=...&limit=...` | Files inside a restic snapshot at a given path (`BrowseResponse` with `backend: "restic-snapshot"`); 409 for non-restic folders (LAMA-259) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
 | GET      | `/backends/:backendId`                     | Read one backend (additive `lastProveAt`/`lastProveOk` for the badge) |
@@ -175,6 +177,9 @@ spec. The high-level shapes (verbose commentary):
 - `DotfileManifest { id, hostId, appName, paths[], excludes[]?, schedule?, instructions?, lastSyncAt?, lastSyncDirection?, originalUploaderHostId? }`
 - `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum?, description? }`
 - `ResticSnapshot { id, snapshotId, folderId, hostId, timestamp, paths[], sizeBytes?, tags? }`
+- `FolderSnapshot { id, time, host?, paths? }` (LAMA-259) — `id` is restic's snapshot id; `time` is epoch ms. Slider feed.
+- `FolderSnapshotsResponse { snapshots: FolderSnapshot[] }` (LAMA-259)
+- `BrowseResponse` `backend` is `"local" | "s3" | "restic-snapshot"`; when `backend === "restic-snapshot"` the response also carries `snapshotId` and `folderId` so the UI can re-fetch without a round-trip (LAMA-259)
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
 - `QueuedAction { id, hostId, type, payload?, status, createdAt, takenAt?, completedAt?, result? }`
