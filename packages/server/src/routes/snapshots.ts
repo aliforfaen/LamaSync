@@ -2,14 +2,14 @@
 // snapshot file listing. Two GET endpoints back the Data Browser's
 // "history mode" slider:
 //
-//   GET /api/v1/folders/:folderId/snapshots
+//   GET /api/v1/folders/:id/snapshots
 //     → { snapshots: FolderSnapshot[] }
 //     Reads straight from the `restic_snapshots` table (daemon-posted
 //     rows from POST /restic/snapshots). Folders that aren't backed by a
 //     restic repository return `{ snapshots: [] }` so the UI can hide the
 //     slider cleanly. Folder-not-found → 404.
 //
-//   GET /api/v1/folders/:folderId/snapshots/:snapshotId/files?path=...
+//   GET /api/v1/folders/:id/snapshots/:snapshotId/files?path=...
 //     → BrowseResponse (backend: "restic-snapshot")
 //     Spawns `restic ls --json <snap>[:<path>]` against the folder's
 //     configured restic repository, parses the JSON-lines output (sharing
@@ -305,9 +305,9 @@ async function runResticLs(
 
 export const folderSnapshotsRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
-    "/folders/:folderId/snapshots",
+    "/folders/:id/snapshots",
     ({ params, set }) => {
-      const folderId = params.folderId;
+      const folderId = params.id;
       // 404 BEFORE the folder-kind check so a typo'd id is "not found",
       // not "no history" — consistent with the rest of /folders/*.
       const folderRow = activeDb
@@ -346,7 +346,7 @@ export const folderSnapshotsRoutes = new Elysia({ prefix: "/api/v1" })
       return response;
     },
     {
-      params: t.Object({ folderId: t.String() }),
+      params: t.Object({ id: t.String() }),
       detail: {
         summary: "List folder-scoped restic snapshots for the time-travel slider",
         tags: ["Data Browser"],
@@ -359,9 +359,9 @@ export const folderSnapshotsRoutes = new Elysia({ prefix: "/api/v1" })
     },
   )
   .get(
-    "/folders/:folderId/snapshots/:snapshotId/files",
+    "/folders/:id/snapshots/:snapshotId/files",
     async ({ params, query, set }) => {
-      const folderId = params.folderId;
+      const folderId = params.id;
       const snapshotId = params.snapshotId;
       const pathPrefix = (query.path ?? "/").trim();
       const safePath = pathPrefix === "" ? "/" : pathPrefix;
@@ -426,7 +426,7 @@ export const folderSnapshotsRoutes = new Elysia({ prefix: "/api/v1" })
       );
     },
     {
-      params: t.Object({ folderId: t.String(), snapshotId: t.String() }),
+      params: t.Object({ id: t.String(), snapshotId: t.String() }),
       query: t.Object({
         path: t.Optional(t.String()),
         limit: t.Optional(
