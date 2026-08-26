@@ -196,6 +196,22 @@ export interface QueuedAction {
   result?: string | null;
 }
 
+// LAMA-260: response shape for `POST /folders/:id/files` (multipart
+// upload). Distinct from the browse-job model — this is a synchronous
+// `rclone copyto` pushed onto the folder's destination backend, not an
+// async tracked job. The file is server-resident long enough to be
+// spawned by rclone, then removed.
+export interface FolderFileUploadResponse {
+  ok: true;
+  name: string;
+  /** Combined target path relative to the folder's destination root.
+   *  Empty string when the file was uploaded to the root. */
+  path: string;
+  /** Bytes written to the destination (post-cap, matching the body
+   *  length the server streamed to its temp file). */
+  size: number;
+}
+
 export interface Folder {
   id: string;
   name: string;

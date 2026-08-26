@@ -8,6 +8,7 @@ import type {
   DotfileVersion,
   Folder,
   FolderAssignment,
+  FolderFileUploadResponse,
   HealthReport,
   HealthResponse,
   Host,
@@ -352,6 +353,41 @@ export class LamaSyncApiClient {
       JSON.stringify(body),
       "application/json",
     );
+  }
+
+  // LAMA-260: multipart file upload into a folder's destination
+  // backend. Mirrors `uploadDotfile` in shape — caller passes a
+  // `Blob` (or `File`) + an optional `path` field. The response is
+  // synchronous (no browse-jobs polling).
+  async uploadFolderFile(
+    folderId: string,
+    file: Blob,
+    opts: { path?: string } = {},
+  ): Promise<FolderFileUploadResponse> {
+    const form = new FormData();
+    // `as any` to accept File-or-Blob; the spread below preserves the
+    // filename when the caller has one (so the server can echo it
+    // back as `name` in the response).
+    const filename = (file as { name?: unknown }).name;
+    form.append(
+      "file",
+      file,
+      typeof filename === "string" && filename.length > 0 ? filename : "upload.bin",
+    );
+    if (opts.path) form.append("path", opts.path);
+    const res = await this.fetchWithTimeout(
+      `${this.baseUrl}/api/v1/folders/${encodeURIComponent(folderId)}/files`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        body: form,
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new LamaSyncApiError(res.status, text);
+    }
+    return (await res.json()) as FolderFileUploadResponse;
   }
 
   // Dotfiles

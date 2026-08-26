@@ -17,6 +17,7 @@ import { actionsRoutes } from "./routes/actions.ts";
 import { notificationsRoutes } from "./routes/notifications.ts";
 import { browseRoutes } from "./routes/browse.ts";
 import { folderSnapshotsRoutes } from "./routes/snapshots.ts";
+import { folderFileRoutes } from "./routes/folder-files.ts";
 import { backendsRoutes } from "./routes/backends.ts";
 import { statsRoutes } from "./routes/stats.ts";
 import { healthDrillRoutes } from "./routes/health-drill.ts";
@@ -160,6 +161,7 @@ const app = new Elysia()
   .use(demoRoutes)
   .use(browseRoutes)
   .use(folderSnapshotsRoutes)
+  .use(folderFileRoutes)
   .use(pauseRoutes)
   .use(healthDrillRoutes)
   .onError(({ code, error, set }): ErrorResponse => {

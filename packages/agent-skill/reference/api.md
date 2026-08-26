@@ -72,6 +72,7 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only; 15-min cache) |
 | GET      | `/folders/:id/snapshots`             | Folder-scoped restic snapshot history for the time-travel slider; empty for non-restic folders (LAMA-259) |
 | GET      | `/folders/:id/snapshots/:snapshotId/files?path=...&limit=...` | Files inside a restic snapshot at a given path (`BrowseResponse` with `backend: "restic-snapshot"`); 409 for non-restic folders (LAMA-259) |
+| POST     | `/folders/:id/files`             | Upload a file into a folder's destination backend (multipart `file`, optional `path` subdir). Synchronous, ≤ 100 MB cap (`LAMASYNC_FOLDER_FILE_MAX_BYTES`); 409 for non-writable backends (sftp/restic) (LAMA-260) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
 | GET      | `/backends/:backendId`                     | Read one backend (additive `lastProveAt`/`lastProveOk` for the badge) |
@@ -180,6 +181,7 @@ spec. The high-level shapes (verbose commentary):
 - `ResticSnapshot { id, snapshotId, folderId, hostId, timestamp, paths[], sizeBytes?, tags? }`
 - `FolderSnapshot { id, time, host?, paths? }` (LAMA-259) — `id` is restic's snapshot id; `time` is epoch ms. Slider feed.
 - `FolderSnapshotsResponse { snapshots: FolderSnapshot[] }` (LAMA-259)
+- `FolderFileUploadResponse { ok: true, name, path, size }` (LAMA-260) — `name` is the uploaded file's leaf; `path` is the (optional) `path` form-field value the client passed (empty string for root); `size` is the bytes the server staged to disk before invoking rclone.
 - `BrowseResponse` `backend` is `"local" | "s3" | "restic-snapshot"`; when `backend === "restic-snapshot"` the response also carries `snapshotId` and `folderId` so the UI can re-fetch without a round-trip (LAMA-259)
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
@@ -217,6 +219,37 @@ spec. The high-level shapes (verbose commentary):
     next call.
 - The `/api/v1/browse/*` write endpoints (copy/move/rename/mkdir/upload/
   delete) all run as async jobs; track via `/api/v1/browse/jobs`.
+- LAMA-260 file uploads into synced folders (`POST /api/v1/folders/:id/files`,
+  multipart `file` field, optional `path` subdir under the folder's
+  destination root). Synchronous, not async; returns
+  `FolderFileUploadResponse { ok, name, path, size }` on success. Body is
+  streamed to a server-side `/tmp` staging file and `rclone copyto` pushes
+  it onto the folder's destination backend:
+  - Writable backends only — `s3` (bucket root + subdir), `local`, `nfs`
+    (both rclone-type=local against the backend's `localPath`).
+  - 409 (not writable) for `sftp` (no per-host credentials available
+    server-side — uploads route through the daemon in a separate channel,
+    not in scope for LAMA-260) and `restic` (use the snapshot/restore
+    flow instead).
+  - 404 for unknown folder, 400 for missing `file` field or unsafe path
+    (the route reuses `browse-paths.validateBrowseInput` so absolute paths,
+    null bytes, and `..` traversal are rejected).
+  - Size cap defaults to **100 MB**, env-overridable via
+    `LAMASYNC_FOLDER_FILE_MAX_BYTES` (positive integer bytes). The cap is
+    enforced mid-stream against `File.size` AND a per-chunk
+    `TransformStream` so an oversized body can't slip past a missing
+    Content-Length, AND the post-stream `statSync` so the temp file
+    can't lie. Anything over the cap returns **413** with the file size
+    and the cap in the message; the staging file is removed in a
+    `finally` regardless of the cap's verdict.
+  - On rclone failure (non-zero exit) the response is **502** with the
+    usual LAMA-226 scrubbed summary (`rclone copyto failed with exit
+    code <n>`). Full stderr — which can embed bucket, endpoint, and
+    access-key fragments — is logged server-side only via `console.error`,
+    never echoed back to the client.
+  - The staging file lives in `/tmp/lamasync-folder-upload-<uuid>` and
+    is `rmSync`'d in the route's `finally` so a crashed handler or a
+    cap-rejected body never leaves a partial file behind.
 - Backup health (LAMA-266):
   - **Prove it** (`POST /api/v1/backends/:backendId/prove`) restores ONE
     random small file from the backend's latest restic snapshot into a
