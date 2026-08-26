@@ -8,6 +8,7 @@ import type {
   DotfileVersion,
   Folder,
   FolderAssignment,
+  FolderFileUploadResponse,
   HealthReport,
   HealthResponse,
   Host,
@@ -16,6 +17,9 @@ import type {
   NotificationEvent,
   OperationLog,
   OperationReport,
+  PairingSessionCreateResponse,
+  PairingSessionExchangeResponse,
+  PairingSessionStatusResponse,
   PauseMode,
   PauseState,
   QueuedAction,
@@ -354,6 +358,41 @@ export class LamaSyncApiClient {
     );
   }
 
+  // LAMA-260: multipart file upload into a folder's destination
+  // backend. Mirrors `uploadDotfile` in shape — caller passes a
+  // `Blob` (or `File`) + an optional `path` field. The response is
+  // synchronous (no browse-jobs polling).
+  async uploadFolderFile(
+    folderId: string,
+    file: Blob,
+    opts: { path?: string } = {},
+  ): Promise<FolderFileUploadResponse> {
+    const form = new FormData();
+    // `as any` to accept File-or-Blob; the spread below preserves the
+    // filename when the caller has one (so the server can echo it
+    // back as `name` in the response).
+    const filename = (file as { name?: unknown }).name;
+    form.append(
+      "file",
+      file,
+      typeof filename === "string" && filename.length > 0 ? filename : "upload.bin",
+    );
+    if (opts.path) form.append("path", opts.path);
+    const res = await this.fetchWithTimeout(
+      `${this.baseUrl}/api/v1/folders/${encodeURIComponent(folderId)}/files`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        body: form,
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new LamaSyncApiError(res.status, text);
+    }
+    return (await res.json()) as FolderFileUploadResponse;
+  }
+
   // Dotfiles
   listDotfileManifests(hostId?: string): Promise<DotfileManifest[]> {
     const qs = hostId ? `?hostId=${encodeURIComponent(hostId)}` : "";
@@ -512,6 +551,31 @@ export class LamaSyncApiClient {
     return this.request<{ deleted: number; olderThanMs: number }>(
       "POST",
       `/api/v1/admin/prune?olderThanMs=${olderThanMs}`,
+    );
+  }
+
+  // P-B cleanup #6: archival export — writes a gzip-compressed NDJSON of
+  // every operation_log row older than the cutoff to `targetDir`, then
+  // prunes the same set. Returns null `file` when there were zero rows in
+  // the window (idempotent — safe for a daily timer). Mirror of
+  // OperationLogExport in core/types.ts.
+  exportOperations(
+    opts: { olderThanMs?: number; targetDir?: string } = {},
+  ): Promise<{
+    archived: number;
+    file: string | null;
+    deleted: number;
+    olderThanMs: number;
+    targetDir: string;
+  }> {
+    const body: Record<string, unknown> = {};
+    if (typeof opts.olderThanMs === "number") body["olderThanMs"] = opts.olderThanMs;
+    if (typeof opts.targetDir === "string") body["targetDir"] = opts.targetDir;
+    return this.request(
+      "POST",
+      "/api/v1/admin/export",
+      JSON.stringify(body),
+      "application/json",
     );
   }
 
@@ -809,6 +873,37 @@ export class LamaSyncApiClient {
     return this.request<void>(
       "DELETE",
       `/api/v1/hosts/${encodeURIComponent(hostId)}/pause`,
+    );
+  }
+
+  // LAMA-262: pairing-session endpoints. The `create` call is admin-auth
+  // (the web UI shows the code to a logged-in operator); `lookup` and
+  // `exchange` are auth-light — `lookup` reveals only status + expiresAt
+  // (never the key), `exchange` is what returns the key itself.
+  // `ttlSeconds` is an admin-only override for the default 600s window.
+  createPairingSession(opts: { ttlSeconds?: number } = {}): Promise<PairingSessionCreateResponse> {
+    const body = opts.ttlSeconds !== undefined ? { ttlSeconds: opts.ttlSeconds } : {};
+    return this.request<PairingSessionCreateResponse>(
+      "POST",
+      "/api/v1/pairing",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  lookupPairingSession(code: string): Promise<PairingSessionStatusResponse> {
+    return this.request<PairingSessionStatusResponse>(
+      "GET",
+      `/api/v1/pairing/${encodeURIComponent(code)}`,
+    );
+  }
+
+  exchangePairingSession(code: string): Promise<PairingSessionExchangeResponse> {
+    return this.request<PairingSessionExchangeResponse>(
+      "POST",
+      `/api/v1/pairing/${encodeURIComponent(code)}/exchange`,
+      "",
+      "application/json",
     );
   }
 }

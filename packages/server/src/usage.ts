@@ -41,7 +41,6 @@ export function serverUsage(): string {
     "  LAMASYNC_BACKUP_DIR             local-backup directory for backup operations",
     "  LAMASYNC_LOG_RETENTION_DAYS     operation_log retention (default 90)",
     "  LAMASYNC_GITHUB_TOKEN           GitHub token for the release proxy (avoids the 60 req/h unauthenticated limit)",
-    "  LAMASYNC_NTFY_URL               seed a Ntfy notification channel on first boot",
     "  LAMASYNC_LAMADB_WEBHOOK_URL     seed a LamaDB webhook channel on first boot",
     "",
     "Flags:",

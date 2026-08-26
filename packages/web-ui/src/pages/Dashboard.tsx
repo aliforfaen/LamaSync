@@ -18,6 +18,7 @@ import { api } from "../api.ts";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { GettingStarted } from "../components/GettingStarted.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { InlineError } from "../components/InlineError.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 import { usePause } from "../hooks/usePause.ts";
 import { PauseBanner } from "../components/PauseBanner.tsx";
@@ -26,6 +27,17 @@ import { formatTimeAgo } from "../relative-time.ts";
 import { showVerifiedBadge } from "../backup-health.ts";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { Donut } from "../components/Donut.tsx";
+import { Confetti, useMilestoneConfetti } from "../components/Confetti.tsx";
+
+/** LAMA-265: "first backup ever seen" — a successful folder or app-settings
+ *  backup in the feed (terminology: `backup` = Backup, `dotfile` = App
+ *  settings backup). Never fires on failures. */
+function isSuccessfulBackup(op: OperationLog): boolean {
+  return (
+    op.status === "success" &&
+    (op.operation === "backup" || op.operation === "dotfile")
+  );
+}
 
 interface DashboardData {
   hosts: Host[];
@@ -131,6 +143,11 @@ function AttentionItem({ title, count, children, to }: AttentionItemProps) {
 export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // P-A: a failed storage-destination list no longer collapses into a silent
+  // "not verified yet" caption — an inline error with retry replaces it.
+  const [backendsError, setBackendsError] = useState<string | null>(null);
+  // P-A: bump to re-run the whole dashboard fetch from the retry button.
+  const [reloadKey, setReloadKey] = useState(0);
   const { state: wsState, event } = useWebSocket();
   // LAMA-273: global pause / slow mode — banner + control for the fleet.
   const { overview, refresh: refreshPause } = usePause();
@@ -148,6 +165,10 @@ export function Dashboard() {
   // LAMA-203: captured once; highlights are computed against the previous
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
+  // LAMA-265: once-per-milestone confetti — first successful backup ever
+  // seen in the operations feed (flag lives in localStorage, reload-safe).
+  const { fire: fireFirstBackup, visible: showFirstBackup } =
+    useMilestoneConfetti("first-backup-seen");
 
   // WS6 P4: resolve folder ids to display names for the needs-attention
   // conflict list. Memoized so the map is rebuilt only when the folders
@@ -207,6 +228,8 @@ export function Dashboard() {
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
+    setBackendsError(null);
     Promise.all([
       api.health(),
       api.listFolders(),
@@ -214,7 +237,6 @@ export function Dashboard() {
       api.listShares(),
       api.listResticSnapshots(),
       api.listOperations({ limit: 100 }),
-      api.listBackends().catch(() => [] as Backend[]),
     ])
       .then(
         async ([
@@ -224,8 +246,20 @@ export function Dashboard() {
           shares,
           snapshots,
           operations,
-          backends,
         ]) => {
+          if (cancelled) return;
+          // The destination list is best-effort — a failure must not blank
+          // the whole dashboard, but it must surface as an inline caption.
+          let backends: Backend[] = [];
+          try {
+            backends = await api.listBackends();
+          } catch (err: unknown) {
+            setBackendsError(
+              `Couldn't load storage destinations — ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
           if (cancelled) return;
           // Workstream 2: any folder assignment anywhere means step 4 is
           // done. Best-effort — a failure just keeps the step pending.
@@ -273,11 +307,21 @@ export function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadKey]);
 
   useEffect(() => {
     if (event) setData((prev) => (prev ? mergeEvent(prev, event) : prev));
   }, [event]);
+
+  // LAMA-265: fire the once-ever milestone the moment the feed shows any
+  // successful backup — including backups that arrive via WebSocket. The
+  // localStorage gate makes repeat runs no-ops, so this is safe to re-check
+  // on every data change.
+  useEffect(() => {
+    if (data && (data.operations ?? []).some(isSuccessfulBackup)) {
+      fireFirstBackup();
+    }
+  }, [data, fireFirstBackup]);
 
   async function onSeedDemo(): Promise<void> {
     setDemoBusy(true);
@@ -385,6 +429,16 @@ export function Dashboard() {
         />
       ) : null}
       {error && <div className="error">{error}</div>}
+      {backendsError ? (
+        <InlineError
+          message={backendsError}
+          onRetry={() => setReloadKey((k) => k + 1)}
+        />
+      ) : null}
+
+      {showFirstBackup ? (
+        <Confetti fallback={<span>✓ Nice work — your first backup is in.</span>} />
+      ) : null}
 
       <section className="section">
         <h2>Needs attention{newTotal > 0 ? ` · ${newTotal} new` : ""}</h2>
@@ -511,6 +565,7 @@ export function Dashboard() {
           <>
             <EmptyState
               variant="devices"
+              glyph="llama"
               title="Pair your first device"
               how="Register a machine with this server and start syncing folders between your devices."
               ctaLabel="Pair your first device"
@@ -557,7 +612,7 @@ export function Dashboard() {
       </section>
 
       <div className="summary-grid">
-        <SummaryCard label="Hosts" value={counts.total} />
+        <SummaryCard label="Devices" value={counts.total} />
         <SummaryCard label="Online" value={counts.online} accent="online" />
         <SummaryCard label="Folders" value={counts.folders} />
         <SummaryCard label="Shares" value={counts.shares} />
@@ -580,18 +635,22 @@ export function Dashboard() {
         {!storage ? (
           <div className="empty-row">
             {storageError ? (
-              <span className="error">
-                Storage report unavailable — {storageError}
-              </span>
+              <InlineError
+                message={`Storage report unavailable — ${storageError}`}
+                onRetry={() => void onRefreshStorage()}
+              />
             ) : (
               <div className="skel skel-line" aria-busy="true" />
             )}
           </div>
         ) : (
           <>
-            {storageError && (
-              <div className="error">Storage refresh failed — {storageError}</div>
-            )}
+            {storageError ? (
+              <InlineError
+                message={`Storage refresh failed — ${storageError}`}
+                onRetry={() => void onRefreshStorage()}
+              />
+            ) : null}
             {storage.backends.some((b) => b.bytes > 0) ? (
               <div className="storage-overview">
                 <Donut

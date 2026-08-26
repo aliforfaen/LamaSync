@@ -9,6 +9,7 @@
 // can reuse it for the device-card grid.
 
 import { Link } from "react-router-dom";
+import { Llama } from "./Llama.tsx";
 
 export type EmptyStateVariant =
   | "devices"
@@ -33,6 +34,12 @@ interface EmptyStateProps {
   timeNote?: string;
   /** Picks the accent tint from the existing semantic tokens. */
   variant?: EmptyStateVariant;
+  /** LAMA-265/274: swap the CSS orbit glyph for the llama SVG where it earns
+   *  its place (delight accent, not a mascot invasion). "llama" is the
+   *  original mid-hop pose (first-boot moment); "llama-sit" is the calmer
+   *  resting pose for secondary empty states (first destinations, etc.).
+   *  Do NOT use a llama in error states that carry real failure detail. */
+  glyph?: "llama" | "llama-sit";
 }
 
 export function EmptyState({
@@ -44,6 +51,7 @@ export function EmptyState({
   steps,
   timeNote,
   variant = "devices",
+  glyph,
 }: EmptyStateProps) {
   const cta =
     onCta !== undefined ? (
@@ -58,10 +66,23 @@ export function EmptyState({
 
   return (
     <section className={`estate estate--${variant}`}>
-      <div className="estate-glyph" aria-hidden="true">
-        <span className="estate-orbit" />
-        <span className="estate-core" />
-        <span className="estate-node" />
+      <div
+        className={`estate-glyph${glyph === "llama" ? " estate-glyph--llama" : ""}`}
+        aria-hidden="true"
+      >
+        {glyph === "llama" || glyph === "llama-sit" ? (
+          <Llama
+            className="estate-llama"
+            size={48}
+            pose={glyph === "llama-sit" ? "sit" : "hop"}
+          />
+        ) : (
+          <>
+            <span className="estate-orbit" />
+            <span className="estate-core" />
+            <span className="estate-node" />
+          </>
+        )}
       </div>
       <h3 className="estate-title">{title}</h3>
       <p className="estate-how">{how}</p>

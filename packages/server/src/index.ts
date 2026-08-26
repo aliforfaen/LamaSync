@@ -16,11 +16,14 @@ import { releaseRoutes } from "./routes/release.ts";
 import { actionsRoutes } from "./routes/actions.ts";
 import { notificationsRoutes } from "./routes/notifications.ts";
 import { browseRoutes } from "./routes/browse.ts";
+import { folderSnapshotsRoutes } from "./routes/snapshots.ts";
+import { folderFileRoutes } from "./routes/folder-files.ts";
 import { backendsRoutes } from "./routes/backends.ts";
 import { statsRoutes } from "./routes/stats.ts";
 import { healthDrillRoutes } from "./routes/health-drill.ts";
 import { demoRoutes } from "./routes/demo.ts";
 import { pauseRoutes } from "./routes/pause.ts";
+import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -69,9 +72,11 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 }
 
 
-// LAMA-221: first boot with legacy env vars (LAMASYNC_NTFY_URL /
-// LAMASYNC_LAMADB_WEBHOOK_URL) seeds the notification_channels table once;
+// LAMA-221 + P-B cleanup #7: first boot with the legacy
+// `LAMASYNC_LAMADB_WEBHOOK_URL` env var seeds the webhook channel once;
 // later config is managed from the Admin page and survives restarts.
+// (The legacy `LAMASYNC_NTFY_URL` env var hookup was removed — ntfy
+// channels are configured at runtime from the Admin UI instead.)
 seedChannelsFromEnv(db);
 
 const app = new Elysia()
@@ -121,6 +126,11 @@ const app = new Elysia()
             name: "Health",
             description: "LAMA-266 backup prove-it + monthly fire-drill endpoints",
           },
+          {
+            name: "Pairing",
+            description:
+              "LAMA-262 pairing-session endpoints — admin issues short codes, devices exchange them for the API key.",
+          },
         ],
         components: {
           securitySchemes: {
@@ -156,7 +166,10 @@ const app = new Elysia()
   .use(statsRoutes)
   .use(demoRoutes)
   .use(browseRoutes)
+  .use(folderSnapshotsRoutes)
+  .use(folderFileRoutes)
   .use(pauseRoutes)
+  .use(pairingRoutes)
   .use(healthDrillRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
@@ -310,4 +323,47 @@ if (
   runDrillPass();
   const drillTimer = setInterval(runDrillPass, drillCheckIntervalMs);
   drillTimer.unref?.();
+}
+
+// LAMA-262: light periodic sweep for expired pairing sessions. Belt-
+// and-braces — every read also projects expiry onto the wire and flips
+// the row, so this only matters for keeping the table bounded over time.
+// Default 5 minutes is enough to amortize a DELETE pass across a fleet
+// of devices without holding the DB long. Opt out with
+// `LAMASYNC_PAIRING_SWEEP_MS=0` (matches the lock-reaper opt-out
+// convention). Gated by the same test env checks so unit tests don't
+// pick up a stray interval.
+const PAIRING_SWEEP_DEFAULT_MS = 5 * 60_000;
+const pairingSweepMs = (() => {
+  const raw = process.env.LAMASYNC_PAIRING_SWEEP_MS;
+  if (raw === undefined) return PAIRING_SWEEP_DEFAULT_MS;
+  if (raw === "0") return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : PAIRING_SWEEP_DEFAULT_MS;
+})();
+
+if (
+  process.env.LAMASYNC_TEST !== "1" &&
+  process.env.NODE_ENV !== "test" &&
+  pairingSweepMs > 0
+) {
+  try {
+    const deleted = sweepExpiredPairingSessions();
+    if (deleted > 0) {
+      console.log(`[pairing] swept ${deleted} expired session row(s) at startup`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[pairing] startup sweep failed: ${msg}`);
+  }
+
+  const pairingSweepTimer = setInterval(() => {
+    try {
+      sweepExpiredPairingSessions();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[pairing] sweep failed: ${msg}`);
+    }
+  }, pairingSweepMs);
+  pairingSweepTimer.unref?.();
 }

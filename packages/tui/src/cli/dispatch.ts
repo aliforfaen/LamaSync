@@ -9,7 +9,25 @@
  * Every command module implements `CliCommand` (run + help). The dispatcher
  * catches `CliUsageError` (exit 2) and re-throws other errors so the
  * top-level `main()` can map them to the right exit code.
+ *
+ * Split-by-surface config fallback (LAMA-248 / endgame):
+ *   - Bare `lamasync` (interactive shell or LAMASYNC_NO_TUI=1 fallback)
+ *     keeps the friendly localhost/dev-key default + the LAMA-254 loud
+ *     fake-key warning — that's a different entry point (`runCliFallback`),
+ *     not this dispatcher.
+ *   - Explicit subcommands with no usable server config REFUSE fast: exit
+ *     code 3, stderr message naming the missing client.toml, and (with
+ *     --json) a `{ok:false, reason:"no-config", ...}` envelope on stdout
+ *     that scripts can `jq .reason` to distinguish from auth failures
+ *     (the existing `auth-failure` envelope, LAMA-247 #14).
+ *   - `doctor`, the `local` subtree, and `register` (LAMA-262) are
+ *     exempt: `doctor` is diagnostic by definition; `local.*` talks to
+ *     the daemon Unix socket and never touches server credentials;
+ *     `register` writes the client.toml as its first side-effect, so
+ *     refusing (exit 3) without one would be a chicken/egg.
  */
+
+import { existsSync } from "fs";
 
 import {
   CliUsageError,
@@ -21,6 +39,7 @@ import {
 } from "./args.ts";
 import {
   buildCliClient,
+  defaultConfigPath,
   exitCodeForError,
   type CliClient,
 } from "./client.ts";
@@ -40,6 +59,7 @@ import * as snapshots from "./snapshots.ts";
 import * as browse from "./browse.ts";
 import * as notifications from "./notifications.ts";
 import * as hosts from "./hosts.ts";
+import * as registerCmd from "./register.ts";
 import * as admin from "./admin.ts";
 
 export interface CliContext {
@@ -99,7 +119,7 @@ Commands:
   backends test           Test a storage destination by id
   sync [folderId]         Trigger a sync (--host, optional --folder)
   ops list                List recent activity (--status, --host, --folder, --limit)
-  doctor                  Structured health report (env, server, socket, version)
+  doctor                  Structured health report (env, server, socket, version) — runs even without client.toml
   dotfiles list           List app settings backups (dotfile manifests)
   dotfiles manifests      CRUD over app settings backup manifests
   dotfiles upload         Upload a new app settings backup version
@@ -117,7 +137,7 @@ Commands:
   notifications test      Send a test notification (--channel for one channel)
   hosts list              List registered devices
   hosts rename            Rename a device (DESTRUCTIVE)
-  register                Register or update a device in the fleet
+  register                Pair this device with the fleet via a web UI code (LAMA-262)
   shares list             List NFS / SMB shares
   admin prune             Manually prune operation_log (DESTRUCTIVE)
   local status            Local daemon status (Unix socket)
@@ -136,7 +156,8 @@ Common flags:
 
 Exit codes (stable contract for the skill's drift check, LAMA-230):
   0 ok, 1 runtime error, 2 usage error,
-  3 auth failure (401/403), 4 server unreachable
+  3 auth failure (401/403) OR no client.toml (subcommand issued without one),
+  4 server unreachable
 
 Run 'lamasync <command> --help' for command-specific help.`,
 };
@@ -575,14 +596,21 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
   register: {
     command: {
       help: {
-        summary: "Register or update a device in the fleet.",
+        summary:
+          "Pair this device with the fleet by exchanging a web UI code for a client.toml (LAMA-262).",
         usage:
-          `Usage: lamasync register --hostname <name> [--tailnet-ip <ip>]\n\n` +
-          `  This is the agent fallback for the install script's web UI flow.\n` +
-          `  Idempotent: POSTs to /api/v1/register with the chosen name; existing\n` +
-          `  rows are updated in place.`,
+          `Usage: lamasync register --code <lama-XXXX-XXXX> --server URL [--hostname <name>] [--force]\n\n` +
+          `  Refuses (exit 1) when a client.toml already exists at the default path; pass\n` +
+          `  --force to overwrite it. Prompts for the code on a TTY; --code is required in\n` +
+          `  non-interactive contexts (exit 2 if missing).\n\n` +
+          `  Flags:\n` +
+          `    --code <lama-XXXX-XXXX>   the pairing code from the web UI (case-insensitive)\n` +
+          `    --server URL              server URL (also: LAMASYNC_SERVER_URL)\n` +
+          `    --hostname <name>         client.toml hostname (defaults to os.hostname())\n` +
+          `    --force                   overwrite an existing client.toml\n` +
+          `    --json                    machine-readable output`,
       },
-      run: async (ctx) => hosts.runRegister(ctx),
+      run: async (ctx) => registerCmd.runRegister(ctx),
     },
   },
   shares: {
@@ -743,7 +771,11 @@ function doctorHelp(): { summary: string; usage: string } {
       `    4. daemon Unix socket probe (defaultSocketPath)\n` +
       `    5. binary vs latest release version drift (GitHub Releases)\n\n` +
       `  Exit non-zero when any check fails. The API key is always printed\n` +
-      `  masked (\`${maskSecret("lamasync_xx")}\`).`,
+      `  masked (\`${maskSecret("lamasync_xx")}\`).\n\n` +
+      `  Exempt from the LAMA-248 no-config refusal — diagnosing the missing\n` +
+      `  client.toml case is part of the job. Other subcommands refuse (exit 3)\n` +
+      `  when no client.toml exists; doctor keeps running so its advice row can\n` +
+      `  point operators at the right remediation.`,
   };
 }
 
@@ -759,6 +791,30 @@ export async function runCli(argv: string[]): Promise<void> {
     if (err instanceof CliUsageError) {
       process.stderr.write(`lamasync: ${err.message}\n`);
       process.exit(2);
+    }
+    // LAMA-248 / endgame: missing client.toml refusal. Exit 3 (same as
+    // auth failure so existing scripts that gate on `$? -eq 3` keep
+    // working), stderr message, and a --json envelope with
+    // `reason:"no-config"` so callers can `jq .reason` to distinguish
+    // from auth failures.
+    if (err instanceof CliNoConfigError) {
+      if (wantJson(parseArgs(argv).flags)) {
+        process.stdout.write(
+          JSON.stringify(
+            {
+              ok: false,
+              reason: "no-config",
+              error: err.message,
+              exitCode: 3,
+              configPath: err.configPath,
+            },
+            null,
+            2,
+          ) + "\n",
+        );
+      }
+      process.stderr.write(`lamasync: ${err.message}\n`);
+      process.exit(3);
     }
     if (err && typeof err === "object" && "message" in err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -780,6 +836,57 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     throw err;
   }
+}
+
+/** Typed error thrown by `refuseNoConfig` so the top-level dispatcher
+ *  (not the per-command run) handles the exit code + --json envelope.
+ *  Matches the LAMA-247 #14 `{ok, reason, error, exitCode}` shape with
+ *  `reason: "no-config"` so scripts can distinguish missing-config from
+ *  auth-failure at the same exit code (3). */
+export class CliNoConfigError extends Error {
+  readonly configPath: string;
+  constructor(configPath: string) {
+    super(
+      `No client.toml found at ${configPath} — run bare 'lamasync' once to connect to your fleet`,
+    );
+    this.name = "CliNoConfigError";
+    this.configPath = configPath;
+  }
+}
+
+/** Top-level commands that should run even when no client.toml exists.
+ *  - `doctor` is diagnostic by definition; diagnosing the missing-config
+ *    case is part of its job.
+ *  - `local` talks to the daemon's Unix socket, not the server, so server
+ *    credentials are irrelevant to its `status / folders / ops / sync /
+ *    sync-all / mount / unmount` surface.
+ *  - `register` (LAMA-262) writes the client.toml as its first
+ *    side-effect, so refusing (exit 3) without one would be a
+ *    chicken/egg — that's the whole point of the flow. The command
+ *    itself refuses (exit 1) if a config already exists without
+ *    --force, which is the right kind of refusal at the right layer. */
+const NO_CONFIG_EXEMPT = new Set(["doctor", "local", "register"]);
+
+/** True when an explicit subcommand was issued AND no usable server
+ *  credentials are reachable AND no client.toml exists on disk. Used to
+ *  short-circuit to the no-config refusal before any HTTP attempt.
+ *  Matches the same precedence ladder as `buildCliClient`: flags win, then
+ *  env, then config. A config file that exists but fails to parse still
+ *  beats the refusal — the loud-warning path covers the malformed case. */
+function shouldRefuseNoConfig(words: string[], parsed: ParsedArgs): boolean {
+  const top = words[0] ?? "";
+  if (NO_CONFIG_EXEMPT.has(top)) return false;
+  // --server + --api-key together provide inline credentials → don't refuse.
+  if (flagString(parsed.flags, "server") && flagString(parsed.flags, "api-key")) {
+    return false;
+  }
+  // LAMASYNC_SERVER_URL + LAMASYNC_API_KEY likewise.
+  if (process.env.LAMASYNC_SERVER_URL && process.env.LAMASYNC_API_KEY) return false;
+  // A config file on disk (even one that fails to parse) covers the
+  // malformed-TOML case via the loud-warning path; only an absent file
+  // triggers the refusal.
+  if (existsSync(defaultConfigPath())) return false;
+  return true;
 }
 
 async function runCliInner(argv: string[]): Promise<void> {
@@ -825,6 +932,15 @@ async function runCliInner(argv: string[]): Promise<void> {
       `missing subcommand for: lamasync ${words.slice(0, walkResult.consumed).join(" ")}`,
       words.slice(0, walkResult.consumed),
     );
+  }
+
+  // LAMA-248 / endgame split-by-surface refusal: refuse BEFORE any
+  // network attempt so a missing client.toml can't masquerade as a real
+  // fleet request. Bare TTY / `LAMASYNC_NO_TUI=1` never reach this code
+  // path (they boot `bootShell` / `runCliFallback` instead, both of which
+  // keep the friendly default + the LAMA-254 loud warning).
+  if (shouldRefuseNoConfig(words, parsed)) {
+    throw new CliNoConfigError(defaultConfigPath());
   }
 
   // Wire auth discovery. Flag precedence is handled in buildCliClient().

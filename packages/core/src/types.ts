@@ -57,6 +57,28 @@ export interface Backend {
   lastProveOk?: boolean | null;
 }
 
+// LAMA-259: one row in the folder-scoped backup-history slider. Shape is
+// intentionally thinner than `ResticSnapshot` so the wire is small (the
+// Data Browser may render hundreds of these in a scrubber) and so we can
+// rearrange internals without a contract change. `id` is restic's own
+// snapshot id (matches the `restic_snapshots.snapshot_id` column) — that
+// is what the slider feeds back into
+// `GET /folders/:folderId/snapshots/:snapshotId/files` to drill in.
+export interface FolderSnapshot {
+  /** Restic's snapshot id (NOT the LamaSync internal `restic_snapshots.id`). */
+  id: string;
+  /** Epoch ms when the snapshot was taken. */
+  time: number;
+  /** Host that produced the snapshot (matches `ResticSnapshot.hostId`). */
+  host?: string | null;
+  /** Source paths recorded by restic at backup time. */
+  paths?: string[];
+}
+
+export interface FolderSnapshotsResponse {
+  snapshots: FolderSnapshot[];
+}
+
 // LAMA-221: configurable notification delivery channels (ntfy / webhook).
 export type NotificationChannelKind = "ntfy" | "webhook";
 
@@ -172,6 +194,22 @@ export interface QueuedAction {
   takenAt?: number | null;
   completedAt?: number | null;
   result?: string | null;
+}
+
+// LAMA-260: response shape for `POST /folders/:id/files` (multipart
+// upload). Distinct from the browse-job model — this is a synchronous
+// `rclone copyto` pushed onto the folder's destination backend, not an
+// async tracked job. The file is server-resident long enough to be
+// spawned by rclone, then removed.
+export interface FolderFileUploadResponse {
+  ok: true;
+  name: string;
+  /** Combined target path relative to the folder's destination root.
+   *  Empty string when the file was uploaded to the root. */
+  path: string;
+  /** Bytes written to the destination (post-cap, matching the body
+   *  length the server streamed to its temp file). */
+  size: number;
 }
 
 export interface Folder {
@@ -514,6 +552,19 @@ export interface PruneResult {
   olderThanMs: number;
 }
 
+// P-B op-log archival (cleanup #6): count of rows included in an export,
+// the on-disk path of the resulting archive, and the rows removed from
+// the DB after a successful archive write. `file` is `null` when nothing
+// was exported (zero rows in the cutoff window — the call is still 200
+// and idempotent so the daily timer can re-fire safely).
+export interface OperationLogExport {
+  archived: number;
+  file: string | null;
+  deleted: number;
+  olderThanMs: number;
+  targetDir: string;
+}
+
 // Network share definition (NFS / SMB). The server exposes its list via
 // GET /api/v1/shares; the TUI renders an fstab line per share.
 export interface Share {
@@ -534,10 +585,20 @@ export interface BrowseEntry {
   folderId?: string;
 }
 
+// LAMA-259: the Data Browser's "history" mode renders files from inside a
+// restic snapshot instead of from a live filesystem. `backend` discriminates
+// the source so the UI can render either shape with a single switch.
+export type BrowseBackend = "local" | "s3" | "restic-snapshot";
+
 export interface BrowseResponse {
-  backend: "local" | "s3";
+  backend: BrowseBackend;
   path: string;
   entries: BrowseEntry[];
+  // LAMA-259: present only when backend === "restic-snapshot". Tells the
+  // slider UI which snapshot (and folder) this listing came from so it can
+  // re-fetch on path navigation without an extra round-trip.
+  snapshotId?: string;
+  folderId?: string;
 }
 
 // LAMA-224: storage statistics. The server computes each entry lazily and
@@ -651,5 +712,36 @@ export interface HealthDrill {
   ranAt: number;
   ok: boolean;
   detail: string | null;
+}
+
+// LAMA-262: pairing-session model. The web UI shows a short human code
+// (`lama-72B4-9PQ1`) plus an optional QR; the device operator runs
+// `lamasync register --code lama-72B4-9PQ1 --server URL` to exchange the
+// code for an API key. Sessions are single-use: a successful
+// `POST /pairing/:code/exchange` marks the row `used` and any second
+// exchange returns 409. Expired sessions read as `expired` and cannot be
+// exchanged (410 / 409 per the spec — see route for the exact contract).
+// The code is the public identifier; the id is the row PK.
+export type PairingSessionStatus = "pending" | "used" | "expired";
+
+export interface PairingSessionCreateResponse {
+  /** Human-readable code, e.g. `lama-72B4-9PQ1`. */
+  code: string;
+  /** TTL in seconds — operators can show a countdown from this. */
+  expiresInSeconds: number;
+}
+
+export interface PairingSessionStatusResponse {
+  status: PairingSessionStatus;
+  /** ISO timestamp when the session expires (UTC). */
+  expiresAt: string;
+}
+
+export interface PairingSessionExchangeResponse {
+  /** The pre-shared API key. Today this is always the server's
+   *  `LAMASYNC_API_KEY` env value (see server's pairing route). The
+   *  field is named so a future per-device rotation can swap the
+   *  issuer without changing the wire. */
+  apiKey: string;
 }
 

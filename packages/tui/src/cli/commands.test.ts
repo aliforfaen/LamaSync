@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -146,7 +146,12 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
   // localhost/dev-key default but must warn loudly on stderr. HOME is
   // pointed at a temp dir so a real ~/.config/lamasync/client.toml on the
   // host can't side-step the fallback path.
-  test("config-less invocation warns loudly about the fake default client", async () => {
+  //
+  // LAMA-248 / endgame split-by-surface: the loud warning now only fires
+  // for diagnostic / exempt commands (doctor, local.*). Doctor is the
+  // canonical case — it still warns and goes out to the network so it can
+  // diagnose this state. Non-exempt subcommands refuse before any HTTP.
+  test("config-less doctor still warns loudly and goes to the network", async () => {
     const originalHome = process.env.HOME;
     const originalUrl = process.env.LAMASYNC_SERVER_URL;
     const originalKey = process.env.LAMASYNC_API_KEY;
@@ -155,13 +160,24 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
       process.env.HOME = fakeHome;
       delete process.env.LAMASYNC_SERVER_URL;
       delete process.env.LAMASYNC_API_KEY;
-      const code = await runExpectingExit(["status", "--json"]);
-      expect(code).toBe(3); // stub transport 401s the fake-client request
+      // Stub every fetch with 401 — doctor turns it into FAIL rows and
+      // exits 1, but the point is it RAN end-to-end (refusal would have
+      // short-circuited with exit 3 BEFORE any fetch).
+      const code = await runExpectingExit(["doctor", "--json"]);
+      // Refusal message MUST NOT appear.
+      expect(written).not.toContain("No client.toml found");
+      // Loud warning still fires.
       expect(written).toContain("[!] no credentials found");
       expect(written).toContain("dev-key");
-      // And NOT a real-fleet silent lookup: the request went to the fake
-      // default URL.
-      expect(recorded[0]?.url).toContain("localhost:8080");
+      // Doctor really went out to the network — the refusal would have
+      // left recorded empty. Doctor calls the version-drift probe too,
+      // so recorded has at least one entry even though source=default
+      // skips the server-reachability fetch.
+      expect(recorded.length).toBeGreaterThan(0);
+      // The LAMA-248 advice copy is present in the auth-source row.
+      expect(written).toContain("subcommands refuse exit 3");
+      // exit code is whatever doctor decides (0 / 1) — NOT the refusal's 3.
+      expect(code).not.toBe(3);
     } finally {
       process.env.HOME = originalHome;
       if (originalUrl === undefined) delete process.env.LAMASYNC_SERVER_URL;
@@ -170,6 +186,179 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
       else process.env.LAMASYNC_API_KEY = originalKey;
       rmSync(fakeHome, { recursive: true, force: true });
     }
+  });
+
+  // LAMA-248 / endgame split-by-surface: explicit subcommands without
+  // a client.toml refuse with exit 3 BEFORE any network attempt. The
+  // refusal must NOT hit the fake URL (no fetch happens). HOME is pointed
+  // at a temp dir; no env vars; no flags. Three different commands are
+  // exercised to pin the behavior across leaf / group-head shapes.
+  describe("no-config refusal (LAMA-248)", () => {
+    async function runWithNoConfig(argv: string[]): Promise<void> {
+      const originalHome = process.env.HOME;
+      const originalUrl = process.env.LAMASYNC_SERVER_URL;
+      const originalKey = process.env.LAMASYNC_API_KEY;
+      const fakeHome = mkdtempSync(join(tmpdir(), "lamasync-cli-no-config-"));
+      try {
+        process.env.HOME = fakeHome;
+        delete process.env.LAMASYNC_SERVER_URL;
+        delete process.env.LAMASYNC_API_KEY;
+        await runExpectingExit(argv);
+      } finally {
+        process.env.HOME = originalHome;
+        if (originalUrl === undefined) delete process.env.LAMASYNC_SERVER_URL;
+        else process.env.LAMASYNC_SERVER_URL = originalUrl;
+        if (originalKey === undefined) delete process.env.LAMASYNC_API_KEY;
+        else process.env.LAMASYNC_API_KEY = originalKey;
+        rmSync(fakeHome, { recursive: true, force: true });
+      }
+    }
+
+    test("status (no config) → exit 3 + stderr + zero network calls", async () => {
+      await runWithNoConfig(["status"]);
+      expect(exitCode).toBe(3);
+      expect(written).toContain("No client.toml found at");
+      expect(written).toContain("run bare 'lamasync' once");
+      // Critical: refusal fired BEFORE any fetch. The old behavior
+      // hit localhost:8080 / 401; the new behavior must not.
+      expect(recorded).toHaveLength(0);
+    });
+
+    test("folders list (no config) → exit 3 + stderr message", async () => {
+      await runWithNoConfig(["folders", "list"]);
+      expect(exitCode).toBe(3);
+      expect(written).toContain("No client.toml found at");
+      expect(recorded).toHaveLength(0);
+    });
+
+    test("ops list (no config) → exit 3 + stderr message", async () => {
+      await runWithNoConfig(["ops", "list"]);
+      expect(exitCode).toBe(3);
+      expect(written).toContain("No client.toml found at");
+      expect(recorded).toHaveLength(0);
+    });
+
+    test("status --json (no config) → exit 3 + structured no-config envelope on stdout", async () => {
+      await runWithNoConfig(["status", "--json"]);
+      expect(exitCode).toBe(3);
+      // The grep-able envelope matches the LAMA-247 #14 shape but with
+      // reason:"no-config" so scripts can distinguish from auth-failure.
+      const envelope = JSON.parse(stdout);
+      expect(envelope).toMatchObject({
+        ok: false,
+        reason: "no-config",
+        exitCode: 3,
+      });
+      expect(envelope.error).toContain("No client.toml found at");
+      expect(envelope.configPath).toContain(".config/lamasync/client.toml");
+      // No fetch was attempted.
+      expect(recorded).toHaveLength(0);
+    });
+
+    test("--server + --api-key (no config file) bypasses the refusal", async () => {
+      // Inline credentials must not trigger the refusal even when no
+      // client.toml exists on disk — same precedence as buildCliClient.
+      responder = () =>
+        new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      const fakeHome = mkdtempSync(join(tmpdir(), "lamasync-cli-no-config-"));
+      const originalHome = process.env.HOME;
+      const originalUrl = process.env.LAMASYNC_SERVER_URL;
+      const originalKey = process.env.LAMASYNC_API_KEY;
+      try {
+        process.env.HOME = fakeHome;
+        delete process.env.LAMASYNC_SERVER_URL;
+        delete process.env.LAMASYNC_API_KEY;
+        const code = await runExpectingExit([
+          "status",
+          "--server", "http://lamasync.test",
+          "--api-key", "real-key-1234567890",
+        ]);
+        // Hit the real URL the flags pointed at, not localhost:8080 —
+        // proves the refusal didn't fire and the inline credentials were
+        // honored.
+        expect(code).toBe(3); // 401 from stubbed transport
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]?.url).toBe("http://lamasync.test/api/v1/health");
+        expect(written).not.toContain("No client.toml found");
+      } finally {
+        process.env.HOME = originalHome;
+        if (originalUrl === undefined) delete process.env.LAMASYNC_SERVER_URL;
+        else process.env.LAMASYNC_SERVER_URL = originalUrl;
+        if (originalKey === undefined) delete process.env.LAMASYNC_API_KEY;
+        else process.env.LAMASYNC_API_KEY = originalKey;
+        rmSync(fakeHome, { recursive: true, force: true });
+      }
+    });
+
+    test("LAMASYNC_SERVER_URL + LAMASYNC_API_KEY (no config file) bypass the refusal", async () => {
+      responder = () =>
+        new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      const fakeHome = mkdtempSync(join(tmpdir(), "lamasync-cli-no-config-"));
+      const originalHome = process.env.HOME;
+      const originalUrl = process.env.LAMASYNC_SERVER_URL;
+      const originalKey = process.env.LAMASYNC_API_KEY;
+      try {
+        process.env.HOME = fakeHome;
+        process.env.LAMASYNC_SERVER_URL = "http://env.test";
+        process.env.LAMASYNC_API_KEY = "env-key-long-enough";
+        const code = await runExpectingExit(["status"]);
+        expect(code).toBe(3);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]?.url).toBe("http://env.test/api/v1/health");
+        expect(written).not.toContain("No client.toml found");
+      } finally {
+        process.env.HOME = originalHome;
+        if (originalUrl === undefined) delete process.env.LAMASYNC_SERVER_URL;
+        else process.env.LAMASYNC_SERVER_URL = originalUrl;
+        if (originalKey === undefined) delete process.env.LAMASYNC_API_KEY;
+        else process.env.LAMASYNC_API_KEY = originalKey;
+        rmSync(fakeHome, { recursive: true, force: true });
+      }
+    });
+
+    test("malformed client.toml does NOT refuse (falls through to loud warning + 401)", async () => {
+      // A config file that exists but fails to parse keeps the old
+      // behavior: loud warning + fake server + 401. The refusal is only
+      // for the "no file at all" case so a broken TOML gets a different
+      // signal than an absent one (doctor's job is to tell them apart).
+      const fakeHome = mkdtempSync(join(tmpdir(), "lamasync-cli-malformed-"));
+      const originalHome = process.env.HOME;
+      const originalUrl = process.env.LAMASYNC_SERVER_URL;
+      const originalKey = process.env.LAMASYNC_API_KEY;
+      try {
+        process.env.HOME = fakeHome;
+        delete process.env.LAMASYNC_SERVER_URL;
+        delete process.env.LAMASYNC_API_KEY;
+        const configDir = join(fakeHome, ".config", "lamasync");
+        require("fs").mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+          join(configDir, "client.toml"),
+          "not valid toml = =",
+          "utf8",
+        );
+        const code = await runExpectingExit(["status"]);
+        // Hit the fake URL with fake creds — same path as LAMA-247 #13.
+        expect(code).toBe(3); // 401 from stub transport
+        expect(written).toContain("[!] no credentials found");
+        expect(written).toContain("dev-key");
+        expect(recorded[0]?.url).toContain("localhost:8080");
+        // And NOT the refusal message — the file exists, just broken.
+        expect(written).not.toContain("No client.toml found");
+      } finally {
+        process.env.HOME = originalHome;
+        if (originalUrl === undefined) delete process.env.LAMASYNC_SERVER_URL;
+        else process.env.LAMASYNC_SERVER_URL = originalUrl;
+        if (originalKey === undefined) delete process.env.LAMASYNC_API_KEY;
+        else process.env.LAMASYNC_API_KEY = originalKey;
+        rmSync(fakeHome, { recursive: true, force: true });
+      }
+    });
   });
 
   test("'dotfiles manifests create' dispatches to create (POST), not list", async () => {

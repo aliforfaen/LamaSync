@@ -181,6 +181,78 @@ export function resolveFolderResticConfig(
 }
 
 /**
+ * LAMA-259 follow-up: per-host restic overrides for snapshot browsing
+ * (and any other server-side invocation that needs the effective
+ * repo + password for a particular folder+host tuple). When `hostId`
+ * is supplied AND that host has an assignment for this folder, the
+ * assignment's `resticRepository` + `resticPassword` win if BOTH are
+ * populated. A partial override (only one of the two) silently falls
+ * back to the backend defaults — matching the daemon-side behavior in
+ * `routes/config.ts` (a partial override with only a password but no
+ * repository would otherwise hit a fully-empty argv). Without
+ * `hostId`, this is identical to `resolveFolderResticConfig` (folder-
+ * level defaults only — zero behavior change). An unknown / unassigned
+ * hostId falls through to the folder-level defaults rather than 404ing
+ * so an operator typo can't silently kill browsing.
+ *
+ * The decrypted password must never leave this process — callers
+ * receive it inline for passing to `restic` via `RESTIC_PASSWORD` env
+ * (snapshots.ts), never for serialization across an API boundary.
+ */
+export function resolveFolderResticConfigForHost(
+  db: Database,
+  folder: {
+    id: string;
+    backend?: string | null;
+    backendId?: string | null;
+  },
+  hostId?: string | null,
+): ResticBackendConfig | null {
+  // Folder-level default resolution (no hostId → identical to the
+  // pre-existing path).
+  if (typeof hostId !== "string" || hostId.trim() === "") {
+    return resolveFolderResticConfig(db, folder);
+  }
+  // Look up the (folderId, hostId) assignment. Missing rows — and rows
+  // pre-migration that lack the columns (impossible after the
+  // ALTER TABLE migrations ship, but defended in case of rollback) —
+  // fall through to the folder-level default.
+  const row = db
+    .query<
+      {
+        restic_repository: string | null;
+        restic_password: string | null;
+      },
+      [string, string]
+    >(
+      "SELECT restic_repository, restic_password FROM folder_assignments WHERE folder_id = ? AND host_id = ?",
+    )
+    .get(folder.id, hostId.trim());
+  if (row === null) {
+    return resolveFolderResticConfig(db, folder);
+  }
+  const repository = (row.restic_repository ?? "").trim();
+  const password = row.restic_password ?? "";
+  // Partial override → fall back (defensive — repo and password MUST
+  // travel together; the daemon-side merge in routes/config.ts treats
+  // a half-set assignment as "no override" for the missing side).
+  if (repository === "" || password === "") {
+    return resolveFolderResticConfig(db, folder);
+  }
+  // We need a backendId for the return shape. Anchor it on the folder's
+  // backend even when the override is honored — the resolved cfg still
+  // semantically belongs to that folder's backend, just with a custom
+  // endpoint for this host.
+  const base = resolveFolderResticConfig(db, folder);
+  if (!base) return null;
+  return {
+    backendId: base.backendId,
+    repository,
+    password,
+  };
+}
+
+/**
  * Outcome of the legacy s3_* → backends lift:
  * - "clean": nothing (left) to lift — safe to drop the legacy columns.
  * - "lifted": rows were migrated in this run — safe to drop.

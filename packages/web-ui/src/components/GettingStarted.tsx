@@ -38,10 +38,10 @@ export function GettingStarted({
   const [dismissed, setDismissed] = useState<boolean>(readDismissed);
 
   const steps: Step[] = [
-    { label: "Register a host", done: hosts.length > 0, to: "/hosts" },
-    { label: "Create a backend", done: backends.length > 0, to: "/backends" },
+    { label: "Register a device", done: hosts.length > 0, to: "/hosts" },
+    { label: "Add a storage destination", done: backends.length > 0, to: "/backends" },
     { label: "Create a folder", done: folders.length > 0, to: "/folders" },
-    { label: "Assign it to a host", done: hasAssignments, to: "/folders" },
+    { label: "Set it up on a device", done: hasAssignments, to: "/folders" },
     { label: "Trigger your first sync", done: hasOperations, to: "/hosts" },
   ];
 

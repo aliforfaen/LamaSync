@@ -4,6 +4,7 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import type { Backend, Folder, FolderSize, S3Provider, StorageReport } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { InlineError } from "../components/InlineError.tsx";
 import { Donut } from "../components/Donut.tsx";
 import { Sparkline } from "../components/Sparkline.tsx";
 import { formatBytes } from "../format-bytes.ts";
@@ -111,6 +112,11 @@ export function Backends() {
   >({});
   const [storageReport, setStorageReport] = useState<StorageReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // P-A: auxiliary stats fetches (sizes / history / report / drills) are
+  // best-effort — a failure must not collapse into a misleading
+  // "Not measured yet" / "No fire drills yet" state, so it surfaces as an
+  // inline caption with a retry instead.
+  const [auxError, setAuxError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -140,15 +146,31 @@ export function Backends() {
 
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
+    setAuxError(null);
     try {
       const [backendList, folderList, sizes, history, report, drillHistory] =
         await Promise.all([
           api.listBackends(),
-          api.listFolders().catch(() => [] as Folder[]),
-          api.folderSizes().catch(() => ({}) as Record<string, FolderSize>),
-          api.storageHistory().catch(() => ({ backends: {} })),
-          api.storageReport().catch(() => null),
-          api.listHealthDrills(10).catch(() => ({ drills: [] })),
+          api.listFolders().catch(() => {
+            setAuxError("Some details couldn't load — showing what we have.");
+            return [] as Folder[];
+          }),
+          api.folderSizes().catch(() => {
+            setAuxError("Some details couldn't load — showing what we have.");
+            return {} as Record<string, FolderSize>;
+          }),
+          api.storageHistory().catch(() => {
+            setAuxError("Some details couldn't load — showing what we have.");
+            return { backends: {} };
+          }),
+          api.storageReport().catch(() => {
+            setAuxError("Some details couldn't load — showing what we have.");
+            return null;
+          }),
+          api.listHealthDrills(10).catch(() => {
+            setAuxError("Some details couldn't load — showing what we have.");
+            return { drills: [] };
+          }),
         ]);
       setItems(backendList);
       setFolders(folderList);
@@ -434,7 +456,12 @@ export function Backends() {
           {items ? `${items.length} configured` : "loading…"}
         </span>
       </div>
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <InlineError message={error} onRetry={() => void refresh()} />
+      )}
+      {auxError ? (
+        <InlineError message={auxError} onRetry={() => void refresh()} />
+      ) : null}
       {notice && <div className="all-quiet">{notice}</div>}
 
       <section className="section" ref={formRef}>
@@ -596,12 +623,12 @@ export function Backends() {
             </>
           ) : (
             <p className="muted">
-              {form.kind} backends are reserved for future use — no extra fields yet.
+              {form.kind} destinations are reserved for future use — no extra fields yet.
             </p>
           )}
           <div className="form-row actions-row">
             <button type="submit" className="action primary" disabled={busy || formTesting}>
-              {busy ? "Saving…" : editingId ? "Save changes" : "Create backend"}
+              {busy ? "Saving…" : editingId ? "Save changes" : "Create destination"}
             </button>
             <button
               type="button"
@@ -632,6 +659,7 @@ export function Backends() {
         ) : items.length === 0 ? (
           <EmptyState
             variant="storage"
+            glyph="llama-sit"
             title="No storage destinations yet"
             how="Add where your data lives — S3 buckets, local disks, NFS exports, or a restic repository."
             ctaLabel="Add a storage destination"

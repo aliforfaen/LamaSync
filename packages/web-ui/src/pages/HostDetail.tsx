@@ -22,6 +22,7 @@ import { usePause } from "../hooks/usePause.ts";
 import { PauseBanner } from "../components/PauseBanner.tsx";
 import { PauseControl } from "../components/PauseControl.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { InlineError } from "../components/InlineError.tsx";
 
 interface DetailData {
   host: Host;
@@ -202,7 +203,7 @@ export function HostDetail() {
       if (!action) {
         setPreviewState({
           status: "error",
-          message: "The dry run timed out waiting for the daemon — is the device online?",
+          message: "The dry run timed out waiting for the device — is it online?",
         });
         return;
       }
@@ -279,7 +280,7 @@ export function HostDetail() {
           <h1>Device</h1>
           <Link className="action" to="/hosts">← Back to devices</Link>
         </div>
-        <div className="error">{error}</div>
+        <InlineError message={error} onRetry={() => void refresh()} />
       </div>
     );
   }
@@ -372,7 +373,7 @@ export function HostDetail() {
               <span className="muted">—</span>
             )}
           </dd>
-          <dt>Daemon version</dt>
+          <dt>Service version</dt>
           <dd>
             <code>v{host.version ?? "—"}</code>
             {host.updateAvailable ? (
@@ -405,7 +406,7 @@ export function HostDetail() {
       </section>
 
       <section className="section">
-        <h2>Assigned folders ({assignments.length})</h2>
+        <h2>Folders on this device ({assignments.length})</h2>
         {editingAssignment ? (
           <AssignmentEditor
             assignment={editingAssignment}
@@ -420,7 +421,7 @@ export function HostDetail() {
           />
         ) : null}
         {assignmentRows.length === 0 ? (
-          <div className="empty-row">No folder assignments</div>
+          <div className="empty-row">No folders on this device yet</div>
         ) : (
           <table className="data">
             <thead>
@@ -512,9 +513,9 @@ export function HostDetail() {
       </section>
 
       <section className="section">
-        <h2>Dotfile manifests ({manifests.length})</h2>
+        <h2>App settings backups ({manifests.length})</h2>
         {manifests.length === 0 ? (
-          <div className="empty-row">No dotfile manifests</div>
+          <div className="empty-row">No app settings backups yet</div>
         ) : (
           <ul className="assignment-list">
             {manifests.map((m) => (
@@ -612,9 +613,9 @@ export function HostDetail() {
               Delete device “{data.host.hostname}” ({data.host.id})?
               <br />
               <br />
-              This removes its assignments, dotfile manifests, and operation
-              history. Stop/uninstall the daemon on that machine too, or it
-              will re-register.
+              This removes its folder setups, app settings backups, and
+              history. Stop/uninstall the LamaSync service on that machine
+              too, or it will re-register.
             </>
           }
           onConfirm={() => void runDeleteHost()}

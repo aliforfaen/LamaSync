@@ -2,9 +2,11 @@
 // `rclone --dry-run` for one assignment: would-transfer / would-delete
 // counts and a capped file list. The dry run never changes files; the
 // drawer says so explicitly. Close via the × button, the backdrop, or Esc.
+// P-A (2026-08-26): focus trap + Esc + focus return via useOverlayA11y.
 
 import type { DryRunDetails } from "../dry-run.ts";
 import { capList } from "../dry-run.ts";
+import { useOverlayA11y } from "../hooks/useOverlayA11y.ts";
 
 export type DryRunState =
   | { status: "running" }
@@ -30,9 +32,10 @@ function kindLabel(kind: string): string {
 }
 
 export function DryRunDrawer({ open, folderName, state, onClose }: DryRunDrawerProps) {
+  const containerRef = useOverlayA11y<HTMLDivElement>({ open, onClose });
   if (!open || !state) return null;
   return (
-    <div className="drawer-backdrop" onClick={onClose}>
+    <div ref={containerRef} className="drawer-backdrop" onClick={onClose}>
       <aside
         className="drawer"
         role="dialog"

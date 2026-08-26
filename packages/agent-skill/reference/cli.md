@@ -20,13 +20,26 @@ this file stays curated prose on top of the help texts).
   - `0` ok
   - `1` runtime error
   - `2` usage error (bad flag / missing argument)
-  - `3` auth failure (HTTP 401/403 — wrong key)
+  - `3` auth failure (HTTP 401/403 — wrong key) **OR** no `client.toml`
+    found (LAMA-248 / endgame — explicit subcommands refuse before any
+    network attempt when the file is missing). Distinguish the two with
+    `--json`: `{reason:"auth-failure"}` vs `{reason:"no-config"}`.
   - `4` server unreachable (network / DNS / TLS)
 - **Auth discovery** order (LAMA-229):
   1. `--server URL` / `--api-key KEY` on the command line
   2. `LAMASYNC_SERVER_URL` / `LAMASYNC_API_KEY` env vars
   3. `~/.config/lamasync/client.toml` (written by the installer — on a
      daemon host this is always present, so an agent needs no setup)
+- **Split-by-surface fallback (LAMA-248 / endgame)**: bare `lamasync`
+  (interactive TUI or `LAMASYNC_NO_TUI=1`) keeps the friendly
+  `localhost/dev-key` default + the LAMA-254 loud warning when no
+  `client.toml` exists — that's a local-dev affordance. Any explicit
+  subcommand (`lamasync folders list`, `lamasync doctor`, …) refuses
+  fast instead. Three exemptions: `lamasync doctor` (diagnosing the
+  missing-config state is its job), the `lamasync local *` subtree
+  (talks to the daemon Unix socket, not the server), and `lamasync
+  register` (LAMA-262 — writes the `client.toml` as its first
+  side-effect, so refusing without one would be a chicken/egg).
 - **API key masking**: all output, including diagnostics, masks the key as
   `lamasync_…xxxx` (first 8 + last 4). The CLI's `--doctor` re-masks
   whatever it found in the chosen source.
@@ -196,6 +209,13 @@ Structured health report. Checks (in order):
 5. binary vs latest release version drift (GitHub Releases)
 
 Exits non-zero when **any** check has `ok: false`. Always safe to run.
+
+Doctor is **exempt from the no-config refusal** (LAMA-248 / endgame
+split-by-surface): it can run with no `client.toml` because diagnosing
+that exact state is part of its job. When `auth: source` resolves to the
+localhost/dev-key default the advice row now reads "only used for
+bare-TTY (subcommands refuse exit 3 without client.toml)" — that's the
+operator-facing summary of the split-by-surface contract.
 
 ## `lamasync local status`
 
@@ -455,11 +475,37 @@ the daemon re-keys on its next registration under the new name).
 ## `lamasync register`
 
 ```
-Usage: lamasync register --hostname <name> [--tailnet-ip <ip>]
+Usage: lamasync register --code <lama-XXXX-XXXX> --server URL [--hostname <name>] [--force] [--json]
+
+  --code <lama-XXXX-XXXX>   pairing code from the web UI (case-insensitive)
+  --server URL              server URL (also: LAMASYNC_SERVER_URL env)
+  --hostname <name>         client.toml hostname (defaults to os.hostname())
+  --force                   overwrite an existing client.toml
+  --json                    machine-readable JSON output
 ```
 
-The agent fallback for the install script's web UI flow. Idempotent;
-existing rows are updated in place.
+Pair this device with the fleet by exchanging a short code from the web
+UI for a `client.toml` so the daemon can talk to the server. Replaces
+the previous "agent fallback for the install script" flow (LAMA-262).
+
+The pairing exchange is intentionally **exempt from the LAMA-248
+no-config refusal** (alongside `doctor` and `local.*`): the whole point
+is to *write* the file, so refusing without one would be a chicken/egg.
+The command itself refuses (exit 1) if a `client.toml` already exists at
+the default path; pass `--force` to overwrite.
+
+Failure modes (exit codes):
+
+- `1` runtime / API error (code already used, expired, server misconfig, etc.)
+- `2` usage error (missing `--code` non-interactively, missing `--server`,
+  malformed code shape)
+- `4` server unreachable (network / DNS / TLS)
+
+Wire contract (mirrors `reference/api.md`): the exchange endpoint is
+auth-exempt by design — the code itself proves intent. Single-use; the
+second exchange returns 409 and the operator must mint a new code. The
+returned `apiKey` is the server's pre-shared `LAMASYNC_API_KEY` (the
+`--api-key` mask in any echo is `real-key…7890`-style).
 
 ## `lamasync shares list`
 

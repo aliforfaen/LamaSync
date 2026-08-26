@@ -682,3 +682,141 @@ describe("per-host mount/sync override (LAMA-239)", () => {
     expect(a?.mode).toBe("mount");
   });
 });
+
+// LAMA-259 follow-up: PATCH /folders/:id/assign/:hostId learns the
+// per-host resticRepository/resticPassword overrides. The wires used
+// are additive — no other field's contract moves. Persistence is
+// verified by reading the assignment back via PATCH-then-GET, and the
+// null-on-the-wire semantic must clear the override (back to the
+// folder/backend default) so a UI toggle exists for the operator.
+describe("per-host restic overrides (LAMA-259 follow-up)", () => {
+  async function setupResticAssignedFolder(): Promise<string> {
+    // Match the no-default-backend code path by creating one restic
+    // backend up front and letting /folders default to it.
+    db.run(
+      `INSERT INTO backends (id, name, kind, restic_repository, restic_password_enc, created_at)
+       VALUES ('be-restic', 'central-restic', 'restic',
+               's3:central.example/restic', 'enc-central-pw', 1)`,
+    );
+    const folderRes = await postJson("/api/v1/folders", {
+      name: "restic-folder",
+      type: "backup",
+    });
+    const folder = (await folderRes.json()) as { id: string };
+    await postJson(`/api/v1/folders/${folder.id}/assign`, {
+      hostId: "h1",
+      role: "both",
+      localPath: "/tmp/r",
+    });
+    return folder.id;
+  }
+
+  test("PATCH /assign/:hostId persists resticRepository + resticPassword", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h1','h1')`);
+    const folderId = await setupResticAssignedFolder();
+    const patchRes = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h1`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          resticRepository: "sftp:nas:/srv/restic/h1",
+          resticPassword: "h1-private-pw",
+        }),
+      }),
+    );
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as {
+      resticRepository?: string | null;
+      resticPassword?: string | null;
+    };
+    expect(patched.resticRepository).toBe("sftp:nas:/srv/restic/h1");
+    expect(patched.resticPassword).toBe("h1-private-pw");
+
+    // Round-trip via GET /assignments — must echo both fields.
+    const listRes = await app.handle(
+      request(`/api/v1/folders/${folderId}/assignments`),
+    );
+    const list = (await listRes.json()) as Array<{
+      resticRepository?: string | null;
+      resticPassword?: string | null;
+    }>;
+    expect(list[0]?.resticRepository).toBe("sftp:nas:/srv/restic/h1");
+    expect(list[0]?.resticPassword).toBe("h1-private-pw");
+  });
+
+  test("PATCH resticRepository: null clears the override (folder/backend default resumes)", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h1','h1')`);
+    const folderId = await setupResticAssignedFolder();
+    // Seed a non-null override...
+    await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h1`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          resticRepository: "sftp:nas:/old",
+          resticPassword: "old-pw",
+        }),
+      }),
+    );
+    // ...then null it.
+    const patchRes = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h1`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          resticRepository: null,
+          resticPassword: null,
+        }),
+      }),
+    );
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as {
+      resticRepository?: string | null;
+      resticPassword?: string | null;
+    };
+    // Wire contract: null on the round-trip reads as `null` from
+    // rowToAssignment (the row stored NULL). The wire shape is `|
+    // null` so a UI can distinguish "cleared override" from "field
+    // never set" by `=== null` rather than a missing key. This matches
+    // every other nullable override on the assignment (bandwidthSchedule,
+    // preSyncCmd, etc.).
+    expect(patched.resticRepository).toBeNull();
+    expect(patched.resticPassword).toBeNull();
+  });
+
+  test("PATCH resticRepository: empty string is treated as null (no poisoned override)", async () => {
+    // A blank string would otherwise survive the .trim()-"" guard in
+    // backends.ts and degrade the override to "use empty repository",
+    // which restic would reject. Coerce blanks to NULL on the wire so
+    // the operator can submit a UI "cleared" value without leaving a
+    // poisoned half-set row.
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h1','h1')`);
+    const folderId = await setupResticAssignedFolder();
+    const patchRes = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h1`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ resticRepository: "   " }),
+      }),
+    );
+    expect(patchRes.status).toBe(200);
+    const row = db
+      .query<{ restic_repository: string | null }, [string, string]>(
+        "SELECT restic_repository FROM folder_assignments WHERE folder_id = ? AND host_id = ?",
+      )
+      .get(folderId, "h1");
+    expect(row?.restic_repository).toBeNull();
+  });
+});

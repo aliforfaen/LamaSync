@@ -70,6 +70,9 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only; 15-min cache) |
 | GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only; 15-min cache) |
+| GET      | `/folders/:id/snapshots`             | Folder-scoped restic snapshot history for the time-travel slider; empty for non-restic folders (LAMA-259) |
+| GET      | `/folders/:id/snapshots/:snapshotId/files?path=...&limit=...&hostId=...` | Files inside a restic snapshot at a given path (`BrowseResponse` with `backend: "restic-snapshot"`); 409 for non-restic folders (LAMA-259). Optional `hostId` honors a per-host `resticRepository`/`resticPassword` assignment override (LAMA-259 follow-up) — when set, that host's repo+password reach `restic ls`; absent or unknown hosts fall through to the folder/backend-level default. The no-hostId path is unchanged (backward-compatible). |
+| POST     | `/folders/:id/files`             | Upload a file into a folder's destination backend (multipart `file`, optional `path` subdir). Synchronous, ≤ 100 MB cap (`LAMASYNC_FOLDER_FILE_MAX_BYTES`); 409 for non-writable backends (sftp/restic) (LAMA-260) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
 | GET      | `/backends/:backendId`                     | Read one backend (additive `lastProveAt`/`lastProveOk` for the badge) |
@@ -96,6 +99,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/operations/release`                      | Release folder lock                              |
 | GET      | `/shares`                                  | List NFS / SMB shares                            |
 | POST     | `/admin/prune?olderThanMs=<ms>`            | Manually trim operation_log                      |
+| POST     | `/admin/export`                            | Archive operation_log rows older than cutoff to a gzip'd NDJSON file, then prune them (P-B cleanup #6) |
 | GET      | `/demo`                                   | Demo-mode state (whether demo data is present)  |
 | POST     | `/demo/seed`                              | Seed a demo fleet (fake devices, timeline, snapshot) |
 | DELETE   | `/demo`                                   | Delete all demo data (confirmed by caller)      |
@@ -104,6 +108,9 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/pause`                                  | Resume (clear the global pause) (LAMA-273)      |
 | POST     | `/hosts/:hostId/pause`                    | Set a per-device pause/slow window; bumps that host's `config_revision` (LAMA-273) |
 | DELETE   | `/hosts/:hostId/pause`                    | Resume (clear the per-device pause) (LAMA-273)  |
+| POST     | `/pairing`                                | (admin) create a pairing session — `{ code, expiresInSeconds }`. Code is `LAMA-XXXX-XXXX` from an unambiguous alphabet (no 0/O/1/I/L). Default TTL 600s, optional `ttlSeconds` body field clamped to 30..3600 (LAMA-262) |
+| GET      | `/pairing/:code`                          | (admin) poll a session's status — `{ status: pending\|used\|expired, expiresAt }`. Never reveals the API key (LAMA-262) |
+| POST     | `/pairing/:code/exchange`                 | (no auth) exchange a pending+unexpired code for `{ apiKey }`. Single-use: second exchange returns 409, expired → 410. The returned key is the server's `LAMASYNC_API_KEY` today; a future per-device rotation will keep the wire shape stable (LAMA-262) |
 | GET      | `/notifications`                           | Durable notification history                      |
 | GET      | `/notifications/channels`                  | List delivery channels                           |
 | POST     | `/notifications/channels`                  | Create channel                                   |
@@ -175,12 +182,20 @@ spec. The high-level shapes (verbose commentary):
 - `DotfileManifest { id, hostId, appName, paths[], excludes[]?, schedule?, instructions?, lastSyncAt?, lastSyncDirection?, originalUploaderHostId? }`
 - `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum?, description? }`
 - `ResticSnapshot { id, snapshotId, folderId, hostId, timestamp, paths[], sizeBytes?, tags? }`
+- `FolderSnapshot { id, time, host?, paths? }` (LAMA-259) — `id` is restic's snapshot id; `time` is epoch ms. Slider feed.
+- `FolderSnapshotsResponse { snapshots: FolderSnapshot[] }` (LAMA-259)
+- `FolderFileUploadResponse { ok: true, name, path, size }` (LAMA-260) — `name` is the uploaded file's leaf; `path` is the (optional) `path` form-field value the client passed (empty string for root); `size` is the bytes the server staged to disk before invoking rclone.
+- `BrowseResponse` `backend` is `"local" | "s3" | "restic-snapshot"`; when `backend === "restic-snapshot"` the response also carries `snapshotId` and `folderId` so the UI can re-fetch without a round-trip (LAMA-259)
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
 - `QueuedAction { id, hostId, type, payload?, status, createdAt, takenAt?, completedAt?, result? }`
 - `LockInfo { folderId, lockedBy, lockedAt, lockTtl }`
 - `PauseState { scope: "global"|"host", hostId?, until (ISO), mode: "pause"|"slow", bwlimit? }` — `bwlimit` is a single-segment rclone size (e.g. "1M"); honored only when `mode === "slow"` (LAMA-273)
 - `EffectivePause { until (ISO), mode: "pause"|"slow", bwlimit: string|null }` — embedded on the `/config/:hostId` payload as `pause`; resolved server-side as the host row if present, else the global row, else null (LAMA-273)
+- `PairingSessionCreateResponse { code, expiresInSeconds }` (LAMA-262)
+- `PairingSessionStatusResponse { status: "pending"|"used"|"expired", expiresAt (ISO) }` (LAMA-262)
+- `PairingSessionExchangeResponse { apiKey }` (LAMA-262)
+- `OperationLogExport { archived, file: string|null, deleted, olderThanMs, targetDir }` — response of `POST /api/v1/admin/export` (P-B cleanup #6). `file` is the absolute path of the `.ndjson.gz` archive on the server; `null` when nothing was archived.
 
 `?`-marked fields are nullable. Timestamps are milliseconds since epoch.
 
@@ -192,8 +207,83 @@ spec. The high-level shapes (verbose commentary):
 - `operation_log` retention is `LAMASYNC_LOG_RETENTION_DAYS` (default 90).
   Prune manually via `POST /api/v1/admin/prune?olderThanMs=<ms>` (safety
   rule 5: explicit intent for any destructive API call).
+  - **Archived export** (`POST /api/v1/admin/export`) writes every
+    operation_log row older than the cutoff to a gzip'd NDJSON file and
+    THEN deletes them — preserving the safety-rule invariant that no row
+    vanishes before its archive is durable. Body: `{ olderThanMs? (default
+    90d), targetDir? (default `LAMASYNC_BACKUP_DIR`, falls back to
+    `os.tmpdir()`) }`. Response: `{ archived, file, deleted, olderThanMs,
+    targetDir }` — `file` is `null` when nothing was archived so a daily
+    timer can re-fire without producing extra files. Archive file name:
+    `lamasync-oplog-<unix-epoch-seconds>.ndjson.gz`. Format: one JSON
+    object per line in the DB's column order (camelCase keys: `id`,
+    `timestamp`, `hostId`, `folderId`, `operation`, `status`, `summary`,
+    `details`, `durationMs`, `demo`), rows sorted by `id` ASC so the file
+    is replay-friendly. The archive write goes to a `.ndjson.gz.tmp`
+    sibling first, is fsync'd, and atomically renamed before the DB
+    delete; an interrupted write therefore leaves rows in the DB for the
+    next call.
 - The `/api/v1/browse/*` write endpoints (copy/move/rename/mkdir/upload/
   delete) all run as async jobs; track via `/api/v1/browse/jobs`.
+- LAMA-260 file uploads into synced folders (`POST /api/v1/folders/:id/files`,
+  multipart `file` field, optional `path` subdir under the folder's
+  destination root). Synchronous, not async; returns
+  `FolderFileUploadResponse { ok, name, path, size }` on success. Body is
+  streamed to a server-side `/tmp` staging file and `rclone copyto` pushes
+  it onto the folder's destination backend:
+  - Writable backends only — `s3` (bucket root + subdir), `local`, `nfs`
+    (both rclone-type=local against the backend's `localPath`).
+  - 409 (not writable) for `sftp` (no per-host credentials available
+    server-side — uploads route through the daemon in a separate channel,
+    not in scope for LAMA-260) and `restic` (use the snapshot/restore
+    flow instead).
+  - 404 for unknown folder, 400 for missing `file` field or unsafe path
+    (the route reuses `browse-paths.validateBrowseInput` so absolute paths,
+    null bytes, and `..` traversal are rejected).
+  - Size cap defaults to **100 MB**, env-overridable via
+    `LAMASYNC_FOLDER_FILE_MAX_BYTES` (positive integer bytes). The cap is
+    enforced mid-stream against `File.size` AND a per-chunk
+    `TransformStream` so an oversized body can't slip past a missing
+    Content-Length, AND the post-stream `statSync` so the temp file
+    can't lie. Anything over the cap returns **413** with the file size
+    and the cap in the message; the staging file is removed in a
+    `finally` regardless of the cap's verdict.
+  - On rclone failure (non-zero exit) the response is **502** with the
+    usual LAMA-226 scrubbed summary (`rclone copyto failed with exit
+    code <n>`). Full stderr — which can embed bucket, endpoint, and
+    access-key fragments — is logged server-side only via `console.error`,
+    never echoed back to the client.
+  - The staging file lives in `/tmp/lamasync-folder-upload-<uuid>` and
+    is `rmSync`'d in the route's `finally` so a crashed handler or a
+    cap-rejected body never leaves a partial file behind.
+- Pairing flow (LAMA-262):
+  - **Create** (`POST /api/v1/pairing`) — admin creates a session with a
+    short human code (`LAMA-XXXX-XXXX`). Code alphabet excludes 0/O/1/I/L
+    so a fat-fingered code still maps back to the same row. Default TTL
+    600s (10 minutes), `ttlSeconds` body field clamps to 30..3600 (1
+    minute..1 hour). 201 → `{ code, expiresInSeconds }`.
+  - **Status** (`GET /api/v1/pairing/:code`) — admin polls without ever
+    revealing the API key. 200 → `{ status, expiresAt }`. 400 on bad
+    code shape, 404 on unknown code. Belt-and-braces: every read also
+    flips any pending row whose expiry has elapsed to `expired`, so the
+    caller observes a current view without waiting for the periodic
+    sweep.
+  - **Exchange** (`POST /api/v1/pairing/:code/exchange`) — **deliberately
+    auth-exempt** (see `auth.ts`'s `AUTH_EXEMPT_PATHS`): the device has
+    no API key yet, so requiring the bearer would be a chicken/egg. The
+    code itself is the proof of intent. Single-use: 200 → `{ apiKey }`
+    on the first claim, 409 on any subsequent exchange, 410 on expired.
+    Today the returned key is the server's pre-shared `LAMASYNC_API_KEY`
+    env value. A future per-device key table can swap
+    `apiKeyForExchange()` without touching the wire (`{ apiKey }` is
+    stable). 503 if the server is misconfigured (no `LAMASYNC_API_KEY`
+    env value to issue) — the row stays `used` after a 503, so retry
+    with a fresh code.
+  - Periodic sweep: `LAMASYNC_PAIRING_SWEEP_MS` (default 5 minutes; set
+    to `0` to opt out) drops `expired` rows whose `expires_at` is older
+    than 24h so the table doesn't grow without bound. The sweep is
+    gated by the same `LAMASYNC_TEST=1` env check that keeps the rest
+    of the boot-time timers out of unit tests.
 - Backup health (LAMA-266):
   - **Prove it** (`POST /api/v1/backends/:backendId/prove`) restores ONE
     random small file from the backend's latest restic snapshot into a
