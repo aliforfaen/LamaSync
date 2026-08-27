@@ -13,4 +13,9 @@ describe("device-info", () => {
     expect(typeof used).toBe("number");
     expect(used).toBeGreaterThan(0);
   });
+
+  it("storageUsedBytes expands a tilde dataDir instead of throwing ENOENT", () => {
+    expect(() => storageUsedBytes("~/.local/share/lamasync")).not.toThrow();
+    expect(storageUsedBytes("~")).toBeGreaterThan(0);
+  });
 });

@@ -83,7 +83,7 @@ ProtectHome=read-only
 ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
 Environment=LAMASYNC_SOCKET_PATH=${socket_path}
 # systemd user services inherit a minimal PATH from the user manager
-# (/usr/local/bin:/usr/bin) regardless of what `systemctl --user show-environment`
+# (/usr/local/bin:/usr/bin) regardless of what \`systemctl --user show-environment\`
 # shows. Set PATH explicitly so user-installed binaries (rclone at
 # ~/.local/bin, bun at ~/.bun/bin, restic via package manager, etc.) are
 # visible to the daemon. %h expands to \$HOME (works for /root too).
