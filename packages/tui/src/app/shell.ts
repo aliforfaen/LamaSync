@@ -67,7 +67,7 @@ export class Shell {
   // bottom status line doubles as the hint bar: it shows the default hints
   // until a view/flow calls setStatus, which temporarily replaces them.
   private static readonly DEFAULT_HINT =
-    "[?] help   [ / ] views   [q] quit";
+    "[Tab] tabs   [ / ] views   [?] help   [q] quit";
   // LAMA-273: persistent pause/slow indicator lives in the same status line
   // (single chrome — no separate banner). When set, it follows whatever the
   // status text currently says (transient message OR default hint) so the
@@ -80,6 +80,8 @@ export class Shell {
   private helpOpen = false;
   private readonly layout: BoxRenderable;
   private readonly rootContainer: BoxRenderable;
+  /** Last content control to restore when Tab leaves the tab bar. */
+  private contentFocusBeforeTabBar: Renderable | null = null;
   private mounted = false;
   private destroyed = false;
 
@@ -280,6 +282,23 @@ export class Shell {
       }
     }
 
+    // Tab is the explicit focus escape hatch. The tab bar owns arrows only
+    // while it is focused; content selectors keep their own directional
+    // navigation otherwise. Enter remains owned by the focused renderable.
+    if (name === "tab" || char === "\t") {
+      if (this.isTabBarFocused()) this.focusActiveView();
+      else this.focusTabBar();
+      e.preventDefault();
+      return true;
+    }
+
+    if (this.isTabBarFocused() && (name === "left" || name === "right")) {
+      if (name === "left") this.tabBar.moveLeft();
+      else this.tabBar.moveRight();
+      e.preventDefault();
+      return true;
+    }
+
     // Step 5 (WS3): open the `?` help overlay (only with no wizard mounted
     // and no text Input focused — otherwise `?` is literal input text).
     if ((char === "?" || name === "questionmark") && !this.hasInputFocus()) {
@@ -393,12 +412,15 @@ export class Shell {
    * hidden views (GitHub under More) show without touching the tab bar.
    */
   showView(id: ViewId): void {
+    const tabBarFocused = this.isTabBarFocused();
+    if (!tabBarFocused) this.blurActiveContent();
     const visible = this.visibleSpecs();
     const tabIndex = visible.findIndex((s) => s.id === id);
     if (tabIndex !== -1) {
       this.tabBar.setSelectedIndex(tabIndex);
     }
     this.manager.show(id);
+    if (!tabBarFocused) this.focusActiveView();
   }
 
   private openHelp(): void {
@@ -421,6 +443,9 @@ export class Shell {
     this.helpOverlay.top = Math.max(0, Math.floor((rh - height) / 2));
     const lines = [
       "Global keys",
+      "Tab      focus tab bar / return to page",
+      "← / →    move tabs when tab bar is focused",
+      "Enter    open highlighted tab",
       "[ / ]  cycle views",
       "1-6    jump to tab",
       "?      toggle help",
@@ -455,8 +480,59 @@ export class Shell {
     const specs = this.visibleSpecs();
     const spec = specs[index];
     if (!spec) return;
-    this.tabBar.setSelectedIndex(index);
-    this.manager.show(spec.id);
+    this.showView(spec.id);
+  }
+
+  private isTabBarFocused(): boolean {
+    return (
+      this.tabBar.focused ||
+      this.renderer.currentFocusedRenderable === this.tabBar
+    );
+  }
+
+  private focusTabBar(): void {
+    const focused = this.renderer.currentFocusedRenderable;
+    const activeContainer = this.manager.active().container;
+    if (focused !== null && this.isDescendantOf(focused, activeContainer)) {
+      this.contentFocusBeforeTabBar = focused;
+    }
+    this.tabBar.focus();
+  }
+
+  private focusActiveView(): void {
+    this.tabBar.blur();
+    const activeContainer = this.manager.active().container;
+    const remembered = this.contentFocusBeforeTabBar;
+    this.contentFocusBeforeTabBar = null;
+    if (remembered !== null && this.isDescendantOf(remembered, activeContainer)) {
+      remembered.focus();
+      return;
+    }
+    this.findFocusable(activeContainer)?.focus();
+  }
+
+  private blurActiveContent(): void {
+    const focused = this.renderer.currentFocusedRenderable;
+    if (focused !== null && !this.isTabBarFocused()) focused.blur();
+    this.contentFocusBeforeTabBar = null;
+  }
+
+  private isDescendantOf(node: Renderable, ancestor: Renderable): boolean {
+    let current: Renderable | null = node;
+    while (current !== null) {
+      if (current === ancestor) return true;
+      current = current.parent;
+    }
+    return false;
+  }
+
+  private findFocusable(node: Renderable): Renderable | null {
+    if (node !== this.tabBar && node.focusable && node.visible) return node;
+    for (const child of node.getChildren()) {
+      const found = this.findFocusable(child);
+      if (found !== null) return found;
+    }
+    return null;
   }
 
   /**

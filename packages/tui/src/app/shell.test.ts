@@ -33,7 +33,11 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { Box, instantiate } from "@opentui/core";
+import type { Renderable } from "@opentui/core";
+
 import { Shell } from "./shell.ts";
+import type { ViewContext, ViewSpec } from "./view-manager.ts";
 
 const RUN_RENDERER_SUITE = process.env.LAMASYNC_TUI_TEST_VIEWS === "1";
 
@@ -84,13 +88,76 @@ async function makeShell(): Promise<ShellHandles> {
   };
 }
 
+interface NavigationShellHandles {
+  readonly shell: Shell;
+  readonly tabBar: {
+    focused: boolean;
+    getSelectedIndex: () => number;
+    selectCurrent: () => void;
+  };
+  readonly containers: Renderable[];
+  readonly dispose: () => void;
+}
+
+async function makeNavigationShell(): Promise<NavigationShellHandles> {
+  const { createTestRenderer } = await import("@opentui/core/testing");
+  const created = await createTestRenderer({ width: 80, height: 24 });
+  const ctx: ViewContext = {
+    api: {} as never,
+    hostname: "test-host",
+    socketPath: "/tmp/lamasync.sock",
+    renderer: created.renderer,
+    setStatus: () => undefined,
+    openWizard: () => undefined,
+  };
+  const containers = ["local", "fleet", "logs"].map(() => {
+    const container = instantiate(
+      created.renderer,
+      Box({ flexDirection: "column" }),
+    ) as Renderable;
+    container.focusable = true;
+    return container;
+  });
+  const specs: ViewSpec[] = containers.map((container, index) => ({
+    id: (["local", "fleet", "logs"] as const)[index]!,
+    title: (["Local", "Fleet", "Activity"] as const)[index]!,
+    container,
+    ctx,
+    hotkeys: [],
+  }));
+  const shell = new Shell({
+    renderer: created.renderer,
+    ctxByView: ctx,
+    views: () => specs,
+    startView: "local",
+  });
+  shell.start();
+  const tabBar = (shell as unknown as {
+    tabBar: {
+      focused: boolean;
+      getSelectedIndex: () => number;
+      selectCurrent: () => void;
+    };
+  }).tabBar;
+  return {
+    shell,
+    tabBar,
+    containers,
+    dispose: () => created.renderer.destroy(),
+  };
+}
+
+function navigationKey(name: string, sequence = "") {
+  return { name, sequence, preventDefault() {} } as never;
+}
+
 describe("Shell status-line composition (pure seam — LAMA-273)", () => {
   test("default hint is the base line when nothing has been mutated", async () => {
     const { text, dispose } = await makeShell();
     try {
       // Constructor initializes lastBaseLine = DEFAULT_HINT and
       // pauseIndicator = null; the very first paint carries that verbatim.
-      expect(text()).toBe("[?] help   [ / ] views   [q] quit");
+      expect(text()).toBe("[Tab] tabs   [ / ] views   [?] help   [q] quit");
     } finally {
       dispose();
     }
@@ -136,7 +203,7 @@ describe("Shell status-line composition (pure seam — LAMA-273)", () => {
       shell.clearStatus();
       // The indicator survives a clearStatus() — pause is a persistent
       // affordance; only the transient message resets.
-      expect(text()).toBe("[?] help   [ / ] views   [q] quit   paused 5m");
+      expect(text()).toBe("[Tab] tabs   [ / ] views   [?] help   [q] quit   paused 5m");
     } finally {
       dispose();
     }
@@ -149,7 +216,7 @@ describe("Shell status-line composition (pure seam — LAMA-273)", () => {
       shell.setPauseIndicator("");
       // Empty string is treated as "clear" by setPauseIndicator's
       // normalizer — the status line returns to the bare base line.
-      expect(text()).toBe("[?] help   [ / ] views   [q] quit");
+      expect(text()).toBe("[Tab] tabs   [ / ] views   [?] help   [q] quit");
     } finally {
       dispose();
     }
@@ -162,6 +229,51 @@ describe("Shell status-line composition (pure seam — LAMA-273)", () => {
 const realSuite = describe.skipIf(!RUN_RENDERER_SUITE);
 
 realSuite("Shell status-line rendering (real OpenTUI renderer)", () => {
+  test("Tab focuses the tab bar and arrows move its selection", async () => {
+    const { shell, tabBar, containers, dispose } = await makeNavigationShell();
+    try {
+      containers[0]!.focus();
+      expect(shell.dispatchKey(navigationKey("tab", "\t"))).toBe(true);
+      expect(tabBar.focused).toBe(true);
+
+      expect(shell.dispatchKey(navigationKey("right"))).toBe(true);
+      expect(tabBar.getSelectedIndex()).toBe(1);
+      expect(shell.getManager().activeId()).toBe("local");
+    } finally {
+      dispose();
+    }
+  });
+
+  test("Tab returns focus to the active view and Enter selects the highlighted tab", async () => {
+    const { shell, tabBar, containers, dispose } = await makeNavigationShell();
+    try {
+      containers[0]!.focus();
+      shell.dispatchKey(navigationKey("tab", "\t"));
+      shell.dispatchKey(navigationKey("right"));
+      tabBar.selectCurrent();
+      expect(shell.getManager().activeId()).toBe("fleet");
+
+      shell.dispatchKey(navigationKey("tab", "\t"));
+      expect(tabBar.focused).toBe(false);
+      expect(containers[1]!.focused).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  test("global view switching blurs the old view control", async () => {
+    const { shell, containers, dispose } = await makeNavigationShell();
+    try {
+      containers[0]!.focus();
+      shell.dispatchKey(navigationKey("rightbracket", "]"));
+      expect(shell.getManager().activeId()).toBe("fleet");
+      expect(containers[0]!.focused).toBe(false);
+      expect(containers[1]!.focused).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
   test("status text reflects the base line + pause indicator after setPauseIndicator", async () => {
     const { createTestRenderer } = await import("@opentui/core/testing");
     const created = await createTestRenderer({ width: 120, height: 24 });
