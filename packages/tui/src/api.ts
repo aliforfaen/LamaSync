@@ -5,7 +5,21 @@ import { LamaSyncApiClient, parseClientConfig } from "@lamasync/core";
 
 export const DEFAULT_URL = "http://localhost:8080";
 const DEFAULT_KEY = "dev-key";
-export const CONFIG_PATH = join(homedir(), ".config", "lamasync", "client.toml");
+
+/**
+ * Resolve the client config path at call time. Bun caches `os.homedir()`
+ * process-wide at first call, so a module-level `join(homedir(), ...)`
+ * would freeze the path against the home directory of whichever context
+ * imported this module first — leaking a real `~/.config/lamasync/`
+ * config into HOME-isolated callers (and tests). Reading `$HOME` first
+ * keeps every call (bare-TTY fallback, boot, setup flow) faithful to its
+ * own environment while `homedir()` remains the fallback for HOME-less
+ * shells.
+ */
+export function getConfigPath(): string {
+  const home = process.env.HOME ?? homedir();
+  return join(home, ".config", "lamasync", "client.toml");
+}
 
 export interface TuiClient {
   client: LamaSyncApiClient;
@@ -64,7 +78,7 @@ export function clientConfigToml(config: ClientConfigValues): string {
 /** Write the client config file, creating the config directory if needed. */
 export function writeClientConfig(
   config: ClientConfigValues,
-  path: string = CONFIG_PATH,
+  path: string = getConfigPath(),
 ): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, clientConfigToml(config), "utf8");
@@ -83,11 +97,11 @@ export function buildClient(): TuiClient {
     };
   }
 
-  const hasConfigFile = existsSync(CONFIG_PATH);
+  const hasConfigFile = existsSync(getConfigPath());
   let configError: string | undefined;
   if (hasConfigFile) {
     try {
-      const cfg = parseClientConfig(readFileSync(CONFIG_PATH, "utf8"));
+      const cfg = parseClientConfig(readFileSync(getConfigPath(), "utf8"));
       return {
         client: new LamaSyncApiClient(cfg.serverUrl, cfg.apiKey),
         hostname: cfg.hostname,
@@ -96,7 +110,7 @@ export function buildClient(): TuiClient {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      configError = `Failed to parse ${CONFIG_PATH}: ${message}`;
+      configError = `Failed to parse ${getConfigPath()}: ${message}`;
     }
   }
 

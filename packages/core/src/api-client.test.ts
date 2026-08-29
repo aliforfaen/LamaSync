@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { LamaSyncApiClient, LamaSyncApiError } from "./api-client.ts";
+import type { ApiKeySummary } from "./types.ts";
 
 const API_KEY = "test-key";
 
@@ -135,5 +136,162 @@ describe("LamaSyncApiClient request resilience", () => {
       status: 422,
       code: "bad_request",
     });
+  });
+});
+
+describe("LamaSyncApiClient LAMA-234 API-key + identity methods", () => {
+  test("getAuthMe GETs /api/v1/auth/me with the bearer key and parses identity", async () => {
+    const state: FetchState = { calls: [] };
+    const client = new LamaSyncApiClient("http://localhost:8080", API_KEY, {
+      fetchImpl: makeFetch(
+        [
+          () =>
+            Response.json(
+              { kind: "device", keyId: "key_1", name: "cachy", hostId: "host-a" },
+              { status: 200 },
+            ),
+        ],
+        state,
+      ),
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    const me = await client.getAuthMe();
+    expect(me).toEqual({
+      kind: "device",
+      keyId: "key_1",
+      name: "cachy",
+      hostId: "host-a",
+    });
+    expect(state.calls).toHaveLength(1);
+    expect(state.calls[0]?.url).toBe("http://localhost:8080/api/v1/auth/me");
+    expect(state.calls[0]?.init?.method).toBe("GET");
+    expect(state.calls[0]?.init?.headers).toMatchObject({
+      Authorization: `Bearer ${API_KEY}`,
+    });
+  });
+
+  test("listApiKeys GETs /api/v1/api-keys and returns masked summaries only", async () => {
+    const state: FetchState = { calls: [] };
+    const rows: ApiKeySummary[] = [
+      {
+        id: "key_1",
+        name: "Admin laptop",
+        kind: "admin",
+        hostId: null,
+        createdAt: 1000,
+        lastUsedAt: 2000,
+        revealedAt: null,
+        revokedAt: null,
+        revokedReason: null,
+        fingerprint: "a3f2b9c01d",
+      },
+    ];
+    const client = new LamaSyncApiClient("http://localhost:8080", API_KEY, {
+      fetchImpl: makeFetch([() => Response.json(rows, { status: 200 })], state),
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    const keys = await client.listApiKeys();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toEqual(rows[0]);
+    expect(JSON.stringify(keys)).not.toContain("secret");
+    expect(state.calls[0]?.url).toBe("http://localhost:8080/api/v1/api-keys");
+  });
+
+  test("createApiKey POSTs the label and returns the once-only secret", async () => {
+    const state: FetchState = { calls: [] };
+    const created = {
+      key: {
+        id: "key_2",
+        name: "Ops key",
+        kind: "admin" as const,
+        hostId: null,
+        createdAt: 3000,
+        lastUsedAt: null,
+        revealedAt: null,
+        revokedAt: null,
+        revokedReason: null,
+        fingerprint: "ff0011aa22",
+      },
+      secret: "lamasync-admin-0123456789abcdef",
+    };
+    const client = new LamaSyncApiClient("http://localhost:8080", API_KEY, {
+      fetchImpl: makeFetch([() => Response.json(created, { status: 200 })], state),
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    const res = await client.createApiKey({ name: "Ops key" });
+    expect(res).toEqual(created);
+    expect(state.calls[0]?.url).toBe("http://localhost:8080/api/v1/api-keys");
+    expect(state.calls[0]?.init?.method).toBe("POST");
+    expect(state.calls[0]?.init?.body).toBe(JSON.stringify({ name: "Ops key" }));
+  });
+
+  test("revealApiKey POSTs the reveal route and encodes the id", async () => {
+    const state: FetchState = { calls: [] };
+    const client = new LamaSyncApiClient("http://localhost:8080", API_KEY, {
+      fetchImpl: makeFetch(
+        [
+          () =>
+            Response.json(
+              { id: "key/with/slash", secret: "raw-secret", revealedAt: 4000 },
+              { status: 200 },
+            ),
+        ],
+        state,
+      ),
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    const res = await client.revealApiKey("key/with/slash");
+    expect(res.secret).toBe("raw-secret");
+    expect(state.calls[0]?.url).toBe(
+      "http://localhost:8080/api/v1/api-keys/key%2Fwith%2Fslash/reveal",
+    );
+    expect(state.calls[0]?.init?.method).toBe("POST");
+  });
+
+  test("revokeApiKey POSTs the revoke route with an optional reason", async () => {
+    const state: FetchState = { calls: [] };
+    const client = new LamaSyncApiClient("http://localhost:8080", API_KEY, {
+      fetchImpl: makeFetch(
+        [
+          () =>
+            Response.json(
+              { id: "key_1", revokedAt: 5000 },
+              { status: 200 },
+            ),
+        ],
+        state,
+      ),
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    const res = await client.revokeApiKey("key_1", { reason: "replaced laptop" });
+    expect(res.revokedAt).toBe(5000);
+    expect(state.calls[0]?.url).toBe("http://localhost:8080/api/v1/api-keys/key_1/revoke");
+    expect(state.calls[0]?.init?.method).toBe("POST");
+    expect(state.calls[0]?.init?.body).toBe(JSON.stringify({ reason: "replaced laptop" }));
+  });
+
+  test("revokeApiKey without a reason still sends a JSON body", async () => {
+    const state: FetchState = { calls: [] };
+    const client = new LamaSyncApiClient("http://localhost:8080", API_KEY, {
+      fetchImpl: makeFetch(
+        [() => Response.json({ id: "key_1", revokedAt: 5000 }, { status: 200 })],
+        state,
+      ),
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    await client.revokeApiKey("key_1");
+    expect(state.calls[0]?.init?.body).toBe("{}");
   });
 });

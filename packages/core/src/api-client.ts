@@ -22,6 +22,13 @@ import type {
   PairingSessionExchangeResponse,
   PairingSessionExchangeRequest,
   PairingSessionStatusResponse,
+  ApiKeySummary,
+  ApiKeyCreateRequest,
+  ApiKeyCreateResponse,
+  ApiKeyRevealResponse,
+  ApiKeyRevokeRequest,
+  ApiKeyRevokeResponse,
+  AuthMeResponse,
   PauseMode,
   PauseState,
   QueuedAction,
@@ -934,6 +941,50 @@ export class LamaSyncApiClient {
       "POST",
       `/api/v1/pairing/${encodeURIComponent(code)}/exchange`,
       hostIdentity === undefined ? "" : JSON.stringify(hostIdentity),
+      "application/json",
+    );
+  }
+
+  // LAMA-234: managed API-key endpoints. Any authenticated principal may
+  // call getAuthMe (the TUI labels the active credential with it); the
+  // key-management calls are admin-only on the server (master/admin keys;
+  // device keys get 403). The server marks every secret-bearing response
+  // `Cache-Control: no-store` — the client adds no cache or logging layer
+  // of its own and callers must never persist the returned secrets.
+  getAuthMe(): Promise<AuthMeResponse> {
+    return this.request<AuthMeResponse>("GET", "/api/v1/auth/me");
+  }
+
+  /** Masked managed-key metadata list. Never contains secrets. */
+  listApiKeys(): Promise<ApiKeySummary[]> {
+    return this.request<ApiKeySummary[]>("GET", "/api/v1/api-keys");
+  }
+
+  /** Create an admin key; `secret` is returned exactly once. */
+  createApiKey(body: ApiKeyCreateRequest): Promise<ApiKeyCreateResponse> {
+    return this.request<ApiKeyCreateResponse>(
+      "POST",
+      "/api/v1/api-keys",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  /** Explicit admin reveal of a managed key's encrypted secret (no-store). */
+  revealApiKey(id: string): Promise<ApiKeyRevealResponse> {
+    return this.request<ApiKeyRevealResponse>(
+      "POST",
+      `/api/v1/api-keys/${encodeURIComponent(id)}/reveal`,
+      "",
+    );
+  }
+
+  /** Soft-revoke a managed key; future requests with it return 401. */
+  revokeApiKey(id: string, body?: ApiKeyRevokeRequest): Promise<ApiKeyRevokeResponse> {
+    return this.request<ApiKeyRevokeResponse>(
+      "POST",
+      `/api/v1/api-keys/${encodeURIComponent(id)}/revoke`,
+      JSON.stringify(body ?? {}),
       "application/json",
     );
   }
