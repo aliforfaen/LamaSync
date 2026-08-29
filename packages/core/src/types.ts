@@ -760,9 +760,88 @@ export interface PairingSessionStatusResponse {
 }
 
 export interface PairingSessionExchangeResponse {
-  /** The pre-shared API key. Today this is always the server's
-   *  `LAMASYNC_API_KEY` env value (see server's pairing route). The
-   *  field is named so a future per-device rotation can swap the
-   *  issuer without changing the wire. */
+  /** The managed `device` API key minted by the exchange. Never the
+   *  master `LAMASYNC_API_KEY` (LAMA-234). The field name is stable so
+   *  registration clients keep working unchanged. */
   apiKey: string;
+}
+
+// LAMA-234: device-identity body for the pairing exchange. The code proves
+// intent; hostId/hostname let the server bind the minted device key to the
+// registering host so a compromised key is containable to one device.
+export interface PairingSessionExchangeRequest {
+  hostId: string;
+  hostname: string;
+}
+
+// LAMA-234: managed API keys. The environment `LAMASYNC_API_KEY` remains the
+// `master` credential; managed keys are `admin` or `device`. Device keys are
+// bound to one host and may only touch that host's resources. A managed
+// secret is surfaced exactly twice in its lifetime: at creation and on an
+// explicit admin reveal. List/read responses carry masked metadata only.
+export type ApiKeyKind = "admin" | "device";
+
+/**
+ * Resolved credential identity for one request, attached to the Elysia
+ * context by the auth plugin (see server/src/auth.ts) and mirrored for
+ * WebSocket subscriptions (server/src/ws.ts).
+ */
+export type AuthPrincipal =
+  | { kind: "master"; keyId: null; hostId: null }
+  | { kind: "admin"; keyId: string; hostId: null }
+  | { kind: "device"; keyId: string; hostId: string };
+
+/** Masked managed-key metadata. Deliberately contains no secret material. */
+export interface ApiKeySummary {
+  /** Public opaque key id; also embedded in the token for O(1) lookup. */
+  id: string;
+  name: string;
+  kind: ApiKeyKind;
+  /** Present and required when kind === "device"; null for admin keys. */
+  hostId: string | null;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revealedAt: number | null;
+  revokedAt: number | null;
+  revokedReason: string | null;
+  /** Short digest of the token hash, e.g. "a3f2b9c01d" — for display/masking. */
+  fingerprint: string;
+}
+
+export interface ApiKeyCreateRequest {
+  name: string;
+}
+
+export interface ApiKeyCreateResponse {
+  key: ApiKeySummary;
+  /** Raw token. Returned exactly once, at creation. */
+  secret: string;
+}
+
+export interface ApiKeyRevealResponse {
+  id: string;
+  secret: string;
+  revealedAt: number;
+}
+
+export interface ApiKeyRevokeRequest {
+  reason?: string;
+}
+
+export interface ApiKeyRevokeResponse {
+  id: string;
+  revokedAt: number;
+}
+
+/**
+ * LAMA-234: credential identity for the Web UI. Lets admin surfaces label
+ * the active credential and hide admin-only sections when a `device` key is
+ * in use (the browser holds a bearer token in session/localStorage, which
+ * could otherwise be a device key that will 401 on every admin route).
+ */
+export interface AuthMeResponse {
+  kind: "master" | "admin" | "device";
+  keyId: string | null;
+  name: string | null;
+  hostId: string | null;
 }

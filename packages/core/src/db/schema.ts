@@ -349,6 +349,28 @@ CREATE TABLE IF NOT EXISTS pairing_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_pairing_sessions_expires_at
     ON pairing_sessions(expires_at);
+
+-- LAMA-234: managed API keys. The environment LAMASYNC_API_KEY (the
+-- master credential) is NEVER stored here — it lives only in the process
+-- env. Managed admin/device keys live in this table: token_hash
+-- (SHA-256 hex) authenticates requests; token_enc (AES-256-GCM, see
+-- server/src/crypto.ts) exists solely for explicit admin reveal. Secrets
+-- never appear in logs, lists, or normal reads. Device keys are bound to
+-- hosts.host_id; soft revocation keeps an audit trail.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id             TEXT PRIMARY KEY,   -- public opaque key id, embedded in token
+    name           TEXT NOT NULL,
+    kind           TEXT NOT NULL,      -- 'admin' | 'device'
+    host_id        TEXT,               -- required and present for device keys; null for admin
+    token_hash     TEXT NOT NULL UNIQUE,
+    token_enc      TEXT NOT NULL,
+    created_at     INTEGER NOT NULL,
+    last_used_at   INTEGER,
+    revealed_at    INTEGER,
+    revoked_at     INTEGER,
+    revoked_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_host_id ON api_keys(host_id);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -460,6 +482,11 @@ export const MIGRATIONS: string[] = [
   // initDb's try/catch wrapper).
   "CREATE TABLE IF NOT EXISTS pairing_sessions (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending', expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_pairing_sessions_expires_at ON pairing_sessions(expires_at)",
+  // LAMA-234: managed API keys. New table — the CREATE TABLE IF NOT EXISTS
+  // here is the idempotent safety net for existing databases (mirrors
+  // pairing_sessions); fresh databases get it from SERVER_SCHEMA.
+  "CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, host_id TEXT, token_hash TEXT NOT NULL UNIQUE, token_enc TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER, revealed_at INTEGER, revoked_at INTEGER, revoked_reason TEXT)",
+  "CREATE INDEX IF NOT EXISTS idx_api_keys_host_id ON api_keys(host_id)",
 ];
 
 /**
