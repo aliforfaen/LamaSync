@@ -142,6 +142,10 @@ export interface CreateKeyWizardHandle extends Wizard {
   clearSecret: () => void;
   /** Test seam: current in-memory secret (null once cleared). */
   secretSnapshot: () => string | null;
+  /** Mirror of the label Input's enter handler (test seam). Returns true
+   *  when validation passed and the flow advanced off the label step. */
+  setLabel: (label: string) => boolean;
+  handleKey: (e: KeyEvent) => boolean;
 }
 
 /**
@@ -247,6 +251,10 @@ export function createCreateKeyWizard(deps: {
       currentSecret = null;
     },
     secretSnapshot: () => currentSecret,
+    setLabel: (label: string): boolean => {
+      runner.setField("label", String(label ?? "").trim());
+      return runner.next() === null;
+    },
   };
 }
 
@@ -257,6 +265,7 @@ export function createCreateKeyWizard(deps: {
 export interface RevealKeyWizardHandle extends Wizard {
   clearSecret: () => void;
   secretSnapshot: () => string | null;
+  handleKey: (e: KeyEvent) => boolean;
 }
 
 export function createRevealKeyWizard(deps: {
@@ -324,11 +333,17 @@ export function createRevealKeyWizard(deps: {
 // Revoke wizard
 // ---------------------------------------------------------------------------
 
+export interface RevokeKeyWizardHandle extends Wizard {
+  /** Mirror of the reason Input's enter handler (test seam). */
+  setReason: (reason: string) => void;
+  handleKey: (e: KeyEvent) => boolean;
+}
+
 export function createRevokeKeyWizard(deps: {
   ctx: ViewContext;
   key: ApiKeySummary;
   afterRevoke?: () => void | Promise<void>;
-}): Wizard {
+}): RevokeKeyWizardHandle {
   const { ctx, key } = deps;
   const runner = new WizardRunner({
     id: "access-keys-revoke",
@@ -339,14 +354,27 @@ export function createRevokeKeyWizard(deps: {
 
   const reasonStep: WizardStep = {
     title: "Reason (optional)",
-    render: () =>
-      Box(
+    render: () => {
+      const input = runner.realizeNode(
+        Input({ placeholder: "optional reason" }),
+      ) as unknown as Renderable & {
+        value: string;
+        on: (event: string, handler: (...params: unknown[]) => void) => void;
+      };
+      input.value = String(runner.getState()["reason"] ?? "");
+      input.on("enter", (value: unknown) => {
+        runner.setField("reason", String(value ?? "").trim());
+        runner.next();
+      });
+      return Box(
         { flexDirection: "column", gap: 1 },
         Text({
           content:
             "Optional reason for the audit trail (e.g. 'replaced laptop'). Press Enter to skip.",
         }),
-      ) as unknown as Renderable,
+        input,
+      ) as unknown as Renderable;
+    },
     validate: () => null,
   };
 
@@ -384,6 +412,10 @@ export function createRevokeKeyWizard(deps: {
         ctx.setStatus(`revoke failed: ${friendlyError(err)}`, "error");
       }
     },
+    setReason: (reason: string): void => {
+      runner.setField("reason", String(reason ?? "").trim());
+      runner.next();
+    },
   };
 }
 
@@ -395,6 +427,7 @@ export interface PairDeviceWizardHandle extends Wizard {
   stopPolling: () => void;
   /** Test seam: the code currently displayed (never a managed secret). */
   currentCode: () => string | null;
+  handleKey: (e: KeyEvent) => boolean;
 }
 
 export function createPairDeviceWizard(deps: {
@@ -555,6 +588,12 @@ export function createPairDeviceWizard(deps: {
         }
         return true;
       }
+      // A plain Esc on the code screen cancels the whole pairing (and
+      // stops the poller) — it must not just walk back to the start step.
+      if (name === "escape") {
+        runner.cancel();
+        return true;
+      }
       return false;
     },
   };
@@ -649,6 +688,20 @@ export class AccessKeysView implements View {
 
   hotkeys(): ReadonlyArray<Hotkey> {
     return this.currentHotkeys;
+  }
+
+  /** Test seam: current phase. */
+  phaseOf(): "loading" | "error" | "device" | "table" {
+    return this.phase;
+  }
+
+  /** Test seam: in-memory secret of the live panel (null when none/cleared). */
+  secretSnapshot(): string | null {
+    const panel = this.secretPanel as
+      | { wizard: Wizard & { secretSnapshot?: () => string | null } }
+      | null;
+    if (!panel || typeof panel.wizard.secretSnapshot !== "function") return null;
+    return panel.wizard.secretSnapshot();
   }
 
   // -------------------------------------------------------------------------
