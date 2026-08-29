@@ -18,6 +18,7 @@ import type {
   ApiKeySummary,
   AuthMeResponse,
   LamaSyncApiClient,
+  PairingSessionStatusResponse,
 } from "@lamasync/core";
 
 import {
@@ -433,6 +434,50 @@ describe("pair device wizard", () => {
     vi.advanceTimersByTime(30_000);
     await mflush();
     expect(calls.lookupPairingSession.length).toBe(lookupsAfterStart + 1);
+  });
+
+  test("replacing an expired code clears the prior polling interval", async () => {
+    vi.useFakeTimers();
+    const { api, calls } = makeFakeApi();
+    let issued = 0;
+    (api as {
+      createPairingSession: () => Promise<{ code: string; expiresInSeconds: number }>;
+      lookupPairingSession: (code: string) => Promise<PairingSessionStatusResponse>;
+    }).createPairingSession = async () => {
+      issued++;
+      return { code: `lama-72B4-9PQ${issued}`, expiresInSeconds: 600 };
+    };
+    (api as {
+      lookupPairingSession: (code: string) => Promise<PairingSessionStatusResponse>;
+    }).lookupPairingSession = async (code) => {
+      calls.lookupPairingSession.push(code);
+      return {
+        status: code.endsWith("1") ? "expired" : "pending",
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      };
+    };
+    const ctx = makeCtx(api, []);
+    const wizard = createPairDeviceWizard({ ctx });
+    openWizard(wizard);
+
+    wizard.handleKey(ENTER); // first code is immediately reported expired
+    await mflush();
+    expect(wizard.currentCode()).toBe("lama-72B4-9PQ1");
+    expect(calls.lookupPairingSession).toEqual(["lama-72B4-9PQ1"]);
+
+    wizard.handleKey(ENTER); // regenerate
+    await mflush();
+    expect(wizard.currentCode()).toBe("lama-72B4-9PQ2");
+    expect(calls.lookupPairingSession).toEqual([
+      "lama-72B4-9PQ1",
+      "lama-72B4-9PQ2",
+    ]);
+
+    vi.advanceTimersByTime(10_000);
+    await mflush();
+    // Exactly one interval remains: the replacement session's poller.
+    expect(calls.lookupPairingSession).toHaveLength(3);
+    wizard.stopPolling();
   });
 
   test("cancel clears the code and stops polling", async () => {

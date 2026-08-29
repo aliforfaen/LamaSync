@@ -463,8 +463,10 @@ export function createPairDeviceWizard(deps: {
   let destroyed = false;
   let busy = false;
 
-  const stopPolling = (): void => {
-    destroyed = true;
+  /** Clear a live session's timers without closing the wizard. This is used
+   * before regenerating an expired code so the old session cannot keep
+   * polling alongside the new one. */
+  const clearTimers = (): void => {
     if (pollTimer !== null) {
       clearInterval(pollTimer);
       pollTimer = null;
@@ -473,6 +475,11 @@ export function createPairDeviceWizard(deps: {
       clearInterval(tickTimer);
       tickTimer = null;
     }
+  };
+
+  const stopPolling = (): void => {
+    destroyed = true;
+    clearTimers();
   };
 
   /** Force the current step to re-render (live countdown). */
@@ -506,6 +513,11 @@ export function createPairDeviceWizard(deps: {
   const startSession = async (): Promise<void> => {
     if (busy || destroyed) return;
     busy = true;
+    const advanceToCodeStep = runner.stepIdx() === 0;
+    // An expired session can be regenerated from the same code screen. Stop
+    // its poll/countdown pair before creating the replacement so we never
+    // accumulate duplicate intervals for every regeneration.
+    clearTimers();
     try {
       const res = await ctx.api.createPairingSession({ ttlSeconds: 600 });
       if (destroyed) return;
@@ -514,7 +526,14 @@ export function createPairDeviceWizard(deps: {
         expiresAt: new Date(Date.now() + res.expiresInSeconds * 1000).toISOString(),
       };
       polled = null;
-      runner.next();
+      if (advanceToCodeStep) {
+        runner.next();
+      } else {
+        // Regeneration happens from the final code step. Advancing that step
+        // would finish the wizard and erase the replacement code, so repaint
+        // in place instead.
+        rerender();
+      }
       await pollOnce();
       pollTimer = setInterval(() => void pollOnce(), POLL_MS);
       tickTimer = setInterval(rerender, TICK_MS);
