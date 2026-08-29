@@ -10,6 +10,7 @@ import {
   bumpConfigRevisionForFolder,
 } from "../config-revision.ts";
 import { getFolderSize } from "../stats.ts";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
 // LAMA-232: local/nfs are server-side directory targets; restic folders
@@ -879,7 +880,13 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .patch(
     "/folders/:id/assign/:hostId",
-    ({ params, body, set }) => {
+    ({ params, body, set, store }) => {
+      // LAMA-234: the daemon toggles its own mount⇄sync mode here — a
+      // device key may only touch its own host's assignment.
+      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const b = body as {
         cacheProfile?: string | null;
         cacheMaxSize?: string | null;

@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import type { ResticRestoreJob, ResticSnapshot, WSEvent } from "@lamasync/core";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 import {
   __setDb as __setNotificationDb,
   emitNotification,
@@ -79,11 +80,16 @@ function parseJson<T>(value: string | null, fallback: T): T {
 export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/restic/snapshots",
-    ({ query }) => {
+    ({ query, set, store }) => {
       const { folderId, hostId } = query as {
         folderId?: string;
         hostId?: string;
       };
+      // LAMA-234: a device key must scope snapshot lists to its own host.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const where: string[] = [];
       const args: string[] = [];
       if (folderId) {
@@ -119,7 +125,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/restic/snapshots",
-    ({ body, set }) => {
+    ({ body, set, store }) => {
       const {
         folderId,
         hostId,
@@ -137,6 +143,12 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
         sizeBytes?: number | null;
         tags?: string[];
       };
+      // LAMA-234: snapshots are host-bound; a device key may only report
+      // its own host's snapshots.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const id = crypto.randomUUID();
       activeDb.run(
         `INSERT INTO restic_snapshots
@@ -190,11 +202,17 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/restic/restore",
-    ({ query }) => {
+    ({ query, set, store }) => {
       const { targetHostId, status } = query as {
         targetHostId?: string;
         status?: string;
       };
+      // LAMA-234: a device key must scope restore-job lists to its own
+      // target host.
+      if (!deviceMayAccessHost(principalOf(store), targetHostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const where: string[] = [];
       const args: string[] = [];
       if (targetHostId) {
@@ -230,7 +248,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/restic/restore",
-    ({ body, set }) => {
+    ({ body, set, store }) => {
       const { snapshotId, folderId, targetHostId, targetPath, include } = body as {
         snapshotId: string;
         folderId: string;
@@ -238,6 +256,12 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
         targetPath: string;
         include?: string[];
       };
+      // LAMA-234: restore jobs target one host; a device key may only
+      // create jobs for its own host.
+      if (!deviceMayAccessHost(principalOf(store), targetHostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const id = crypto.randomUUID();
       const now = Date.now();
       activeDb.run(
@@ -281,7 +305,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/restic/restore/:id/status",
-    ({ params, body, set }) => {
+    ({ params, body, set, store }) => {
       const { status, error } = body as {
         status: ResticRestoreJob["status"];
         error?: string | null;
@@ -294,6 +318,11 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
       if (!existing) {
         set.status = 404;
         return { error: "Restore job not found" };
+      }
+      // LAMA-234: only the job's target host may update it.
+      if (!deviceMayAccessHost(principalOf(store), existing.target_host_id)) {
+        set.status = 403;
+        return { error: "Forbidden" };
       }
       const resolvedAt = status === "done" || status === "failed" ? Date.now() : existing.resolved_at;
       activeDb.run(

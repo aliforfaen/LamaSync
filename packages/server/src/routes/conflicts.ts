@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import type { Conflict, ConflictResolution, WSEvent } from "@lamasync/core";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 import {
   __setDb as __setNotificationDb,
   emitNotification,
@@ -50,12 +51,18 @@ function rowToConflict(r: ConflictRow): Conflict {
 export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/conflicts",
-    ({ query }) => {
+    ({ query, set, store }) => {
       const { hostId, folderId, status } = query as {
         hostId?: string;
         folderId?: string;
         status?: string;
       };
+      // LAMA-234: a device key must scope its conflict list to its own
+      // host (a missing hostId fails for device keys — never a fleet leak).
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const where: string[] = [];
       const args: string[] = [];
       if (hostId) {
@@ -96,7 +103,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/conflicts",
-    ({ body, set }) => {
+    ({ body, set, store }) => {
       const { conflicts } = body as {
         conflicts: Array<{
           hostId: string;
@@ -108,6 +115,15 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
           remoteSizeBytes?: number | null;
         }>;
       };
+      // LAMA-234: a device key may only report conflicts for its own host.
+      const principal = principalOf(store);
+      if (
+        principal?.kind === "device" &&
+        conflicts.some((c) => !deviceMayAccessHost(principal, c.hostId))
+      ) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const created: Conflict[] = [];
       const now = Date.now();
       for (const c of conflicts) {
@@ -196,7 +212,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/conflicts/:id/resolve",
-    ({ params, body, set }) => {
+    ({ params, body, set, store }) => {
       const { resolution } = body as { resolution: ConflictResolution };
       const existing = activeDb
         .query<ConflictRow, [string]>(
@@ -206,6 +222,11 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
       if (!existing) {
         set.status = 404;
         return { error: "Conflict not found" };
+      }
+      // LAMA-234: only the conflict's owning host may resolve it.
+      if (!deviceMayAccessHost(principalOf(store), existing.host_id)) {
+        set.status = 403;
+        return { error: "Forbidden" };
       }
       activeDb.run(
         "UPDATE conflicts SET status = 'resolved', resolution = ?, resolved_at = ? WHERE id = ?",

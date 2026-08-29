@@ -1,6 +1,7 @@
 // Unit tests for the /api/v1/conflicts routes.
 
 process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-test-data";
+process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "conflicts-test-key";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
@@ -10,10 +11,18 @@ import { Elysia } from "elysia";
 import { initDb } from "@lamasync/core";
 import type { Database } from "bun:sqlite";
 import { __resetNotificationStateForTests } from "../notifications.ts";
+import { getAuthPlugin } from "../auth.ts";
 import { __setDb, conflictsRoutes } from "./conflicts.ts";
 
 let db: Database;
 let dataDir: string;
+
+/** Like `new Request(url, init)` but carries the master-key bearer header. */
+function authRequest(url: string, init: RequestInit = {}): Request {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${process.env.LAMASYNC_API_KEY}`);
+  return new Request(url, { ...init, headers });
+}
 
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), "lamasync-conflicts-test-"));
@@ -28,18 +37,18 @@ afterEach(() => {
 
 describe("conflictsRoutes", () => {
   test("GET /api/v1/conflicts returns empty list by default", async () => {
-    const app = new Elysia().use(conflictsRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(conflictsRoutes);
     const res = await app.handle(
-      new Request("http://localhost/api/v1/conflicts"),
+      authRequest("http://localhost/api/v1/conflicts"),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
   });
 
   test("POST /api/v1/conflicts creates conflicts and GET filters by status", async () => {
-    const app = new Elysia().use(conflictsRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(conflictsRoutes);
     const res = await app.handle(
-      new Request("http://localhost/api/v1/conflicts", {
+      authRequest("http://localhost/api/v1/conflicts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -62,7 +71,7 @@ describe("conflictsRoutes", () => {
     expect(created[0]?.status).toBe("pending");
 
     const pending = await app.handle(
-      new Request("http://localhost/api/v1/conflicts?status=pending"),
+      authRequest("http://localhost/api/v1/conflicts?status=pending"),
     );
     expect(pending.status).toBe(200);
     const items = (await pending.json()) as Array<Record<string, unknown>>;
@@ -80,9 +89,9 @@ describe("conflictsRoutes", () => {
   });
 
   test("POST /api/v1/conflicts/:id/resolve marks conflict resolved", async () => {
-    const app = new Elysia().use(conflictsRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(conflictsRoutes);
     const create = await app.handle(
-      new Request("http://localhost/api/v1/conflicts", {
+      authRequest("http://localhost/api/v1/conflicts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -100,7 +109,7 @@ describe("conflictsRoutes", () => {
     const id = String(created[0]!.id);
 
     const resolve = await app.handle(
-      new Request(`http://localhost/api/v1/conflicts/${id}/resolve`, {
+      authRequest(`http://localhost/api/v1/conflicts/${id}/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resolution: "local" }),
@@ -112,7 +121,7 @@ describe("conflictsRoutes", () => {
     expect(updated.resolution).toBe("local");
 
     const refresh = await app.handle(
-      new Request("http://localhost/api/v1/conflicts", {
+      authRequest("http://localhost/api/v1/conflicts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -136,9 +145,9 @@ describe("conflictsRoutes", () => {
   });
 
   test("LAMA-268: per-side sizes round-trip through POST and GET", async () => {
-    const app = new Elysia().use(conflictsRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(conflictsRoutes);
     const res = await app.handle(
-      new Request("http://localhost/api/v1/conflicts", {
+      authRequest("http://localhost/api/v1/conflicts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -162,7 +171,7 @@ describe("conflictsRoutes", () => {
     expect(created[0]!.remoteSizeBytes).toBe(2011);
 
     const list = (await (await app.handle(
-      new Request("http://localhost/api/v1/conflicts?status=pending"),
+      authRequest("http://localhost/api/v1/conflicts?status=pending"),
     )).json()) as Array<Record<string, unknown>>;
     expect(list[0]!.localSizeBytes).toBe(1842);
     expect(list[0]!.remoteSizeBytes).toBe(2011);

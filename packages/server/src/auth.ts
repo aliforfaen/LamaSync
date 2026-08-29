@@ -43,6 +43,74 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
+// LAMA-234: device-key route allowlist. A device principal may ONLY reach
+// the daemon's own control-plane calls (config, self-registration, heartbeat
+// + operation reports, its own action queue/completions, its own dotfile
+// uploads, conflicts, restic snapshots + restore jobs, release checks).
+// Everything else — fleet lists, backends/secrets, key management, admin
+// operations — gets 403 at the auth boundary before any route logic runs.
+// `*` matches exactly one path segment. The per-route handlers still enforce
+// host-ownership on top of this (deviceMayAccessHost / requireAdmin).
+const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
+  // self-registration + own host detail
+  { method: "POST", pattern: "/api/v1/register" },
+  { method: "GET", pattern: "/api/v1/hosts/*" },
+  // own action queue + work-ack
+  { method: "POST", pattern: "/api/v1/hosts/*/actions" },
+  { method: "GET", pattern: "/api/v1/hosts/*/actions" },
+  { method: "GET", pattern: "/api/v1/actions/pending" },
+  { method: "GET", pattern: "/api/v1/actions/taken" },
+  { method: "POST", pattern: "/api/v1/actions/*/complete" },
+  // heartbeat + operation reports
+  { method: "POST", pattern: "/api/v1/report/health" },
+  { method: "POST", pattern: "/api/v1/report" },
+  // its own config (embeds assignments, pause state, dotfile manifests)
+  { method: "GET", pattern: "/api/v1/config/*" },
+  // folder operation locks (own host only — enforced in the route)
+  { method: "POST", pattern: "/api/v1/operations/acquire" },
+  { method: "POST", pattern: "/api/v1/operations/heartbeat" },
+  { method: "POST", pattern: "/api/v1/operations/release" },
+  { method: "GET", pattern: "/api/v1/operations/locks" },
+  // own conflicts
+  { method: "GET", pattern: "/api/v1/conflicts" },
+  { method: "POST", pattern: "/api/v1/conflicts" },
+  { method: "POST", pattern: "/api/v1/conflicts/*/resolve" },
+  // restic snapshots + restore jobs scoped to the device's host
+  { method: "GET", pattern: "/api/v1/restic/snapshots" },
+  { method: "POST", pattern: "/api/v1/restic/snapshots" },
+  { method: "GET", pattern: "/api/v1/restic/restore" },
+  { method: "POST", pattern: "/api/v1/restic/restore" },
+  { method: "POST", pattern: "/api/v1/restic/restore/*/status" },
+  // own dotfile uploads + manifest view (upload handler gates host_id)
+  { method: "GET", pattern: "/api/v1/dotfiles" },
+  { method: "GET", pattern: "/api/v1/dotfiles/manifests" },
+  { method: "POST", pattern: "/api/v1/dotfiles/*" },
+  // self-update release checks via the server proxy
+  { method: "GET", pattern: "/api/v1/release/latest" },
+  // health
+  { method: "GET", pattern: "/api/v1/health" },
+  // LAN-peer assignment mode toggles (mount ⇄ sync, LAMA-238 era)
+  { method: "PATCH", pattern: "/api/v1/folders/*/assign/*" },
+];
+
+/** Segment-exact wildcard match for the device route allowlist. */
+function pathMatchesDevicePattern(pathSegments: string[], pattern: string): boolean {
+  const patSegments = pattern.split("/").filter((s) => s.length > 0);
+  if (patSegments.length !== pathSegments.length) return false;
+  for (let i = 0; i < patSegments.length; i++) {
+    if (patSegments[i] !== "*" && patSegments[i] !== pathSegments[i]) return false;
+  }
+  return true;
+}
+
+/** True when a device principal is allowed to reach this route at all. */
+export function deviceMayCallRoute(pathname: string, method: string): boolean {
+  const segments = pathname.split("/").filter((s) => s.length > 0);
+  return DEVICE_ALLOWED_ROUTES.some(
+    (r) => r.method === method && pathMatchesDevicePattern(segments, r.pattern),
+  );
+}
+
 /**
  * Resolve a raw Bearer token to a typed principal, or null when the token
  * is invalid, unknown, or belongs to a revoked managed key. Revoked keys
@@ -112,8 +180,34 @@ export function getAuthPlugin() {
         set.status = 401;
         return { error: "Unauthorized" };
       }
+      // LAMA-234: device keys are confined to their own control-plane calls
+      // at the auth boundary — everything else is 403 before route logic.
+      if (principal.kind === "device" && !deviceMayCallRoute(url.pathname, request.method)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       store.principal = principal;
     });
+}
+
+/**
+ * Narrow a request store (possibly untyped in route plugins composed via
+ * `.use()`) to the auth principal. The single inline cast lives here; route
+ * handlers only ever call this and the gates below.
+ */
+export function principalOf(store: unknown): AuthPrincipal | null {
+  if (store === null || typeof store !== "object") return null;
+  const raw = (store as { principal?: unknown }).principal;
+  if (raw === null || typeof raw !== "object") return null;
+  const rec = raw as Record<string, unknown>;
+  if (rec.kind === "master") return { kind: "master", keyId: null, hostId: null };
+  if (rec.kind === "admin" && typeof rec.keyId === "string") {
+    return { kind: "admin", keyId: rec.keyId, hostId: null };
+  }
+  if (rec.kind === "device" && typeof rec.keyId === "string" && typeof rec.hostId === "string") {
+    return { kind: "device", keyId: rec.keyId, hostId: rec.hostId };
+  }
+  return null;
 }
 
 /** Current request principal (null only on auth-exempt routes). */

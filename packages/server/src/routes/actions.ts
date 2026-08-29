@@ -15,6 +15,7 @@ import {
   type WSEvent,
 } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 
 const ACTION_TYPES: QueuedActionType[] = [
   "trigger_sync",
@@ -108,11 +109,17 @@ export function reapStaleTakenActions(database: Database): number {
 export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/hosts/:hostId/actions",
-    ({ params, body, set }) => {
+    ({ params, body, set, store }) => {
       const { type, payload } = body as {
         type: QueuedActionType;
         payload?: Record<string, unknown> | null;
       };
+      // LAMA-234: a device key may only enqueue actions for its own host
+      // (the daemon itself never enqueues; the web/TUI control plane does).
+      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       if (!isActionType(type)) {
         set.status = 400;
         return { error: `Invalid action type: ${String(type)}` };
@@ -174,11 +181,17 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/actions/pending",
-    ({ query, set }) => {
+    ({ query, set, store }) => {
       const { hostId, limit } = query as {
         hostId?: string;
         limit?: number | string;
       };
+      // LAMA-234: an action queue belongs to one host; a device key may
+      // only claim its own host's pending actions.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       if (!hostId) {
         set.status = 400;
         return { error: "hostId is required" };
@@ -249,13 +262,18 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/actions/taken",
-    ({ query, set }) => {
+    ({ query, set, store }) => {
       // LAMA-232: boot-time reclaim. A freshly booted daemon has no
       // in-flight work, so every 'taken' action for the host was orphaned
       // by the previous incarnation — return them all and let the daemon
       // re-execute + ack. The periodic reaper (inside /actions/pending)
       // covers the "daemon alive but execution silently died" case.
       const { hostId } = query as { hostId?: string };
+      // LAMA-234: same host scoping as /actions/pending.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       if (!hostId) {
         set.status = 400;
         return { error: "hostId is required" };
@@ -284,7 +302,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/actions/:id/complete",
-    ({ params, body, set }) => {
+    ({ params, body, set, store }) => {
       const { status, result } = body as {
         status: "done" | "failed";
         result?: string | null;
@@ -301,6 +319,11 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
       if (!existing) {
         set.status = 404;
         return { error: "Action not found" };
+      }
+      // LAMA-234: only the action's owning host may ack it.
+      if (!deviceMayAccessHost(principalOf(store), existing.host_id)) {
+        set.status = 403;
+        return { error: "Forbidden" };
       }
       const completedAt = Date.now();
       activeDb.run(
@@ -352,7 +375,12 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/hosts/:hostId/actions",
-    ({ params, query }) => {
+    ({ params, query, store, set }) => {
+      // LAMA-234: a device key may only read its own host's action history.
+      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const { status, limit } = query as {
         status?: string;
         limit?: number | string;

@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { isNewer, type Host, type HostStatus } from "@lamasync/core";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 import { getCachedLatestVersion } from "../release-cache.ts";
 import {
   bumpConfigRevision,
@@ -151,7 +152,12 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/hosts/:hostId",
-    async ({ params, set }) => {
+    async ({ params, set, store }) => {
+      // LAMA-234: a device key may only read its own host record.
+      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const row = activeDb
         .query<HostRow, [string]>(`${HOST_SELECT} WHERE id = ?`)
         .get(params.hostId);
@@ -177,7 +183,13 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .patch(
     "/hosts/:hostId",
-    async ({ params, body, set }) => {
+    async ({ params, body, set, store }) => {
+      // LAMA-234: device keys may only rename their own host (and the
+      // daemon never renames itself — admin/TUI paths do).
+      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const row = activeDb
         .query<HostRow, [string]>(`${HOST_SELECT} WHERE id = ?`)
         .get(params.hostId);
@@ -265,12 +277,19 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/register",
-    async ({ body, set }) => {
+    async ({ body, set, store }) => {
       const { id, hostname, tailnetIp } = body as {
         id: string;
         hostname: string;
         tailnetIp?: string | null;
       };
+      // LAMA-234: a device key may register/self-identify its own host
+      // id only. (Pairing mints the device key bound to this same id, so
+      // re-registration after a rename keeps working.)
+      if (!deviceMayAccessHost(principalOf(store), id)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const previous = activeDb
         .query<{ id: string; status: string | null }, [string]>(
           "SELECT id, status FROM hosts WHERE id = ?",
@@ -410,7 +429,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/report/health",
-    async ({ body, set }) => {
+    async ({ body, set, store }) => {
       const { hostId, timestamp, status, lanIp, tailnetIp, version, os, storageUsedBytes } = body as {
         hostId: string;
         timestamp: number;
@@ -421,6 +440,12 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         os?: string | null;
         storageUsedBytes?: number | null;
       };
+      // LAMA-234: heartbeats are host-bound; a device key may only report
+      // its own host.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const previous = activeDb
         .query<{ status: string | null }, [string]>(
           "SELECT status FROM hosts WHERE id = ?",

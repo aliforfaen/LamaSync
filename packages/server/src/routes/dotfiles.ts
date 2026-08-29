@@ -5,6 +5,7 @@ import { db as defaultDb } from "../db.ts";
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { DotfileManifest, DotfileVersion } from "@lamasync/core";
 import { bumpConfigRevision } from "../config-revision.ts";
+import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
 
 const BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR || "/backups";
 const GLOBAL_HOST_ID = "_global";
@@ -121,8 +122,14 @@ function appProfileExists(profileId: string): boolean {
 export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/dotfiles/manifests",
-    ({ query }) => {
+    ({ query, set, store }) => {
       const hostId = (query as { hostId?: string }).hostId;
+      // LAMA-234: a device key may only view manifests scoped to its own
+      // host (global-only view without hostId stays admin/master).
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const globalRows = activeDb
         .query<ManifestRow, [string]>(
           "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id, profile_id FROM dotfile_manifests WHERE host_id = ?",
@@ -157,7 +164,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/dotfiles/manifests",
-    ({ body, set }) => {
+    ({ body, set, store }) => {
+      // LAMA-234: manifest creation is a control-plane/admin surface. The
+      // device allowlist pattern /dotfiles/* would otherwise admit this
+      // path for device keys — shut that hole explicitly.
+      if (!requireAdmin({ principal: principalOf(store) })) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const hostId = body.hostId ?? GLOBAL_HOST_ID;
       const id = crypto.randomUUID();
       const paths = parsePaths(body.paths);
@@ -353,8 +367,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/dotfiles",
-    ({ query }) => {
+    ({ query, set, store }) => {
       const hostId = (query as { hostId?: string }).hostId;
+      // LAMA-234: a device key may only list version history for its own
+      // host.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       if (!hostId) {
         return [];
       }
@@ -410,8 +430,24 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/dotfiles/:appName",
-    async ({ params, request, set }) => {
+    async ({ params, request, set, store }) => {
       const form = await request.formData();
+      // LAMA-234: a device key may only upload dotfiles for its own host —
+      // the hostId form field must match its binding (absent hostId would
+      // default to the global manifest, which a device must never do).
+      const principal = principalOf(store);
+      if (principal?.kind === "device") {
+        const hostIdRaw = form.get("hostId");
+        if (typeof hostIdRaw !== "string" || !deviceMayAccessHost(principal, hostIdRaw)) {
+          set.status = 403;
+          return { error: "Forbidden" };
+        }
+        const uploaderRaw = form.get("uploaderHostId");
+        if (typeof uploaderRaw === "string" && uploaderRaw.length > 0 && !deviceMayAccessHost(principal, uploaderRaw)) {
+          set.status = 403;
+          return { error: "Forbidden" };
+        }
+      }
       const hostIdRaw = form.get("hostId");
       const hostId =
         typeof hostIdRaw === "string" && hostIdRaw.length > 0 ? hostIdRaw : GLOBAL_HOST_ID;

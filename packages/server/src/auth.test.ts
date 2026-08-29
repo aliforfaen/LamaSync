@@ -54,6 +54,14 @@ beforeEach(() => {
       keyId: store.principal?.keyId ?? null,
       hostId: store.principal?.hostId ?? null,
     }))
+    // Device-allowlisted echo route (mirrors GET /api/v1/health) so device
+    // principals can prove the principal attached to their allowed calls.
+    .get("/api/v1/health", ({ store }) => ({
+      kind: store.principal?.kind ?? null,
+      keyId: store.principal?.keyId ?? null,
+      hostId: store.principal?.hostId ?? null,
+    }))
+    .get("/api/v1/backends", () => ({ ok: true }))
     .get("/api/v1/pairing/exempt/exchange", () => ({ ok: true }));
 });
 
@@ -74,10 +82,14 @@ function req(path: string, init: RequestInit = {}): Request {
   return new Request(`http://localhost${path}`, { ...init, headers });
 }
 
-async function probeWith(token: string | null): Promise<Record<string, unknown>> {
+async function requestWith(token: string | null, path: string): Promise<Response> {
   const headers = new Headers();
   if (token !== null) headers.set("Authorization", `Bearer ${token}`);
-  const res = await app.handle(req("/api/v1/probe", { headers }));
+  return app.handle(req(path, { headers }));
+}
+
+async function probeWith(token: string | null, path = "/api/v1/probe"): Promise<Record<string, unknown>> {
+  const res = await requestWith(token, path);
   expect(res.status).toBe(200);
   return (await res.json()) as Record<string, unknown>;
 }
@@ -151,6 +163,7 @@ describe("route middleware", () => {
   });
 
   test("each credential type attaches the right principal", async () => {
+    // master + admin reach any route (probe is not device-allowlisted)
     expect(await probeWith(TEST_API_KEY)).toEqual({ kind: "master", keyId: null, hostId: null });
 
     const admin = insertManagedApiKey({ name: "ops", kind: "admin", hostId: null });
@@ -158,11 +171,24 @@ describe("route middleware", () => {
     expect(adminBody.kind).toBe("admin");
     expect(adminBody.keyId).toBe(admin.row.id);
 
+    // device keys are confined to their allowlisted routes — via /health
+    // they see their principal attached; via /probe and /backends they get 403.
     const device = insertManagedApiKey({ name: "cachy", kind: "device", hostId: "host-7" });
-    const deviceBody = await probeWith(device.token);
-    expect(deviceBody.kind).toBe("device");
-    expect(deviceBody.hostId).toBe("host-7");
-    expect(deviceBody.keyId).toBe(device.row.id);
+    const healthBody = await probeWith(device.token, "/api/v1/health");
+    expect(healthBody.kind).toBe("device");
+    expect(healthBody.hostId).toBe("host-7");
+    expect(healthBody.keyId).toBe(device.row.id);
+
+    expect((await requestWith(device.token, "/api/v1/probe")).status).toBe(403);
+    expect((await requestWith(device.token, "/api/v1/backends")).status).toBe(403);
+  });
+
+  test("device keys get 403 on non-allowlisted admin routes and 401 when revoked", async () => {
+    const device = insertManagedApiKey({ name: "cachy", kind: "device", hostId: "host-7" });
+    expect((await requestWith(device.token, "/api/v1/hosts")).status).toBe(403);
+    expect((await requestWith(device.token, "/api/v1/folders")).status).toBe(403);
+    db.run("UPDATE api_keys SET revoked_at = ? WHERE id = ?", [Date.now(), device.row.id]);
+    expect((await requestWith(device.token, "/api/v1/health")).status).toBe(401);
   });
 
   test("pairing exchange endpoint stays auth-exempt", async () => {

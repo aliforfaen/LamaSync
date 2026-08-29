@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import type { OperationLog, OperationStatus } from "@lamasync/core";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
@@ -136,7 +137,13 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
 )
   .post(
     "/operations/acquire",
-    ({ body: { folderId, hostId }, set }) => {
+    ({ body: { folderId, hostId }, set, store }) => {
+      // LAMA-234: locks are host-bound; a device key may only lock as its
+      // own host.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const now = Date.now();
       const lock = activeDb
         .query<LockRow, [string]>(
@@ -190,7 +197,12 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .post(
     "/operations/heartbeat",
-    ({ body: { folderId, hostId, lockId }, set }) => {
+    ({ body: { folderId, hostId, lockId }, set, store }) => {
+      // LAMA-234: host-bound like acquire.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const lock = activeDb
         .query<LockRow, [string]>(
           `SELECT locked_by, locked_at, lock_ttl, lock_id
@@ -242,7 +254,12 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .post(
     "/operations/release",
-    ({ body: { folderId, hostId, status, lockId }, set }) => {
+    ({ body: { folderId, hostId, status, lockId }, set, store }) => {
+      // LAMA-234: host-bound like acquire/heartbeat.
+      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       const lock = activeDb
         .query<LockOwnerRow, [string]>(
           `SELECT locked_by, lock_id
@@ -298,14 +315,23 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .get(
     "/operations/locks",
-    () => {
+    ({ store }) => {
+      // LAMA-234: device keys see only their own host's locks (the daemon's
+      // stale-lock recovery filters client-side by lockedBy); master/admin
+      // see every lock.
+      const principal = principalOf(store);
+      const where =
+        principal?.kind === "device"
+          ? "WHERE locked_by = ?"
+          : "WHERE locked_by IS NOT NULL";
+      const args: string[] = principal?.kind === "device" && principal.hostId ? [principal.hostId] : [];
       const rows = activeDb
-        .query<ActiveLockRow, []>(
+        .query<ActiveLockRow, string[]>(
           `SELECT folder_id, locked_by, locked_at, lock_ttl
            FROM folder_locks
-           WHERE locked_by IS NOT NULL`,
+           ${where}`,
         )
-        .all();
+        .all(...args);
 
       return rows.map((row) => ({
         folderId: row.folder_id,

@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type { OperationStatus, WSEvent, OperationLog } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 import {
   __setDb as __setNotificationDb,
   emitNotification,
@@ -17,7 +18,7 @@ export function __setDb(next: Database): void {
 
 export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
   "/report",
-  ({ body, set }) => {
+  ({ body, set, store }) => {
     const {
       hostId,
       folderId,
@@ -41,6 +42,12 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       dotfileAppName?: string | null;
       dotfileDirection?: "upload" | "download" | null;
     };
+    // LAMA-234: operation reports are host-bound; a device key may only
+    // report operations for its own host.
+    if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      set.status = 403;
+      return { error: "Forbidden" };
+    }
     const ts = typeof timestamp === "number" ? timestamp : Date.now();
 
     const result = activeDb.run(

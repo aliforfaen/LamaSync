@@ -1,6 +1,7 @@
 // Unit tests for the /api/v1/restic routes.
 
 process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-test-data";
+process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "restic-test-key";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
@@ -10,6 +11,7 @@ import { Elysia } from "elysia";
 import { initDb } from "@lamasync/core";
 import type { Database } from "bun:sqlite";
 import { __resetNotificationStateForTests } from "../notifications.ts";
+import { getAuthPlugin } from "../auth.ts";
 import { __setDb, resticRoutes } from "./restic.ts";
 
 let db: Database;
@@ -17,6 +19,13 @@ let dataDir: string;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Like `new Request(url, init)` but carries the master-key bearer header. */
+function authRequest(url: string, init: RequestInit = {}): Request {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${process.env.LAMASYNC_API_KEY}`);
+  return new Request(url, { ...init, headers });
 }
 
 beforeEach(() => {
@@ -32,16 +41,16 @@ afterEach(() => {
 
 describe("resticRoutes", () => {
   test("GET /api/v1/restic/snapshots returns empty list by default", async () => {
-    const app = new Elysia().use(resticRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(resticRoutes);
     const res = await app.handle(
-      new Request("http://localhost/api/v1/restic/snapshots"),
+      authRequest("http://localhost/api/v1/restic/snapshots"),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
   });
 
   test("POST /api/v1/restic/snapshots records a snapshot", async () => {
-    const app = new Elysia().use(resticRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(resticRoutes);
     const body = {
       folderId: "folder-1",
       hostId: "host-1",
@@ -52,7 +61,7 @@ describe("resticRoutes", () => {
       tags: ["lamasync"],
     };
     const res = await app.handle(
-      new Request("http://localhost/api/v1/restic/snapshots", {
+      authRequest("http://localhost/api/v1/restic/snapshots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -65,7 +74,7 @@ describe("resticRoutes", () => {
     expect(created.paths).toEqual(["/tmp/a"]);
 
     const list = await app.handle(
-      new Request("http://localhost/api/v1/restic/snapshots?folderId=folder-1"),
+      authRequest("http://localhost/api/v1/restic/snapshots?folderId=folder-1"),
     );
     expect(list.status).toBe(200);
     const items = (await list.json()) as Array<Record<string, unknown>>;
@@ -74,9 +83,9 @@ describe("resticRoutes", () => {
   });
 
   test("POST /api/v1/restic/restore creates a restore job", async () => {
-    const app = new Elysia().use(resticRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(resticRoutes);
     const res = await app.handle(
-      new Request("http://localhost/api/v1/restic/restore", {
+      authRequest("http://localhost/api/v1/restic/restore", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -93,7 +102,7 @@ describe("resticRoutes", () => {
     expect(job.status).toBe("pending");
 
     const list = await app.handle(
-      new Request("http://localhost/api/v1/restic/restore?targetHostId=host-2"),
+      authRequest("http://localhost/api/v1/restic/restore?targetHostId=host-2"),
     );
     expect(list.status).toBe(200);
     const items = (await list.json()) as Array<Record<string, unknown>>;
@@ -102,11 +111,11 @@ describe("resticRoutes", () => {
   });
 
   test("restore completion and failure emit notifications", async () => {
-    const app = new Elysia().use(resticRoutes);
+    const app = new Elysia().use(getAuthPlugin()).use(resticRoutes);
 
     async function createJob(snapshotId: string): Promise<string> {
       const response = await app.handle(
-        new Request("http://localhost/api/v1/restic/restore", {
+        authRequest("http://localhost/api/v1/restic/restore", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -124,7 +133,7 @@ describe("resticRoutes", () => {
 
     const doneId = await createJob("done-snapshot");
     const done = await app.handle(
-      new Request(`http://localhost/api/v1/restic/restore/${doneId}/status`, {
+      authRequest(`http://localhost/api/v1/restic/restore/${doneId}/status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "done" }),
@@ -134,7 +143,7 @@ describe("resticRoutes", () => {
 
     const failedId = await createJob("failed-snapshot");
     const failed = await app.handle(
-      new Request(`http://localhost/api/v1/restic/restore/${failedId}/status`, {
+      authRequest(`http://localhost/api/v1/restic/restore/${failedId}/status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "failed", error: "disk full" }),

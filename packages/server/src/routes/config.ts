@@ -12,6 +12,7 @@ import type {
 } from "@lamasync/core";
 import { resolveFolderLocalConfig, resolveFolderResticConfig, resolveFolderS3Config } from "../backends.ts";
 import { effectiveFolderType } from "@lamasync/core";
+import { deviceMayAccessHost, principalOf } from "../auth.ts";
 
 // Test seam: allows unit tests to substitute the production DB. Production
 // code never calls this; the default `db` is the live one.
@@ -519,8 +520,14 @@ export function generateRcloneConfig(
 
 export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
   "/config/:hostId",
-  ({ params, set }) => {
+  ({ params, set, store }) => {
     const { hostId } = params;
+    // LAMA-234: a device key may only pull its own host's config (which
+    // embeds assignment details, peers, and dotfile manifests).
+    if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      set.status = 403;
+      return { error: "Forbidden" };
+    }
     const host = activeDb
       .query<HostRow, [string]>(
         "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, config_revision FROM hosts WHERE id = ?",
