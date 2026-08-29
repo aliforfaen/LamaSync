@@ -8,6 +8,7 @@ import type {
 import { api } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { PairingModal } from "../components/PairingModal.tsx";
+import { AccessKeysPanel } from "../components/AccessKeysPanel.tsx";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SEVERITY_LEVELS: NotificationSeverity[] = ["critical", "default", "info"];
@@ -406,9 +407,12 @@ export function Admin() {
         </div>
         <p className="muted">
           Generate a short code a new device can scan or type to join the
-          fleet — no copying the API key.
+          fleet — no copying the API key. The exchange mints a device key
+          bound to that host (never the master key).
         </p>
       </section>
+
+      <AccessKeysPanel />
 
       <section className="section">
         <h2>Operation log retention</h2>

@@ -543,7 +543,7 @@ describe("register command helpers (LAMA-262)", () => {
     expect(helpers.friendlyPairingError(404, "")).toContain("not found");
     expect(helpers.friendlyPairingError(409, "already used")).toContain("already used");
     expect(helpers.friendlyPairingError(410, "expired")).toContain("expired");
-    expect(helpers.friendlyPairingError(503, "")).toContain("LAMASYNC_API_KEY");
+    expect(helpers.friendlyPairingError(503, "")).toContain("LAMASYNC_SECRET_KEY");
     expect(helpers.friendlyPairingError(500, "boom")).toContain("500");
   });
 

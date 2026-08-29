@@ -4,6 +4,11 @@
 
 import type {
   AppProfile,
+  ApiKeyCreateResponse,
+  ApiKeyRevealResponse,
+  ApiKeyRevokeResponse,
+  ApiKeySummary,
+  AuthMeResponse,
   Backend,
   BrowseResponse,
   Conflict,
@@ -286,6 +291,16 @@ async function browseDownloadBlob(ref: BrowseRef, name: string): Promise<Blob> {
 // Typed domain helpers.
 
 export const api = {
+  authMe: () => apiGet<AuthMeResponse>("/auth/me"),
+  listApiKeys: () => apiGet<ApiKeySummary[]>("/api-keys"),
+  createApiKey: (name: string) =>
+    apiPost<ApiKeyCreateResponse>("/api-keys", { name }),
+  revealApiKey: (id: string) =>
+    apiPost<ApiKeyRevealResponse>(`/api-keys/${encodeURIComponent(id)}/reveal`),
+  revokeApiKey: (id: string, reason?: string) =>
+    apiPost<ApiKeyRevokeResponse>(`/api-keys/${encodeURIComponent(id)}/revoke`, {
+      reason: reason ?? undefined,
+    }),
   health: () => apiGet<HealthResponse>("/health"),
   latestRelease: () => apiGet<ReleaseInfo>("/release/latest"),
   listHosts: () => apiGet<Host[]>("/hosts"),
