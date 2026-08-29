@@ -646,6 +646,32 @@ describe("AccessKeysView — principal-aware behavior", () => {
     expect(calls.createApiKey.length).toBe(1); // the POST itself already happened
   });
 
+  test("a self-closed panel unblocks the next action", async () => {
+    const { api } = makeFakeApi();
+    const opened: Array<{ id: string }> = [];
+    const { ctx } = makeViewCtx(api, opened);
+    const view = new AccessKeysView({ ctx });
+    view.onShow(ctx);
+    await flush();
+    await flush();
+
+    // Open create, run it through confirm (secret shown), acknowledge → the
+    // wizard closes ITSELF. The view must drop its stale handle afterwards.
+    view.handleKey(keyEvent("c", "c"));
+    const createWizard = wizardRegistry.get("access-keys-create") as CreateKeyWizardHandle;
+    createWizard.setLabel("Ops key");
+    createWizard.handleKey(ENTER); // confirm → secret
+    await flush();
+    createWizard.handleKey(ENTER); // ack → self-close
+    await flush();
+    await flush();
+    expect(view.secretSnapshot()).toBeNull();
+
+    // A subsequent action is no longer blocked by the stale handle.
+    view.handleKey(keyEvent("p", "p"));
+    expect(wizardRegistry.has("access-keys-pair")).toBe(true);
+  });
+
   test("pairing poller stops when the view hides", async () => {
     vi.useFakeTimers();
     const { api, calls } = makeFakeApi();

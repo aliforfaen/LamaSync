@@ -158,6 +158,9 @@ export interface CreateKeyWizardHandle extends Wizard {
 export function createCreateKeyWizard(deps: {
   ctx: ViewContext;
   afterCreate?: (key: ApiKeySummary) => void | Promise<void>;
+  /** Fired whenever the wizard closes (finish OR cancel) so the view can
+   *  drop its live panel handle. */
+  onClosed?: () => void;
 }): CreateKeyWizardHandle {
   const { ctx } = deps;
   const runner = new WizardRunner({
@@ -239,13 +242,16 @@ export function createCreateKeyWizard(deps: {
     id: runner.id,
     title: runner.title,
     container: (runner as unknown as { modal: Renderable }).modal,
+    mount: (host) => runner.setOverlayHost(host),
     handleKey: (e) => runner.handleKey(e),
     onCancel: () => {
       currentSecret = null;
       ctx.setStatus("Create cancelled", "info");
+      deps.onClosed?.();
     },
     onFinish: () => {
       currentSecret = null;
+      deps.onClosed?.();
     },
     clearSecret: () => {
       currentSecret = null;
@@ -271,6 +277,7 @@ export interface RevealKeyWizardHandle extends Wizard {
 export function createRevealKeyWizard(deps: {
   ctx: ViewContext;
   key: ApiKeySummary;
+  onClosed?: () => void;
 }): RevealKeyWizardHandle {
   const { ctx, key } = deps;
   const runner = new WizardRunner({
@@ -314,13 +321,16 @@ export function createRevealKeyWizard(deps: {
     id: runner.id,
     title: runner.title,
     container: (runner as unknown as { modal: Renderable }).modal,
+    mount: (host) => runner.setOverlayHost(host),
     handleKey: (e) => runner.handleKey(e),
     onCancel: () => {
       currentSecret = null;
       ctx.setStatus("Reveal cancelled", "info");
+      deps.onClosed?.();
     },
     onFinish: () => {
       currentSecret = null;
+      deps.onClosed?.();
     },
     clearSecret: () => {
       currentSecret = null;
@@ -398,6 +408,7 @@ export function createRevokeKeyWizard(deps: {
     id: runner.id,
     title: runner.title,
     container: (runner as unknown as { modal: Renderable }).modal,
+    mount: (host) => runner.setOverlayHost(host),
     handleKey: (e) => runner.handleKey(e),
     onCancel: () => {
       ctx.setStatus("Revoke cancelled", "info");
@@ -432,6 +443,7 @@ export interface PairDeviceWizardHandle extends Wizard {
 
 export function createPairDeviceWizard(deps: {
   ctx: ViewContext;
+  onClosed?: () => void;
 }): PairDeviceWizardHandle {
   const { ctx } = deps;
   const runner = new WizardRunner({
@@ -605,15 +617,18 @@ export function createPairDeviceWizard(deps: {
     id: runner.id,
     title: runner.title,
     container: (runner as unknown as { modal: Renderable }).modal,
+    mount: (host) => runner.setOverlayHost(host),
     handleKey: (e) => runner.handleKey(e),
     onCancel: () => {
       stopPolling();
       session = null;
       ctx.setStatus("Pairing cancelled", "info");
+      deps.onClosed?.();
     },
     onFinish: () => {
       stopPolling();
       session = null;
+      deps.onClosed?.();
     },
     stopPolling,
     currentCode: () => session?.code ?? null,
@@ -991,6 +1006,9 @@ export class AccessKeysView implements View {
     const loadAtOpen = this.loadId;
     const wizard = createCreateKeyWizard({
       ctx,
+      onClosed: () => {
+        if (this.secretPanel?.wizard === wizard) this.secretPanel = null;
+      },
       afterCreate: async (key) => {
         // Refresh the masked table before the secret is shown; a failed
         // refresh throws, which aborts the panel (view stays secret-free).
@@ -1009,7 +1027,13 @@ export class AccessKeysView implements View {
     const key = this.keyById(id);
     if (!ctx || !key) return;
     if (this.secretPanel || this.pairWizard) return;
-    const wizard = createRevealKeyWizard({ ctx, key });
+    const wizard = createRevealKeyWizard({
+      ctx,
+      key,
+      onClosed: () => {
+        if (this.secretPanel?.wizard === wizard) this.secretPanel = null;
+      },
+    });
     this.secretPanel = { wizard, clearSecret: wizard.clearSecret };
     ctx.openWizard(wizard);
   }
@@ -1035,7 +1059,12 @@ export class AccessKeysView implements View {
     const ctx = this.ctx;
     if (!ctx) return;
     if (this.secretPanel || this.pairWizard) return;
-    const wizard = createPairDeviceWizard({ ctx });
+    const wizard = createPairDeviceWizard({
+      ctx,
+      onClosed: () => {
+        if (this.pairWizard?.wizard === wizard) this.pairWizard = null;
+      },
+    });
     this.pairWizard = { wizard, stopPolling: wizard.stopPolling };
     ctx.openWizard(wizard);
   }

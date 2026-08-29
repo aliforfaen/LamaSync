@@ -147,7 +147,12 @@ export async function bootShell(): Promise<void> {
       // renderable to the runner so the modal is rendered above the
       // view containers. The Wizard's container is the modal itself.
       const layout = pendingShell?.getLayout();
-      if (layout && w.container) {
+      if (!layout) return;
+      // Flows expose `mount` to get setOverlayHost semantics (modal mount
+      // + first-step render); plain wizards fall back to a raw add.
+      if (w.mount) {
+        w.mount(layout);
+      } else {
         layout.add(w.container);
       }
     },
@@ -235,7 +240,10 @@ export async function bootShell(): Promise<void> {
         });
         openWizard(wizard);
         const layout = pendingShell?.getLayout();
-        if (layout && wizard.container) {
+        if (!layout) return;
+        if (wizard.mount) {
+          wizard.mount(layout);
+        } else {
           layout.add(wizard.container);
         }
       } catch (err) {

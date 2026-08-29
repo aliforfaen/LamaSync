@@ -42,6 +42,15 @@ export interface Wizard {
   readonly title: string;
   readonly container: Renderable;
   /**
+   * Optional live mount hook. The Shell calls it with the overlay host (the
+   * layout Box) instead of a raw `layout.add(container)`: it lets a
+   * `WizardRunner`-backed flow call `setOverlayHost(host)`, which mounts the
+   * modal AND renders the first step. Without it, a freshly-opened wizard
+   * keeps its initial (empty) paint until the first Enter arrives — the
+   * mounted step body would not exist yet to receive it.
+   */
+  readonly mount?: (host: Renderable) => void;
+  /**
    * Optional key router the Shell calls when a wizard is active. The runner
    * exposes its own `handleKey`; flows attach it so ESC cancels, q cancels,
    * and the focused widget (Select / Input) consumes Enter.
