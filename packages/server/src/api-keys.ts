@@ -38,7 +38,15 @@ export const LAST_USED_WRITE_WINDOW_MS = 5 * 60 * 1000;
 
 // ---------- test seam ----------------------------------------------------
 
-let activeDb: Database = defaultDb;
+// Deferred on purpose: reading `defaultDb` at module init can hit a TDZ when
+// bun test's shared graph evaluates api-keys.ts while db.ts is still being
+// initialized (db.ts eagerly calls getDb() at module scope). Resolve the
+// handle lazily on first use instead.
+let activeDb: Database | null = null;
+
+function currentDb(): Database {
+  return activeDb ?? defaultDb;
+}
 
 /** Test seam: point this module's DB functions at an in-memory DB. */
 export function __setApiKeysDb(next: Database): void {
@@ -180,12 +188,13 @@ export function insertManagedApiKey(opts: {
   if (opts.kind === "device" && typeof hostId !== "string") {
     throw new Error("device API keys require a hostId");
   }
-  activeDb.run(
+  const d = currentDb();
+  d.run(
     `INSERT INTO api_keys (id, name, kind, host_id, token_hash, token_enc, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [keyId, opts.name, opts.kind, hostId, hash, enc, now],
   );
-  const row = activeDb
+  const row = d
     .query<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?")
     .get(keyId)!;
   return { token, row };
@@ -200,7 +209,7 @@ export function insertManagedApiKey(opts: {
 export function findApiKeyByToken(token: string): ApiKeyRow | null {
   const parsed = parseApiKeyToken(token);
   if (!parsed) return null;
-  const row = activeDb
+  const row = currentDb()
     .query<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?")
     .get(parsed.keyId);
   if (!row) return null;
@@ -217,7 +226,8 @@ export function findApiKeyByToken(token: string): ApiKeyRow | null {
 export function touchApiKeyLastUsed(keyId: string, nowMs?: number): void {
   const now = nowMs ?? Date.now();
   try {
-    const row = activeDb
+    const d = currentDb();
+    const row = d
       .query<{ last_used_at: number | null }, [string]>(
         "SELECT last_used_at FROM api_keys WHERE id = ?",
       )
@@ -226,7 +236,7 @@ export function touchApiKeyLastUsed(keyId: string, nowMs?: number): void {
     if (row.last_used_at !== null && now - row.last_used_at < LAST_USED_WRITE_WINDOW_MS) {
       return;
     }
-    activeDb.run("UPDATE api_keys SET last_used_at = ? WHERE id = ?", [now, keyId]);
+    d.run("UPDATE api_keys SET last_used_at = ? WHERE id = ?", [now, keyId]);
   } catch {
     // never fail auth on bookkeeping
   }

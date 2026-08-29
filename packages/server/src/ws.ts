@@ -7,6 +7,15 @@
 import { Elysia } from "elysia";
 import type { ElysiaWS } from "elysia/ws";
 import type { WSEvent } from "@lamasync/core";
+import { resolvePrincipal } from "./auth.ts";
+
+// LAMA-234: WebSocket subscriptions require master or a managed admin key.
+// Device keys are rejected in v1 — the fleet stream is control-plane data.
+export function isWsSubscriptionAllowed(token: string | null | undefined): boolean {
+  const principal = resolvePrincipal(token);
+  if (!principal) return false;
+  return principal.kind === "master" || principal.kind === "admin";
+}
 
 type Subscriber = (event: WSEvent) => void;
 const subscribers = new Set<Subscriber>();
@@ -30,9 +39,7 @@ export function broadcast(event: WSEvent): void {
 }
 
 function isApiKeyValid(provided: string | undefined): boolean {
-  const expected = process.env.LAMASYNC_API_KEY;
-  if (!expected) return false;
-  return provided === expected;
+  return isWsSubscriptionAllowed(provided);
 }
 
 /**
