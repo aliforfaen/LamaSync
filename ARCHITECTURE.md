@@ -208,13 +208,38 @@ POST   /api/v1/admin/prune                     → manual operation_log prune
 WS     /api/v1/ws                              → live event stream (operations, mounts, locks)
 ```
 
-### Auth
+### Auth (LAMA-234: master / admin / device credentials)
 
-- Pre-shared API key in `LAMASYNC_API_KEY`.
-- Clients store it in `~/.config/lamasync/client.toml`.
-- All REST requests include `Authorization: Bearer <key>`.
-- WebSocket upgrades authenticate via `Sec-WebSocket-Protocol: lamasync-auth, <base64(key)>`.
-  The query-string `?apiKey=...` form is deprecated.
+Credentials resolve to one of three typed principals (`AuthPrincipal` in
+`core/src/types.ts`) on every request:
+
+- **master** — the pre-shared `LAMASYNC_API_KEY` env value. Super-admin,
+  never stored in SQLite, never returned by any route, never shown in the
+  UI. Existing clients keep working until they voluntarily re-pair.
+  Production rotation is an intentional deployment operation (change
+  `.env`, recreate, re-pair legacy clients), not an in-app button.
+- **admin** — a managed key (`api_keys` table) created via the Web UI /
+  `POST /api-keys`. Full admin surface, may manage other managed keys.
+  The raw secret is surfaced only at creation and by an explicit, audited
+  `POST /api-keys/:id/reveal`; it is stored as SHA-256 hash (auth) plus an
+  AES-256-GCM copy (reveal only) via `server/src/crypto.ts` — the legacy
+  plaintext fallback is never used for new keys.
+- **device** — minted by the pairing exchange, bound to exactly one host.
+  A route-level allowlist in `server/src/auth.ts` confines device keys to
+  their own control-plane calls (config, registration, reports, action
+  queue/completions, locks, conflicts, restic snapshots + restore jobs,
+  dotfile uploads, release checks, `/auth/me`); everything else is 403 at
+  the auth boundary. Host-bearing routes enforce ownership on top
+  (`deviceMayAccessHost` / `requireAdmin`).
+
+- REST: `Authorization: Bearer <key>`; `auth.ts` resolves once into the
+  principal and attaches it to the Elysia store.
+- WebSocket upgrades authenticate via `Sec-WebSocket-Protocol: lamasync-auth, <base64(key)>`;
+  only master/admin keys may subscribe to the fleet stream (v1). The
+  query-string `?apiKey=...` form is deprecated.
+- Revoked managed keys resolve to 401 exactly like a bad key.
+- Paired devices mint `lmsk.<keyId>.<secret>` tokens with the public keyId
+  embedded for O(1) lookup; `last_used_at` writes are rate-limited.
 - Tailnet provides transport encryption; the API key is a lightweight
   "you're allowed" check.
 

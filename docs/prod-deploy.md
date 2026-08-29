@@ -117,6 +117,22 @@ lifecycle messages from the legacy S3 drop, `gated DROP path fired`,
 `Database has closed` — needs attention; cross-reference the message in
 `docs/features.md` (LAMA-222, LAMA-226).
 
+## Managed API keys (LAMA-234)
+
+Production now supports managed `admin`/`device` keys alongside the master
+`LAMASYNC_API_KEY`:
+
+- Managed-key issuance (pairing, admin-key creation) needs a working
+  server-side secret key: `LAMASYNC_SECRET_KEY` (>= 16 chars) in
+  `/home/messhias/lamasync/.env`, or a writable `LAMASYNC_DATA_DIR` so the
+  server can persist `secret.key` (0600) on first use. If neither exists,
+  pairing / creation **fails closed** (no plaintext fallback for new keys).
+- The master key is never stored in the DB and never returned by any
+  route — rotation stays an env change + recreate (see Update procedure).
+- Paired devices get a unique host-bound device key; revoke + re-pair via
+  the Web Admin → Access keys when a device is replaced. Existing
+  master-key clients keep working until re-paired — no forced cut-over.
+
 ## Container introspection
 
 ```bash

@@ -43,6 +43,22 @@ by `packaging/install/install.sh`). On a daemon host that already runs
 The API key is **always masked** in any output:
 `lamasync_…xxxx` (first 8 + last 4 characters).
 
+## Credentials (LAMA-234)
+
+The server accepts three kinds of bearer credential:
+
+- **master** — `LAMASYNC_API_KEY` env value; super-admin, never stored or
+  shown.
+- **admin** — managed key created in the Web Admin → **Access keys** (or
+  `POST /api/v1/api-keys`); full management surface, may manage other keys.
+- **device** — minted by pairing (`lamasync register --code …`); bound to
+  one host, confined to that host's own daemon calls.
+
+Diagnose auth failures with the wire contract: `401` = missing / wrong /
+revoked key; `403` = valid key without authority for that route (device key
+on an admin route, or touching another host's rows). `GET /api/v1/auth/me`
+identifies the active credential.
+
 ## Safety — the six rules (summary)
 
 The full, verbatim contract lives in `reference/safety.md`. The rules are:

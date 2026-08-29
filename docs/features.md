@@ -19,6 +19,8 @@
 
 | Issue | Feature | Location |
 |-------|---------|----------|
+| LAMA-262 | Pair a device with a short code / QR — no API-key copy-paste; the exchange now mints a host-bound **device** key (LAMA-234): never the master key | `server/src/routes/pairing.ts`, `core/src/api-client.ts`, `tui/src/cli/register.ts`, `web-ui/src/components/PairingModal.tsx` |
+| LAMA-234 | Managed API keys: master / admin / device credentials, device-key route allowlist + per-host ownership, key lifecycle routes (`/api-keys`, `/auth/me`), pairing mints host-bound device keys, Admin Access keys UI | `core/src/{types.ts,db/schema.ts,api-client.ts}`, `server/src/{api-keys.ts,auth.ts,ws.ts,routes/{api-keys,pairing,hosts,config,report,actions,operations,conflicts,restic,dotfiles,folders}.ts}`, `web-ui/src/{api.ts,access-keys.ts,components/AccessKeysPanel.tsx,pages/Admin.tsx}`, `packages/agent-skill/reference/api.md` |
 | LAMA-114 | Bandwidth scheduling (`--bwlimit`) | `daemon/src/executor.ts`, `folders.ts` |
 | LAMA-116 | Disk-space pre-flight | `daemon/src/executor.ts` |
 | LAMA-117 | Operation-log retention | `server/src/routes/admin.ts`, `server/src/index.ts` |

@@ -3,6 +3,22 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Done — LAMA-234 managed API keys (2026-08-29)
+
+Shipped in 5 commits (e543274, d0708cb, 957407a, 27f55e3, 54814a1, 61186f2):
+managed key credential model (api_keys table, `lmsk.<keyId>.<secret>` tokens,
+AES-GCM reveal-only copies, fail-closed issuance), typed auth principals +
+route-level device allowlist + per-host ownership, key lifecycle routes
+(`/api-keys`, `/auth/me`), pairing mints host-bound device keys (never the
+master), Admin Access keys UI with masked table / create / reveal / revoke /
+migration panel. Gates: tsc clean, web build green, strict skill-drift OK,
+1086/1087 tests green (1 pre-existing env failure in
+`cli-fallback.test.ts`, reproduced on clean HEAD), live server smoke test
+passed (create/reveal/revoke → 401; pairing → device key; device 403s on
+admin routes + cross-host; own-host register/config 200). Production deploy
+deferred per plan (docs/prod-deploy.md updated with the LAMASYNC_SECRET_KEY
+requirement + recovery notes).
+
 ## Planned — LAMA-234 managed API keys (2026-08-29)
 
 Owner-approved implementation handoff: [managed API-key plan](handoff-234-api-key-management-plan.md).
