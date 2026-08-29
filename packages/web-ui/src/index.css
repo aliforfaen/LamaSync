@@ -691,6 +691,18 @@ button.action.theme-toggle {
 .preset-actions { display: flex; gap: var(--space-2); margin-top: auto; flex-wrap: wrap; }
 .preset-actions .action { text-align: center; }
 .preset-hint { margin-top: var(--space-3); }
+.preset-card { border-top: 3px solid var(--accent-info); }
+.preset-emoji { font-size: 1.25em; }
+.preset-toolbar { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); margin: var(--space-4) 0 var(--space-3); }
+.preset-toolbar h2 { margin: 0; }
+.preset-toolbar p { margin: 0.25rem 0 0; }
+.preset-toolbar-my { margin-top: var(--space-5); }
+.preset-empty { margin: 0 0 var(--space-3); }
+.profile-identity-fields { display: grid; grid-template-columns: minmax(0, 1fr) 7rem 5rem; gap: var(--space-2); }
+.profile-path-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); }
+@media (max-width: 760px) {
+  .preset-toolbar, .profile-identity-fields, .profile-path-grid { grid-template-columns: 1fr; flex-direction: column; align-items: stretch; }
+}
 /* LAMA-264: demo-mode banner + empty-fleet secondary CTA on the Dashboard. */
 .demo-banner {
   border-left: 3px solid var(--accent-info);

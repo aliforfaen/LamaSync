@@ -3,6 +3,7 @@
 // API key and the global fetch API. Imports types only from core.
 
 import type {
+  AppProfile,
   Backend,
   BrowseResponse,
   Conflict,
@@ -364,6 +365,16 @@ export const api = {
     apiPut<DotfileManifest>(`/dotfiles/manifests/${encodeURIComponent(id)}`, body),
   deleteManifest: (id: string) =>
     apiDelete(`/dotfiles/manifests/${encodeURIComponent(id)}`),
+  listAppProfiles: () => apiGet<AppProfile[]>("/app-profiles"),
+  createAppProfile: (
+    body: Omit<AppProfile, "id" | "createdAt" | "updatedAt">,
+  ) => apiPost<AppProfile>("/app-profiles", body),
+  updateAppProfile: (
+    id: string,
+    body: Partial<Omit<AppProfile, "id" | "createdAt" | "updatedAt">>,
+  ) => apiPut<AppProfile>(`/app-profiles/${encodeURIComponent(id)}`, body),
+  deleteAppProfile: (id: string) =>
+    apiDelete(`/app-profiles/${encodeURIComponent(id)}`),
   listDotfileVersions: (appName: string) =>
     apiGet<DotfileVersion[]>(
       `/dotfiles/${encodeURIComponent(appName)}`,

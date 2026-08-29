@@ -74,8 +74,23 @@ CREATE TABLE IF NOT EXISTS dotfile_manifests (
     last_sync_at  INTEGER,
     last_sync_direction TEXT,
     original_uploader_host_id TEXT,
+    profile_id    TEXT,
     demo                    INTEGER NOT NULL DEFAULT 0,
     UNIQUE(host_id, app_name)
+);
+
+CREATE TABLE IF NOT EXISTS app_profiles (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL UNIQUE,
+    description         TEXT,
+    emoji               TEXT,
+    color               TEXT,
+    paths               TEXT NOT NULL,
+    install_url         TEXT,
+    install_instructions TEXT,
+    restore_instructions TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS dotfile_versions (
@@ -377,6 +392,9 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE dotfile_manifests ADD COLUMN last_sync_at INTEGER",
   "ALTER TABLE dotfile_manifests ADD COLUMN last_sync_direction TEXT",
   "ALTER TABLE dotfile_manifests ADD COLUMN original_uploader_host_id TEXT",
+  "ALTER TABLE dotfile_manifests ADD COLUMN profile_id TEXT",
+  "CREATE TABLE IF NOT EXISTS app_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT, emoji TEXT, color TEXT, paths TEXT NOT NULL, install_url TEXT, install_instructions TEXT, restore_instructions TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_dotfile_manifests_profile_id ON dotfile_manifests(profile_id)",
   "ALTER TABLE hosts ADD COLUMN version TEXT",
   "ALTER TABLE hosts ADD COLUMN config_revision INTEGER DEFAULT 0",
   // LAMA-282: device OS label + storage used for the device cards.

@@ -1,5 +1,6 @@
 import type {
   Backend,
+  AppProfile,
   BrowseJob,
   BrowseResponse,
   Conflict,
@@ -394,6 +395,32 @@ export class LamaSyncApiClient {
   }
 
   // Dotfiles
+  listAppProfiles(): Promise<AppProfile[]> {
+    return this.request<AppProfile[]>("GET", "/api/v1/app-profiles");
+  }
+
+  createAppProfile(body: Omit<AppProfile, "id" | "createdAt" | "updatedAt">): Promise<AppProfile> {
+    return this.request<AppProfile>(
+      "POST",
+      "/api/v1/app-profiles",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  updateAppProfile(id: string, body: Partial<Omit<AppProfile, "id" | "createdAt" | "updatedAt">>): Promise<AppProfile> {
+    return this.request<AppProfile>(
+      "PUT",
+      `/api/v1/app-profiles/${encodeURIComponent(id)}`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  deleteAppProfile(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/app-profiles/${encodeURIComponent(id)}`);
+  }
+
   listDotfileManifests(hostId?: string): Promise<DotfileManifest[]> {
     const qs = hostId ? `?hostId=${encodeURIComponent(hostId)}` : "";
     return this.request<DotfileManifest[]>("GET", `/api/v1/dotfiles/manifests${qs}`);

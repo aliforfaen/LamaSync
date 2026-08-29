@@ -86,6 +86,10 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/dotfiles/manifests`                      | Create a manifest                                |
 | PUT      | `/dotfiles/manifests/:id`                  | Update a manifest                                |
 | DELETE   | `/dotfiles/manifests/:id`                  | Delete a manifest + cascade                      |
+| GET      | `/app-profiles`                            | List user-defined reusable app profiles          |
+| POST     | `/app-profiles`                            | Create a reusable app profile                    |
+| PUT      | `/app-profiles/:id`                         | Update a reusable app profile                    |
+| DELETE   | `/app-profiles/:id`                         | Delete a profile; linked manifests are preserved |
 | GET      | `/dotfiles?hostId=...`                     | List dotfile versions for a host                 |
 | GET      | `/dotfiles/:appName`                       | List versions of a dotfile app                   |
 | POST     | `/dotfiles/:appName`                       | Upload a new version (multipart `tarball`)       |

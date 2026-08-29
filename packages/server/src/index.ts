@@ -24,6 +24,7 @@ import { healthDrillRoutes } from "./routes/health-drill.ts";
 import { demoRoutes } from "./routes/demo.ts";
 import { pauseRoutes } from "./routes/pause.ts";
 import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts";
+import { appProfilesRoutes } from "./routes/app-profiles.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -131,6 +132,10 @@ const app = new Elysia()
             description:
               "LAMA-262 pairing-session endpoints — admin issues short codes, devices exchange them for the API key.",
           },
+          {
+            name: "App Profiles",
+            description: "User-defined reusable app-settings profiles",
+          },
         ],
         components: {
           securitySchemes: {
@@ -170,6 +175,7 @@ const app = new Elysia()
   .use(folderFileRoutes)
   .use(pauseRoutes)
   .use(pairingRoutes)
+  .use(appProfilesRoutes)
   .use(healthDrillRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {

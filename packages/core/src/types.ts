@@ -300,12 +300,34 @@ export interface DotfileManifest {
   hostId: string;
   appName: string;
   paths: string[];
+  /** Optional reusable app profile that generated this manifest. */
+  profileId?: string | null;
   excludes?: string[] | null;
   schedule?: string | null;
   instructions?: string | null;
   lastSyncAt?: number | null;
   lastSyncDirection?: "upload" | "download" | null;
   originalUploaderHostId?: string | null;
+}
+
+/** Reusable user-defined app-settings template. */
+export interface AppProfile {
+  id: string;
+  name: string;
+  description?: string | null;
+  emoji?: string | null;
+  color?: string | null;
+  /** Suggested appdata paths keyed by operating system. */
+  paths: {
+    linux?: string[];
+    macos?: string[];
+    windows?: string[];
+  };
+  installUrl?: string | null;
+  installInstructions?: string | null;
+  restoreInstructions?: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface DotfileVersion {
@@ -744,4 +766,3 @@ export interface PairingSessionExchangeResponse {
    *  issuer without changing the wire. */
   apiKey: string;
 }
-

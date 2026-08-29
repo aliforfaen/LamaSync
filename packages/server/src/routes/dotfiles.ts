@@ -35,6 +35,7 @@ interface ManifestRow {
   last_sync_at: number | null;
   last_sync_direction: string | null;
   original_uploader_host_id: string | null;
+  profile_id: string | null;
 }
 
 function rowToVersion(r: VersionRow): DotfileVersion {
@@ -69,6 +70,7 @@ function rowToManifest(r: ManifestRow): DotfileManifest {
     hostId: r.host_id,
     appName: r.app_name,
     paths,
+    profileId: r.profile_id,
     excludes,
     schedule: r.schedule,
     instructions: r.instructions,
@@ -112,6 +114,10 @@ function ensureManifest(appName: string, hostId: string): string | null {
   }
 }
 
+function appProfileExists(profileId: string): boolean {
+  return activeDb.query<{ id: string }, [string]>("SELECT id FROM app_profiles WHERE id = ?").get(profileId) !== null;
+}
+
 export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/dotfiles/manifests",
@@ -119,14 +125,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       const hostId = (query as { hostId?: string }).hostId;
       const globalRows = activeDb
         .query<ManifestRow, [string]>(
-          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE host_id = ?",
+          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id, profile_id FROM dotfile_manifests WHERE host_id = ?",
         )
         .all(GLOBAL_HOST_ID);
       const byApp = new Map(globalRows.map((r) => [r.app_name, r]));
       if (hostId && hostId !== GLOBAL_HOST_ID) {
         const hostRows = activeDb
           .query<ManifestRow, [string]>(
-            "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE host_id = ?",
+            "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id, profile_id FROM dotfile_manifests WHERE host_id = ?",
           )
           .all(hostId);
         for (const r of hostRows) {
@@ -156,10 +162,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       const id = crypto.randomUUID();
       const paths = parsePaths(body.paths);
       const excludes = parsePaths(body.excludes);
+      if (body.profileId && !appProfileExists(body.profileId)) {
+        set.status = 400;
+        return { error: "App profile not found" };
+      }
       try {
         activeDb.run(
-          "INSERT INTO dotfile_manifests (id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [id, hostId, body.appName, JSON.stringify(paths), JSON.stringify(excludes), body.schedule ?? null, body.instructions ?? null, null, null, null],
+          "INSERT INTO dotfile_manifests (id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id, profile_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [id, hostId, body.appName, JSON.stringify(paths), JSON.stringify(excludes), body.schedule ?? null, body.instructions ?? null, null, null, null, body.profileId ?? null],
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -168,7 +178,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const row = activeDb
         .query<ManifestRow, [string]>(
-          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE id = ?",
+          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id, profile_id FROM dotfile_manifests WHERE id = ?",
         )
         .get(id);
       // LAMA-198: manifest creation changes the host's effective dotfile
@@ -189,6 +199,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         excludes: t.Optional(t.Union([t.Array(t.String()), t.String(), t.Null()])),
         schedule: t.Optional(t.Union([t.String(), t.Null()])),
         instructions: t.Optional(t.Union([t.String(), t.Null()])),
+        profileId: t.Optional(t.Union([t.String(), t.Null()])),
         hostId: t.Optional(t.String()),
       }),
       detail: {
@@ -237,6 +248,14 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         updates.push("instructions = ?");
         values.push(body.instructions ?? null);
       }
+      if ("profileId" in body) {
+        if (body.profileId && !appProfileExists(body.profileId)) {
+          set.status = 400;
+          return { error: "App profile not found" };
+        }
+        updates.push("profile_id = ?");
+        values.push(body.profileId ?? null);
+      }
       if (updates.length === 0) {
         set.status = 400;
         return { error: "No fields to update" };
@@ -253,7 +272,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const row = activeDb
         .query<ManifestRow, [string]>(
-          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id FROM dotfile_manifests WHERE id = ?",
+          "SELECT id, host_id, app_name, paths, excludes, schedule, instructions, last_sync_at, last_sync_direction, original_uploader_host_id, profile_id FROM dotfile_manifests WHERE id = ?",
         )
         .get(params.id);
       // LAMA-198: manifest update affects only the host this manifest
@@ -276,6 +295,7 @@ export const dotfilesRoutes = new Elysia({ prefix: "/api/v1" })
         excludes: t.Optional(t.Union([t.Array(t.String()), t.String(), t.Null()])),
         schedule: t.Optional(t.Union([t.String(), t.Null()])),
         instructions: t.Optional(t.Union([t.String(), t.Null()])),
+        profileId: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Update a dotfile manifest",

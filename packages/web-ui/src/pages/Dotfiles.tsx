@@ -1,9 +1,9 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
-import type { DotfileManifest, DotfileVersion, Host } from "@lamasync/core";
+import type { AppProfile, DotfileManifest, DotfileVersion, Host } from "@lamasync/core";
 import { api } from "../api.ts";
 import { HintText } from "../components/Hint.tsx";
-import { ConfirmDialog } from "../components/Modal.tsx";
+import { ConfirmDialog, Modal } from "../components/Modal.tsx";
 import { MISC_HINTS } from "../concepts.ts";
 // LAMA-267: shared presets (single source of truth for labels) and the
 // client-side "Next: …" sentence helper.
@@ -20,6 +20,16 @@ interface ManifestForm {
   schedulePreset: string;
   schedule: string;
   instructions: string;
+}
+
+interface SaveProfileDraft {
+  name: string;
+  description: string;
+  emoji: string;
+  color: string;
+  linuxPaths: string;
+  macosPaths: string;
+  windowsPaths: string;
 }
 
 const EMPTY_FORM: ManifestForm = {
@@ -80,6 +90,9 @@ export function Dotfiles() {
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [deletingManifestId, setDeletingManifestId] = useState<string | null>(null);
   const [deletingVersion, setDeletingVersion] = useState<{ appName: string; version: DotfileVersion } | null>(null);
+  const [profileSaveTarget, setProfileSaveTarget] = useState<DotfileManifest | null>(null);
+  const [profileSaveDraft, setProfileSaveDraft] = useState<SaveProfileDraft | null>(null);
+  const [profileSaveBusy, setProfileSaveBusy] = useState(false);
 
   async function refresh(currentScope: Scope, requestId: number) {
     // LAMA-225 P1-8: a request-counter guard ignores stale responses.
@@ -308,6 +321,64 @@ export function Dotfiles() {
     if (hostId === GLOBAL_HOST_ID) return "All devices";
     const host = hosts.find((h) => h.id === hostId);
     return host?.hostname ?? hostId;
+  }
+
+  function hostOs(hostId: string): keyof AppProfile["paths"] {
+    const host = hosts.find((item) => item.id === hostId);
+    const value = (host?.os ?? "").toLowerCase();
+    if (value.includes("darwin") || value.includes("mac")) return "macos";
+    if (value.includes("win")) return "windows";
+    return "linux";
+  }
+
+  function beginSaveAsProfile(manifest: DotfileManifest): void {
+    const os = hostOs(manifest.hostId);
+    const paths = manifest.paths.join("\n");
+    setProfileSaveTarget(manifest);
+    setProfileSaveDraft({
+      name: manifest.appName,
+      description: `Reusable profile for ${manifest.appName}.`,
+      emoji: "🧩",
+      color: "#5dd6c0",
+      linuxPaths: os === "linux" ? paths : "",
+      macosPaths: os === "macos" ? paths : "",
+      windowsPaths: os === "windows" ? paths : "",
+    });
+  }
+
+  async function saveAsProfile(): Promise<void> {
+    if (!profileSaveDraft || !profileSaveTarget) return;
+    const lines = (value: string): string[] => value.split("\n").map((path) => path.trim()).filter((path) => path.length > 0);
+    const payload: Omit<AppProfile, "id" | "createdAt" | "updatedAt"> = {
+      name: profileSaveDraft.name.trim(),
+      description: profileSaveDraft.description.trim() || null,
+      emoji: profileSaveDraft.emoji.trim() || null,
+      color: profileSaveDraft.color.trim() || null,
+      paths: {
+        linux: lines(profileSaveDraft.linuxPaths),
+        macos: lines(profileSaveDraft.macosPaths),
+        windows: lines(profileSaveDraft.windowsPaths),
+      },
+      installUrl: null,
+      installInstructions: null,
+      restoreInstructions: profileSaveTarget.instructions,
+    };
+    if (payload.name.length === 0 || Object.values(payload.paths).every((paths) => paths.length === 0)) {
+      setError("Give the profile a name and add at least one path.");
+      return;
+    }
+    setProfileSaveBusy(true);
+    setError(null);
+    try {
+      const created = await api.createAppProfile(payload);
+      await api.updateManifest(profileSaveTarget.id, { profileId: created.id });
+      setProfileSaveTarget(null);
+      setProfileSaveDraft(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProfileSaveBusy(false);
+    }
   }
 
   return (
@@ -591,6 +662,14 @@ export function Dotfiles() {
                       <button
                         type="button"
                         className="action"
+                        onClick={() => beginSaveAsProfile(m)}
+                        disabled={busy}
+                      >
+                        Save as profile
+                      </button>
+                      <button
+                        type="button"
+                        className="action"
                         onClick={() => beginEdit(m)}
                         disabled={busy}
                       >
@@ -694,6 +773,32 @@ export function Dotfiles() {
           onCancel={() => setDeletingVersion(null)}
         />
       )}
+
+      {profileSaveTarget && profileSaveDraft ? (
+        <Modal
+          title={`Save ${profileSaveTarget.appName} as a profile`}
+          onClose={() => { setProfileSaveTarget(null); setProfileSaveDraft(null); }}
+          footer={
+            <>
+              <button type="button" className="action" onClick={() => { setProfileSaveTarget(null); setProfileSaveDraft(null); }}>Cancel</button>
+              <button type="button" className="action primary" disabled={profileSaveBusy} onClick={() => void saveAsProfile()}>{profileSaveBusy ? "Saving…" : "Save profile"}</button>
+            </>
+          }
+        >
+          <p className="muted">Turn this backup into a reusable template. You can add paths for other operating systems later from App profiles.</p>
+          <label className="field"><span>Name</span><input value={profileSaveDraft.name} onChange={(e) => setProfileSaveDraft({ ...profileSaveDraft, name: e.target.value })} /></label>
+          <div className="profile-identity-fields">
+            <label className="field"><span>Emoji</span><input value={profileSaveDraft.emoji} maxLength={8} onChange={(e) => setProfileSaveDraft({ ...profileSaveDraft, emoji: e.target.value })} /></label>
+            <label className="field"><span>Color</span><input type="color" value={profileSaveDraft.color} onChange={(e) => setProfileSaveDraft({ ...profileSaveDraft, color: e.target.value })} /></label>
+          </div>
+          <label className="field"><span>Description</span><input value={profileSaveDraft.description} onChange={(e) => setProfileSaveDraft({ ...profileSaveDraft, description: e.target.value })} /></label>
+          <div className="profile-path-grid">
+            <label className="field"><span>Linux paths</span><textarea rows={4} value={profileSaveDraft.linuxPaths} onChange={(e) => setProfileSaveDraft({ ...profileSaveDraft, linuxPaths: e.target.value })} /></label>
+            <label className="field"><span>macOS paths</span><textarea rows={4} value={profileSaveDraft.macosPaths} onChange={(e) => setProfileSaveDraft({ ...profileSaveDraft, macosPaths: e.target.value })} /></label>
+            <label className="field"><span>Windows paths</span><textarea rows={4} value={profileSaveDraft.windowsPaths} onChange={(e) => setProfileSaveDraft({ ...profileSaveDraft, windowsPaths: e.target.value })} /></label>
+          </div>
+        </Modal>
+      ) : null}
     </div>
   );
 }

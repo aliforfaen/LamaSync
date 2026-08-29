@@ -82,6 +82,7 @@ interface ManifestRow {
   excludes: string | null;
   schedule: string | null;
   instructions: string | null;
+  profile_id: string | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
@@ -162,6 +163,7 @@ function rowToManifest(r: ManifestRow): DotfileManifest {
     hostId: r.host_id,
     appName: r.app_name,
     paths,
+    profileId: r.profile_id,
     excludes,
     schedule: r.schedule,
     instructions: r.instructions,
@@ -551,13 +553,13 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
 
     const globalManifestRows = activeDb
       .query<ManifestRow, []>(
-        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions
+        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions, profile_id
          FROM dotfile_manifests WHERE host_id = '_global'`,
       )
       .all();
     const hostManifestRows = activeDb
       .query<ManifestRow, [string]>(
-        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions
+        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions, profile_id
          FROM dotfile_manifests WHERE host_id = ?`,
       )
       .all(hostId);
