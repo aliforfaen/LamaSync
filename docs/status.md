@@ -3,6 +3,16 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Planned — LAMA-234 managed API keys (2026-08-29)
+
+Owner-approved implementation handoff: [managed API-key plan](handoff-234-api-key-management-plan.md).
+The design keeps `LAMASYNC_API_KEY` as a break-glass master credential while
+adding named, revocable `admin` and host-bound `device` keys. QR pairing will
+mint a device-specific key rather than distribute the master key. Web Admin is
+the v1 management surface; TUI work is intentionally deferred. Do not begin
+implementation without following the route-level device allowlist and secret
+reveal/audit requirements in the handoff.
+
 ## Endgame batch — CLI fallback, LAMA-260/262/274, polish run 3 (2026-08-26)
 
 All of `docs/handoff-product-finish-endgame.md` shipped via subagents.
