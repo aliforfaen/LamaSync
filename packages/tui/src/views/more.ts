@@ -40,6 +40,11 @@ const TOOLS: readonly MoreRow[] = [
     description: "adopt a repository — creates a synced git folder",
     value: "gh",
   },
+  {
+    name: "Access keys",
+    description: "manage API keys and pair devices",
+    value: "access-keys",
+  },
 ];
 
 function toRows(): MoreRow[] {
@@ -94,6 +99,11 @@ export class MoreView implements View {
   hotkeys(): ReadonlyArray<Hotkey> {
     return [
       { key: "g", label: "GitHub", run: () => this.ctx?.navigateTo?.("gh") },
+      {
+        key: "a",
+        label: "Access keys",
+        run: () => this.ctx?.navigateTo?.("access-keys"),
+      },
     ];
   }
 

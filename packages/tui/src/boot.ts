@@ -43,6 +43,7 @@ import { GhView } from "./views/gh-selector.ts";
 import { LocalView } from "./views/local.ts";
 import { LogsView } from "./views/logs.ts";
 import { MoreView } from "./views/more.ts";
+import { AccessKeysView } from "./views/access-keys.ts";
 
 /**
  * Compose the runtime, wire the six views through the Shell, and start the
@@ -169,6 +170,7 @@ export async function bootShell(): Promise<void> {
     new LogsView({ renderer }),
     new GhView({ ctx }),
     new MoreView({ ctx }),
+    new AccessKeysView({ ctx }),
   ];
 
   specs = views.map((view) => ({
@@ -179,9 +181,12 @@ export async function bootShell(): Promise<void> {
     ctx,
     // LAMA-276/D4: GitHub is an integration, not a core destination — it
     // hides from the tab bar and is opened from the More menu. Esc returns
-    // to More via the Shell's drill-in handling.
-    hiddenFromTabBar: view.id === "gh" ? true : undefined,
-    homeTab: view.id === "gh" ? "more" : undefined,
+    // to More via the Shell's drill-in handling. LAMA-234: the Access keys
+    // screen is the same drill-in pattern (hidden, home tab = More).
+    hiddenFromTabBar:
+      view.id === "gh" || view.id === "access-keys" ? true : undefined,
+    homeTab:
+      view.id === "gh" || view.id === "access-keys" ? "more" : undefined,
     // Relook (owner, 2026-08-23): tab bar uses the short label so six tabs
     // fit at 80 cols; the page heading + help keep the full approved name.
     tabLabel: view.id === "dotfiles" ? "Backups" : undefined,

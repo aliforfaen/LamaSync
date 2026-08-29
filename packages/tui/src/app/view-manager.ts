@@ -14,7 +14,7 @@ import type { Wizard } from "./wizard.ts";
  * `gh` is part of the union so the GhView stays a discoverable tab; slice J
  * owns the rest of the integration (menu retirement, wiring, removal).
  */
-export type ViewId = "local" | "fleet" | "dotfiles" | "conflicts" | "logs" | "gh" | "more";
+export type ViewId = "local" | "fleet" | "dotfiles" | "conflicts" | "logs" | "gh" | "more" | "access-keys";
 
 /**
  * API client, the local hostname, the daemon socket path, the OpenTUI
