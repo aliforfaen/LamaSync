@@ -3,6 +3,67 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Done — LAMA-234 TUI access-key management (2026-08-29)
+
+TUI completion of LAMA-234 shipped on `lama-234-tui-access-keys` on top of
+the security-boundary cherry-pick `ea3fc6d` (device assignment updates are
+mode-only; no device action enqueue/history; cross-host dotfile metadata
+closed). Commits: `7a3b9ac` (cherry-pick), `04774ed` (config-path fix),
+`a7e15f9` (helpers), `9fd6eea` (view), `392ef1e` (tests), `95c3e99`
+(wizard lifecycle).
+
+- **Access keys drill-in view** under More (hidden from the tab bar,
+  `homeTab: more`; six-tab layout intact at 80 cols). `a` opens it from
+  More; Esc returns to More.
+- **Credential-aware phases**: master/admin get the masked managed-key
+  table + create/pair/reveal/revoke/refresh; a `device` principal sees an
+  identity-only screen (kind, name, bound host id, explanation) and the
+  view never calls `/api-keys` (PTY-verified with a freshly minted device
+  key). 401/403 surfaces as an error phase, never an empty key list.
+- **Secret contract**: create/reveal secrets appear only in an explicit
+  acknowledged transient panel ("SAVE THIS NOW" + scrollback warning),
+  live in a private wizard closure, never in status/rows/logs/config or
+  thrown errors, and clear on close/cancel/hide/destroy/failed-refresh
+  (PTY-verified end-to-end). No clipboard integration.
+- **Pairing**: 10-minute single-use session, code + live countdown +
+  `lamasync register --server … --code …` command, 10s status polling;
+  used/expired states render and a fresh code is offered after expiry
+  (PTY-verified: exchanged a session from the server side and watched the
+  TUI flip to USED on the next poll). Poller stops on every exit path.
+- **Contextual footer**: only valid actions advertised (no Reveal/Revoke
+  on revoked rows or an empty table). Case-sensitive `r`/`R` keep reveal
+  vs refresh distinct under the case-insensitive global matcher.
+- **Shared client**: `LamaSyncApiClient.getAuthMe/listApiKeys/
+  createApiKey/revealApiKey/revokeApiKey` with focused path/body tests;
+  server `Cache-Control: no-store` preserved, no client cache/log layer.
+
+Bug fixes shipped along the way:
+- `cli-fallback.test.ts` failure root-caused as **test-env leakage**, not a
+  fallback regression: `api.ts` froze `CONFIG_PATH = join(homedir(), …)`
+  at module load while Bun caches `os.homedir()` process-wide, so a real
+  `~/.config/lamasync/client.toml` leaked into the HOME-isolated test.
+  `getConfigPath()` now resolves `$HOME` per call (homedir() fallback).
+- Wizards opened through the Shell never rendered their first step
+  (raw `layout.add(container)` skips the runner's first-paint); the
+  `Wizard` interface gained an optional `mount(host)` hook wired to
+  `setOverlayHost`, which mounts AND renders — also fixes the existing
+  pause dialog's blank first paint.
+- A wizard that closed itself left the view's live panel handle stale
+  (blocked all later actions until hide/show); flows now report
+  `onClosed` so the view drops its handle.
+
+Gates (all green): `tsc` clean; `bun run build:web-ui`; targeted client +
+helpers + view suites (plain and `LAMASYNC_TUI_TEST_VIEWS=1`); strict
+skill-drift OK (no route changed, so no new API docs were required);
+`bun test --reporter=dot` **1136 pass / 0 fail** (was 1 known failure);
+`bun run build`; live server smoke with disposable data + a non-production
+master key (health, /auth/me, create/reveal/revoke with `no-store`, then
+clean teardown). Real-PTY walkthrough via tmux at 80×24 and 60×20
+(document applies in `docs/dogfood-2026-08-23.md`): More → Access keys,
+create/reveal refresh + wizards + secret panels, pair code + countdown +
+USED flip, device-principal read-only screen, Tab/arrow/Enter tab bar.
+Not deployed to production.
+
 ## Done — LAMA-234 managed API keys (2026-08-29)
 
 Shipped in 5 commits (e543274, d0708cb, 957407a, 27f55e3, 54814a1, 61186f2):
