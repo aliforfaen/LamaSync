@@ -27,7 +27,7 @@ Three credential kinds (LAMA-234):
 |-----------|------------|-------|
 | `master`  | The `LAMASYNC_API_KEY` env value on the server. Never stored in SQLite, never returned by any route, never shown in the UI. | Full super-admin surface. Existing clients keep working until re-paired. |
 | `admin`   | A managed key created via `POST /api-keys` (or the Web UI). Secret shown once at creation; revealable later only via explicit `POST /api-keys/:id/reveal`. | Full admin surface incl. managing other managed keys. |
-| `device`  | Minted by the pairing exchange, bound to exactly one host. | Only that host's own control-plane calls — config, registration, heartbeat/reports, its own action queue/completions, locks, conflicts, restic snapshots + restore jobs, dotfile uploads, release checks, `/auth/me`. |
+| `device`  | Minted by the pairing exchange, bound to exactly one host. | Only that host's daemon calls — config, registration, heartbeat/reports, claiming and completing its action queue (never enqueueing), locks, conflicts, restic snapshots + restore jobs, dotfile uploads, release checks, `/auth/me`. Assignment PATCH is limited to that host's `mode` field. |
 
 - `401 Unauthorized`: missing, wrong, or revoked key — a device that was revoked gets 401 exactly like a bad key.
 - `403 Forbidden`: the key is valid but lacks authority for the route (device key hitting an admin route, or a device key touching another host's rows).
@@ -60,8 +60,8 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/hosts/:hostId`                           | Delete host + cascade                            |
 | POST     | `/report/health`                           | Host heartbeat                                   |
 | GET      | `/config/:hostId`                          | Bundled config (assignments + rclone section)    |
-| POST     | `/hosts/:hostId/actions`                   | Enqueue a control-plane action                   |
-| GET      | `/hosts/:hostId/actions`                   | Action history for the host                      |
+| POST     | `/hosts/:hostId/actions`                   | Enqueue a control-plane action (master/admin)   |
+| GET      | `/hosts/:hostId/actions`                   | Action history for the host (master/admin)      |
 | GET      | `/actions/pending`                         | Daemon poll: claim pending actions               |
 | GET      | `/actions/taken?hostId=...`                | Daemon boot-time reclaim: a host's taken actions |
 | POST     | `/actions/:id/complete`                    | Daemon ack: mark action done/failed              |
@@ -73,7 +73,7 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/folders/:id`                             | Delete folder + cascade assignments              |
 | POST     | `/folders/:id/assign`                      | Assign folder to a host                         |
 | GET      | `/folders/:id/assignments`                 | List assignments for a folder                    |
-| PATCH    | `/folders/:id/assign/:hostId`              | Update one assignment (role, schedule, ...)      |
+| PATCH    | `/folders/:id/assign/:hostId`              | Update one assignment (master/admin); device may change only its own `mode` |
 | DELETE   | `/folders/:id/assign/:hostId`              | Unassign                                         |
 | PUT      | `/assignments/:id`                         | Intentional 405 — assignments are addressed by folder+host; use `/folders/:folderId/assign/:hostId` |
 | PATCH    | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
@@ -101,7 +101,7 @@ All paths are under `/api/v1/` unless noted.
 | PUT      | `/app-profiles/:id`                         | Update a reusable app profile                    |
 | DELETE   | `/app-profiles/:id`                         | Delete a profile; linked manifests are preserved |
 | GET      | `/dotfiles?hostId=...`                     | List dotfile versions for a host                 |
-| GET      | `/dotfiles/:appName`                       | List versions of a dotfile app                   |
+| GET      | `/dotfiles/:appName`                       | List versions of a dotfile app (master/admin)   |
 | POST     | `/dotfiles/:appName`                       | Upload a new version (multipart `tarball`)       |
 | GET      | `/dotfiles/:appName/:version`              | Download a tarball                               |
 | DELETE   | `/dotfiles/:appName/:version`              | Delete a version (DB row + file)                 |

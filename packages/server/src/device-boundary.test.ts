@@ -13,6 +13,9 @@ import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
 
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "boundary-master-key-123456";
 process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "boundary-secret-key-123456";
+// Keep the dotfiles route on the same writable test path as dotfiles.test.ts
+// when Bun runs route suites in one process.
+process.env.LAMASYNC_BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR ?? "/tmp/lamasync-dotfiles-test";
 
 const { getAuthPlugin } = await import("./auth.ts");
 const { insertManagedApiKey, __setApiKeysDb, __resetApiKeysDb } = await import("./api-keys.ts");
@@ -23,6 +26,8 @@ const { __setDb: __setActionsDb, actionsRoutes } = await import("./routes/action
 const { __setDb: __setOpsDb, operationsRoutes } = await import("./routes/operations.ts");
 const { __setDb: __setConflictsDb, conflictsRoutes } = await import("./routes/conflicts.ts");
 const { __setDb: __setResticDb, resticRoutes } = await import("./routes/restic.ts");
+const { __setDb: __setFoldersDb, foldersRoutes } = await import("./routes/folders.ts");
+const { __setDb: __setDotfilesDb, dotfilesRoutes } = await import("./routes/dotfiles.ts");
 const { __setDb: __setConfigRevisionDb } = await import("./config-revision.ts");
 const { __setCachedLatestVersionForTests } = await import("./release-cache.ts");
 const { __resetNotificationStateForTests } = await import("./notifications.ts");
@@ -53,6 +58,8 @@ beforeEach(() => {
   __setOpsDb(db);
   __setConflictsDb(db);
   __setResticDb(db);
+  __setFoldersDb(db);
+  __setDotfilesDb(db);
   // Register/heartbeat bump config revisions; point that seam at this db
   // too so it never touches the default path or another file's closed db.
   __setConfigRevisionDb(db);
@@ -65,7 +72,27 @@ beforeEach(() => {
   seedRow("INSERT INTO hosts (id, hostname) VALUES ('host-b', 'host-b')", []);
   seedRow("INSERT INTO folders (id, name, type) VALUES ('f1', 'folder1', 'sync')", []);
   seedRow(
-    "INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, enabled) VALUES ('a1', 'f1', 'host-a', 'both', '/tmp/a', 1)",
+    "INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, enabled, pre_sync_cmd, post_sync_cmd, restic_repository, restic_password) VALUES ('a1', 'f1', 'host-a', 'both', '/tmp/a', 1, 'before-safe', 'after-safe', 'restic://safe', 'safe-password')",
+    [],
+  );
+  seedRow(
+    "INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, enabled) VALUES ('a2', 'f1', 'host-b', 'both', '/tmp/b', 1)",
+    [],
+  );
+  seedRow(
+    "INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('dot-a', 'host-a', 'shared-app', '[]')",
+    [],
+  );
+  seedRow(
+    "INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('dot-b', 'host-b', 'shared-app', '[]')",
+    [],
+  );
+  seedRow(
+    "INSERT INTO dotfile_versions (id, manifest_id, timestamp, tarball_path) VALUES ('version-a', 'dot-a', 1, 'dotfiles/shared-app/host-a.tar.gz')",
+    [],
+  );
+  seedRow(
+    "INSERT INTO dotfile_versions (id, manifest_id, timestamp, tarball_path) VALUES ('version-b', 'dot-b', 2, 'dotfiles/shared-app/host-b-secret.tar.gz')",
     [],
   );
 
@@ -102,7 +129,9 @@ beforeEach(() => {
     .use(actionsRoutes)
     .use(operationsRoutes)
     .use(conflictsRoutes)
-    .use(resticRoutes);
+    .use(resticRoutes)
+    .use(foldersRoutes)
+    .use(dotfilesRoutes);
 });
 
 afterEach(() => {
@@ -140,6 +169,14 @@ describe("own-host access works for device keys", () => {
 
   test("own queued action can be acked", async () => {
     expect(await statusOf(deviceA, "POST", "/api/v1/actions/act-a/complete", { status: "done" })).toBe(200);
+  });
+
+  test("may change only its own assignment mode", async () => {
+    expect(
+      await statusOf(deviceA, "PATCH", "/api/v1/folders/f1/assign/host-a", { mode: "mount" }),
+    ).toBe(200);
+    const row = db.query("SELECT mode FROM folder_assignments WHERE id = 'a1'").get() as { mode: string };
+    expect(row.mode).toBe("mount");
   });
 
   test("own-host restic restore job can be created and updated", async () => {
@@ -197,6 +234,72 @@ describe("cross-host access is forbidden for device keys", () => {
     expect(await statusOf(deviceA, "GET", "/api/v1/actions/pending?hostId=host-b")).toBe(403);
   });
 
+  test("cannot change another host's assignment mode", async () => {
+    expect(
+      await statusOf(deviceA, "PATCH", "/api/v1/folders/f1/assign/host-b", { mode: "mount" }),
+    ).toBe(403);
+  });
+
+  test("cannot use assignment PATCH to change hooks or other settings", async () => {
+    const attempts: Array<Record<string, unknown>> = [
+      { preSyncCmd: "malicious-before" },
+      { postSyncCmd: "malicious-after" },
+      { resticRepository: "restic://attacker", resticPassword: "attacker-password" },
+      { localPath: "/attacker/path" },
+      { enabled: false },
+      { cacheProfile: "minimal" },
+      { mode: "sync", unknown: "must-not-be-ignored" },
+      {},
+    ];
+    for (const body of attempts) {
+      expect(
+        await statusOf(deviceA, "PATCH", "/api/v1/folders/f1/assign/host-a", body),
+      ).toBe(403);
+    }
+    const row = db.query(
+      "SELECT mode, pre_sync_cmd, post_sync_cmd, restic_repository, restic_password, local_path, enabled, cache_profile FROM folder_assignments WHERE id = 'a1'",
+    ).get() as {
+      mode: string;
+      pre_sync_cmd: string;
+      post_sync_cmd: string;
+      restic_repository: string;
+      restic_password: string;
+      local_path: string;
+      enabled: number;
+      cache_profile: string | null;
+    };
+    expect(row).toEqual({
+      mode: "inherit",
+      pre_sync_cmd: "before-safe",
+      post_sync_cmd: "after-safe",
+      restic_repository: "restic://safe",
+      restic_password: "safe-password",
+      local_path: "/tmp/a",
+      enabled: 1,
+      cache_profile: null,
+    });
+  });
+
+  test("cannot enqueue actions or read action history", async () => {
+    expect(
+      await statusOf(deviceA, "POST", "/api/v1/hosts/host-a/actions", { type: "trigger_sync" }),
+    ).toBe(403);
+    expect(await statusOf(deviceA, "GET", "/api/v1/hosts/host-a/actions")).toBe(403);
+  });
+
+  test("cannot list same-app dotfile metadata from another host", async () => {
+    const appList = await app.handle(as(deviceA, "GET", "/api/v1/dotfiles/shared-app"));
+    expect(appList.status).toBe(403);
+    expect(await appList.json()).toEqual({ error: "Forbidden" });
+
+    const scoped = await app.handle(as(deviceA, "GET", "/api/v1/dotfiles?hostId=host-a"));
+    expect(scoped.status).toBe(200);
+    const versions = (await scoped.json()) as Array<{ id: string; tarballPath: string }>;
+    expect(versions.map(({ id, tarballPath }) => ({ id, tarballPath }))).toEqual([
+      { id: "version-a", tarballPath: "dotfiles/shared-app/host-a.tar.gz" },
+    ]);
+  });
+
   test("resource-ID rows owned by another host: action, conflict, restore job", async () => {
     expect(await statusOf(deviceA, "POST", "/api/v1/actions/act-b/complete", { status: "done" })).toBe(403);
     expect(await statusOf(deviceA, "POST", "/api/v1/conflicts/conf-b/resolve", { resolution: "remote" })).toBe(403);
@@ -249,6 +352,12 @@ describe("master and admin keys keep the full surface", () => {
         conflicts: [{ hostId: "host-b", folderId: "f1", path: "/admin-made" }],
       }),
     ).toBe(201);
+    expect(
+      await statusOf(MASTER, "POST", "/api/v1/hosts/host-a/actions", { type: "trigger_sync" }),
+    ).toBe(201);
+    const dotfiles = await app.handle(as(MASTER, "GET", "/api/v1/dotfiles/shared-app"));
+    expect(dotfiles.status).toBe(200);
+    expect((await dotfiles.json()) as Array<{ id: string }>).toHaveLength(2);
   });
 
   test("admin managed key also keeps the full surface", async () => {
@@ -263,5 +372,8 @@ describe("master and admin keys keep the full surface", () => {
     expect(await statusOf(token, "GET", "/api/v1/config/host-b")).toBe(200);
     expect(await statusOf(token, "GET", "/api/v1/hosts")).toBe(200);
     expect(await statusOf(token, "POST", "/api/v1/actions/act-b/complete", { status: "done" })).toBe(200);
+    expect(
+      await statusOf(token, "POST", "/api/v1/hosts/host-a/actions", { type: "trigger_sync" }),
+    ).toBe(201);
   });
 });

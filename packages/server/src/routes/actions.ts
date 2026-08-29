@@ -15,7 +15,7 @@ import {
   type WSEvent,
 } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
-import { deviceMayAccessHost, principalOf } from "../auth.ts";
+import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
 
 const ACTION_TYPES: QueuedActionType[] = [
   "trigger_sync",
@@ -114,9 +114,9 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         type: QueuedActionType;
         payload?: Record<string, unknown> | null;
       };
-      // LAMA-234: a device key may only enqueue actions for its own host
-      // (the daemon itself never enqueues; the web/TUI control plane does).
-      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+      // Enqueueing is a control-plane action. Daemons only claim and ack
+      // queued work, so a stolen device credential must never create work.
+      if (!requireAdmin({ principal: principalOf(store) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -376,8 +376,9 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/hosts/:hostId/actions",
     ({ params, query, store, set }) => {
-      // LAMA-234: a device key may only read its own host's action history.
-      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+      // Action history is a control-plane view. Daemons use /actions/pending
+      // and /actions/taken instead, so device credentials do not receive it.
+      if (!requireAdmin({ principal: principalOf(store) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }

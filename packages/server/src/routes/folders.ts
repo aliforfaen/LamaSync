@@ -881,11 +881,20 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .patch(
     "/folders/:id/assign/:hostId",
     ({ params, body, set, store }) => {
-      // LAMA-234: the daemon toggles its own mount⇄sync mode here — a
-      // device key may only touch its own host's assignment.
-      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+      // A daemon may toggle only its own mount⇄sync mode. This endpoint is
+      // otherwise a broad control-plane PATCH (including executable hooks),
+      // so device bodies must contain exactly `mode` and nothing else.
+      const principal = principalOf(store);
+      if (!deviceMayAccessHost(principal, params.hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
+      }
+      if (principal?.kind === "device") {
+        const fields = Object.keys(body);
+        if (fields.length !== 1 || fields[0] !== "mode") {
+          set.status = 403;
+          return { error: "Device keys may only update assignment mode" };
+        }
       }
       const b = body as {
         cacheProfile?: string | null;
@@ -1068,13 +1077,14 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         // a partial override as "no override".
         resticRepository: t.Optional(t.Union([t.String(), t.Null()])),
         resticPassword: t.Optional(t.Union([t.String(), t.Null()])),
-      }),
+      }, { additionalProperties: true }),
       detail: {
         summary: "Update an existing assignment",
         tags: ["Folders"],
         responses: {
           200: { description: "Assignment updated" },
           400: { description: "No fields to update" },
+          403: { description: "Device key attempted a non-mode assignment update" },
           404: { description: "Assignment not found" },
           401: { description: "Unauthorized" },
         },

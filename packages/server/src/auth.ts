@@ -56,8 +56,6 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   { method: "POST", pattern: "/api/v1/register" },
   { method: "GET", pattern: "/api/v1/hosts/*" },
   // own action queue + work-ack
-  { method: "POST", pattern: "/api/v1/hosts/*/actions" },
-  { method: "GET", pattern: "/api/v1/hosts/*/actions" },
   { method: "GET", pattern: "/api/v1/actions/pending" },
   { method: "GET", pattern: "/api/v1/actions/taken" },
   { method: "POST", pattern: "/api/v1/actions/*/complete" },
@@ -92,7 +90,8 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   // LAMA-234: identify the active credential (also lets a device-key-holding
   // browser degrade gracefully instead of 401ing on every admin call).
   { method: "GET", pattern: "/api/v1/auth/me" },
-  // LAN-peer assignment mode toggles (mount ⇄ sync, LAMA-238 era)
+  // LAN-peer assignment mode toggles (mount ⇄ sync, LAMA-238 era). The
+  // route admits device keys only for their bound host and a mode-only body.
   { method: "PATCH", pattern: "/api/v1/folders/*/assign/*" },
 ];
 
