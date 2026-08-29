@@ -18,11 +18,21 @@ truth, so what `/swagger/json` says is what the server actually enforces.
 Single header on every request:
 
 ```
-Authorization: Bearer <LAMASYNC_API_KEY>
+Authorization: Bearer <key>
 ```
 
-`401 Unauthorized` when missing or wrong. `403 Forbidden` is reserved for
-per-resource revocation (none today; do not invent it — safety rule 1).
+Three credential kinds (LAMA-234):
+
+| Kind      | What it is | Scope |
+|-----------|------------|-------|
+| `master`  | The `LAMASYNC_API_KEY` env value on the server. Never stored in SQLite, never returned by any route, never shown in the UI. | Full super-admin surface. Existing clients keep working until re-paired. |
+| `admin`   | A managed key created via `POST /api-keys` (or the Web UI). Secret shown once at creation; revealable later only via explicit `POST /api-keys/:id/reveal`. | Full admin surface incl. managing other managed keys. |
+| `device`  | Minted by the pairing exchange, bound to exactly one host. | Only that host's own control-plane calls — config, registration, heartbeat/reports, its own action queue/completions, locks, conflicts, restic snapshots + restore jobs, dotfile uploads, release checks, `/auth/me`. |
+
+- `401 Unauthorized`: missing, wrong, or revoked key — a device that was revoked gets 401 exactly like a bad key.
+- `403 Forbidden`: the key is valid but lacks authority for the route (device key hitting an admin route, or a device key touching another host's rows).
+- Identify the active credential with `GET /auth/me` (works for all three kinds).
+- Managed key secrets are encrypted at rest (AES-256-GCM); lists and normal reads return masked metadata only.
 
 ## Base URL
 
@@ -142,6 +152,11 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/conflicts`                               | List manual sync conflicts                       |
 | POST     | `/conflicts`                               | Bulk-create conflicts                            |
 | POST     | `/conflicts/:id/resolve`                   | Resolve conflict (local/remote/both)             |
+| GET      | `/api-keys`                                | (admin) list managed keys — masked metadata, never secrets (LAMA-234) |
+| POST     | `/api-keys`                                | (admin) create an `admin` key — `{ key, secret }`, secret returned once, `Cache-Control: no-store` (LAMA-234) |
+| POST     | `/api-keys/:id/reveal`                     | (admin) explicit reveal of a key's secret — audited, `no-store` (LAMA-234) |
+| POST     | `/api-keys/:id/revoke`                     | (admin) soft-revoke a key (optional `reason`); future requests from it return 401 (LAMA-234) |
+| GET      | `/auth/me`                                 | Identify the active credential — `{ kind: master\|admin\|device, keyId, hostId, name }` (LAMA-234) |
 | WS       | `/ws`                                      | Fleet event stream (subprotocol auth, LAMA-118)   |
 | GET      | `/swagger/json`                            | Live OpenAPI 3 spec                              |
 | GET      | `/swagger`                                 | Swagger UI                                       |

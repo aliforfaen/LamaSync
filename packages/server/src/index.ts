@@ -24,6 +24,7 @@ import { healthDrillRoutes } from "./routes/health-drill.ts";
 import { demoRoutes } from "./routes/demo.ts";
 import { pauseRoutes } from "./routes/pause.ts";
 import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts";
+import { apiKeysRoutes } from "./routes/api-keys.ts";
 import { appProfilesRoutes } from "./routes/app-profiles.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
@@ -175,6 +176,7 @@ const app = new Elysia()
   .use(folderFileRoutes)
   .use(pauseRoutes)
   .use(pairingRoutes)
+  .use(apiKeysRoutes)
   .use(appProfilesRoutes)
   .use(healthDrillRoutes)
   .onError(({ code, error, set }): ErrorResponse => {

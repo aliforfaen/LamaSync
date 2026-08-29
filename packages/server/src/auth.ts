@@ -89,6 +89,9 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   { method: "GET", pattern: "/api/v1/release/latest" },
   // health
   { method: "GET", pattern: "/api/v1/health" },
+  // LAMA-234: identify the active credential (also lets a device-key-holding
+  // browser degrade gracefully instead of 401ing on every admin call).
+  { method: "GET", pattern: "/api/v1/auth/me" },
   // LAN-peer assignment mode toggles (mount ⇄ sync, LAMA-238 era)
   { method: "PATCH", pattern: "/api/v1/folders/*/assign/*" },
 ];
