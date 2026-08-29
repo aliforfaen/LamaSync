@@ -125,7 +125,7 @@ function friendlyPairingError(status: number, body: string): string {
     case 410:
       return "pairing code expired — generate a new code in the web UI";
     case 503:
-      return "pairing exchange unavailable — server has no API key configured; set LAMASYNC_API_KEY on the server";
+      return "pairing exchange unavailable — server could not issue a device key (check LAMASYNC_SECRET_KEY / data directory)";
     default:
       return `pairing failed (status ${status}): ${body.trim()}`;
   }
@@ -192,7 +192,24 @@ export async function runRegister(ctx: CliContext): Promise<void> {
   }
   code = normalizeCode(code);
 
-  // 4-5. Build a client just for this flow and run lookup + exchange.
+  // 4. Derive the host identity BEFORE the exchange (LAMA-234): the
+  //    server binds the minted device key to this exact hostId, so the
+  //    same value must land in client.toml and every daemon call.
+  //    Prefer --hostname; fall back to $(hostname) so a vanilla
+  //    `lamasync register --code X --server URL` Just Works.
+  let host = (flagString(flags, "hostname") ?? "").trim();
+  if (host.length === 0) {
+    try {
+      host = osHostname();
+    } catch {
+      host = "";
+    }
+  }
+  if (host.length === 0) {
+    fail("register: failed to determine hostname — pass --hostname <name>", 1);
+  }
+
+  // 5-6. Build a client just for this flow and run lookup + exchange.
   //    We tolerate a 401 on the lookup (auth-protected; we don't have a
   //    key yet) and skip straight to the exchange — that's the whole
   //    point of the auth-exempt endpoint.
@@ -215,7 +232,10 @@ export async function runRegister(ctx: CliContext): Promise<void> {
 
     let apiKey: string;
     try {
-      const result = await client.exchangePairingSession(code);
+      const result = await client.exchangePairingSession(code, {
+        hostId: host,
+        hostname: host,
+      });
       apiKey = result.apiKey;
     } catch (exchangeErr) {
       const apiErr = exchangeErr as { status?: number; body?: string; message?: string };
@@ -242,20 +262,8 @@ export async function runRegister(ctx: CliContext): Promise<void> {
       fail(friendlyPairingError(status, body), code);
     }
 
-    // 6. Derive the hostname. Prefer --hostname; fall back to $(hostname)
-    //    so a vanilla `lamasync register --code X --server URL` Just Works.
-    let host = (flagString(flags, "hostname") ?? "").trim();
-    if (host.length === 0) {
-      try {
-        host = osHostname();
-      } catch {
-        host = "";
-      }
-    }
-    if (host.length === 0) {
-      fail("register: failed to determine hostname — pass --hostname <name>", 1);
-    }
-
+    // 7. Write the client.toml with the SAME host identity the key was
+    //    bound to.
     try {
       writeClientConfig(
         { serverUrl: target.serverUrl, apiKey, hostname: host },

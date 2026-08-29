@@ -13,17 +13,17 @@
 // time-limited. Without the right code the exchange endpoint refuses
 // with 404 / 409 / 410 depending on the row state.
 //
-// Key issuance model: today the exchange returns the server's
-// `LAMASYNC_API_KEY` env value (same pre-shared key every device gets).
-// This is honest given the current single-key auth model — the spec
-// acknowledges it in `reference/api.md`. A future per-device key table
-// can swap the source of `apiKeyForExchange()` without touching the
-// wire shape (`{ apiKey }` is stable).
+// Key issuance model (LAMA-234): the exchange now mints a managed `device`
+// key bound to the host identity the device submits — it NEVER returns the
+// server's `LAMASYNC_API_KEY`. Each paired device gets a unique, revocable
+// credential contained to that host. The wire shape (`{ apiKey }`) is
+// unchanged so registration clients keep working.
 
 import { Elysia, t } from "elysia";
 import { randomBytes } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
+import { insertManagedApiKeyInto } from "../api-keys.ts";
 import type {
   PairingSessionCreateResponse,
   PairingSessionExchangeResponse,
@@ -73,14 +73,9 @@ export function generatePairingCode(): string {
 /** Resolve the API key returned by a successful exchange. Today this is
  *  always the server's `LAMASYNC_API_KEY` env value (pre-shared). A
  *  future per-device rotation swaps the implementation here. */
-export function apiKeyForExchange(): string {
-  const k = process.env.LAMASYNC_API_KEY ?? "";
-  if (k.length === 0) {
-    throw new Error(
-      "pairing exchange: LAMASYNC_API_KEY is not set; the server cannot issue an API key",
-    );
-  }
-  return k;
+export function issuedDeviceKeyName(hostname: string, hostId: string): string {
+  const name = typeof hostname === "string" ? hostname.trim() : "";
+  return name.length > 0 ? name : hostId;
 }
 
 // ---------- DB row helpers ----------------------------------------------
@@ -308,11 +303,16 @@ export const pairingRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/pairing/:code/exchange",
-    ({ params, set }) => {
+    ({ params, body: { hostId, hostname }, set }) => {
       const code = normalizeCode(params.code);
       if (!isValidCodeShape(code)) {
         set.status = 400;
         return { error: "invalid pairing code shape; expected lama-XXXX-XXXX" };
+      }
+      const safeHostId = hostId.trim();
+      if (safeHostId.length === 0) {
+        set.status = 400;
+        return { error: "hostId is required" };
       }
       // Read first so we can return the right error code per state.
       // The actual claim happens via `claimSessionForExchange` which is
@@ -363,16 +363,28 @@ export const pairingRoutes = new Elysia({ prefix: "/api/v1" })
       }
       let apiKey: string;
       try {
-        apiKey = apiKeyForExchange();
+        // LAMA-234: mint a managed device key bound to the submitting
+        // host — never the master key. The name echoes the device's
+        // hostname so the Admin UI shows readable labels.
+        const issued = insertManagedApiKeyInto(activeDb, {
+          name: issuedDeviceKeyName(hostname, safeHostId),
+          kind: "device",
+          hostId: safeHostId,
+        });
+        apiKey = issued.token;
       } catch (err) {
-        // The server is misconfigured — refuse cleanly rather than
-        // leaving the code claimed and the device stuck. The row stays
-        // `used` (single-use contract holds) so a retry won't help
-        // until a fresh code is created.
+        // The server is misconfigured (secret key unavailable) — refuse
+        // cleanly rather than leaving the code claimed and the device
+        // stuck. The row stays `used` (single-use contract holds) so a
+        // retry won't help until a fresh code is created.
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[pairing] exchange refused: ${msg}`);
         set.status = 503;
-        return { error: "pairing exchange unavailable: server has no API key configured" };
+        return {
+          error:
+            "pairing exchange unavailable: could not issue a device key " +
+            "(check LAMASYNC_SECRET_KEY / data directory)",
+        };
       }
       const response: PairingSessionExchangeResponse = { apiKey };
       set.status = 200;
@@ -380,17 +392,21 @@ export const pairingRoutes = new Elysia({ prefix: "/api/v1" })
     },
     {
       params: t.Object({ code: t.String() }),
+      body: t.Object({
+        hostId: t.String(),
+        hostname: t.String(),
+      }),
       detail: {
         summary:
-          "Exchange a pending+unexpired pairing code for the API key (single-use). No bearer required — the code itself is the proof of intent. Today the returned key is the server's pre-shared `LAMASYNC_API_KEY`; a future per-device rotation will keep the wire shape stable.",
+          "Exchange a pending+unexpired pairing code for a host-bound device API key (single-use). No bearer required — the code itself is the proof of intent. LAMA-234: the returned key is a managed device key bound to the submitted hostId, never the master LAMASYNC_API_KEY.",
         tags: ["Pairing"],
         responses: {
-          200: { description: "Exchange succeeded; `apiKey` is the key to write into client.toml" },
-          400: { description: "Invalid code shape" },
+          200: { description: "Exchange succeeded; `apiKey` is the device key to write into client.toml" },
+          400: { description: "Invalid code shape or missing hostId/hostname" },
           404: { description: "Code not found" },
           409: { description: "Code already used or otherwise unavailable" },
           410: { description: "Code expired" },
-          503: { description: "Server misconfigured (no API key to issue)" },
+          503: { description: "Server misconfigured (could not issue a device key)" },
         },
       },
     },
@@ -399,7 +415,7 @@ export const pairingRoutes = new Elysia({ prefix: "/api/v1" })
 /** Re-exported for tests so they can drive the helper directly. */
 export const __pairingHelpersForTests = {
   generatePairingCode,
-  apiKeyForExchange,
+  issuedDeviceKeyName,
   createSessionRow,
   findSessionByCode,
   claimSessionForExchange,

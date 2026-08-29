@@ -124,7 +124,7 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/hosts/:hostId/pause`                    | Resume (clear the per-device pause) (LAMA-273)  |
 | POST     | `/pairing`                                | (admin) create a pairing session — `{ code, expiresInSeconds }`. Code is `LAMA-XXXX-XXXX` from an unambiguous alphabet (no 0/O/1/I/L). Default TTL 600s, optional `ttlSeconds` body field clamped to 30..3600 (LAMA-262) |
 | GET      | `/pairing/:code`                          | (admin) poll a session's status — `{ status: pending\|used\|expired, expiresAt }`. Never reveals the API key (LAMA-262) |
-| POST     | `/pairing/:code/exchange`                 | (no auth) exchange a pending+unexpired code for `{ apiKey }`. Single-use: second exchange returns 409, expired → 410. The returned key is the server's `LAMASYNC_API_KEY` today; a future per-device rotation will keep the wire shape stable (LAMA-262) |
+| POST     | `/pairing/:code/exchange`                 | (no auth, body `{ hostId, hostname }`) exchange a pending+unexpired code for `{ apiKey }` — a managed DEVICE key bound to the submitted hostId, never the master `LAMASYNC_API_KEY` (LAMA-234). Single-use: second exchange returns 409, expired → 410; missing body → 422 (LAMA-262) |
 | GET      | `/notifications`                           | Durable notification history                      |
 | GET      | `/notifications/channels`                  | List delivery channels                           |
 | POST     | `/notifications/channels`                  | Create channel                                   |
@@ -290,14 +290,14 @@ spec. The high-level shapes (verbose commentary):
   - **Exchange** (`POST /api/v1/pairing/:code/exchange`) — **deliberately
     auth-exempt** (see `auth.ts`'s `AUTH_EXEMPT_PATHS`): the device has
     no API key yet, so requiring the bearer would be a chicken/egg. The
-    code itself is the proof of intent. Single-use: 200 → `{ apiKey }`
-    on the first claim, 409 on any subsequent exchange, 410 on expired.
-    Today the returned key is the server's pre-shared `LAMASYNC_API_KEY`
-    env value. A future per-device key table can swap
-    `apiKeyForExchange()` without touching the wire (`{ apiKey }` is
-    stable). 503 if the server is misconfigured (no `LAMASYNC_API_KEY`
-    env value to issue) — the row stays `used` after a 503, so retry
-    with a fresh code.
+    code itself is the proof of intent; the body carries the device's
+    `{ hostId, hostname }`. Single-use: 200 → `{ apiKey }` on the first
+    claim, 409 on any subsequent exchange, 410 on expired. LAMA-234: the
+    issued key is a managed DEVICE key bound to `hostId` — never the
+    server's `LAMASYNC_API_KEY` — so a compromised device credential is
+    containable to that device. The row stays `used` after a failure,
+    so retry with a fresh code.
+    The `hostname` becomes the key's display name in the Admin UI.
   - Periodic sweep: `LAMASYNC_PAIRING_SWEEP_MS` (default 5 minutes; set
     to `0` to opt out) drops `expired` rows whose `expires_at` is older
     than 24h so the table doesn't grow without bound. The sweep is

@@ -5,8 +5,12 @@
 //     generatePairingCode shape, effectiveStatus projection,
 //     pruneExpiredPending idempotence, sweepExpiredPairingSessions
 //   - routes: create (admin auth required), lookup (admin), exchange
-//     (single-use, 409 on second; 410 on expired; 404 on missing; 503
-//     when LAMASYNC_API_KEY is unset), case-insensitive lookup
+//     (single-use, 409 on second; 410 on expired; 404 on missing; 400
+//     on missing host identity; 503 when a device key cannot be issued
+//     because the secret key is unavailable), case-insensitive lookup
+//   - LAMA-234: the exchange mints a host-bound DEVICE key — never the
+//     master key — and the code stays single-use even on issuance
+//     failure
 //   - schema: pairing_sessions table + index exist on a fresh DB
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -15,8 +19,16 @@ import { Elysia } from "elysia";
 import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
 
 const ORIGINAL_API_KEY = process.env.LAMASYNC_API_KEY;
+const ORIGINAL_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY;
+const ORIGINAL_DATA_DIR = process.env.LAMASYNC_DATA_DIR;
 process.env.LAMASYNC_API_KEY =
   process.env.LAMASYNC_API_KEY ?? "pairing-test-key-1234567890";
+// Device-key issuance needs a working AES-GCM key; without it the
+// exchange fails closed with 503.
+process.env.LAMASYNC_SECRET_KEY =
+  process.env.LAMASYNC_SECRET_KEY ?? "pairing-test-secret-1234567890";
+process.env.LAMASYNC_DATA_DIR =
+  process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-pairing-test";
 
 const { getAuthPlugin } = await import("../auth.ts");
 const {
@@ -58,6 +70,13 @@ function requestNoAuth(path: string, init: RequestInit = {}): Request {
 }
 
 beforeEach(() => {
+  // Re-set the crypto env every test: afterEach restores the outer env
+  // (possibly deleting the values above), so later crypto-using tests
+  // must re-pin them.
+  process.env.LAMASYNC_SECRET_KEY =
+    process.env.LAMASYNC_SECRET_KEY ?? "pairing-test-secret-1234567890";
+  process.env.LAMASYNC_DATA_DIR =
+    process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-pairing-test";
   db = new Database(":memory:");
   db.exec(SERVER_SCHEMA);
   for (const migration of MIGRATIONS) {
@@ -75,6 +94,10 @@ afterEach(() => {
   db.close();
   if (ORIGINAL_API_KEY === undefined) delete process.env.LAMASYNC_API_KEY;
   else process.env.LAMASYNC_API_KEY = ORIGINAL_API_KEY;
+  if (ORIGINAL_SECRET_KEY === undefined) delete process.env.LAMASYNC_SECRET_KEY;
+  else process.env.LAMASYNC_SECRET_KEY = ORIGINAL_SECRET_KEY;
+  if (ORIGINAL_DATA_DIR === undefined) delete process.env.LAMASYNC_DATA_DIR;
+  else process.env.LAMASYNC_DATA_DIR = ORIGINAL_DATA_DIR;
 });
 
 describe("pairing code alphabet", () => {
@@ -199,22 +222,41 @@ describe("create + lookup + exchange (LAMA-262)", () => {
     expect(missing.status).toBe(404);
   });
 
-  test("exchange succeeds once, returns the server API key, marks used", async () => {
+  test("exchange mints a host-bound device key (never the master), single-use", async () => {
     const created = await responseObject(
       await app.handle(request("/api/v1/pairing", { method: "POST", body: "{}" })),
     );
     const code = String(created["code"]);
     // The exchange endpoint does NOT require the bearer header.
     const exchange = await app.handle(
-      requestNoAuth(`/api/v1/pairing/${code}/exchange`, { method: "POST" }),
+      requestNoAuth(`/api/v1/pairing/${code}/exchange`, {
+        method: "POST",
+        body: JSON.stringify({ hostId: "pair-host", hostname: "pair-host" }),
+      }),
     );
     expect(exchange.status).toBe(200);
     const body = await responseObject(exchange);
-    expect(body["apiKey"]).toBe(process.env.LAMASYNC_API_KEY);
+    // LAMA-234: a managed device key, never the shared master key.
+    const apiKey = String(body["apiKey"]);
+    expect(apiKey.startsWith("lmsk.")).toBe(true);
+    expect(apiKey).not.toBe(process.env.LAMASYNC_API_KEY);
+    // The minted key is bound to the submitted host in api_keys.
+    const found = db
+      .query<{ kind: string; host_id: string | null; name: string }, [string]>(
+        "SELECT kind, host_id, name FROM api_keys WHERE id = ?",
+      )
+      .get(body["apiKey"]!.toString().split(".")[1]);
+    expect(found).not.toBeNull();
+    expect(found!.kind).toBe("device");
+    expect(found!.host_id).toBe("pair-host");
+    expect(found!.name).toBe("pair-host");
 
-    // Second exchange → 409 (already used).
+    // Second exchange → 409 (already used), even with a different host.
     const second = await app.handle(
-      requestNoAuth(`/api/v1/pairing/${code}/exchange`, { method: "POST" }),
+      requestNoAuth(`/api/v1/pairing/${code}/exchange`, {
+        method: "POST",
+        body: JSON.stringify({ hostId: "other-host", hostname: "other" }),
+      }),
     );
     expect(second.status).toBe(409);
     const secondBody = await responseObject(second);
@@ -223,6 +265,24 @@ describe("create + lookup + exchange (LAMA-262)", () => {
     // Lookup reflects the new state.
     const status = await responseObject(await app.handle(request(`/api/v1/pairing/${code}`)));
     expect(status["status"]).toBe("used");
+  });
+
+  test("exchange requires the device host identity in the body", async () => {
+    const created = await responseObject(
+      await app.handle(request("/api/v1/pairing", { method: "POST", body: "{}" })),
+    );
+    const code = String(created["code"]);
+    const noBody = await app.handle(
+      requestNoAuth(`/api/v1/pairing/${code}/exchange`, { method: "POST" }),
+    );
+    expect(noBody.status).toBe(422); // Elysia body validation failure
+    const emptyHost = await app.handle(
+      requestNoAuth(`/api/v1/pairing/${code}/exchange`, {
+        method: "POST",
+        body: JSON.stringify({ hostId: "", hostname: "x" }),
+      }),
+    );
+    expect(emptyHost.status).toBe(400);
   });
 
   test("exchange rejects expired sessions with 410 and flips them on read", async () => {
@@ -237,7 +297,10 @@ describe("create + lookup + exchange (LAMA-262)", () => {
     );
 
     const exchange = await app.handle(
-      requestNoAuth(`/api/v1/pairing/${code}/exchange`, { method: "POST" }),
+      requestNoAuth(`/api/v1/pairing/${code}/exchange`, {
+        method: "POST",
+        body: JSON.stringify({ hostId: "pair-host", hostname: "pair-host" }),
+      }),
     );
     expect(exchange.status).toBe(410);
 
@@ -247,43 +310,68 @@ describe("create + lookup + exchange (LAMA-262)", () => {
 
     // Expired rows are NOT claimable even by a fresh exchange.
     const exchange2 = await app.handle(
-      requestNoAuth(`/api/v1/pairing/${code}/exchange`, { method: "POST" }),
+      requestNoAuth(`/api/v1/pairing/${code}/exchange`, {
+        method: "POST",
+        body: JSON.stringify({ hostId: "pair-host", hostname: "pair-host" }),
+      }),
     );
     expect(exchange2.status).toBe(410);
   });
 
   test("exchange returns 404 for unknown codes", async () => {
     const exchange = await app.handle(
-      requestNoAuth("/api/v1/pairing/lama-ZZZZ-ZZZZ/exchange", { method: "POST" }),
+      requestNoAuth("/api/v1/pairing/lama-ZZZZ-ZZZZ/exchange", {
+        method: "POST",
+        body: JSON.stringify({ hostId: "x", hostname: "x" }),
+      }),
     );
     expect(exchange.status).toBe(404);
   });
 
   test("exchange rejects malformed codes with 400", async () => {
     const exchange = await app.handle(
-      requestNoAuth("/api/v1/pairing/not-a-code/exchange", { method: "POST" }),
+      requestNoAuth("/api/v1/pairing/not-a-code/exchange", {
+        method: "POST",
+        body: JSON.stringify({ hostId: "x", hostname: "x" }),
+      }),
     );
     expect(exchange.status).toBe(400);
   });
 
-  test("exchange returns 503 when LAMASYNC_API_KEY is unset (server misconfigured)", async () => {
+  test("exchange returns 503 when a device key cannot be issued (secret key unavailable), and the code stays single-use", async () => {
     const created = await responseObject(
       await app.handle(request("/api/v1/pairing", { method: "POST", body: "{}" })),
     );
     const code = String(created["code"]);
-    const savedKey = process.env.LAMASYNC_API_KEY;
+    const savedKey = process.env.LAMASYNC_SECRET_KEY;
+    const savedDir = process.env.LAMASYNC_DATA_DIR;
     try {
-      delete process.env.LAMASYNC_API_KEY;
-      // apiKeyForExchange reads process.env.LAMASYNC_API_KEY at call
-      // time, so unset → throws → 503. The row stays `used` so a
-      // second exchange returns 409 (the contract holds).
+      // Force insertManagedApiKeyInto's fail-closed path: no env secret
+      // key and a data dir that cannot be created.
+      delete process.env.LAMASYNC_SECRET_KEY;
+      process.env.LAMASYNC_DATA_DIR = "/dev/null/lamasync/none";
       const exchange = await app.handle(
-        requestNoAuth(`/api/v1/pairing/${code}/exchange`, { method: "POST" }),
+        requestNoAuth(`/api/v1/pairing/${code}/exchange`, {
+          method: "POST",
+          body: JSON.stringify({ hostId: "x", hostname: "x" }),
+        }),
       );
       expect(exchange.status).toBe(503);
     } finally {
-      process.env.LAMASYNC_API_KEY = savedKey;
+      if (savedKey === undefined) delete process.env.LAMASYNC_SECRET_KEY;
+      else process.env.LAMASYNC_SECRET_KEY = savedKey;
+      if (savedDir === undefined) delete process.env.LAMASYNC_DATA_DIR;
+      else process.env.LAMASYNC_DATA_DIR = savedDir;
     }
+    // The single-use contract holds even on a failed issuance: a retry
+    // with a working secret key still gets 409, not a second mint.
+    const retry = await app.handle(
+      requestNoAuth(`/api/v1/pairing/${code}/exchange`, {
+        method: "POST",
+        body: JSON.stringify({ hostId: "x", hostname: "x" }),
+      }),
+    );
+    expect(retry.status).toBe(409);
   });
 });
 

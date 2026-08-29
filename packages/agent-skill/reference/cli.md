@@ -502,7 +502,11 @@ Failure modes (exit codes):
 - `4` server unreachable (network / DNS / TLS)
 
 Wire contract (mirrors `reference/api.md`): the exchange endpoint is
-auth-exempt by design — the code itself proves intent. Single-use; the
+auth-exempt by design — the code itself proves intent. The body sends
+`{ hostId, hostname }` (hostId = the hostname that lands in
+`client.toml`); LAMA-234 binds the minted device key to exactly that
+host, so a `--hostname` mismatch later means the daemon gets 403/401
+until the operator re-pairs. Single-use; the
 second exchange returns 409 and the operator must mint a new code. The
 returned `apiKey` is the server's pre-shared `LAMASYNC_API_KEY` (the
 `--api-key` mask in any echo is `real-key…7890`-style).

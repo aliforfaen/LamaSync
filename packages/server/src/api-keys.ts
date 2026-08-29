@@ -162,16 +162,21 @@ export function apiKeyRowToSummary(row: ApiKeyRow): ApiKeySummary {
 }
 
 /**
- * Create a managed key row. Returns the full token (to hand the caller once)
- * plus the stored row. Throws when the secret key is unavailable so the
- * encrypted copy is never silently downgraded to plaintext.
+ * Create a managed key row in an EXPLICIT database (the pairing exchange
+ * writes into the pairing route's db handle, which is the same table).
+ * Returns the full token (to hand the caller once) plus the stored row.
+ * Throws when the secret key is unavailable so the encrypted copy is
+ * never silently downgraded to plaintext.
  */
-export function insertManagedApiKey(opts: {
-  name: string;
-  kind: ApiKeyKind;
-  hostId: string | null;
-  nowMs?: number;
-}): { token: string; row: ApiKeyRow } {
+export function insertManagedApiKeyInto(
+  d: Database,
+  opts: {
+    name: string;
+    kind: ApiKeyKind;
+    hostId: string | null;
+    nowMs?: number;
+  },
+): { token: string; row: ApiKeyRow } {
   const { token, keyId } = generateApiKeyToken();
   const parsed = parseApiKeyToken(token)!;
   const hash = hashTokenSecret(parsed.secret);
@@ -188,7 +193,6 @@ export function insertManagedApiKey(opts: {
   if (opts.kind === "device" && typeof hostId !== "string") {
     throw new Error("device API keys require a hostId");
   }
-  const d = currentDb();
   d.run(
     `INSERT INTO api_keys (id, name, kind, host_id, token_hash, token_enc, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -198,6 +202,16 @@ export function insertManagedApiKey(opts: {
     .query<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE id = ?")
     .get(keyId)!;
   return { token, row };
+}
+
+/** Create a managed key row on the module's active db (route default). */
+export function insertManagedApiKey(opts: {
+  name: string;
+  kind: ApiKeyKind;
+  hostId: string | null;
+  nowMs?: number;
+}): { token: string; row: ApiKeyRow } {
+  return insertManagedApiKeyInto(currentDb(), opts);
 }
 
 /**

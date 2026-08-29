@@ -20,6 +20,7 @@ import type {
   OperationReport,
   PairingSessionCreateResponse,
   PairingSessionExchangeResponse,
+  PairingSessionExchangeRequest,
   PairingSessionStatusResponse,
   PauseMode,
   PauseState,
@@ -925,11 +926,14 @@ export class LamaSyncApiClient {
     );
   }
 
-  exchangePairingSession(code: string): Promise<PairingSessionExchangeResponse> {
+  exchangePairingSession(
+    code: string,
+    hostIdentity?: PairingSessionExchangeRequest,
+  ): Promise<PairingSessionExchangeResponse> {
     return this.request<PairingSessionExchangeResponse>(
       "POST",
       `/api/v1/pairing/${encodeURIComponent(code)}/exchange`,
-      "",
+      hostIdentity === undefined ? "" : JSON.stringify(hostIdentity),
       "application/json",
     );
   }
