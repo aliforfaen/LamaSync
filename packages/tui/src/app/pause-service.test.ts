@@ -14,11 +14,13 @@ import {
 } from "./pause-service.ts";
 
 function makeState(): PauseState {
-  // Stable ISO one hour into the future — tests construct absolute `until`
-  // values, not `computeUntilMs` outputs, so the value itself doesn't drift.
+  // Keep the caption in a multi-day bucket so rapid sequential polls cannot
+  // cross a minute/hour boundary and turn this de-duplication test into a
+  // wall-clock race. Tests construct an absolute `until` value rather than
+  // relying on a timer or a `computeUntilMs` output.
   return {
     scope: "global",
-    until: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    until: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
     mode: "pause",
   };
 }
