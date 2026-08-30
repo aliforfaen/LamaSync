@@ -3,12 +3,12 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
-## Current release — v0.3.3 (2026-08-30)
+## Current release — v0.3.3 released (2026-08-30)
 
-The post-v0.3.2 product-finish and LAMA-234 work is now the v0.3.3 release
-candidate on `master`. The tag publishes the three binaries, the agent-skill
-bundle, and the GHCR server image through CI. Production deployment remains a
-separate operational verification step after CI succeeds.
+The post-v0.3.2 product-finish and LAMA-234 work is now released as v0.3.3.
+The tag CI passed check, build, release, and Docker publication, producing the
+three binaries, agent-skill bundle, and GHCR server image. Production
+deployment remains a separate operational verification step.
 
 ## Done — LAMA-234 TUI access-key management (2026-08-29)
 
