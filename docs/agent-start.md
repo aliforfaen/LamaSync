@@ -23,12 +23,12 @@ overhaul (LAMA-275, owner-approved D1–D5) are **done** — do not redo them.
 The feature batches, LAMA-234 managed keys, and TUI access-key work are
 shipped and audited green. The current work order is release verification:
 
-### A. v0.3.3 release verification
+### A. v0.3.4 release verification
 
-Confirm the tag CI produces the three binaries, agent-skill bundle, and GHCR
-image. Then update and health-check production using `docs/prod-deploy.md`.
-Do not claim production is updated until the live image and boot log are
-verified.
+The tag CI produced the three binaries, agent-skill bundle, GitHub release, and
+GHCR image. Production deployment remains separate: use
+`docs/prod-deploy.md` and do not claim production is updated until the live
+image and boot log are verified.
 
 ### B. Maintenance follow-ups
 

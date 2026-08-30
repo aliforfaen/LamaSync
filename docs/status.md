@@ -3,14 +3,14 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
-## Current release — v0.3.3 released (2026-08-30)
+## Current release — v0.3.4 released (2026-08-30)
 
-The post-v0.3.2 product-finish and LAMA-234 work is now released as v0.3.3.
-The tag CI passed check, build, release, and Docker publication, producing the
-three binaries, agent-skill bundle, and GHCR server image. Production
-deployment remains a separate operational verification step.
+The post-v0.3.3 LAMA-294 locking and backup-isolation fixes are now released as
+v0.3.4. The tag CI passed check, build, release, and Docker publication,
+producing the three binaries, agent-skill bundle, and GHCR server image.
+Production deployment remains a separate operational verification step.
 
-## LAMA-294 — host-scoped backups + canonical destination locking (phase 1+2)
+## LAMA-294 — host-scoped backups + canonical destination locking (phase 1–3)
 
 Fixes LAMA-292 (concurrent hosts backing up the same folder merged/starved,
 showed as `skipped: folder locked by …` **failed** rows). Commits:
@@ -22,9 +22,9 @@ the orphaned legacy-root handling on the same branch.
   folder id. `folder_locks` is re-keyed by `destination_key` (folder_id kept
   for diagnostics). Two assignments that write the *same physical destination*
   (or share a Restic repo) serialize; distinct prefixes under one backend run
-  concurrently. `POST /operations/acquire|heartbeat|release` accept an
-  optional `destinationKey` (omitted → `folder:<id>`, preserving legacy
-  per-folder serialization).
+  concurrently. The server derives the key from its folder/assignment state;
+  the request key is only a compatibility fallback for unmatched legacy
+  callers.
 - **Ordinary backups are host-scoped by default** to `<folder-name>/<host-id>`
   (new `FolderAssignment.destination`, separate from the connection alias
   `remoteName`). Same folder on different hosts now target distinct
@@ -36,10 +36,11 @@ the orphaned legacy-root handling on the same branch.
   skipping until the next cron. `deferred` is a real `OperationStatus` shown
   in the TUI logs filter, CLI ops status, and web activity sentence.
 - **rclone exit-code classification corrected** (0=success, 9=NoFilesTransferred
-  = success, 5=retryable, everything else non-retryable). Exit 9 no longer
-  renders as `failed (exit 9)` and is not retried; only transient failures
-  (exit 5 / timeout) retry. Missing paths, usage/syntax, no-retry, fatal and
-  quota codes surface as failed with scrubbed stderr + `exitCategory`.
+  = success, 5=retryable, bisync exit 1 retryable, everything else
+  non-retryable). Exit 9 no longer renders as `failed (exit 9)` and is not
+  retried; one-shot copy/backup failures with exit 1 remain failed. Missing
+  paths, usage/syntax, no-retry, fatal and quota codes surface as failed with
+  scrubbed stderr + `exitCategory`.
 
 **Migration / cleanup behavior (important)**
 
