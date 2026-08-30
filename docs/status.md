@@ -68,9 +68,11 @@ the orphaned legacy-root handling on the same branch.
   /api/v1/backups/legacy-root` (dry-run) reports the orphaned top-level
   children of each backup folder root — anything **not** a known host-scoped
   prefix — with size/item counts; `POST /api/v1/backups/legacy-root/prune`
-  (body `{confirm: true}`) prunes only those orphaned children. The CLI is
-  `lamasync backup legacy [--prune --yes]`. Host prefixes and the legacy root
-  are never deleted (the orphan set is recomputed fresh at prune time).
+  (body `{confirm: true}`) prunes only those orphaned children. Explicit
+  destinations overlapping the legacy root are protected too. The CLI is
+  `lamasync backup legacy [--prune --yes]`. Host prefixes, explicitly-used
+  prefixes, and the legacy root are never deleted (the orphan set is
+  recomputed fresh at prune time).
 - Do **not** point an explicit `destination` at the legacy shared root unless
   you intentionally want multiple hosts to share one namespace (that is then
   serialized by the canonical lock and reported as `deferred` on contention).

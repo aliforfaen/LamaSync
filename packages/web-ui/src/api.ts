@@ -326,6 +326,7 @@ export const api = {
       role: string;
       localPath: string;
       syncExpr?: string | null;
+      destination?: string | null;
       // LAMA-239: per-host mount/sync override (omit for "inherit").
       mode?: "inherit" | "sync" | "mount" | null;
     },
@@ -362,6 +363,7 @@ export const api = {
       role: string | null;
       localPath: string | null;
       bandwidthSchedule: string | null;
+      destination: string | null;
     }>,
   ) =>
     apiPatch<FolderAssignment>(

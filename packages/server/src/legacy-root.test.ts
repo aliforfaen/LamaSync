@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
-import { buildLegacyRootPlans } from "./legacy-root.ts";
+import { buildLegacyRootPlans, normalizeLegacyChildName } from "./legacy-root.ts";
 
 function makeDb(): Database {
   const db = new Database(":memory:");
@@ -39,6 +39,11 @@ function makeDb(): Database {
 }
 
 describe("buildLegacyRootPlans (LAMA-294)", () => {
+  test("normalizes lsf directory markers before host-prefix comparisons", () => {
+    expect(normalizeLegacyChildName("host-a/\n")).toBe("host-a");
+    expect(normalizeLegacyChildName("old-file")).toBe("old-file");
+  });
+
   test("plans S3, local and nfs backup folders with host prefixes", () => {
     const plans = buildLegacyRootPlans(makeDb());
     const byFolder = new Map(plans.map((p) => [p.folderId, p]));
@@ -88,5 +93,21 @@ describe("buildLegacyRootPlans (LAMA-294)", () => {
     db.run("UPDATE folders SET s3_bucket = NULL WHERE id = 'fb-s3'");
     const plans = buildLegacyRootPlans(db);
     expect(plans.map((p) => p.folderId)).not.toContain("fb-s3");
+  });
+
+  test("protects explicit destinations that overlap the legacy root", () => {
+    const db = makeDb();
+    db.run(
+      "UPDATE folder_assignments SET destination = 'photos/shared' WHERE folder_id = 'fb-s3' AND host_id = 'host-a'",
+    );
+    const plan = buildLegacyRootPlans(db).find((p) => p.folderId === "fb-s3");
+    expect(plan?.protectedChildren).toContain("shared");
+    expect(plan?.protectAllChildren).toBe(false);
+
+    db.run(
+      "UPDATE folder_assignments SET destination = 'photos' WHERE folder_id = 'fb-s3' AND host_id = 'host-a'",
+    );
+    const rootPlan = buildLegacyRootPlans(db).find((p) => p.folderId === "fb-s3");
+    expect(rootPlan?.protectAllChildren).toBe(true);
   });
 });

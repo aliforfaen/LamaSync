@@ -15,6 +15,7 @@
 // affected.
 
 import type { Database } from "bun:sqlite";
+import { normalizeDestination } from "@lamasync/core";
 import type { Folder } from "@lamasync/core";
 import { buildRcloneConfig } from "./browse-rclone.ts";
 import { withTempRcloneConfig } from "./temp-rclone-config.ts";
@@ -30,6 +31,10 @@ export interface LegacyRootPlan {
   remotePath: string;
   /** Top-level child names that are live host-scoped prefixes (kept). */
   hostPrefixes: string[];
+  /** Top-level children used by an explicit destination (also kept). */
+  protectedChildren: string[];
+  /** True when an assignment writes directly to the legacy root. */
+  protectAllChildren: boolean;
 }
 
 /** Normalize a path: strip leading/trailing slashes, collapse doubles. */
@@ -76,12 +81,36 @@ export function buildLegacyRootPlans(db: Database): LegacyRootPlan[] {
     }
 
     const assignments = db
-      .query<{ host_id: string }, [string]>(
-        "SELECT DISTINCT host_id FROM folder_assignments WHERE folder_id = ?",
+      .query<{ host_id: string; destination: string | null }, [string]>(
+        "SELECT host_id, destination FROM folder_assignments WHERE folder_id = ?",
       )
       .all(f.id);
     const hostPrefixes = assignments.map((a) => a.host_id).filter(Boolean);
     if (hostPrefixes.length === 0) continue;
+
+    const normalizedFolderName = normalizeDestination(f.name);
+    const protectedChildren = new Set<string>();
+    let protectAllChildren = false;
+    for (const assignment of assignments) {
+      const destination = normalizeDestination(
+        assignment.destination ?? `${f.name}/${assignment.host_id}`,
+      );
+      // If an existing row contains a malformed destination, the safe choice
+      // is to skip deletion for this root rather than guess which data is live.
+      if (destination === null || normalizedFolderName === null) {
+        protectAllChildren = true;
+        continue;
+      }
+      if (destination === normalizedFolderName) {
+        protectAllChildren = true;
+        continue;
+      }
+      const prefix = `${normalizedFolderName}/`;
+      if (destination.startsWith(prefix)) {
+        const child = destination.slice(prefix.length).split("/")[0];
+        if (child) protectedChildren.add(child);
+      }
+    }
 
     plans.push({
       folderId: f.id,
@@ -91,6 +120,8 @@ export function buildLegacyRootPlans(db: Database): LegacyRootPlan[] {
       sectionName,
       remotePath,
       hostPrefixes,
+      protectedChildren: Array.from(protectedChildren),
+      protectAllChildren,
     });
   }
   return plans;
@@ -147,6 +178,11 @@ async function runRclone(argv: string[]): Promise<{ stdout: string; stderr: stri
   return { stdout, stderr, code };
 }
 
+/** Convert one `rclone lsf` entry into a child name without its dir marker. */
+export function normalizeLegacyChildName(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
 /** List the immediate children (names) of a remote path; null when the path
  *  doesn't exist. */
 async function listChildren(plan: LegacyRootPlan, configPath: string): Promise<string[] | null> {
@@ -154,7 +190,13 @@ async function listChildren(plan: LegacyRootPlan, configPath: string): Promise<s
   const lsf = ["rclone", "lsf", `${plan.sectionName}:${plan.remotePath}`, "--config", configPath];
   const { stdout, code } = await runRclone(lsf);
   if (code !== 0) return null; // DirNotFound or other: no legacy root
-  return stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // `rclone lsf` marks directories with a trailing slash. Remove that marker
+  // before comparing against host IDs or constructing a purge target; without
+  // this, every live host prefix looks orphaned to the cleanup command.
+  return stdout
+    .split(/\r?\n/)
+    .map(normalizeLegacyChildName)
+    .filter(Boolean);
 }
 
 /** `rclone size --json` on a single path; returns null when missing. */
@@ -182,6 +224,7 @@ export interface OrphanEntry {
   sizeBytes: number;
   itemCount: number;
   isHostPrefix: boolean;
+  isProtected: boolean;
 }
 
 export interface LegacyRootReport {
@@ -209,9 +252,11 @@ export async function reportLegacyRoots(db: Database): Promise<LegacyRootReport[
       const children = await listChildren(plan, configPath);
       if (!children) return; // no legacy root → nothing orphaned
       const hostSet = new Set(plan.hostPrefixes);
+      const protectedSet = new Set(plan.protectedChildren);
       const orphaned: OrphanEntry[] = [];
       for (const name of children) {
         const isHostPrefix = hostSet.has(name);
+        const isProtected = plan.protectAllChildren || isHostPrefix || protectedSet.has(name);
         const size = await remoteSize(plan, name, configPath);
         orphaned.push({
           folderId: plan.folderId,
@@ -221,9 +266,10 @@ export async function reportLegacyRoots(db: Database): Promise<LegacyRootReport[
           sizeBytes: size?.bytes ?? 0,
           itemCount: size?.count ?? 0,
           isHostPrefix,
+          isProtected,
         });
       }
-      const orphanedBytes = orphaned.reduce((sum, e) => sum + (e.isHostPrefix ? 0 : e.sizeBytes), 0);
+      const orphanedBytes = orphaned.reduce((sum, e) => sum + (e.isProtected ? 0 : e.sizeBytes), 0);
       reports.push({
         folderId: plan.folderId,
         folderName: plan.folderName,
@@ -263,12 +309,13 @@ export async function pruneLegacyRoots(db: Database): Promise<PruneResult[]> {
     await withTempRcloneConfig(body, async (configPath) => {
       const children = await listChildren(plan, configPath);
       const hostSet = new Set(plan.hostPrefixes);
+      const protectedSet = new Set(plan.protectedChildren);
       const pruned: string[] = [];
       const skippedHostPrefixes: string[] = [];
       const errors: string[] = [];
       if (children) {
         for (const name of children) {
-          if (hostSet.has(name)) {
+          if (plan.protectAllChildren || hostSet.has(name) || protectedSet.has(name)) {
             skippedHostPrefixes.push(name);
             continue;
           }

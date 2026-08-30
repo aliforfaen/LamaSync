@@ -128,6 +128,7 @@ Usage: lamasync folders assign <folderId> [flags]
   --path <localPath>     absolute local path (required)
   --role <role>          source | target | both (default: both)
   --schedule <cron>      cron expression (optional)
+  --destination <path>   explicit remote prefix (optional; shared backup use)
   --enabled              mark the assignment enabled (default)
   --disabled             mark the assignment disabled
 ```
@@ -208,8 +209,8 @@ backups wrote directly to `<folder-name>/`; they now write to
 host prefix are orphaned.
 
 - Default (`--prune` omitted) is a **safe dry-run**: lists the legacy root,
-  and flags each top-level child as `legacy (orphaned)` or
-  `host-prefix (kept)`, with size + item count and a total orphaned byte
+  and flags each top-level child as `legacy (orphaned)`, `host-prefix (kept)`,
+  or `explicit destination (kept)`, with size + item count and a total orphaned byte
   count. No remote mutation.
 - `--prune --yes` deletes only the orphaned top-level children. Host-scoped
   prefixes and the legacy root itself are never touched (recomputed fresh at

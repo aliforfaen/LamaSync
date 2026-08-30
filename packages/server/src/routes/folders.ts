@@ -3,7 +3,7 @@ import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderSize, FolderType } from "@lamasync/core";
-import { normalizeAssignmentMode, resolveDestination } from "@lamasync/core";
+import { normalizeAssignmentMode, normalizeDestination, resolveDestination } from "@lamasync/core";
 import { getBackend } from "../backends.ts";
 import {
   bumpConfigRevision,
@@ -750,6 +750,21 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Host not found" };
       }
+      const normalizedDestination =
+        typeof b.destination === "string"
+          ? normalizeDestination(b.destination)
+          : null;
+      if (
+        b.destination !== undefined &&
+        b.destination !== null &&
+        b.destination.trim() !== "" &&
+        normalizedDestination === null
+      ) {
+        set.status = 400;
+        return {
+          error: "destination must be a non-empty relative path without '.' or '..' segments",
+        };
+      }
       const id = crypto.randomUUID();
       // LAMA-294: resolve the destination path/prefix, kept separate from the
       // connection alias (remoteName). Default is host-scoped for backups
@@ -759,7 +774,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         { id: folder.id, name: folder.name, type: folder.type as FolderType },
         {
           hostId: b.hostId,
-          destination: b.destination,
+          destination: normalizedDestination,
           resticRepository: b.resticRepository,
           resticPassword: b.resticPassword,
         },
@@ -931,6 +946,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         role?: string | null;
         localPath?: string | null;
         bandwidthSchedule?: string | null;
+        destination?: string | null;
         // LAMA-259 follow-up: per-host restic repository/password
         // override. null on the wire CLEARS the override (back to the
         // folder/backend default). Both fields must travel together —
@@ -941,6 +957,24 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       };
       const sets: string[] = [];
       const args: (string | number | null)[] = [];
+      if (b.destination !== undefined) {
+        const normalizedDestination =
+          typeof b.destination === "string"
+            ? normalizeDestination(b.destination)
+            : null;
+        if (
+          b.destination !== null &&
+          b.destination.trim() !== "" &&
+          normalizedDestination === null
+        ) {
+          set.status = 400;
+          return {
+            error: "destination must be a non-empty relative path without '.' or '..' segments",
+          };
+        }
+        sets.push("destination = ?");
+        args.push(normalizedDestination);
+      }
       if (b.cacheProfile !== undefined) {
         sets.push("cache_profile = ?");
         args.push(b.cacheProfile);
@@ -1089,6 +1123,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         role: t.Optional(t.Union([t.String(), t.Null()])),
         localPath: t.Optional(t.Union([t.String(), t.Null()])),
         bandwidthSchedule: t.Optional(t.Union([t.String(), t.Null()])),
+        destination: t.Optional(t.Union([t.String(), t.Null()])),
         // LAMA-259 follow-up: per-host restic override. null clears the
         // override (back to folder/backend defaults). Both fields
         // must travel together; resolveFolderResticConfigForHost treats

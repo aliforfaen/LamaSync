@@ -33,6 +33,7 @@ interface AssignForm {
   role: AssignRole;
   localPath: string;
   syncExpr: string;
+  destination: string;
 }
 
 /** Hint for a folder backend value (sftp has no glossary entry — the four
@@ -161,6 +162,7 @@ export function Folders() {
     role: "both",
     localPath: "",
     syncExpr: "",
+    destination: "",
   });
   // LAMA-198: transient "queued" note after a per-assignment Sync now.
   const [syncNote, setSyncNote] = useState<string | null>(null);
@@ -328,6 +330,7 @@ export function Folders() {
       role: "both",
       localPath: "",
       syncExpr: "",
+      destination: "",
     });
   }
 
@@ -352,6 +355,7 @@ export function Folders() {
         role: assignForm.role,
         localPath: assignForm.localPath.trim(),
         syncExpr: cron || null,
+        destination: assignForm.destination.trim() || null,
       });
       setAssigningFolder(null);
       await refresh();
@@ -623,6 +627,20 @@ export function Folders() {
                 onChange={(e) => setAssignForm({ ...assignForm, localPath: e.target.value })}
               />
             </label>
+            {assigningFolder.type === "backup" ? (
+              <label>
+                Remote prefix (optional)
+                <input
+                  placeholder={`${assigningFolder.name}/shared`}
+                  value={assignForm.destination}
+                  onChange={(e) => setAssignForm({ ...assignForm, destination: e.target.value })}
+                />
+                <HintText>
+                  Leave empty for this device&apos;s host-scoped backup path. Set a
+                  prefix only when sharing a backup namespace intentionally.
+                </HintText>
+              </label>
+            ) : null}
             <label>
               Schedule
               <select

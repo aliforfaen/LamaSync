@@ -160,6 +160,11 @@ describe("classifyRcloneExit (LAMA-294)", () => {
     expect(classifyRcloneExit(5)).toBe("retryable");
   });
 
+  test("bisync exit 1 is retryable but copy exit 1 is not", () => {
+    expect(classifyRcloneExit(1, "sync")).toBe("retryable");
+    expect(classifyRcloneExit(1, "backup")).toBe("non-retryable");
+  });
+
   test("missing paths, syntax, fatal, quota are non-retryable", () => {
     // DirNotFound, FileNotFound, UsageError, NoRetryError, FatalError,
     // TransferExceeded, DurationExceeded, Uncategorized.

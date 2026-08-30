@@ -24,4 +24,5 @@ export {
   canonicalDestinationKey,
   resolveDestination,
   defaultDestination,
+  normalizeDestination,
 } from "./destination.ts";

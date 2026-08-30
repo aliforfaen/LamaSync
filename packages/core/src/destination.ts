@@ -30,7 +30,7 @@ type FolderIdentity = Pick<Folder, "id" | "name" | "type"> & {
 };
 type AssignmentIdentity = Pick<
   FolderAssignment,
-  "hostId" | "destination" | "resticRepository" | "resticPassword"
+  "hostId" | "remoteName" | "destination" | "resticRepository" | "resticPassword"
 >;
 
 /** Join two path segments with a single "/", trimming empty segments. */
@@ -39,6 +39,24 @@ function joinPath(...parts: string[]): string {
     .map((p) => p.trim())
     .filter((p) => p.length > 0)
     .join("/");
+}
+
+/**
+ * Normalize a remote destination prefix into one canonical relative path.
+ * Backslashes are treated as separators so a Windows-authored assignment
+ * cannot create a second lock identity for the same remote path. Dot
+ * segments and absolute paths are rejected because a destination is a
+ * namespace/prefix, not an arbitrary filesystem escape hatch.
+ */
+export function normalizeDestination(value: string): string | null {
+  const raw = value.trim().replaceAll("\\", "/");
+  if (raw.length === 0) return null;
+  if (raw.startsWith("/")) return null;
+  const parts = raw.split("/").filter((part) => part.length > 0);
+  if (parts.length === 0 || parts.some((part) => part === "." || part === ".." || part.includes("\0"))) {
+    return null;
+  }
+  return parts.join("/");
 }
 
 /**
@@ -53,7 +71,14 @@ export function resolveDestination(
   assignment: AssignmentIdentity,
 ): string {
   const explicit = assignment.destination?.trim();
-  if (explicit && explicit.length > 0) return explicit;
+  if (explicit && explicit.length > 0) {
+    // Server-side assignment writes validate this before persistence. Throwing
+    // here makes a malformed legacy/config payload fail closed rather than
+    // silently targeting a different prefix.
+    const normalized = normalizeDestination(explicit);
+    if (normalized === null) throw new Error("invalid backup destination prefix");
+    return normalized;
+  }
   return defaultDestination(folder, assignment);
 }
 
@@ -69,12 +94,26 @@ export function defaultDestination(
 }
 
 /** Backend/bucket identity used to key a remote destination namespace. */
-function backendIdentity(folder: FolderIdentity): string {
+function backendIdentity(folder: FolderIdentity, assignment: AssignmentIdentity): string {
   // A reusable backend row is the most precise "same connection" identity:
-  // two folders referencing the same backendId share a connection, so their
-  // destinations can be compared by path alone.
+  // two folders referencing the same backendId share a connection. The S3
+  // bucket is still part of the namespace, so different buckets must not
+  // unnecessarily serialize each other.
   if (folder.backendId) {
-    return `${folder.backend ?? "remote"}:${folder.backendId}`;
+    const bucket = folder.backend === "s3" && folder.s3Bucket
+      ? `:bucket:${normalizeDestination(folder.s3Bucket) ?? folder.s3Bucket.trim()}`
+      : "";
+    return `${folder.backend ?? "remote"}:${folder.backendId}${bucket}`;
+  }
+  // Legacy SFTP and S3 folders keep the rclone connection alias on the
+  // assignment. Include it so equal paths on different remotes are not
+  // mistaken for the same physical destination.
+  const remoteName = assignment.remoteName?.trim();
+  if (remoteName) {
+    if (folder.backend === "s3" && folder.s3Bucket) {
+      return `s3:${remoteName}:bucket:${folder.s3Bucket.trim()}`;
+    }
+    return `${folder.backend ?? "remote"}:${remoteName}`;
   }
   // Legacy per-folder S3: the bucket namespaces the destination.
   if (folder.backend === "s3" && folder.s3Bucket) {
@@ -99,7 +138,8 @@ export function canonicalDestinationKey(
 ): string {
   // Restic repositories are their own serialization unit regardless of host.
   if (assignment.resticRepository) {
-    return `repo:${assignment.resticRepository}`;
+    const repo = assignment.resticRepository.trim().replace(/\/+$/, "") || "/";
+    return `repo:${repo}`;
   }
-  return joinPath(backendIdentity(folder), resolveDestination(folder, assignment));
+  return `${backendIdentity(folder, assignment)}:path:${resolveDestination(folder, assignment)}`;
 }

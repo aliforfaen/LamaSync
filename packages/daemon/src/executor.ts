@@ -96,7 +96,10 @@ const BISYNC_CORRUPTION_MARKERS = ["bisync aborted", "inconsistent state", "must
 // uncategorized (1), no-retry (6), fatal (7), or quota-exceeded (8/10).
 export type RcloneExitCategory = "success" | "no-transfer" | "retryable" | "non-retryable";
 
-export function classifyRcloneExit(code: number): RcloneExitCategory {
+export function classifyRcloneExit(
+  code: number,
+  folderType?: FolderType,
+): RcloneExitCategory {
   switch (code) {
     case 0:
       return "success";
@@ -104,6 +107,11 @@ export function classifyRcloneExit(code: number): RcloneExitCategory {
       return "no-transfer"; // everything succeeded but nothing was copied
     case 5:
       return "retryable"; // temporary error the operation may be retried
+    case 1:
+      // bisync documents exit 1 as a non-critical failing run where a rerun
+      // may succeed. For one-shot copy/mount operations, retain the stricter
+      // generic rclone classification and surface it as a real failure.
+      return folderType === "sync" ? "retryable" : "non-retryable";
     default:
       return "non-retryable";
   }
@@ -685,7 +693,7 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
       if ((runResult.exitCode === 0 || runResult.exitCode === 9) && !runResult.timedOut && !runResult.aborted) break;
       // Retry only transient failures (exit 5 / timeout). Missing paths,
       // auth/syntax, fatal and resync-required failures are NOT retried.
-      const exitCategory = classifyRcloneExit(runResult.exitCode);
+      const exitCategory = classifyRcloneExit(runResult.exitCode, folder.type);
       const retryable = !runResult.aborted && (exitCategory === "retryable" || runResult.timedOut);
       if (!retryable || attempt === maxAttempts) break;
       const delayMs = 30_000 * 2 ** (attempt - 1);
@@ -783,7 +791,7 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   const ok = !runResult.timedOut && !runResult.aborted && (runResult.exitCode === 0 || runResult.exitCode === 9);
   const status: OperationStatus = ok ? (isRecovery ? "recovery" : "success") : "failed";
   const summary = buildSummary(folder.type, runResult, start, postHookMs, dry);
-  const exitCategory = classifyRcloneExit(runResult.exitCode);
+  const exitCategory = classifyRcloneExit(runResult.exitCode, folder.type);
   return report(hostId, folder.id, folder.type, status, start, { summary, details: { rclone: runResult.stats, exitCode: runResult.exitCode, exitCategory, retryable: !ok && exitCategory === "retryable", timedOut: runResult.timedOut, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, wouldCopy: runResult.wouldCopy, wouldDelete: runResult.wouldDelete, wouldMkdir: runResult.wouldMkdir, lanPeer: lanPeer.detail } });
 }
 

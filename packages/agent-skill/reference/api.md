@@ -112,7 +112,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/operations/heartbeat`                    | Heartbeat an existing lock (`destinationKey` optional) |
 | POST     | `/operations/release`                      | Release lock (`destinationKey` optional)          |
 | GET      | `/backups/legacy-root`                     | Report orphaned legacy shared backup data under backup folder roots (dry-run, admin) — LAMA-294 |
-| POST     | `/backups/legacy-root/prune`               | Prune orphaned legacy backup data. Body `{confirm: true}` (required; admin). Never touches host-scoped prefixes — LAMA-294 |
+| POST     | `/backups/legacy-root/prune`               | Prune orphaned legacy backup data. Body `{confirm: true}` (required; admin). Never touches host-scoped or explicitly-used prefixes — LAMA-294 |
 | GET      | `/shares`                                  | List NFS / SMB shares                            |
 | POST     | `/admin/prune?olderThanMs=<ms>`            | Manually trim operation_log                      |
 | POST     | `/admin/export`                            | Archive operation_log rows older than cutoff to a gzip'd NDJSON file, then prune them (P-B cleanup #6) |
@@ -196,7 +196,7 @@ spec. The high-level shapes (verbose commentary):
 
 - `Host { id, hostname, tailnetIp?, lanIp?, lastSeen?, status, version?, updateAvailable?, configRevision? }`
 - `Folder { id, name, type, createdAt?, encrypted?, cryptPassword?, backend?, backendId?, s3Bucket?, gitProvider?, gitRemote? }`
-- `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, destination?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }` — `destination` (LAMA-294) is the explicit path/prefix on the remote, separate from the connection alias `remoteName`. Ordinary backups host-scope by default to `<folder-name>/<host-id>`; sync/mount stay shared (`<folder-name>`). The canonical destination key is the server-side lock identity.
+- `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, destination?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }` — `destination` (LAMA-294) is the explicit relative path/prefix on the remote, separate from the connection alias `remoteName`; `null`/omitted uses the default. Ordinary backups host-scope by default to `<folder-name>/<host-id>`; sync/mount stay shared (`<folder-name>`). The canonical destination key is the server-side lock identity.
 - `Backend { id, name, kind, s3Provider?, s3Endpoint?, s3Region?, s3AccessKeyId?, hasSecret?, s3SecretAccessKey? (write-only), localPath?, resticRepository?, hasResticPassword?, resticPassword? (write-only), createdAt, lastProveAt?, lastProveOk? }` — `lastProveAt`/`lastProveOk` are epoch ms + boolean; null/null means "never proven". LAMA-266
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details?, durationMs? }` — drill runs use `host_id = "_backup-health-drill"`, `operation = "backup_drill"`, `folder_id = NULL`. LAMA-266
 - `HealthDrill { id, backendId, kind: "prove"|"drill", ranAt, ok, detail? }` — one row per prove/drill run; `detail` is a scrubbed failure summary (never raw restic stderr and never secrets). LAMA-266

@@ -237,6 +237,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
             "--path <localPath>     absolute local path (required)",
             "--role <role>          source | target | both (default: both)",
             "--schedule <cron>      cron expression (optional)",
+            "--destination <path>   explicit remote prefix (optional; shared backup use)",
             "--enabled              mark the assignment enabled (default)",
             "--disabled             mark the assignment disabled",
           ],

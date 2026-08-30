@@ -2,7 +2,8 @@ import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
-import type { OperationLog, OperationStatus } from "@lamasync/core";
+import { canonicalDestinationKey } from "@lamasync/core";
+import type { FolderBackend, FolderType, OperationLog, OperationStatus } from "@lamasync/core";
 import { deviceMayAccessHost, principalOf } from "../auth.ts";
 
 const DEFAULT_LIMIT = 50;
@@ -48,6 +49,89 @@ interface OpRow {
   summary: string | null;
   details: string | null;
   duration_ms: number | null;
+}
+
+interface LockFolderRow {
+  id: string;
+  name: string;
+  type: FolderType;
+  backend: FolderBackend | null;
+  backend_id: string | null;
+  s3_bucket: string | null;
+}
+
+interface LockAssignmentRow {
+  host_id: string;
+  remote_name: string | null;
+  destination: string | null;
+  restic_repository: string | null;
+  restic_password: string | null;
+}
+
+interface LockResticBackendRow {
+  restic_repository: string | null;
+  restic_password: string | null;
+}
+
+function folderBackend(value: FolderBackend | null): FolderBackend {
+  return value === "s3" || value === "local" || value === "nfs" || value === "restic"
+    ? value
+    : "sftp";
+}
+
+/**
+ * Compute the lock identity from server-owned assignment/folder state. The
+ * optional client key remains accepted for legacy callers only when no
+ * matching assignment exists; an authenticated daemon must not be able to
+ * choose a second key for the same physical destination.
+ */
+function canonicalKeyForAcquire(
+  folderId: string,
+  hostId: string,
+  requestedKey: string | undefined,
+): string {
+  const folder = activeDb
+    .query<LockFolderRow, [string]>(
+      "SELECT id, name, type, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
+    )
+    .get(folderId);
+  const assignment = activeDb
+    .query<LockAssignmentRow, [string, string]>(
+      "SELECT host_id, remote_name, destination, restic_repository, restic_password FROM folder_assignments WHERE folder_id = ? AND host_id = ?",
+    )
+    .get(folderId, hostId);
+  if (folder && assignment) {
+    let repository = assignment.restic_repository;
+    let password = assignment.restic_password;
+    if (!repository && folder.backend === "restic" && folder.backend_id) {
+      const backend = activeDb
+        .query<LockResticBackendRow, [string]>(
+          "SELECT restic_repository, restic_password FROM backends WHERE id = ?",
+        )
+        .get(folder.backend_id);
+      repository = backend?.restic_repository ?? null;
+      password = backend?.restic_password ?? null;
+    }
+    return canonicalDestinationKey(
+      {
+        id: folder.id,
+        name: folder.name,
+        type: folder.type,
+        backend: folderBackend(folder.backend),
+        backendId: folder.backend_id,
+        s3Bucket: folder.s3_bucket,
+      },
+      {
+        hostId: assignment.host_id,
+        remoteName: assignment.remote_name,
+        destination: assignment.destination,
+        resticRepository: repository,
+        resticPassword: password,
+      },
+    );
+  }
+  const trimmed = requestedKey?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : `folder:${folderId}`;
 }
 
 function rowToLog(r: OpRow): OperationLog {
@@ -147,13 +231,11 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
         set.status = 403;
         return { error: "Forbidden" };
       }
-      // LAMA-294: the lock identity is the canonical destination/repository
-      // key, not the folder id. When the daemon omits it (legacy callers)
-      // we fall back to a `folder:<id>` identity so existing per-folder
-      // serialization is preserved.
-      const key = (destinationKey && destinationKey.trim().length > 0)
-        ? destinationKey
-        : `folder:${folderId}`;
+      // LAMA-294: derive the canonical identity from server-owned config.
+      // The request field is only a compatibility fallback for old callers
+      // that have no matching assignment row; it is never authoritative for
+      // a real daemon assignment.
+      const key = canonicalKeyForAcquire(folderId, hostId, destinationKey);
       const now = Date.now();
       const lock = activeDb
         .query<LockRow, [string]>(
@@ -217,7 +299,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       }
       const key = (destinationKey && destinationKey.trim().length > 0)
         ? destinationKey
-        : `folder:${folderId}`;
+        : canonicalKeyForAcquire(folderId, hostId, undefined);
       const lock = activeDb
         .query<LockRow, [string]>(
           `SELECT locked_by, locked_at, lock_ttl, lock_id
@@ -278,7 +360,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       }
       const key = (destinationKey && destinationKey.trim().length > 0)
         ? destinationKey
-        : `folder:${folderId}`;
+        : canonicalKeyForAcquire(folderId, hostId, undefined);
       const lock = activeDb
         .query<LockOwnerRow, [string]>(
           `SELECT locked_by, lock_id
@@ -422,4 +504,3 @@ export function reapExpiredFolderLocks(now: number = Date.now()): {
   }
   return { deleted, folderIds: expired.map((row) => row.folderId) };
 }
-

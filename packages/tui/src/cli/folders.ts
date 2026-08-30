@@ -191,6 +191,7 @@ export async function runAssign(ctx: CliContext): Promise<void> {
     ? roleRaw
     : "both";
   const schedule = flagString(flags, "schedule") ?? null;
+  const destination = flagString(flags, "destination") ?? null;
   // --enabled / --disabled both flip the boolean; default behavior is enabled
   // unless --disabled is set explicitly.
   const explicitDisabled = flagBool(flags, "disabled");
@@ -208,6 +209,7 @@ export async function runAssign(ctx: CliContext): Promise<void> {
     role,
     localPath,
     remoteName: null,
+    destination,
     syncExpr: schedule,
     enabled,
   };

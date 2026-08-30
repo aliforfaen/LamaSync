@@ -458,6 +458,56 @@ describe("config_revision bumps (LAMA-198)", () => {
     expect(patched.bandwidthSchedule).toBe("08:00,512K 12:00,10M");
     expect(created.folderId).toBe(folder.id);
   });
+
+  test("assignment destination can be created, normalized, updated, and cleared", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    const folder = (await (await postJson("/api/v1/folders", { name: "x", type: "backup" })).json()) as { id: string };
+    const created = (await (await postJson(`/api/v1/folders/${folder.id}/assign`, {
+      hostId: "a",
+      role: "both",
+      localPath: "/tmp/a",
+      destination: " shared\\data/ ",
+    })).json()) as { destination: string | null };
+    expect(created.destination).toBe("shared/data");
+
+    const patched = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folder.id}/assign/a`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ destination: "shared/other/" }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+    expect((await patched.json() as { destination: string | null }).destination).toBe("shared/other");
+
+    const cleared = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folder.id}/assign/a`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ destination: null }),
+      }),
+    );
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json() as { destination: string | null }).destination).toBeNull();
+
+    const invalid = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folder.id}/assign/a`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ destination: "../escape" }),
+      }),
+    );
+    expect(invalid.status).toBe(400);
+  });
 });
 
 describe("POST /api/v1/folders/:id/assign — host existence (LAMA-215)", () => {

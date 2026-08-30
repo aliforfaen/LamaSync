@@ -50,7 +50,9 @@ async function runLegacyReport(ctx: CliContext): Promise<void> {
     r.orphaned.map((e) => ({
       folder: r.folderName,
       path: `${r.remotePath}/${e.name}`,
-      kind: e.isHostPrefix ? "host-prefix (kept)" : "legacy (orphaned)",
+      kind: e.isProtected
+        ? (e.isHostPrefix ? "host-prefix (kept)" : "explicit destination (kept)")
+        : "legacy (orphaned)",
       size: formatBytes(e.sizeBytes),
       items: e.itemCount,
     })),

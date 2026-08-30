@@ -29,6 +29,7 @@ function toNumOrNull(s: string): number | null {
 
 interface EditorState {
   localPath: string;
+  destination: string;
   role: string;
   schedulePreset: string;
   syncExpr: string;
@@ -47,6 +48,7 @@ interface EditorState {
 function stateFromAssignment(a: FolderAssignment): EditorState {
   return {
     localPath: toStr(a.localPath),
+    destination: toStr(a.destination),
     role: a.role ?? "both",
     schedulePreset: schedulePresetForCron(a.syncExpr),
     syncExpr: toStr(a.syncExpr),
@@ -153,6 +155,7 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
 
     const text = [
       ["localPath", state.localPath, assignment.localPath],
+      ["destination", state.destination, assignment.destination],
       ["role", state.role, assignment.role],
       ["syncExpr", state.syncExpr, assignment.syncExpr],
       ["conflictStrategy", state.conflictStrategy, assignment.conflictStrategy],
@@ -215,6 +218,21 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
           onChange={(e) => set({ localPath: e.target.value })}
         />
       </label>
+
+      {folder?.type === "backup" ? (
+        <label>
+          Remote prefix (optional)
+          <input
+            placeholder={`${folderName ?? assignment.folderId}/shared`}
+            value={state.destination}
+            onChange={(e) => set({ destination: e.target.value })}
+          />
+          <span className="muted">
+            Leave empty for this device&apos;s host-scoped path. Use a prefix
+            only when intentionally sharing backup data.
+          </span>
+        </label>
+      ) : null}
 
       <label>
         Role

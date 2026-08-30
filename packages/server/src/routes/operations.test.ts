@@ -25,7 +25,8 @@ beforeEach(() => {
   }
   db.exec(`
     INSERT INTO hosts (id, hostname) VALUES ('host-a', 'host-a'), ('host-b', 'host-b');
-    INSERT INTO folders (id, name, type) VALUES ('f1', 'folder1', 'sync');
+    INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket)
+      VALUES ('f1', 'folder1', 'sync', 's3', 'be1', 'bucket');
     INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, enabled)
       VALUES ('a1', 'f1', 'host-a', 'both', '/tmp/f1', 1);
     INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, enabled)
@@ -145,15 +146,22 @@ describe("operations lock routes", () => {
 
   test("same canonical destination serializes writers (LAMA-294)", async () => {
     // host-a holds the canonical destination key for folder f1.
+    db.exec(`
+      INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket)
+        VALUES ('f2', 'folder2', 'sync', 's3', 'be1', 'bucket');
+      INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, destination, enabled)
+        VALUES ('a3', 'f2', 'host-b', 'both', '/tmp/f2', 'shared', 1);
+      UPDATE folder_assignments SET destination = 'shared' WHERE id = 'a1';
+    `);
     const first = await post("/api/v1/operations/acquire", {
       folderId: "f1",
       hostId: "host-a",
-      destinationKey: "s3:be1/folder1",
+      destinationKey: "forged-client-key",
     });
     expect(first.status).toBe(200);
     expect(await first.json()).toMatchObject({
       acquired: true,
-      destinationKey: "s3:be1/folder1",
+      destinationKey: "s3:be1:bucket:bucket:path:shared",
     });
 
     // A different folder id resolving to the SAME canonical destination must
@@ -162,34 +170,32 @@ describe("operations lock routes", () => {
     const competing = await post("/api/v1/operations/acquire", {
       folderId: "f2",
       hostId: "host-b",
-      destinationKey: "s3:be1/folder1",
     });
     expect(competing.status).toBe(409);
     expect(await competing.json()).toMatchObject({
       error: "folder_locked",
       lockedBy: "host-a",
-      destinationKey: "s3:be1/folder1",
+      destinationKey: "s3:be1:bucket:bucket:path:shared",
     });
   });
 
   test("distinct prefixes under one backend run concurrently (LAMA-294)", async () => {
     // host-a locks prefix A; host-b locks prefix B under the same backend.
+    db.run("UPDATE folder_assignments SET destination = CASE host_id WHEN 'host-a' THEN 'folder1/host-a' ELSE 'folder1/host-b' END WHERE folder_id = 'f1'");
     const first = await post("/api/v1/operations/acquire", {
       folderId: "f1",
       hostId: "host-a",
-      destinationKey: "s3:be1/folder1/host-a",
     });
     expect(first.status).toBe(200);
 
     const second = await post("/api/v1/operations/acquire", {
       folderId: "f1",
       hostId: "host-b",
-      destinationKey: "s3:be1/folder1/host-b",
     });
     expect(second.status).toBe(200);
     expect(await second.json()).toMatchObject({
       acquired: true,
-      destinationKey: "s3:be1/folder1/host-b",
+      destinationKey: "s3:be1:bucket:bucket:path:folder1/host-b",
     });
   });
 });

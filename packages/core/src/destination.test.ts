@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   canonicalDestinationKey,
   defaultDestination,
+  normalizeDestination,
   resolveDestination,
 } from "./destination.ts";
 import type { Folder, FolderAssignment } from "./types.ts";
@@ -28,6 +29,13 @@ function assignment(partial: Partial<FolderAssignment>): FolderAssignment {
 }
 
 describe("resolveDestination (LAMA-294)", () => {
+  test("normalizes equivalent prefixes and rejects escapes", () => {
+    expect(normalizeDestination(" shared//folder/ ")).toBe("shared/folder");
+    expect(normalizeDestination("shared\\folder")).toBe("shared/folder");
+    expect(normalizeDestination("/absolute")).toBeNull();
+    expect(normalizeDestination("shared/../other")).toBeNull();
+  });
+
   test("ordinary backups are host-scoped by default", () => {
     const f = folder({ type: "backup" });
     expect(resolveDestination(f, assignment({ hostId: "host-a" }))).toBe(
@@ -94,5 +102,29 @@ describe("canonicalDestinationKey (LAMA-294)", () => {
     const c = canonicalDestinationKey(f, assignment({ hostId: "host-a", resticRepository: "/repo/b" }));
     expect(a).toBe(b);
     expect(a).not.toBe(c);
+  });
+
+  test("different S3 buckets do not share a lock key", () => {
+    const a = canonicalDestinationKey(
+      folder({ type: "backup", backend: "s3", backendId: "be1", s3Bucket: "one" }),
+      assignment({ destination: "shared" }),
+    );
+    const b = canonicalDestinationKey(
+      folder({ type: "backup", backend: "s3", backendId: "be1", s3Bucket: "two" }),
+      assignment({ destination: "shared" }),
+    );
+    expect(a).not.toBe(b);
+  });
+
+  test("different legacy remote aliases do not share a lock key", () => {
+    const a = canonicalDestinationKey(
+      folder({ type: "backup", backend: "sftp" }),
+      assignment({ remoteName: "remote-a", destination: "shared" }),
+    );
+    const b = canonicalDestinationKey(
+      folder({ type: "backup", backend: "sftp" }),
+      assignment({ remoteName: "remote-b", destination: "shared" }),
+    );
+    expect(a).not.toBe(b);
   });
 });

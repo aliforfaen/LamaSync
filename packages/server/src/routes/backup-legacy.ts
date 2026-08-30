@@ -13,8 +13,11 @@ export function __setDb(next: Database): void {
 export const backupLegacyRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/backups/legacy-root",
-    ({ store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) return { error: "Forbidden" };
+    ({ set, store }) => {
+      if (!requireAdmin({ principal: principalOf(store) })) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       return reportLegacyRoots(activeDb);
     },
     {

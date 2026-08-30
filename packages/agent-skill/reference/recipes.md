@@ -235,8 +235,8 @@ lamasync backup legacy --prune --yes # delete it (admin key required)
 ```
 
 - The dry-run (no `--prune`) is safe: it lists top-level children of each
-  backup folder root, flagging each as `legacy (orphaned)` or
-  `host-prefix (kept)`, with size + item count.
+  backup folder root, flagging each as `legacy (orphaned)`,
+  `host-prefix (kept)`, or `explicit destination (kept)`, with size + item count.
 - `--prune --yes` deletes **only** the orphaned children. Host prefixes and
   the legacy root are never touched (the orphan set is recomputed fresh at
   prune time), so new per-host backups are always protected.

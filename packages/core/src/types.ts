@@ -573,6 +573,8 @@ export interface LegacyRootOrphanEntry {
   itemCount: number;
   /** true when this child is a live host-scoped prefix (never pruned). */
   isHostPrefix: boolean;
+  /** true when any live assignment explicitly uses this child/root. */
+  isProtected: boolean;
 }
 
 export interface LegacyRootReport {
