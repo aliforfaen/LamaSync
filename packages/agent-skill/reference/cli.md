@@ -186,7 +186,7 @@ verify the run with `lamasync ops list --host <hostId>`.
 ```
 Usage: lamasync ops list [flags]
 
-  --status <s>     filter by status (started|success|failed|conflict|recovery|retry)
+  --status <s>     filter by status (started|success|failed|conflict|recovery|retry|deferred)
   --host <id>      filter by host
   --folder <id>    filter by folder
   --limit <n>      max rows (default 50, max 500)

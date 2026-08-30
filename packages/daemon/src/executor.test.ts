@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import type { EffectivePause, FolderAssignment } from "@lamasync/core";
 import {
   buildRcloneCommand,
+  classifyRcloneExit,
   effectiveBandwidthSchedule,
   isPauseActive,
   pickConflictAction,
@@ -143,6 +144,28 @@ describe("buildRcloneCommand", () => {
         excludeFilePath: null,
       }),
     ).toThrow(/unsupported folder type/);
+  });
+});
+
+describe("classifyRcloneExit (LAMA-294)", () => {
+  test("exit 0 is success", () => {
+    expect(classifyRcloneExit(0)).toBe("success");
+  });
+
+  test("exit 9 is NoFilesTransferred (a success, not an error)", () => {
+    expect(classifyRcloneExit(9)).toBe("no-transfer");
+  });
+
+  test("exit 5 is a retryable transient error", () => {
+    expect(classifyRcloneExit(5)).toBe("retryable");
+  });
+
+  test("missing paths, syntax, fatal, quota are non-retryable", () => {
+    // DirNotFound, FileNotFound, UsageError, NoRetryError, FatalError,
+    // TransferExceeded, DurationExceeded, Uncategorized.
+    for (const code of [1, 2, 3, 4, 6, 7, 8, 10]) {
+      expect(classifyRcloneExit(code)).toBe("non-retryable");
+    }
   });
 });
 

@@ -88,6 +88,27 @@ const MOUNT_TIMEOUT_SEC = 30;
 const DISK_SPACE_DEFAULT = 1_000_000_000;
 const BISYNC_CORRUPTION_MARKERS = ["bisync aborted", "inconsistent state", "must use --resync", "state corruption"];
 
+// LAMA-294: rclone's documented exit codes (lib/exitcode/exitcode.go).
+//   0 Success          5 RetryError (temporary, may retry)
+//   9 NoFilesTransferred (everything succeeded, no transfer made)
+// The daemon must only retry transient failures (5, or a timeout); it must
+// NOT retry missing paths (3/4 Dir?File not found), usage/syntax errors (2),
+// uncategorized (1), no-retry (6), fatal (7), or quota-exceeded (8/10).
+export type RcloneExitCategory = "success" | "no-transfer" | "retryable" | "non-retryable";
+
+export function classifyRcloneExit(code: number): RcloneExitCategory {
+  switch (code) {
+    case 0:
+      return "success";
+    case 9:
+      return "no-transfer"; // everything succeeded but nothing was copied
+    case 5:
+      return "retryable"; // temporary error the operation may be retried
+    default:
+      return "non-retryable";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Disk space pre-flight (LAMA-116)
 // ---------------------------------------------------------------------------
@@ -659,12 +680,17 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           return report(hostId, folder.id, folder.type, "failed", start, { summary: `post-hook failed (exit ${h.exitCode})`, details: { phase: "post-hook", attempt, exitCode: h.exitCode, stderr: h.stderr, stdout: h.stdout, durationMs: h.durationMs, rclone: runResult.stats } });
         }
       }
-      if (runResult.exitCode === 0 && !runResult.timedOut && !runResult.aborted) break;
-      const retryable = !runResult.aborted && (runResult.exitCode === 9 || (runResult.exitCode === 2 && runResult.timedOut));
+      // LAMA-294: exit 0 (success) and exit 9 (success, no files transferred)
+      // both terminate the loop as a clean outcome.
+      if ((runResult.exitCode === 0 || runResult.exitCode === 9) && !runResult.timedOut && !runResult.aborted) break;
+      // Retry only transient failures (exit 5 / timeout). Missing paths,
+      // auth/syntax, fatal and resync-required failures are NOT retried.
+      const exitCategory = classifyRcloneExit(runResult.exitCode);
+      const retryable = !runResult.aborted && (exitCategory === "retryable" || runResult.timedOut);
       if (!retryable || attempt === maxAttempts) break;
       const delayMs = 30_000 * 2 ** (attempt - 1);
       console.warn(`[executor] folder=${folder.id} transient failure attempt=${attempt}/${maxAttempts}; retry in ${delayMs / 1000}s`);
-      try { await client.reportOperation(report(hostId, folder.id, folder.type, "retry", start, { summary: `${folder.type} retry ${attempt + 1}/${maxAttempts} exit=${runResult.exitCode}`, details: { attempt, next: attempt + 1, maxAttempts, delayMs, exitCode: runResult.exitCode, timedOut: runResult.timedOut, stderrTail: runResult.stderrTail } })); } catch { /* ignore */ }
+      try { await client.reportOperation(report(hostId, folder.id, folder.type, "retry", start, { summary: `${folder.type} retry ${attempt + 1}/${maxAttempts} exit=${runResult.exitCode}`, details: { attempt, next: attempt + 1, maxAttempts, delayMs, exitCode: runResult.exitCode, exitCategory, retryable: true, timedOut: runResult.timedOut, stderrTail: runResult.stderrTail } })); } catch { /* ignore */ }
       await Bun.sleep(delayMs);
     }
   } finally {
@@ -753,10 +779,12 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
     }
   }
 
-  const ok = !runResult.timedOut && !runResult.aborted && runResult.exitCode === 0;
+  // LAMA-294: exit 9 (NoFilesTransferred) is success, not a failure.
+  const ok = !runResult.timedOut && !runResult.aborted && (runResult.exitCode === 0 || runResult.exitCode === 9);
   const status: OperationStatus = ok ? (isRecovery ? "recovery" : "success") : "failed";
   const summary = buildSummary(folder.type, runResult, start, postHookMs, dry);
-  return report(hostId, folder.id, folder.type, status, start, { summary, details: { rclone: runResult.stats, exitCode: runResult.exitCode, timedOut: runResult.timedOut, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, wouldCopy: runResult.wouldCopy, wouldDelete: runResult.wouldDelete, wouldMkdir: runResult.wouldMkdir, lanPeer: lanPeer.detail } });
+  const exitCategory = classifyRcloneExit(runResult.exitCode);
+  return report(hostId, folder.id, folder.type, status, start, { summary, details: { rclone: runResult.stats, exitCode: runResult.exitCode, exitCategory, retryable: !ok && exitCategory === "retryable", timedOut: runResult.timedOut, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, wouldCopy: runResult.wouldCopy, wouldDelete: runResult.wouldDelete, wouldMkdir: runResult.wouldMkdir, lanPeer: lanPeer.detail } });
 }
 
 // ---------------------------------------------------------------------------
@@ -894,6 +922,8 @@ function buildSummary(type: FolderType, r: CommandResult, t0: number, postMs: nu
   if (dry) { const p: string[] = []; if (r.wouldCopy.length) p.push(`${r.wouldCopy.length} would-copy`); if (r.wouldDelete.length) p.push(`${r.wouldDelete.length} would-delete`); if (r.wouldMkdir.length) p.push(`${r.wouldMkdir.length} would-mkdir`); return `dry-run: ${p.length ? p.join(", ") : "0 changes"}`; }
   if (r.aborted) return `${type} aborted: ${r.abortReason ?? "lock lost"}`;
   if (r.timedOut) return `${type} timed out after ${Math.round(r.durationMs / 1000)}s`;
+  // LAMA-294: exit 9 = NoFilesTransferred — succeeded with nothing to copy.
+  if (r.exitCode === 9) return `${type} ok: no files transferred`;
   if (r.exitCode !== 0) return `${type} failed (exit ${r.exitCode}) in ${Math.round(total / 1000)}s`;
   return `${type} ok: ${r.stats.transfers} transfers, ${formatBytes(r.stats.bytes)} in ${Math.round(total / 1000)}s${postMs ? `, post-hook ${postMs}ms` : ""}`;
 }
