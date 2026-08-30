@@ -42,6 +42,21 @@ the orphaned legacy-root handling on the same branch.
   quota codes surface as failed with scrubbed stderr + `exitCategory`.
 
 **Migration / cleanup behavior (important)**
+
+> **⚠️ REQUIRED POST-UPGRADE ACTION (easy to forget):** after upgrading, the
+> new per-host backup prefixes (`<folder-name>/<host-id>/`) populate only as
+> each host runs its next scheduled backup. Once they're confirmed populated,
+> **clear the old shared root** that the migration deliberately left behind:
+>
+> ```bash
+> lamasync backup legacy            # dry-run: review what is orphaned
+> lamasync backup legacy --prune --yes   # permanently delete the orphaned legacy data
+> ```
+>
+> This is admin-only (master/admin key). It only deletes top-level children of
+> the legacy `<folder-name>` root that are **not** a known host prefix — the
+> host-scoped prefixes and the legacy root itself are never touched.
+
 - The migration adds `folder_assignments.destination` and backfills it:
   existing backup assignments → `<folder-name>/<host-id>` (host-scoped),
   existing sync/mount → `<folder-name>`. It also rebuilds `folder_locks`

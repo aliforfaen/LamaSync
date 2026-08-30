@@ -221,6 +221,28 @@ open http://<server-url>/
 
 Login with the same `<api-key>`. The session is `sessionStorage`-scoped.
 
+## Recipe 10 — Clean up orphaned legacy backup data (after the LAMA-294 migration)
+
+After backups became host-scoped (`<folder-name>/<host-id>`), the old shared
+backup contents under the legacy `<folder-name>` root are left **orphaned**
+(not re-homed). **This is a required post-upgrade step you're likely to
+forget.** Once the per-host prefixes are confirmed populated, clear the
+orphaned data:
+
+```bash
+lamasync backup legacy              # dry-run: review what is orphaned
+lamasync backup legacy --prune --yes # delete it (admin key required)
+```
+
+- The dry-run (no `--prune`) is safe: it lists top-level children of each
+  backup folder root, flagging each as `legacy (orphaned)` or
+  `host-prefix (kept)`, with size + item count.
+- `--prune --yes` deletes **only** the orphaned children. Host prefixes and
+  the legacy root are never touched (the orphan set is recomputed fresh at
+  prune time), so new per-host backups are always protected.
+- Restic and sftp folders are skipped; only S3 / local / nfs `backup` folders
+  are scanned.
+
 ## See also
 
 - `reference/troubleshooting.md` — what to do when something fails.

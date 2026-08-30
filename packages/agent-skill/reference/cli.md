@@ -477,6 +477,18 @@ Usage: lamasync notifications channels [--json]
 
 Lists configured delivery channels (ntfy / webhook).
 
+## `lamasync notifications test`
+
+```
+Usage: lamasync notifications test [flags]
+
+  --channel <id>   deliver through one channel only
+  --json           machine-readable output
+```
+
+Sends a test notification. With `--channel` it delivers through a single
+identified channel; otherwise it exercises every enabled channel.
+
 ## `lamasync hosts list`
 
 ```
