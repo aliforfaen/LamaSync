@@ -142,6 +142,56 @@ describe("operations lock routes", () => {
       error: "lock_held_by_other",
     });
   });
+
+  test("same canonical destination serializes writers (LAMA-294)", async () => {
+    // host-a holds the canonical destination key for folder f1.
+    const first = await post("/api/v1/operations/acquire", {
+      folderId: "f1",
+      hostId: "host-a",
+      destinationKey: "s3:be1/folder1",
+    });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({
+      acquired: true,
+      destinationKey: "s3:be1/folder1",
+    });
+
+    // A different folder id resolving to the SAME canonical destination must
+    // be blocked — this is the "distinct folder ids pointing at the same
+    // backend/path" case LAMA-294 is fixing.
+    const competing = await post("/api/v1/operations/acquire", {
+      folderId: "f2",
+      hostId: "host-b",
+      destinationKey: "s3:be1/folder1",
+    });
+    expect(competing.status).toBe(409);
+    expect(await competing.json()).toMatchObject({
+      error: "folder_locked",
+      lockedBy: "host-a",
+      destinationKey: "s3:be1/folder1",
+    });
+  });
+
+  test("distinct prefixes under one backend run concurrently (LAMA-294)", async () => {
+    // host-a locks prefix A; host-b locks prefix B under the same backend.
+    const first = await post("/api/v1/operations/acquire", {
+      folderId: "f1",
+      hostId: "host-a",
+      destinationKey: "s3:be1/folder1/host-a",
+    });
+    expect(first.status).toBe(200);
+
+    const second = await post("/api/v1/operations/acquire", {
+      folderId: "f1",
+      hostId: "host-b",
+      destinationKey: "s3:be1/folder1/host-b",
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({
+      acquired: true,
+      destinationKey: "s3:be1/folder1/host-b",
+    });
+  });
 });
 
 describe("operations GET /operations", () => {

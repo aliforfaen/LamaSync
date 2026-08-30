@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     role                TEXT NOT NULL,
     local_path          TEXT NOT NULL,
     remote_name         TEXT,
+    -- LAMA-294: explicit destination path/prefix on the remote. Stored so
+    -- both the daemon (rclone path) and the server (canonical lock key) agree.
+    destination         TEXT,
     sync_expr           TEXT,
     enabled             INTEGER DEFAULT 1,
     -- LAMA-239: per-host override ("inherit" | "sync" | "mount"). Default
@@ -258,12 +261,17 @@ CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
 CREATE INDEX IF NOT EXISTS idx_dotfile_versions_manifest_ts
     ON dotfile_versions(manifest_id, timestamp);
 
+-- LAMA-294: locks are keyed by the canonical destination/repository key so
+-- two assignments that write the same physical destination (or share a Restic
+-- repo) serialize, while distinct prefixes under one backend run concurrently.
+-- folder_id is retained for diagnostics and schedule_state correlation.
 CREATE TABLE IF NOT EXISTS folder_locks (
-    folder_id   TEXT PRIMARY KEY,
-    locked_by   TEXT,
-    locked_at   INTEGER,
-    lock_ttl    INTEGER DEFAULT 1200,
-    lock_id     TEXT
+    destination_key TEXT PRIMARY KEY,
+    folder_id       TEXT,
+    locked_by       TEXT,
+    locked_at       INTEGER,
+    lock_ttl        INTEGER DEFAULT 1200,
+    lock_id         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_folder_locks_locked_by
@@ -487,6 +495,25 @@ export const MIGRATIONS: string[] = [
   // pairing_sessions); fresh databases get it from SERVER_SCHEMA.
   "CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, host_id TEXT, token_hash TEXT NOT NULL UNIQUE, token_enc TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER, revealed_at INTEGER, revoked_at INTEGER, revoked_reason TEXT)",
   "CREATE INDEX IF NOT EXISTS idx_api_keys_host_id ON api_keys(host_id)",
+  // LAMA-294: explicit per-assignment destination path/prefix, kept separate
+  // from the connection alias (remote_name). The canonical destination key
+  // (see core/destination.ts) is derived from this and becomes the lock
+  // identity. Fresh DBs get the column from SERVER_SCHEMA; this is the
+  // backfill for existing ones (the "duplicate column" is swallowed).
+  "ALTER TABLE folder_assignments ADD COLUMN destination TEXT",
+  // LAMA-294: folder_locks is re-keyed by the canonical destination/repo key
+  // so distinct assignments that write the same physical destination (or share
+  // a Restic repo) serialize, while distinct prefixes under one backend run
+  // concurrently. In-flight locks are transient (TTL ~1200s), so discarding
+  // them during the one-time rebuild is safe and expected (LAMA-294 notes
+  // existing backup data may be discarded; it is never silently re-homed).
+  "DROP TABLE IF EXISTS folder_locks; CREATE TABLE folder_locks (destination_key TEXT PRIMARY KEY, folder_id TEXT, locked_by TEXT, locked_at INTEGER, lock_ttl INTEGER DEFAULT 1200, lock_id TEXT); CREATE INDEX IF NOT EXISTS idx_folder_locks_locked_by ON folder_locks(locked_by)",
+  // LAMA-294 migration: host-scope existing ordinary backups by default and
+  // pin shared sync/mount destinations to the folder name. Old shared backup
+  // data under the legacy `<folder-name>` prefix is left in place but is no
+  // longer referenced (documented; not silently re-homed).
+  "UPDATE folder_assignments SET destination = (SELECT name FROM folders WHERE folders.id = folder_assignments.folder_id) || '/' || host_id WHERE folder_id IN (SELECT id FROM folders WHERE type = 'backup') AND destination IS NULL",
+  "UPDATE folder_assignments SET destination = (SELECT name FROM folders WHERE folders.id = folder_assignments.folder_id) WHERE folder_id IN (SELECT id FROM folders WHERE type != 'backup') AND destination IS NULL",
 ];
 
 /**

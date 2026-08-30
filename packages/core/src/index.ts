@@ -19,3 +19,9 @@ export { isNewer } from "./version-compare.ts";
 export { defaultSocketPath, defaultSocketDir } from "./socket-path.ts";
 // LAMA-239: per-host mount/sync override helper + AssignmentMode narrow.
 export { effectiveFolderType, normalizeAssignmentMode } from "./effective-type.ts";
+// LAMA-294: canonical destination resolution + lock-key derivation.
+export {
+  canonicalDestinationKey,
+  resolveDestination,
+  defaultDestination,
+} from "./destination.ts";

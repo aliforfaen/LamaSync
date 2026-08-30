@@ -334,7 +334,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
           "ops list",
           "List recent activity (operation log).",
           [
-            "--status <s>     filter by status (started|success|failed|conflict|recovery|retry)",
+            "--status <s>     filter by status (started|success|failed|conflict|recovery|retry|deferred)",
             "--host <id>      filter by host",
             "--folder <id>    filter by folder",
             "--limit <n>      max rows (default 50, max 500)",

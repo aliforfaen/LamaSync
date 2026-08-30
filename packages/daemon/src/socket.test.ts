@@ -49,9 +49,11 @@ function makeCtx(
         handle: {
           lockId: "test-lock",
           folderId,
+          destinationKey: `folder:${folderId}`,
           ttl: 1200,
           acquiredAt: Date.now(),
         },
+        destinationKey: `folder:${folderId}`,
       };
     },
     releaseLock: async (folderId, status, summary) => {

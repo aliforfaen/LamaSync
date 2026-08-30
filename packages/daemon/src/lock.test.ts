@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { LamaSyncApiClient } from "@lamasync/core";
-import { acquireLock, heartbeatLock, __clearActiveLocks } from "./lock.ts";
+import { acquireLock, acquireLockWithRetry, heartbeatLock, __clearActiveLocks } from "./lock.ts";
 
 const HOST_ID = "host-a";
 const FOLDER_ID = "folder-1";
@@ -35,10 +35,12 @@ describe("acquireLock", () => {
       ok: true,
       handle: {
         folderId: FOLDER_ID,
+        destinationKey: `folder:${FOLDER_ID}`,
         lockId: "lock-1",
         ttl: 1200,
         acquiredAt: expect.any(Number),
       },
+      destinationKey: `folder:${FOLDER_ID}`,
     });
   });
 
@@ -55,6 +57,7 @@ describe("acquireLock", () => {
       ok: false,
       reason: "contended",
       lockedBy: HOST_ID,
+      destinationKey: `folder:${FOLDER_ID}`,
     });
   });
 
@@ -71,6 +74,7 @@ describe("acquireLock", () => {
       reason: "contended",
       lockedBy: "host-b",
       remainingSec: 45,
+      destinationKey: `folder:${FOLDER_ID}`,
     });
   });
 
@@ -84,6 +88,92 @@ describe("acquireLock", () => {
     expect(result).toEqual({
       ok: false,
       reason: "unreachable",
+      destinationKey: `folder:${FOLDER_ID}`,
+    });
+  });
+});
+
+describe("acquireLockWithRetry (LAMA-294)", () => {
+  beforeEach(() => {
+    __clearActiveLocks();
+  });
+  afterEach(() => {
+    __clearActiveLocks();
+  });
+
+  test("succeeds immediately when the destination is free", async () => {
+    const client = makeClient([
+      Response.json({ lockId: "lock-1", ttl: 1200, acquired: true }),
+    ]);
+    const outcome = await acquireLockWithRetry(client, FOLDER_ID, HOST_ID, "dest:free");
+    expect(outcome).toMatchObject({
+      ok: true,
+      attempts: 1,
+      destinationKey: "dest:free",
+    });
+  });
+
+  test("retries a contended destination and succeeds after it clears", async () => {
+    const client = makeClient([
+      Response.json({ error: "folder_locked", lockedBy: "host-b", remainingSec: 5 }, { status: 409 }),
+      Response.json({ lockId: "lock-2", ttl: 1200, acquired: true }),
+    ]);
+    const outcome = await acquireLockWithRetry(
+      client,
+      FOLDER_ID,
+      HOST_ID,
+      "dest:shared",
+      { baseDelayMs: 0, maxDelayMs: 0 },
+    );
+    expect(outcome).toMatchObject({
+      ok: true,
+      attempts: 2,
+      destinationKey: "dest:shared",
+    });
+    expect(outcome.handle?.lockId).toBe("lock-2");
+  });
+
+  test("gives up after bounded attempts and reports the contention as first-class deferred", async () => {
+    // Factory so every retry gets a fresh body (a single Response is
+    // consumed after the first .text(), which would otherwise classify as
+    // unreachable).
+    const client = makeClient([
+      () => Response.json({ error: "folder_locked", lockedBy: "host-b", remainingSec: 120 }, { status: 409 }),
+    ]);
+    const outcome = await acquireLockWithRetry(
+      client,
+      FOLDER_ID,
+      HOST_ID,
+      "dest:shared",
+      { baseDelayMs: 0, maxDelayMs: 0, maxAttempts: 3 },
+    );
+    expect(outcome).toMatchObject({
+      ok: false,
+      reason: "contended",
+      lockedBy: "host-b",
+      attempts: 3,
+      destinationKey: "dest:shared",
+    });
+  });
+
+  test("retries a server outage and defers without starting a transfer", async () => {
+    const client = new LamaSyncApiClient("http://localhost:8080", "test-key", {
+      fetchImpl: (() => Promise.reject(new TypeError("fetch failed"))) as unknown as typeof fetch,
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+    const outcome = await acquireLockWithRetry(
+      client,
+      FOLDER_ID,
+      HOST_ID,
+      "dest:foo",
+      { baseDelayMs: 0, maxDelayMs: 0, maxAttempts: 3 },
+    );
+    expect(outcome).toMatchObject({
+      ok: false,
+      reason: "unreachable",
+      attempts: 3,
+      destinationKey: "dest:foo",
     });
   });
 });
@@ -93,6 +183,7 @@ describe("heartbeatLock", () => {
     const client = makeClient([Response.json({ ok: true, renewedAt: Date.now() })]);
     const result = await heartbeatLock(client, FOLDER_ID, HOST_ID, {
       folderId: FOLDER_ID,
+      destinationKey: `folder:${FOLDER_ID}`,
       lockId: "lock-1",
       ttl: 1200,
       acquiredAt: Date.now(),

@@ -12,7 +12,7 @@ import type {
   QueuedActionStatus,
   ResticRestoreJob,
 } from "@lamasync/core";
-import { LamaSyncApiClient, VERSION, defaultSocketPath, effectiveFolderType } from "@lamasync/core";
+import { LamaSyncApiClient, VERSION, canonicalDestinationKey, defaultSocketPath, effectiveFolderType, resolveDestination } from "@lamasync/core";
 import { locateSkillAsset, SKILL_DIR, downloadSkillBundle, readInstalledSkillVersion } from "./skill-update.ts";
 import {
   isDryRunRequested,
@@ -39,6 +39,7 @@ import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
 import { detectTailnetIp, TailnetReportTracker } from "./lan-peer.ts";
 import {
   acquireLock,
+  acquireLockWithRetry,
   heartbeatLock,
   releaseLock,
   releaseStaleLocks,
@@ -284,7 +285,7 @@ export async function switchToMount(folderId: string): Promise<SwitchResult> {
     try {
       await ctx.startMount({
         folderId,
-        remotePath: `${ctx.getRemoteName(assignment.remoteName, folderId)}:${folder.name}`,
+        remotePath: `${ctx.getRemoteName(assignment.remoteName, folderId)}:${resolveDestination(folder, assignment)}`,
         mountPath: localPath,
         configPath,
         cacheProfile: assignment.cacheProfile ?? undefined,
@@ -524,7 +525,7 @@ async function reconcileMountsOnRefresh(
         try {
           await systemdAwareStartMount({
             folderId: assignment.folderId,
-            remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${folder.name}`,
+            remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${resolveDestination(folder, assignment)}`,
             mountPath: assignment.localPath,
             configPath,
             cacheProfile: assignment.cacheProfile ?? undefined,
@@ -680,25 +681,46 @@ async function main(): Promise<void> {
       type: effectiveFolderType(folder, assignment),
     };
 
-    const lockResult = await acquireLock(client, assignment.folderId, hostId);
+    // LAMA-294: the lock identity is the canonical destination/repository
+    // key (host-scoped for ordinary backups), so distinct hosts with the
+    // same folder no longer contend unless they intentionally share a
+    // prefix. Acquisition retries with bounded exponential backoff + jitter
+    // so a simultaneous schedule isn't skipped until the next cron interval.
+    const lockResult = await acquireLockWithRetry(
+      client,
+      assignment.folderId,
+      hostId,
+      canonicalDestinationKey(folder, assignment),
+    );
     if (!lockResult.ok) {
+      const reason = lockResult.reason ?? "unreachable";
+      const lockedBy = lockResult.lockedBy ?? "unknown";
       const summary =
-        lockResult.reason === "contended"
-          ? `skipped: folder locked by ${lockResult.lockedBy === hostId ? "this host" : lockResult.lockedBy} (${lockResult.remainingSec}s remaining)`
-          : "skipped: server unreachable, lock not acquired";
+        reason === "contended"
+          ? `deferred: destination locked by ${lockedBy === hostId ? "this host" : lockedBy} (${lockResult.remainingSec ?? 0}s remaining) after ${lockResult.attempts} attempt(s)`
+          : `deferred: server unreachable, lock not acquired after ${lockResult.attempts} attempt(s)`;
       console.warn(`[run] folder=${folder.name} ${summary}`);
+      // Contention / control-plane outage is a first-class deferral, not a
+      // failed backup: no transfer was started, so it must not surface as a
+      // permanent failure (LAMA-294 goal 4-5).
       const skipReport: OperationReport = {
         hostId,
         folderId: folder.id,
         operation: effectiveFolder.type,
-        status: "failed",
+        status: "deferred",
         summary,
+        details: JSON.stringify({
+          destinationKey: lockResult.destinationKey,
+          reason,
+          lockedBy,
+          attempts: lockResult.attempts,
+        }),
         durationMs: 0,
       };
       await reportOperation(skipReport);
       return skipReport;
     }
-    const lock = lockResult.handle;
+    const lock = lockResult.handle!;
 
     const abortController = new AbortController();
     const heartbeatTimer = setInterval(() => {
@@ -1232,7 +1254,7 @@ async function runMountCommand(folderId: string): Promise<void> {
   }
 
   const { configPath, cleanup } = writeRcloneConfig(hostConfig.rcloneConfig);
-  const remotePath = `${getRemoteName(assignment.remoteName, folderId)}:${folder.name}`;
+  const remotePath = `${getRemoteName(assignment.remoteName, folderId)}:${resolveDestination(folder, assignment)}`;
   const mountPath = assignment.localPath;
   const cacheProfile = (assignment.cacheProfile ?? "normal") as
     | "normal"

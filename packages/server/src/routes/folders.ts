@@ -3,7 +3,7 @@ import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderSize, FolderType } from "@lamasync/core";
-import { normalizeAssignmentMode } from "@lamasync/core";
+import { normalizeAssignmentMode, resolveDestination } from "@lamasync/core";
 import { getBackend } from "../backends.ts";
 import {
   bumpConfigRevision,
@@ -122,6 +122,7 @@ interface AssignmentRow {
   role: string;
   local_path: string;
   remote_name: string | null;
+  destination: string | null;
   sync_expr: string | null;
   enabled: number;
   // LAMA-239: per-host override. Default "inherit" matches the schema NOT
@@ -184,6 +185,7 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     role: r.role,
     localPath: r.local_path,
     remoteName: r.remote_name,
+    destination: r.destination,
     syncExpr: r.sync_expr,
     enabled: r.enabled === 1,
     // LAMA-239: belt-and-braces default for rows pre-dating the migration
@@ -409,7 +411,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const rows = db
         .query<AssignmentRow, [string]>(
-          `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+          `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                   mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password
@@ -722,6 +724,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         role: string;
         localPath: string;
         remoteName?: string | null;
+        destination?: string | null;
         syncExpr?: string | null;
         enabled?: boolean;
         // LAMA-239: per-host mount/sync override. Omitted → "inherit".
@@ -748,13 +751,26 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Host not found" };
       }
       const id = crypto.randomUUID();
+      // LAMA-294: resolve the destination path/prefix, kept separate from the
+      // connection alias (remoteName). Default is host-scoped for backups
+      // (<folder-name>/<host-id>) so distinct hosts never merge or starve;
+      // sync/mount stay shared (<folder-name>).
+      const destination = resolveDestination(
+        { id: folder.id, name: folder.name, type: folder.type as FolderType },
+        {
+          hostId: b.hostId,
+          destination: b.destination,
+          resticRepository: b.resticRepository,
+          resticPassword: b.resticPassword,
+        },
+      );
       db.run(
         `INSERT INTO folder_assignments
-           (id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+           (id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
             mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
             timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
             cache_profile, cache_max_size, restic_repository, restic_password)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           params.id,
@@ -762,6 +778,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           b.role,
           b.localPath,
           b.remoteName ?? null,
+          destination,
           b.syncExpr ?? null,
           b.enabled === false ? 0 : 1,
           // LAMA-239: default "inherit" preserves today's behavior.
@@ -783,7 +800,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       );
       const row = db
         .query<AssignmentRow, [string]>(
-          `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+          `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                   mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password
@@ -806,6 +823,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         role: t.String(),
         localPath: t.String(),
         remoteName: t.Optional(t.Union([t.String(), t.Null()])),
+        destination: t.Optional(t.Union([t.String(), t.Null()])),
         syncExpr: t.Optional(t.Union([t.String(), t.Null()])),
         enabled: t.Optional(t.Boolean()),
         // LAMA-239: per-host sync/mount override.
@@ -1023,7 +1041,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const row = db
         .query<AssignmentRow, [string, string]>(
-          `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+          `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                   mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password

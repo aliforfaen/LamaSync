@@ -12,7 +12,8 @@ export type OperationStatus =
   | "failed"
   | "conflict"
   | "recovery"  // bisync state was corrupted and recovered
-  | "retry";    // transient failure, will retry
+  | "retry"     // transient failure, will retry
+  | "deferred"; // lock contention or control-plane outage; no transfer started, will retry
 
 // LAMA-222: first-class reusable backend (S3 today; local/nfs/restic future).
 export type BackendKind = "s3" | "local" | "nfs" | "restic";
@@ -272,6 +273,13 @@ export interface FolderAssignment {
   role: string; // "source" | "target" | "both"
   localPath: string;
   remoteName?: string | null;
+  // LAMA-294: explicit destination path/prefix on the remote, distinct from
+  // the connection alias (remoteName). Host-scoped by default for backups
+  // (e.g. "<folder-name>/<host-id>") so different hosts don't merge or
+  // starve each other; sync/mount stay shared ("<folder-name>"). The
+  // canonical destination key (see ./destination.ts) is derived from this
+  // and is the server-side lock identity. null/omitted => derived default.
+  destination?: string | null;
   syncExpr?: string | null; // cron expression
   enabled: boolean;
   // LAMA-239: per-host override. "inherit" (the default) lets the
@@ -560,7 +568,7 @@ export type WSEvent =
   // LAMA-225: emitted after a host rename (id == hostname). The UI shows a
   // banner and re-fetches host lists; other fields reference the NEW id.
   | { kind: "host_renamed"; oldId: string; newId: string; hostname: string }
-  | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released" | "reaped"; status?: string; lockId?: string }
+  | { kind: "lock"; folderId: string; hostId: string; action: "acquired" | "released" | "reaped"; status?: string; lockId?: string; destinationKey?: string }
   | { kind: "mount"; folderId: string; status: MountEntry["status"]; path: string }
   | { kind: "conflict"; conflict: Conflict }
   | { kind: "restic_snapshot"; snapshot: ResticSnapshot }

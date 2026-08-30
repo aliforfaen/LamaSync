@@ -526,7 +526,11 @@ export class LamaSyncApiClient {
   }
 
   // Lock coordination
-  async acquireLock(folderId: string, hostId: string): Promise<{ lockId: string; ttl: number; acquired: boolean } | { error: string; lockedBy: string; remainingSec: number }> {
+  async acquireLock(
+    folderId: string,
+    hostId: string,
+    destinationKey?: string,
+  ): Promise<{ lockId: string; ttl: number; acquired: boolean; destinationKey: string } | { error: string; lockedBy: string; remainingSec: number; destinationKey: string }> {
     const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/operations/acquire`,
       {
@@ -535,15 +539,20 @@ export class LamaSyncApiClient {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ folderId, hostId }),
+        body: JSON.stringify({ folderId, hostId, ...(destinationKey !== undefined ? { destinationKey } : {}) }),
       },
     );
     const text = await res.text().catch(() => "");
     if (!res.ok) throw new LamaSyncApiError(res.status, text);
-    return JSON.parse(text);
+    return JSON.parse(text) as {
+      lockId: string;
+      ttl: number;
+      acquired: boolean;
+      destinationKey: string;
+    };
   }
 
-  async heartbeatLock(folderId: string, hostId: string, lockId?: string): Promise<{ ok: boolean; renewedAt: number }> {
+  async heartbeatLock(folderId: string, hostId: string, lockId?: string, destinationKey?: string): Promise<{ ok: boolean; renewedAt: number }> {
     const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/operations/heartbeat`,
       {
@@ -552,7 +561,7 @@ export class LamaSyncApiClient {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ folderId, hostId, ...(lockId !== undefined ? { lockId } : {}) }),
+        body: JSON.stringify({ folderId, hostId, ...(destinationKey !== undefined ? { destinationKey } : {}), ...(lockId !== undefined ? { lockId } : {}) }),
       },
     );
     const text = await res.text().catch(() => "");
@@ -560,7 +569,7 @@ export class LamaSyncApiClient {
     return JSON.parse(text);
   }
 
-  async releaseLock(folderId: string, hostId: string, status: string, summary?: string, lockId?: string): Promise<{ ok: boolean }> {
+  async releaseLock(folderId: string, hostId: string, status: string, summary?: string, lockId?: string, destinationKey?: string): Promise<{ ok: boolean }> {
     const res = await this.fetchWithTimeout(
       `${this.baseUrl}/api/v1/operations/release`,
       {
@@ -569,7 +578,7 @@ export class LamaSyncApiClient {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ folderId, hostId, status, ...(summary !== undefined ? { summary } : {}), ...(lockId !== undefined ? { lockId } : {}) }),
+        body: JSON.stringify({ folderId, hostId, status, ...(destinationKey !== undefined ? { destinationKey } : {}), ...(summary !== undefined ? { summary } : {}), ...(lockId !== undefined ? { lockId } : {}) }),
       },
     );
     const text = await res.text().catch(() => "");
@@ -578,7 +587,7 @@ export class LamaSyncApiClient {
   }
 
 
-  async listLocks(): Promise<{ folderId: string; lockedBy: string; lockedAt: number; lockTtl: number }[]> {
+  async listLocks(): Promise<{ destinationKey: string; folderId: string; lockedBy: string; lockedAt: number; lockTtl: number }[]> {
     return this.request("GET", "/api/v1/operations/locks");
   }
 

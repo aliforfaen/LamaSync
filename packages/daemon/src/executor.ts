@@ -2,6 +2,7 @@ import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import type { ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
+import { resolveDestination } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
@@ -491,7 +492,10 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   }
 
   const remoteName = getRemoteName(assignment.remoteName, folder.id);
-  const remotePath = `${remoteName}:${folder.name}`;
+  // LAMA-294: the destination path/prefix (host-scoped for backups by
+  // default) is separate from the connection alias. Two hosts with ordinary
+  // backups therefore target distinct namespaces and can run concurrently.
+  const remotePath = `${remoteName}:${resolveDestination(folder, assignment)}`;
   const filterMode = folder.type === "mount" ? "mount" : "sync";
   const filterPath = resolveFilterPath(assignment.ignorePath, assignment.mountIgnorePath ?? null, filterMode);
   const patterns = loadFilterPatterns(filterPath, assignment.localPath);
@@ -604,7 +608,7 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
     localPath: assignment.localPath,
   });
   if (lanPeer.useRemote !== null) {
-    const peerPath = `${lanPeer.useRemote}:${folder.name}`;
+    const peerPath = `${lanPeer.useRemote}:${resolveDestination(folder, assignment)}`;
     for (let i = 0; i < command.length; i += 1) {
       if (command[i] === remotePath) {
         command[i] = peerPath;

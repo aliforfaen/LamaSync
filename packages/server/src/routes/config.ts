@@ -55,6 +55,7 @@ interface AssignmentRow {
   role: string;
   local_path: string;
   remote_name: string | null;
+  destination: string | null;
   sync_expr: string | null;
   enabled: number;
   // LAMA-239: per-host override. Rows written before the migration may have
@@ -121,6 +122,7 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     role: r.role,
     localPath: r.local_path,
     remoteName: r.remote_name,
+    destination: r.destination,
     syncExpr: r.sync_expr,
     enabled: r.enabled === 1,
     // LAMA-239: belt-and-braces default — older rows written before the
@@ -539,7 +541,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     }
     const assignmentRows = activeDb
       .query<AssignmentRow, [string]>(
-        `SELECT id, folder_id, host_id, role, local_path, remote_name, sync_expr, enabled,
+        `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                 mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                 timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                 cache_profile, cache_max_size, restic_repository, restic_password

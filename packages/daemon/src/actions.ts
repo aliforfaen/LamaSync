@@ -108,12 +108,18 @@ export function selectAssignmentsForSyncAction(
  * already in flight").
  */
 export function summarizeReportForAction(
-  reportStatus: "success" | "failed" | "conflict" | "retry" | "recovery" | "started",
+  reportStatus: "success" | "failed" | "conflict" | "retry" | "recovery" | "started" | "deferred",
   reportSummary: string | null,
   fallback: string,
 ): ActionCompletion {
   const summary = reportSummary ?? fallback;
   if (reportStatus === "failed" && summary.startsWith("skipped:")) {
+    return { status: "done", result: summary };
+  }
+  // LAMA-294: lock contention / control-plane outage is a first-class
+  // deferral — no transfer started, so it must not surface as a permanent
+  // failure.
+  if (reportStatus === "deferred") {
     return { status: "done", result: summary };
   }
   return {

@@ -21,7 +21,7 @@ import type { View, ViewContext, ViewId } from "../app/view-manager.ts";
  */
 export type LogsAction = "refresh" | "next" | "prev" | "filter" | "quit";
 
-export type LogsStatus = "all" | "success" | "failed" | "conflict";
+export type LogsStatus = "all" | "success" | "failed" | "conflict" | "deferred";
 
 /**
  * Plain-data snapshot of the logs view's filter + pagination state. The
@@ -43,7 +43,7 @@ export interface RenderLogsOpts {
 }
 
 const PAGE_SIZE = 50;
-const STATUS_CYCLE: LogsStatus[] = ["all", "success", "failed", "conflict"];
+const STATUS_CYCLE: LogsStatus[] = ["all", "success", "failed", "conflict", "deferred"];
 
 function statusLine(entry: OperationLog): string {
   const time = new Date(entry.timestamp).toISOString();

@@ -17,6 +17,8 @@ export function __setDb(next: Database): void {
 }
 
 interface LockRow {
+  destination_key: string;
+  folder_id: string | null;
   locked_by: string | null;
   locked_at: number | null;
   lock_ttl: number | null;
@@ -29,7 +31,8 @@ interface LockOwnerRow {
 }
 
 interface ActiveLockRow {
-  folder_id: string;
+  destination_key: string;
+  folder_id: string | null;
   locked_by: string;
   locked_at: number;
   lock_ttl: number;
@@ -137,21 +140,28 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
 )
   .post(
     "/operations/acquire",
-    ({ body: { folderId, hostId }, set, store }) => {
+    ({ body: { folderId, hostId, destinationKey }, set, store }) => {
       // LAMA-234: locks are host-bound; a device key may only lock as its
       // own host.
       if (!deviceMayAccessHost(principalOf(store), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
+      // LAMA-294: the lock identity is the canonical destination/repository
+      // key, not the folder id. When the daemon omits it (legacy callers)
+      // we fall back to a `folder:<id>` identity so existing per-folder
+      // serialization is preserved.
+      const key = (destinationKey && destinationKey.trim().length > 0)
+        ? destinationKey
+        : `folder:${folderId}`;
       const now = Date.now();
       const lock = activeDb
         .query<LockRow, [string]>(
-          `SELECT locked_by, locked_at, lock_ttl, lock_id
+          `SELECT destination_key, folder_id, locked_by, locked_at, lock_ttl, lock_id
            FROM folder_locks
-           WHERE folder_id = ?`,
+           WHERE destination_key = ?`,
         )
-        .get(folderId);
+        .get(key);
 
       const lockedAt = lock?.locked_at;
       const lockTtl = lock?.lock_ttl ?? DEFAULT_LOCK_TTL;
@@ -168,48 +178,53 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
           lockedBy: lock.locked_by,
           lockedAt,
           lockTtl,
+          destinationKey: key,
           remainingSec: Math.ceil((lockedAt + lockTtl * 1000 - now) / 1000),
         };
       }
 
       const lockId = crypto.randomUUID();
       activeDb
-        .query<never, [string, string, number, number, string]>(
+        .query<never, [string, string, string, number, number, string]>(
           `INSERT OR REPLACE INTO folder_locks
-             (folder_id, locked_by, locked_at, lock_ttl, lock_id)
-           VALUES (?, ?, ?, ?, ?)`,
+             (destination_key, folder_id, locked_by, locked_at, lock_ttl, lock_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(folderId, hostId, now, DEFAULT_LOCK_TTL, lockId);
-      broadcast({ kind: "lock", folderId, hostId, action: "acquired", lockId });
+        .run(key, folderId, hostId, now, DEFAULT_LOCK_TTL, lockId);
+      broadcast({ kind: "lock", folderId, hostId, action: "acquired", lockId, destinationKey: key });
 
-      return { lockId, ttl: DEFAULT_LOCK_TTL, acquired: true };
+      return { lockId, ttl: DEFAULT_LOCK_TTL, acquired: true, destinationKey: key };
     },
     {
       body: t.Object({
         folderId: t.String(),
         hostId: t.String(),
+        destinationKey: t.Optional(t.String()),
       }),
       detail: {
-        summary: "Acquire a folder operation lock",
+        summary: "Acquire a canonical destination operation lock",
         tags: ["Operations"],
       },
     },
   )
   .post(
     "/operations/heartbeat",
-    ({ body: { folderId, hostId, lockId }, set, store }) => {
+    ({ body: { folderId, hostId, lockId, destinationKey }, set, store }) => {
       // LAMA-234: host-bound like acquire.
       if (!deviceMayAccessHost(principalOf(store), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
+      const key = (destinationKey && destinationKey.trim().length > 0)
+        ? destinationKey
+        : `folder:${folderId}`;
       const lock = activeDb
         .query<LockRow, [string]>(
           `SELECT locked_by, locked_at, lock_ttl, lock_id
            FROM folder_locks
-           WHERE folder_id = ?`,
+           WHERE destination_key = ?`,
         )
-        .get(folderId);
+        .get(key);
 
       if (!lock || lock.locked_by === null) {
         set.status = 404;
@@ -234,9 +249,9 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
 
       activeDb
         .query<never, [number, string]>(
-          "UPDATE folder_locks SET locked_at = ? WHERE folder_id = ?",
+          "UPDATE folder_locks SET locked_at = ? WHERE destination_key = ?",
         )
-        .run(now, folderId);
+        .run(now, key);
 
       return { ok: true, renewedAt: now };
     },
@@ -245,28 +260,32 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
         folderId: t.String(),
         hostId: t.String(),
         lockId: t.Optional(t.String()),
+        destinationKey: t.Optional(t.String()),
       }),
       detail: {
-        summary: "Renew a folder operation lock",
+        summary: "Renew a canonical destination operation lock",
         tags: ["Operations"],
       },
     },
   )
   .post(
     "/operations/release",
-    ({ body: { folderId, hostId, status, lockId }, set, store }) => {
+    ({ body: { folderId, hostId, status, lockId, destinationKey }, set, store }) => {
       // LAMA-234: host-bound like acquire/heartbeat.
       if (!deviceMayAccessHost(principalOf(store), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
+      const key = (destinationKey && destinationKey.trim().length > 0)
+        ? destinationKey
+        : `folder:${folderId}`;
       const lock = activeDb
         .query<LockOwnerRow, [string]>(
           `SELECT locked_by, lock_id
            FROM folder_locks
-           WHERE folder_id = ?`,
+           WHERE destination_key = ?`,
         )
-        .get(folderId);
+        .get(key);
 
       if (!lock) {
         set.status = 404;
@@ -284,8 +303,8 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       const releasedLockId = lock.lock_id ?? undefined;
       const now = Date.now();
       activeDb
-        .query<never, [string]>("DELETE FROM folder_locks WHERE folder_id = ?")
-        .run(folderId);
+        .query<never, [string]>("DELETE FROM folder_locks WHERE destination_key = ?")
+        .run(key);
       activeDb
         .query<never, [number, string, string, string]>(
           `UPDATE schedule_state
@@ -295,7 +314,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
            )`,
         )
         .run(now, status, folderId, hostId);
-      broadcast({ kind: "lock", folderId, hostId, action: "released", lockId: releasedLockId, status });
+      broadcast({ kind: "lock", folderId, hostId, action: "released", lockId: releasedLockId, status, destinationKey: key });
 
       return { ok: true };
     },
@@ -306,9 +325,10 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
         status: t.String(),
         summary: t.Optional(t.String()),
         lockId: t.Optional(t.String()),
+        destinationKey: t.Optional(t.String()),
       }),
       detail: {
-        summary: "Release a folder operation lock",
+        summary: "Release a canonical destination operation lock",
         tags: ["Operations"],
       },
     },
@@ -327,13 +347,14 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
       const args: string[] = principal?.kind === "device" && principal.hostId ? [principal.hostId] : [];
       const rows = activeDb
         .query<ActiveLockRow, string[]>(
-          `SELECT folder_id, locked_by, locked_at, lock_ttl
+          `SELECT destination_key, folder_id, locked_by, locked_at, lock_ttl
            FROM folder_locks
            ${where}`,
         )
         .all(...args);
 
       return rows.map((row) => ({
+        destinationKey: row.destination_key,
         folderId: row.folder_id,
         lockedBy: row.locked_by,
         lockedAt: row.locked_at,
@@ -342,7 +363,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
     },
     {
       detail: {
-        summary: "List active folder operation locks",
+        summary: "List active destination operation locks",
         tags: ["Operations"],
       },
     },
