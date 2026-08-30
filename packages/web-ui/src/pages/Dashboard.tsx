@@ -433,7 +433,25 @@ export function Dashboard() {
           <h1>{dashboardHeadline}</h1>
           <p className="dashboard-lede">{heroDescription}</p>
         </div>
-        <div className="dashboard-header-tools">
+        <div className="dashboard-head-right">
+          <nav className="dashboard-tabs" role="tablist" aria-label="Dashboard views">
+            {tabs.map((tab) => (
+              <button
+                type="button"
+                key={tab.id}
+                className={dashboardTab === tab.id ? "is-active" : undefined}
+                aria-selected={dashboardTab === tab.id}
+                role="tab"
+                onClick={() => setDashboardTab(tab.id)}
+              >
+                {tab.label}
+                {tab.id === "activity" && data?.operations.length ? (
+                  <span className="tab-count">{data.operations.length}</span>
+                ) : null}
+              </button>
+            ))}
+          </nav>
+          <div className="dashboard-header-tools">
           <span className={`ws-pill ws-${wsState}`} title="WebSocket connection status">
             <span className="ws-dot" aria-hidden="true" /> {wsState}
           </span>
@@ -451,26 +469,9 @@ export function Dashboard() {
               Backups not verified yet
             </span>
           )}
+          </div>
         </div>
       </header>
-
-      <nav className="dashboard-tabs" role="tablist" aria-label="Dashboard views">
-        {tabs.map((tab) => (
-          <button
-            type="button"
-            key={tab.id}
-            className={dashboardTab === tab.id ? "is-active" : undefined}
-            aria-selected={dashboardTab === tab.id}
-            role="tab"
-            onClick={() => setDashboardTab(tab.id)}
-          >
-            {tab.label}
-            {tab.id === "activity" && data?.operations.length ? (
-              <span className="tab-count">{data.operations.length}</span>
-            ) : null}
-          </button>
-        ))}
-      </nav>
 
       {overview?.global ? (
         <PauseBanner state={overview.global} scope="global" onResumed={() => void refreshPause()} />
