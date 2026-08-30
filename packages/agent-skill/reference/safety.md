@@ -5,17 +5,19 @@ SKILL.md summarises them; this file is the canonical contract. Violating any
 rule is a handoff-worthy bug — stop, ask the operator, and surface the
 gap instead of working around it.
 
-## 1. API trust, no users
+## 1. API trust, no user accounts
 
-The pre-shared API key is the *only* trust boundary. No users, sessions, or
-roles. If a task seems to need per-user authz, escalate to a human instead
-of inventing one.
+There are no user accounts or OAuth sessions. The trust boundary is the
+credential model: a break-glass pre-shared master key plus managed `admin` and
+host-bound `device` keys; pairing sessions are short-lived bootstrap state.
+If a task seems to need per-user authz, escalate to a human instead of
+inventing user accounts or roles.
 
 Concretely:
-- never suggest OAuth flows, per-user tokens, or row-level security policies
-- when asked to "restrict this to user X", answer that the API key is the
-  trust boundary and that the right path is a separate deployment or a
-  human-mediated workflow
+- never suggest OAuth flows, user accounts, or row-level security policies
+- when asked to "restrict this to user X", explain that there are no user
+  accounts; the credential model is the trust boundary and the right path is
+  a separate deployment or a human-mediated workflow
 
 ## 2. Never invoke `rclone` directly
 
@@ -38,20 +40,22 @@ The server broadcasts `operation`, `host`, `lock`, `mount`, `conflict`,
 stream is not. Use the WebSocket — or `lamasync local ops` against the
 daemon — for live state.
 
-## 4. Mask the API key
+## 4. Mask credentials
 
-The API key never appears in plain text anywhere an agent writes. In all
+No credential ever appears in plain text anywhere an agent writes. In all
 output, examples, and diagnostics use the masked form:
 
 ```
-lamasync_…xxxx
+lmsk.ABCDEFG…xxxx
 ```
 
 where the masked form shows the **first 8 + last 4** characters of the
-actual key (`lamasync_…xxxx`). The
+actual credential. A master key may begin `lamasync_`; managed keys begin
+`lmsk.`. The
 `lamasync` CLI already masks automatically (exit-code 3 still tells you
-auth failed; the body never echoes the key). When typing examples into a
-chat, use `<your-api-key>` or a placeholder — never a literal value.
+auth failed or config is missing; the body never echoes the credential). When
+typing examples into a chat, use `<your-api-key>` or a placeholder — never a
+literal value.
 
 The same rule applies to any other credentials: `s3SecretAccessKey`,
 `resticPassword`, `cryptPassword`. They are write-only at the API surface;

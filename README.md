@@ -40,7 +40,7 @@ same binary.
   reachable from a browser or an SSH terminal.
 - **Self-hosted and tailnet-only** — no cloud account, no third-party sync
   service. Your data travels over your own Tailscale network, and the API is
-  protected by a pre-shared key you generate.
+  protected by a break-glass master key plus managed admin/device credentials.
 
 ## Features
 
@@ -119,10 +119,11 @@ This downloads `lamasyncd` (+ the terminal UI with `--with-tui`), writes
 `~/.config/lamasync/client.toml` (mode 600), installs the systemd **user**
 service, and starts it.
 
-> **No release yet?** The install script pulls binaries from GitHub Releases.
-> Until the first `v*` tag exists, build from source (see
-> [Development](#development)) and copy `packages/daemon/dist/lamasyncd` /
-> `packages/tui/dist/lamasync-tui` to `~/.local/bin/` yourself.
+> The install script pulls binaries from the latest GitHub Release. If a
+> release has not been published for the current checkout yet, build from
+> source (see [Development](#development)) and copy
+> `packages/daemon/dist/lamasyncd` / `packages/tui/dist/lamasync-tui` to
+> `~/.local/bin/` yourself.
 
 Check it's alive:
 

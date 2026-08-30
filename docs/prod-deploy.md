@@ -26,7 +26,7 @@ production setup.
   Owned by user `messhias`. **Not** under `/root/` — earlier status
   entries mentioned `/root/lamasync/` but that was the pre-Aug-3 layout.
 - **Auto-update**: messhias's user crontab runs
-  `0 4 * * * /home/messasync/lamasync/update.sh` daily at 04:00 (local).
+  `0 4 * * * /home/messhias/lamasync/update.sh` daily at 04:00 (local).
   The script pulls the latest GHCR image, falls back to local build on
   pull failure, and recreates the container via `docker compose up -d`.
 
@@ -166,7 +166,7 @@ If the bad image is actively bricking the container on every restart
 (boot loop), you can pin a known-good image digest in `.env` on the LXC
 as `LAMASYNC_IMAGE=ghcr.io/aliforfaen/lamasync-server@sha256:<digest>`
 and rerun `update.sh`. The digest of any past GHCR image is reachable
-via `docker pull` history or `gh api repos/aliforaen/LamaSync/packages`
+via `docker pull` history or `gh api repos/aliforfaen/LamaSync/packages`
 (requires `packages: read`).
 
 The volumes (`docker_lamasync-data`, `docker_lamasync-backups`) are

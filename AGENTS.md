@@ -5,10 +5,12 @@
 LamaSync is a personal sync-fleet system: one server (Docker on an LXC
 container, tailnet-only), a lightweight daemon on each client, and a terminal
 UI for local & fleet views.
-It wraps **rclone** for file transfers and uses a **pre-shared API key** for auth.
+It wraps **rclone** for file transfers and uses managed bearer credentials for
+auth: a break-glass pre-shared master key plus named admin and host-bound
+device keys.
 Everything is written in **TypeScript** running on **Bun**.
 
-Bun workspace with five packages under `packages/`:
+Bun workspace with six packages under `packages/`:
 - `core` — shared types, DB schema, TOML config, API client
 - `server` — Elysia REST + WebSocket + Swagger + auth
 - `daemon` — client sync daemon (heartbeat, rclone, mounts, scheduler, Unix socket, `--update skill`)
@@ -73,7 +75,9 @@ API endpoints and TUI views, release process): `docs/development.md`.
 - **Bun over Node** — `bun:sqlite`, `bun build --compile`, `Bun.spawn`.
 - **Elysia over Express/Koa** — lightweight, built-in validation, one-liner Swagger. Fallback: `hono` + `zod`.
 - **rclone as the file engine** — mature, supports every backend; LamaSync generates temp rclone configs per-operation.
-- **Pre-shared API key** — no user management; tailnet provides transport encryption.
+- **Credential model** — no user accounts or OAuth; the break-glass master key
+  plus managed admin/device keys are the trust boundary, and the tailnet
+  provides transport encryption.
 - **OpenTUI** — native rendering with CLI fallback via `LAMASYNC_NO_TUI=1` (`packages/tui/src/index.ts`).
 - **TUI unification (LAMA-173)** — single `Shell` dispatches keys in this order: active wizard → view `handleKey` → view `hotkeys()` → global tab/quit/cycle.
 - **Agent surface (LAMA-227)** — the `lamasync` binary is BOTH the TUI shell AND a non-interactive subcommand CLI (LAMA-229). Any positional argv routes to CLI dispatch (`packages/tui/src/cli/dispatch.ts`); bare invocation + TTY still boots the TUI; bare invocation + `LAMASYNC_NO_TUI=1` keeps the legacy CLI fallback. The REST/WS API is the documented escape hatch when the CLI can't express the operation (LAMA-230 + LAMA-231 fill the full CRUD surface here). The install pipeline persists a skill-install preference in `~/.lamasync/install-state.json`; `lamasyncd --update skill` refreshes the skill bundle in lockstep with the binary version.

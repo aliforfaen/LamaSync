@@ -18,32 +18,30 @@ feature ideas in the other LAMA-249 children.
 
 ## Where to begin today
 
-Updated 2026-08-25. The foundation (LAMA-250 terminology) and design
+Updated 2026-08-30. The foundation (LAMA-250 terminology) and design
 overhaul (LAMA-275, owner-approved D1–D5) are **done** — do not redo them.
-Batch 1 (LAMA-153/257/258/268/269/282/283) is shipped and audited green.
-Current work orders:
+The feature batches, LAMA-234 managed keys, and TUI access-key work are
+shipped and audited green. The current work order is release verification:
 
-### A. Coding-agent batch 2 (no live infra needed)
+### A. v0.3.3 release verification
 
-Work order: `docs/handoff-agent-batch2-2026-08-25.md` — LAMA-259
-(time-travel browser), LAMA-265 (llama + confetti delight pass), and the
-agent-planned polish run 2 (P-A web UX hardening + P-B cleanup leftovers).
-Session contract is at the top of that file. Batch 1's contract and audit:
-`docs/handoff-agent-batch-2026-08-24.md`.
+Confirm the tag CI produces the three binaries, agent-skill bundle, and GHCR
+image. Then update and health-check production using `docs/prod-deploy.md`.
+Do not claim production is updated until the live image and boot log are
+verified.
 
-### B. Live-LXC batch (needs SSH to the container)
+### B. Maintenance follow-ups
 
-Plans: `docs/handoff-273-266-plan.md` (LAMA-273 pause/slow mode,
-LAMA-266 backup health fire drills) plus pending live verification of
-LAMA-263/264 (see `docs/handoff-wrapup-2026-08-24.md`). Run against the
-live app; the main orchestrator owns this one.
+Optional follow-ups are the 507 kB web-bundle split, a fuller browser/PTY
+artifact set, and live managed-key migration/pairing smoke testing. These are
+not prerequisites for the already-green build or release tag.
 
 ### Historical context
 
 The original LAMA-275 sequencing (terminology → design proposal → shell
 implementation) is preserved below for reference.
 
-### C. Implementation sequence after approval
+### Historical LAMA-275 implementation sequence
 
 1. Define the shared design contract: type scale, spacing, surfaces, status
    semantics, action hierarchy, focus/selection behavior, and theme rules.

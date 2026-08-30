@@ -8,9 +8,10 @@ Conventions used below:
 - `<server-url>` and `<api-key>` are placeholders. The CLI's auth discovery
   (`--server` / `--api-key` flags → `LAMASYNC_*` env → `client.toml`) means
   you usually don't have to spell them out.
-- `<your-api-key>` is the API key. In any echo, mask it:
-  `lamasync_…xxxx`.
-- `exit=0` means the command succeeded; `exit=3` is auth failure;
+- `<your-api-key>` is the credential. In any echo, mask it:
+  first 8 + last 4 characters (for example `lmsk.ABCDEFG…xxxx`).
+- `exit=0` means the command succeeded; `exit=3` is auth failure or missing
+  server config;
   `exit=4` is unreachable. The CLI's `--json` output lets you branch on
   these in scripts.
 

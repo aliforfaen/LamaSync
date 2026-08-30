@@ -3,6 +3,13 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## Current release — v0.3.3 (2026-08-30)
+
+The post-v0.3.2 product-finish and LAMA-234 work is now the v0.3.3 release
+candidate on `master`. The tag publishes the three binaries, the agent-skill
+bundle, and the GHCR server image through CI. Production deployment remains a
+separate operational verification step after CI succeeds.
+
 ## Done — LAMA-234 TUI access-key management (2026-08-29)
 
 TUI completion of LAMA-234 shipped on `lama-234-tui-access-keys` on top of
@@ -55,7 +62,7 @@ Bug fixes shipped along the way:
 Gates (all green): `tsc` clean; `bun run build:web-ui`; targeted client +
 helpers + view suites (plain and `LAMASYNC_TUI_TEST_VIEWS=1`); strict
 skill-drift OK (no route changed, so no new API docs were required);
-`bun test --reporter=dot` **1136 pass / 0 fail** (was 1 known failure);
+`bun test --reporter=dot` **1138 pass / 9 skip / 0 fail**;
 `bun run build`; live server smoke with disposable data + a non-production
 master key (health, /auth/me, create/reveal/revoke with `no-store`, then
 clean teardown). Real-PTY walkthrough via tmux at 80×24 and 60×20
@@ -80,15 +87,12 @@ admin routes + cross-host; own-host register/config 200). Production deploy
 deferred per plan (docs/prod-deploy.md updated with the LAMASYNC_SECRET_KEY
 requirement + recovery notes).
 
-## Planned — LAMA-234 managed API keys (2026-08-29)
+## Historical plan — LAMA-234 managed API keys (superseded)
 
-Owner-approved implementation handoff: [managed API-key plan](handoff-234-api-key-management-plan.md).
-The design keeps `LAMASYNC_API_KEY` as a break-glass master credential while
-adding named, revocable `admin` and host-bound `device` keys. QR pairing will
-mint a device-specific key rather than distribute the master key. Web Admin is
-the v1 management surface; TUI work is intentionally deferred. Do not begin
-implementation without following the route-level device allowlist and secret
-reveal/audit requirements in the handoff.
+The owner-approved implementation handoff is preserved at
+[managed API-key plan](handoff-234-api-key-management-plan.md). It has been
+implemented and is documented by the two completed LAMA-234 entries above;
+the handoff is retained for design rationale only.
 
 ## Endgame batch — CLI fallback, LAMA-260/262/274, polish run 3 (2026-08-26)
 
@@ -390,31 +394,11 @@ live app. Both remain `backlog` on Multica.
 
 ## Next session options
 
-Ready-to-pick work, ordered by likely value/urgency:
-
-1. **Merge PR #1** (owner) — the full coding-agent batch + prior flourishes
-   are pushed and CI-green; the what's-new doc has the review notes.
-
-2. **Live-LXC items** — LAMA-273 (pause/slow mode), LAMA-266 (backup fire
-   drills), LAMA-262 (pairing), plus live verification of LAMA-263/264 and
-   the new 257/269/282 surfaces against a real daemon — with the main
-   orchestrator (`docs/handoff-273-266-plan.md`).
-
-3. **LAMA-249 Phase 7 leftovers** — fuller screenshot/GIF set + filing the
-   audit findings (dogfood doc #1–#5), and the first `v*` release tag
-   (removes the build-from-source install gap).
-
-4. **LAMA-247 remainder** — op-log export, ntfyUrl dead code, dotfile diff
-   preview, renderer smoke tests, env-table doc (see the LAMA-247 comment).
-
-5. **LAMA-110 — Oh-My-Pi inspiration** (todo, urgent)
-   - Pull OMP-specific features/conventions into a lighter Pi runtime. Likely overlaps with management UI and runtime simplification.
-
-6. **LAMA-228 — TUI runtime-verify clean process exit** (todo, medium)
-   - LAMA-182 fixed it statically (commit `cbb10a1`); nobody has watched the actual process exit yet. Run the pty harness against dead + live servers.
-
-7. **LAMA-204 — LamaSync → LamaDB webhook receiver** (todo)
-   - Cross-project: LamaSync side is live (env-gated), the LamaDB side doesn't exist yet. Builds the Life OS timeline.
-
-8. **LAMA-237 / LAMA-236** (backlog, no priority)
-   - Host Types (laptop vs server, etc.) and Fleet software management. Larger features; revisit when the above is quiet.
+1. Verify the v0.3.3 GitHub release assets and GHCR image after CI completes,
+   then perform the production update and health check.
+2. Run the managed-key migration/pairing smoke against the live fleet, with a
+   rollback plan using the existing master key.
+3. Optional maintenance: split the 507 kB web bundle and expand the current
+   browser/PTY artifact set.
+4. Revisit backlog items LAMA-110, LAMA-204, LAMA-236, and LAMA-237 when the
+   release is settled.

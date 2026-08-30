@@ -1,12 +1,23 @@
 # What's new for the owner — rolling brief
 
-User-facing summary of what changed on `feature/product-finish`, what to look
+User-facing summary of what changed on the product-finish line, what to look
 for when you review or dogfood, and which decisions were made by agents vs.
-approved by you. Appended to at every milestone; the current branch work is
-tracked in Multica (LAMA-249 parent, LAMA-275/276/247 children).
+approved by you. Appended to at every milestone; current release state and
+work-order routing live in `docs/status.md` and `docs/agent-start.md`.
 
 **Legend:** ✅ you approved it · 🤖 agent decided (safe/mechanical) · ⚠️ agent
 decided but you may want a relook
+
+## 2026-08-30 — v0.3.3 release reconciliation
+
+- The product-finish, LAMA-273/266, LAMA-259/265/288, and LAMA-234 work is
+  present on `master` and passes the current gates: 1,138 tests passing and 9
+  skipped, strict skill-drift clean, and standalone builds clean.
+- The previous “PR #1 open” and “not deployed” notes below are historical
+  review context. The current release path is the v0.3.3 tag, followed by CI
+  asset/image verification and an explicit production health check.
+- Documentation was reconciled for the managed master/admin/device
+  credential model, current release behavior, and the completed cleanup items.
 
 ---
 

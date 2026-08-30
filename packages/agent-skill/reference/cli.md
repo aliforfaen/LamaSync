@@ -40,9 +40,10 @@ this file stays curated prose on top of the help texts).
   (talks to the daemon Unix socket, not the server), and `lamasync
   register` (LAMA-262 — writes the `client.toml` as its first
   side-effect, so refusing without one would be a chicken/egg).
-- **API key masking**: all output, including diagnostics, masks the key as
-  `lamasync_…xxxx` (first 8 + last 4). The CLI's `--doctor` re-masks
-  whatever it found in the chosen source.
+- **Credential masking**: all output, including diagnostics, masks the
+  credential to its first 8 + last 4 characters (for example
+  `lmsk.ABCDEFG…xxxx`). The CLI's `--doctor` re-masks whatever it found in
+  the chosen source.
 
 ## Top-level usage
 
@@ -203,7 +204,7 @@ Usage: lamasync doctor [--json]
 Structured health report. Checks (in order):
 
 1. env vars (`LAMASYNC_SERVER_URL` / `LAMASYNC_API_KEY` presence)
-2. auth source + **masked** API key (`lamasync_…xxxx`)
+2. auth source + **masked** credential (first 8 + last 4 characters)
 3. server reachability (`GET /api/v1/health`) and round-trip latency
 4. daemon Unix socket probe (`defaultSocketPath`)
 5. binary vs latest release version drift (GitHub Releases)

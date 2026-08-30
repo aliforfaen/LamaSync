@@ -9,9 +9,9 @@ description: Operate a LamaSync fleet — manage folders, hosts, backends, sync 
 
 LamaSync is a personal sync-fleet system: one `lamasync-server` (the control
 plane, REST + WebSocket + Swagger + SQLite) and a lightweight `lamasyncd`
-daemon per host that runs `rclone` for syncs, backups, and mounts. Auth is a
-single pre-shared API key — the *only* trust boundary. The tailnet provides
-transport encryption; the API key is the gate.
+daemon per host that runs `rclone` for syncs, backups, and mounts. Auth has no
+user accounts or OAuth: the break-glass master key plus managed admin/device
+keys are the trust boundary. The tailnet provides transport encryption.
 
 ## Decision tree
 
@@ -30,7 +30,7 @@ transport encryption; the API key is the gate.
 
 All commands take `--json` for machine output and obey a stable exit code
 contract (see `reference/cli.md`): `0` ok, `1` runtime, `2` usage error,
-`3` auth failure (401/403), `4` server unreachable.
+`3` auth failure (401/403) or missing server config, `4` server unreachable.
 
 ## Auth discovery order
 
@@ -40,8 +40,8 @@ The CLI and the daemon use the same precedence chain. `--server` and
 by `packaging/install/install.sh`). On a daemon host that already runs
 `lamasyncd`, the config file is always present — an agent needs zero setup.
 
-The API key is **always masked** in any output:
-`lamasync_…xxxx` (first 8 + last 4 characters).
+Credentials are **always masked** in output as their first 8 + last 4
+characters, e.g. `lmsk.ABCDEFG…xxxx` (master keys may begin `lamasync_`).
 
 ## Credentials (LAMA-234)
 
@@ -63,15 +63,16 @@ identifies the active credential.
 
 The full, verbatim contract lives in `reference/safety.md`. The rules are:
 
-1. **API trust, no users.** The pre-shared API key is the *only* trust
-   boundary; no users, roles, or sessions. If a task seems to need per-user
-   authz, escalate to a human.
+1. **API trust, no user accounts.** Master/admin/device credentials are the
+   trust boundary; there are no user accounts or OAuth sessions. If a task
+   seems to need per-user authz, escalate to a human.
 2. **Never invoke `rclone` directly.** All transfers go through the daemon
    executor, which owns locks and writes the operation report.
 3. **Prefer the WebSocket** for live state; don't poll `GET /operations` in
    a tight loop.
-4. **Mask the API key** — never log, print, or commit it; always
-   `lamasync_…xxxx` in examples, diagnostics, and step descriptions.
+4. **Mask credentials** — never log, print, or commit them; always show only
+   the first 8 + last 4 characters (for example `lmsk.ABCDEFG…xxxx`) in
+   examples, diagnostics, and step descriptions.
 5. **Mutations need intent.** Reads are free. Writes (and destructive
    commands) need explicit user intent — confirm before delete folder,
    force restore, rotate key, stop mounts, prune logs.

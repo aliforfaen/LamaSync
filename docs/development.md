@@ -93,7 +93,8 @@ The complete client end-to-end path (Proxmox-over-tailnet, install → register
 Docker Compose sandbox. The Command Center v1 (LAMA-183) browser dogfood
 matrix is preserved in git history if you need to re-run it.
 
-Current coverage: every `*.test.ts` in the source tree (~50 files, ~580 passing as of v0.3.2). Worth knowing by name:
+Current coverage: every `*.test.ts` in the source tree (101 files; 1,138
+passing and 9 skipped on 2026-08-30). Worth knowing by name:
 - `packages/core/src/test.test.ts` — DB schema, config parsing, version constant
 - `packages/server/src/routes/config.test.ts` — rclone config generation, encryption, peer detection
 - `packages/server/src/routes/{shares,operations,restic,conflicts,backends,browse,stats,actions,hosts}.test.ts` — REST routes

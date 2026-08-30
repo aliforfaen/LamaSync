@@ -25,7 +25,9 @@ client** or operate the local daemon. For direct server API operations
   HTTP, the tailnet provides encryption).
 - Server runs in Docker on an LXC container; it auto-updates from GHCR
   daily at 04:00.
-- Auth is one pre-shared API key used by every client and the Web UI.
+- Auth supports the break-glass master key plus managed admin/device keys;
+  paired clients should use their host-bound device key. The Web UI normally
+  uses a master or managed admin key.
 - **Getting the API key**: never guess or generate one — it must match the
   server's `LAMASYNC_API_KEY`. Ask the user, or read it from an existing
   client's `~/.config/lamasync/client.toml` (`apiKey = "..."`) if you have
