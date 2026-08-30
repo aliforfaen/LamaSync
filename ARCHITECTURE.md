@@ -193,10 +193,10 @@ DELETE /api/v1/folders/:id                     → remove folder
 POST   /api/v1/folders/:id/assign              → assign folder to host
 DELETE /api/v1/folders/:id/assign/:host_id     → unassign
 
-POST   /api/v1/operations/acquire              → acquire sync lock
-POST   /api/v1/operations/heartbeat            → renew sync lock
-POST   /api/v1/operations/release              → release sync lock
-GET    /api/v1/operations/locks                → list active locks
+POST   /api/v1/operations/acquire              → acquire canonical destination lock (body `destinationKey?`)
+POST   /api/v1/operations/heartbeat            → renew lock
+POST   /api/v1/operations/release              → release lock
+GET    /api/v1/operations/locks                → list active destination locks
 GET    /api/v1/operations                      → list operation_log entries
 
 
@@ -277,13 +277,28 @@ Credentials resolve to one of three typed principals (`AuthPrincipal` in
 
 1. Scheduler fires (or manual trigger from the TUI).
 2. Pulls folder config from local cache (synced with the server).
-3. Acquires the server-side lock for the folder (`acquireLock`).
+3. Acquires the server-side lock keyed by the folder's **canonical
+   destination/repository key** (`acquireLock`), with bounded backoff +
+   jitter/coalescing via `acquireLockWithRetry`.
 4. Pre-flight checks: rclone binary present, disk space >= threshold.
 5. Spawns `rclone bisync source:path dest:path --config /tmp/lamasync-rclone.conf`.
 6. Streams `--use-json-log` for transfer stats.
 7. Detects bisync state corruption and auto-recovers (`--resync`).
 8. Post-hook runs on success.
 9. Releases the lock and posts the report via `POST /report`.
+
+**Destination & lock model (LAMA-294):** the connection alias
+(`FolderAssignment.remoteName`) is separate from the destination path/prefix
+(`FolderAssignment.destination`). Ordinary backups host-scope by default to
+`<folder-name>/<host-id>`, so different hosts never collapse onto one
+namespace; sync/mount stay shared (`<folder-name>`). The **canonical
+destination key** (from `core/destination.ts`) is the server-side lock
+identity — `folder_locks` is keyed on `destination_key` (folder_id kept for
+diagnostics). Two assignments that write the same physical destination (or
+share a Restic repo) are serialized; distinct prefixes under one backend run
+concurrently. Lock contention or a control-plane outage is a first-class
+`deferred` outcome (not a failed backup), retried in-process so a
+simultaneous schedule isn't skipped until the next cron.
 
 ### Self-update (LAMA-151)
 

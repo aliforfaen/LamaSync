@@ -1,4 +1,4 @@
-import { LamaSyncApiClient, LamaSyncApiError } from "@lamasync/core";
+import { LamaSyncApiClient, LamaSyncApiError, type OperationReport } from "@lamasync/core";
 
 export interface LockHandle {
   folderId: string;
@@ -228,6 +228,42 @@ export async function heartbeatLock(
     }
     return "unknown";
   }
+}
+
+/**
+ * LAMA-294: build the first-class deferred OperationReport for a lock that
+ * could not be acquired after bounded retries. Contention or a temporary
+ * control-plane outage is a deferral (no transfer started), never a failed
+ * backup. Pure + exported so the wording/status mapping is testable.
+ */
+export function buildDeferredReport(
+  outcome: LockAcquireOutcome,
+  hostId: string,
+  folderId: string,
+  operation: string,
+  now: number = Date.now(),
+): OperationReport {
+  const reason = outcome.reason ?? "unreachable";
+  const lockedBy = outcome.lockedBy ?? "unknown";
+  const summary =
+    reason === "contended"
+      ? `deferred: destination locked by ${lockedBy === hostId ? "this host" : lockedBy} (${outcome.remainingSec ?? 0}s remaining) after ${outcome.attempts} attempt(s)`
+      : `deferred: server unreachable, lock not acquired after ${outcome.attempts} attempt(s)`;
+  return {
+    hostId,
+    folderId,
+    operation,
+    status: "deferred",
+    summary,
+    details: JSON.stringify({
+      destinationKey: outcome.destinationKey,
+      reason,
+      lockedBy,
+      attempts: outcome.attempts,
+    }),
+    timestamp: now,
+    durationMs: 0,
+  };
 }
 
 export async function releaseLock(

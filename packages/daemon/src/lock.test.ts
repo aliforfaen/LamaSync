@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { LamaSyncApiClient } from "@lamasync/core";
-import { acquireLock, acquireLockWithRetry, heartbeatLock, __clearActiveLocks } from "./lock.ts";
+import { acquireLock, acquireLockWithRetry, buildDeferredReport, heartbeatLock, __clearActiveLocks } from "./lock.ts";
 
 const HOST_ID = "host-a";
 const FOLDER_ID = "folder-1";
@@ -175,6 +175,55 @@ describe("acquireLockWithRetry (LAMA-294)", () => {
       attempts: 3,
       destinationKey: "dest:foo",
     });
+  });
+});
+
+describe("buildDeferredReport (LAMA-294)", () => {
+  test("contention maps to a first-class 'deferred' report, not failed", () => {
+    const report = buildDeferredReport(
+      { ok: false, reason: "contended", lockedBy: "host-b", remainingSec: 45, attempts: 3, destinationKey: "dest:shared" },
+      "host-a",
+      "f1",
+      "backup",
+      1_700_000_000_000,
+    );
+    expect(report.status).toBe("deferred");
+    expect(report.summary).toContain("destination locked by host-b");
+    expect(report.summary).toContain("3 attempt(s)");
+    expect(JSON.parse(report.details!)).toMatchObject({
+      destinationKey: "dest:shared",
+      reason: "contended",
+      lockedBy: "host-b",
+      attempts: 3,
+    });
+  });
+
+  test("server outage maps to a deferred report with the canonical key", () => {
+    const report = buildDeferredReport(
+      { ok: false, reason: "unreachable", attempts: 5, destinationKey: "s3:be1/folder1/host-a" },
+      "host-a",
+      "f1",
+      "backup",
+      1_700_000_000_000,
+    );
+    expect(report.status).toBe("deferred");
+    expect(report.summary).toContain("server unreachable");
+    expect(JSON.parse(report.details!)).toMatchObject({
+      destinationKey: "s3:be1/folder1/host-a",
+      reason: "unreachable",
+      attempts: 5,
+    });
+  });
+
+  test("the owning host is described as 'this host' for internal contention", () => {
+    const report = buildDeferredReport(
+      { ok: false, reason: "contended", lockedBy: "host-a", remainingSec: 0, attempts: 2, destinationKey: "dest:x" },
+      "host-a",
+      "f1",
+      "sync",
+      1,
+    );
+    expect(report.summary).toContain("locked by this host");
   });
 });
 

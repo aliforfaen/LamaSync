@@ -40,6 +40,7 @@ import { detectTailnetIp, TailnetReportTracker } from "./lan-peer.ts";
 import {
   acquireLock,
   acquireLockWithRetry,
+  buildDeferredReport,
   heartbeatLock,
   releaseLock,
   releaseStaleLocks,
@@ -693,30 +694,17 @@ async function main(): Promise<void> {
       canonicalDestinationKey(folder, assignment),
     );
     if (!lockResult.ok) {
-      const reason = lockResult.reason ?? "unreachable";
-      const lockedBy = lockResult.lockedBy ?? "unknown";
-      const summary =
-        reason === "contended"
-          ? `deferred: destination locked by ${lockedBy === hostId ? "this host" : lockedBy} (${lockResult.remainingSec ?? 0}s remaining) after ${lockResult.attempts} attempt(s)`
-          : `deferred: server unreachable, lock not acquired after ${lockResult.attempts} attempt(s)`;
-      console.warn(`[run] folder=${folder.name} ${summary}`);
+      const skipReport = buildDeferredReport(
+        lockResult,
+        hostId,
+        folder.id,
+        effectiveFolder.type,
+        Date.now(),
+      );
+      console.warn(`[run] folder=${folder.name} ${skipReport.summary}`);
       // Contention / control-plane outage is a first-class deferral, not a
       // failed backup: no transfer was started, so it must not surface as a
       // permanent failure (LAMA-294 goal 4-5).
-      const skipReport: OperationReport = {
-        hostId,
-        folderId: folder.id,
-        operation: effectiveFolder.type,
-        status: "deferred",
-        summary,
-        details: JSON.stringify({
-          destinationKey: lockResult.destinationKey,
-          reason,
-          lockedBy,
-          attempts: lockResult.attempts,
-        }),
-        durationMs: 0,
-      };
       await reportOperation(skipReport);
       return skipReport;
     }

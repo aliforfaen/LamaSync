@@ -10,6 +10,57 @@ The tag CI passed check, build, release, and Docker publication, producing the
 three binaries, agent-skill bundle, and GHCR server image. Production
 deployment remains a separate operational verification step.
 
+## LAMA-294 — host-scoped backups + canonical destination locking (phase 1+2)
+
+Fixes LAMA-292 (concurrent hosts backing up the same folder merged/starved,
+showed as `skipped: folder locked by …` **failed** rows). Commits:
+`982f990` (phase 1), `017ae24` (phase 2), plus the deferred-report helper on
+the same branch.
+
+**What changed**
+- **Lock identity is now the canonical destination/repository key**, not the
+  folder id. `folder_locks` is re-keyed by `destination_key` (folder_id kept
+  for diagnostics). Two assignments that write the *same physical destination*
+  (or share a Restic repo) serialize; distinct prefixes under one backend run
+  concurrently. `POST /operations/acquire|heartbeat|release` accept an
+  optional `destinationKey` (omitted → `folder:<id>`, preserving legacy
+  per-folder serialization).
+- **Ordinary backups are host-scoped by default** to `<folder-name>/<host-id>`
+  (new `FolderAssignment.destination`, separate from the connection alias
+  `remoteName`). Same folder on different hosts now target distinct
+  namespaces ⇒ no contention. Sync/mount destinations stay shared
+  (`<folder-name>`).
+- **Lock contention / control-plane outage is a first-class `deferred`
+  outcome**, not a failed backup; the daemon retries acquisition with bounded
+  exponential backoff + jitter/coalescing (`acquireLockWithRetry`) instead of
+  skipping until the next cron. `deferred` is a real `OperationStatus` shown
+  in the TUI logs filter, CLI ops status, and web activity sentence.
+- **rclone exit-code classification corrected** (0=success, 9=NoFilesTransferred
+  = success, 5=retryable, everything else non-retryable). Exit 9 no longer
+  renders as `failed (exit 9)` and is not retried; only transient failures
+  (exit 5 / timeout) retry. Missing paths, usage/syntax, no-retry, fatal and
+  quota codes surface as failed with scrubbed stderr + `exitCategory`.
+
+**Migration / cleanup behavior (important)**
+- The migration adds `folder_assignments.destination` and backfills it:
+  existing backup assignments → `<folder-name>/<host-id>` (host-scoped),
+  existing sync/mount → `<folder-name>`. It also rebuilds `folder_locks`
+  (in-flight locks are transient TTL locks, safely discarded).
+- **Legacy shared backup data** sitting at the old `<folder-name>` root is
+  **left in place but orphaned** — it is *not* re-homed or silently merged
+  into the new layout. After upgrade, re-run backups to repopulate the
+  per-host `<folder-name>/<host-id>` prefixes; the old root can be cleaned up
+  manually once you've confirmed the new prefixes are populated.
+- Do **not** point an explicit `destination` at the legacy shared root unless
+  you intentionally want multiple hosts to share one namespace (that is then
+  serialized by the canonical lock and reported as `deferred` on contention).
+
+**Test coverage**: core destination derivation, server canonical-key
+contention/concurrency, daemon lock-retry (contention/outage) + deferred
+report, rclone exit-code classification. Typecheck, `bun test`, and
+`check-skill-drift --strict` all green. Phase 3 (remaining integration matrix
++ docs polish) still open.
+
 ## Done — LAMA-234 TUI access-key management (2026-08-29)
 
 TUI completion of LAMA-234 shipped on `lama-234-tui-access-keys` on top of
