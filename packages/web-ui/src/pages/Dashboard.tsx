@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { PageHeader } from "../components/PageHeader.tsx";
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 import type {
@@ -28,6 +27,14 @@ import { showVerifiedBadge } from "../backup-health.ts";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { Donut } from "../components/Donut.tsx";
 import { Confetti, useMilestoneConfetti } from "../components/Confetti.tsx";
+import {
+  IconFolderFilled,
+  IconHost,
+  IconLlamaFilled,
+  IconShieldFilled,
+  IconStorageFilled,
+  IconSyncFilled,
+} from "../components/icons.tsx";
 
 /** LAMA-265: "first backup ever seen" — a successful folder or app-settings
  *  backup in the feed (terminology: `backup` = Backup, `dotfile` = App
@@ -116,28 +123,25 @@ function isNewSince(ts: number | undefined, lastVisit: number | null): boolean {
   return lastVisit !== null && typeof ts === "number" && ts > lastVisit;
 }
 
-interface AttentionItemProps {
-  title: string;
-  count: number;
-  children?: ReactNode;
-  to?: string;
+function greetingForHour(hour: number): string {
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
 }
 
-function AttentionItem({ title, count, children, to }: AttentionItemProps) {
-  return (
-    <div className={`attention-item ${count ? "attention-active" : ""}`}>
-      <div>
-        <strong>{title}</strong>
-        <span className="attention-count">{count}</span>
-      </div>
-      {count ? <div className="attention-detail">{children}</div> : null}
-      {to && count ? (
-        <Link className="attention-link" to={to}>
-          View all →
-        </Link>
-      ) : null}
-    </div>
-  );
+function activityLabel(op: OperationLog): string {
+  if (op.operation === "dotfile") return "App settings backed up";
+  if (op.operation === "backup") return "Backup completed";
+  if (op.operation === "sync") return "Folder synced";
+  if (op.operation === "restore") return "Recovery started";
+  return op.operation.replaceAll("_", " ");
+}
+
+function activityTone(status: OperationLog["status"]): "success" | "warning" | "critical" | "info" {
+  if (status === "success") return "success";
+  if (status === "failed") return "critical";
+  if (status === "conflict" || status === "deferred" || status === "retry") return "warning";
+  return "info";
 }
 
 export function Dashboard() {
@@ -165,6 +169,7 @@ export function Dashboard() {
   // LAMA-203: captured once; highlights are computed against the previous
   // visit, then the stored value is bumped to `now` for the next one.
   const [lastVisit] = useState<number | null>(readLastVisit);
+  const [dashboardTab, setDashboardTab] = useState<"overview" | "sync" | "protection" | "activity">("overview");
   // LAMA-265: once-per-milestone confetti — first successful backup ever
   // seen in the operations feed (flag lives in localStorage, reload-safe).
   const { fire: fireFirstBackup, visible: showFirstBackup } =
@@ -379,6 +384,24 @@ export function Dashboard() {
 
   const allQuiet =
     data !== null && !counts.conflicts && !failed.length && !offline.length && !updates.length;
+  const attentionCount = failed.length + counts.conflicts + offline.length + updates.length;
+  const heroTitle =
+    data === null
+      ? "Checking in with your fleet…"
+      : data.hosts.length === 0
+        ? "A quiet home for your files."
+        : allQuiet
+          ? "Your files are in good hands."
+          : "Your files need a hand.";
+  const heroDescription =
+    data === null
+      ? "Gathering the latest device, folder, and protection signals."
+      : data.hosts.length === 0
+        ? "Pair a device to start keeping your files in step and recoverable."
+        : allQuiet
+          ? "Everything important is moving along. Here’s the latest from your sync fleet."
+          : `${attentionCount} ${attentionCount === 1 ? "item needs" : "items need"} a closer look. Start with the next useful action below.`;
+  const dashboardHeadline = data?.hosts.length ? "Your sync fleet, at a glance." : "A quiet home for your files.";
 
   async function onRefreshStorage(): Promise<void> {
     setStorageBusy(true);
@@ -393,395 +416,258 @@ export function Dashboard() {
     }
   }
 
+  const tabs: Array<{ id: typeof dashboardTab; label: string }> = [
+    { id: "overview", label: "Overview" },
+    { id: "sync", label: "Sync" },
+    { id: "protection", label: "Protection" },
+    { id: "activity", label: "Activity" },
+  ];
+
   return (
-    <div className="page">
-      <PageHeader title="Dashboard" purpose="See what needs attention across your devices at a glance." />
-<div className="toolbar">
-        <span
-          className={`ws-pill ws-${wsState}`}
-          title="WebSocket connection status"
-        >
-          <span className="ws-dot" aria-hidden="true" /> {wsState}
-        </span>
-        <PauseControl
-          scope="global"
-          active={overview?.global !== null}
-          onChanged={() => void refreshPause()}
-        />
-        {backupVerified !== null ? (
-          <span
-            className="badge badge-success"
-            title="A storage destination was proven within the last 30 days"
-          >
-            ✓ Verified {formatTimeAgo(backupVerified)} ago
-          </span>
-        ) : (
-          <span className="muted" title="Run 'Prove it' on a restic destination">
-            backups not verified yet
-          </span>
-        )}
-      </div>
-      {overview?.global ? (
-        <PauseBanner
-          state={overview.global}
-          scope="global"
-          onResumed={() => void refreshPause()}
-        />
-      ) : null}
-      {error && <div className="error">{error}</div>}
-      {backendsError ? (
-        <InlineError
-          message={backendsError}
-          onRetry={() => setReloadKey((k) => k + 1)}
-        />
-      ) : null}
-
-      {showFirstBackup ? (
-        <Confetti fallback={<span>✓ Nice work — your first backup is in.</span>} />
-      ) : null}
-
-      <section className="section">
-        <h2>Needs attention{newTotal > 0 ? ` · ${newTotal} new` : ""}</h2>
-        {allQuiet ? (
-          <div className="all-quiet">✓ All quiet — your fleet is healthy</div>
-        ) : (
-          <div className="attention-grid">
-            <AttentionItem title="Pending conflicts" count={counts.conflicts} to="/conflicts">
-              <ul>
-                {data?.pendingConflicts.slice(0, 3).map((c) => (
-                  <li key={c.id} title={formatTimestamp(c.createdAt)}>
-                    <span className="attention-entry-text">
-                      {folderNameById.get(c.folderId) ?? c.folderId}
-                    </span>
-                    <span className="attention-entry-time">
-                      {formatTimeAgo(c.createdAt)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </AttentionItem>
-            <AttentionItem
-              title="Failed operations (24h)"
-              count={failed.length}
-              to="/operations"
-            >
-              <ul>
-                {failed.slice(0, 3).map((op) => (
-                  <li
-                    key={String(op.id)}
-                    title={`${op.summary ?? op.operation} · ${formatTimestamp(op.timestamp)}`}
-                  >
-                    <span className="attention-entry-text">
-                      <OperationSentenceView
-                        op={op}
-                        ctx={{
-                          folderName: op.folderId ? folderNameById.get(op.folderId) : undefined,
-                          hostName: hostNameById.get(op.hostId),
-                          backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined,
-                        }}
-                      />
-                    </span>
-                    <span className="attention-entry-time">
-                      {formatTimeAgo(op.timestamp)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </AttentionItem>
-            <AttentionItem title="Offline / degraded" count={offline.length}>
-              <div>
-                {offline.map((h) => (
-                  <span className="attention-host" key={h.id}>
-                    {h.hostname}
-                  </span>
-                ))}
-              </div>
-            </AttentionItem>
-            <AttentionItem title="Updates available" count={updates.length}>
-              <div>
-                {updates.map((h) => (
-                  <span className="attention-host" key={h.id}>
-                    {h.hostname} <code>v{h.version ?? "—"}</code>
-                  </span>
-                ))}
-              </div>
-            </AttentionItem>
-          </div>
-        )}
-      </section>
-
-      {data && data.hosts.length > 0 ? (
-        <GettingStarted
-          hosts={data.hosts}
-          backends={data.backends}
-          folders={data.folders}
-          hasAssignments={data.hasAssignments}
-          hasOperations={data.operations.length > 0}
-        />
-      ) : null}
-
-      {demo?.hasDemo ? (
-        <section className="section demo-banner">
-          <div className="toolbar">
-            <h2>Demo data is active</h2>
-            <button
-              type="button"
-              className="action danger"
-              disabled={demoBusy}
-              onClick={() => setConfirmDeleteDemo(true)}
-            >
-              {demoBusy ? "Working…" : "Delete demo data"}
-            </button>
-          </div>
-          <p className="muted">
-            You're exploring a demo fleet — 3 fake devices, a timeline, and a
-            browsable snapshot. Nothing here touches a real backend. Delete it
-            any time to start fresh.
+    <div className="page dashboard-page">
+      <header className="dashboard-header">
+        <div>
+          <p className="dashboard-eyebrow">
+            {greetingForHour(new Date().getHours())}, friend <span aria-hidden="true">✦</span>
           </p>
+          <h1>{dashboardHeadline}</h1>
+          <p className="dashboard-lede">{heroDescription}</p>
+        </div>
+        <div className="dashboard-header-tools">
+          <span className={`ws-pill ws-${wsState}`} title="WebSocket connection status">
+            <span className="ws-dot" aria-hidden="true" /> {wsState}
+          </span>
+          <PauseControl
+            scope="global"
+            active={Boolean(overview?.global)}
+            onChanged={() => void refreshPause()}
+          />
+          {backupVerified !== null ? (
+            <span className="dashboard-verified" title="A storage destination was proven within the last 30 days">
+              <span aria-hidden="true">✓</span> Verified {formatTimeAgo(backupVerified)} ago
+            </span>
+          ) : (
+            <span className="dashboard-unverified" title="Run 'Prove it' on a restic destination">
+              Backups not verified yet
+            </span>
+          )}
+        </div>
+      </header>
+
+      <nav className="dashboard-tabs" role="tablist" aria-label="Dashboard views">
+        {tabs.map((tab) => (
+          <button
+            type="button"
+            key={tab.id}
+            className={dashboardTab === tab.id ? "is-active" : undefined}
+            aria-selected={dashboardTab === tab.id}
+            role="tab"
+            onClick={() => setDashboardTab(tab.id)}
+          >
+            {tab.label}
+            {tab.id === "activity" && data?.operations.length ? (
+              <span className="tab-count">{data.operations.length}</span>
+            ) : null}
+          </button>
+        ))}
+      </nav>
+
+      {overview?.global ? (
+        <PauseBanner state={overview.global} scope="global" onResumed={() => void refreshPause()} />
+      ) : null}
+      {error ? <div className="error">{error}</div> : null}
+      {backendsError ? <InlineError message={backendsError} onRetry={() => setReloadKey((k) => k + 1)} /> : null}
+      {showFirstBackup ? <Confetti fallback={<span>✓ Nice work — your first backup is in.</span>} /> : null}
+
+      {dashboardTab === "overview" ? (
+        <section className={`dashboard-hero ${data && allQuiet ? "hero-healthy" : "hero-attention"}`} aria-labelledby="fleet-verdict">
+          <div className="hero-copy">
+            <div className="hero-kicker">
+              <span className="hero-status-mark" aria-hidden="true">{data && allQuiet ? "✓" : data ? "!" : "…"}</span>
+              Fleet verdict
+            </div>
+            <h2 id="fleet-verdict">{heroTitle}</h2>
+            <p>{heroDescription}</p>
+            <div className="hero-actions">
+              {data && !allQuiet ? (
+                <button type="button" className="action primary" onClick={() => document.getElementById("needs-a-hand")?.scrollIntoView({ behavior: "smooth" })}>
+                  Review what needs a hand
+                </button>
+              ) : data && data.hosts.length === 0 ? (
+                <Link className="action primary" to="/hosts">Pair a device</Link>
+              ) : (
+                <button type="button" className="action primary" onClick={() => setDashboardTab("activity")}>View recent activity</button>
+              )}
+              <Link className="hero-secondary-action" to="/folders">Manage synced folders <span aria-hidden="true">→</span></Link>
+            </div>
+          </div>
+          <div className="hero-llama" aria-hidden="true"><IconLlamaFilled /></div>
+          <div className="hero-summary" aria-label="Current attention summary">
+            <div className="hero-attention-heading">{attentionCount ? "Worth a look" : "A calm moment"}</div>
+            <div className="hero-attention-list">
+              <HeroSignal label="Failed operations" value={failed.length} tone={failed.length ? "critical" : "quiet"} />
+              <HeroSignal label="Pending conflicts" value={counts.conflicts} tone={counts.conflicts ? "warning" : "quiet"} />
+              <HeroSignal label="Offline devices" value={offline.length} tone={offline.length ? "warning" : "quiet"} />
+              <HeroSignal label="Updates available" value={updates.length} tone={updates.length ? "info" : "quiet"} />
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {dashboardTab !== "activity" ? (
+        <div className="dashboard-signals" aria-label="Fleet signals">
+          <SignalTile icon={<IconHost />} label="Devices" value={data ? `${counts.online}/${counts.total}` : "—"} detail="online now" to="/hosts" tone="moss" />
+          <SignalTile icon={<IconFolderFilled />} label="Synced folders" value={counts.folders} detail="kept in step" to="/folders" tone="clay" />
+          <SignalTile icon={<IconShieldFilled />} label="Protection" value={backupVerified !== null ? "Verified" : data?.backends.length ? "Not yet" : "Set up"} detail={backupVerified !== null ? `checked ${formatTimeAgo(backupVerified)} ago` : "recovery copies"} to="/backends" tone="moss" />
+          <SignalTile icon={<IconStorageFilled />} label="Storage" value={storage ? formatBytes(storage.totalBytes) : "—"} detail={storage ? "in use" : "measuring"} to="/backends" tone="teal" />
+        </div>
+      ) : null}
+
+      {dashboardTab === "overview" && data ? (
+        <GettingStarted hosts={data.hosts} backends={data.backends} folders={data.folders} hasAssignments={data.hasAssignments} hasOperations={data.operations.length > 0} />
+      ) : null}
+
+      {demo?.hasDemo && dashboardTab === "overview" ? (
+        <section className="section demo-banner">
+          <div className="toolbar"><h2>Demo fleet active</h2><button type="button" className="action danger" disabled={demoBusy} onClick={() => setConfirmDeleteDemo(true)}>{demoBusy ? "Working…" : "Delete demo data"}</button></div>
+          <p className="muted">You’re exploring three fictional devices and a sample timeline. Nothing here touches a real storage destination.</p>
         </section>
       ) : null}
 
       {confirmDeleteDemo ? (
-        <ConfirmDialog
-          title="Delete demo data?"
-          message="This permanently removes the demo devices, folders, timeline, and snapshot. Your real data is not affected."
-          confirmLabel="Delete demo data"
-          danger
-          onConfirm={() => void onDeleteDemo()}
-          onCancel={() => setConfirmDeleteDemo(false)}
-        />
+        <ConfirmDialog title="Delete demo data?" message="This permanently removes the demo devices, folders, timeline, and snapshot. Your real data is not affected." confirmLabel="Delete demo data" danger onConfirm={() => void onDeleteDemo()} onCancel={() => setConfirmDeleteDemo(false)} />
       ) : null}
 
-      <section className="section">
-        <h2>Fleet</h2>
-        {!data ? (
-          <div className="fleet-grid" aria-busy="true">
-            <div className="skel skel-card" />
-            <div className="skel skel-card" />
-            <div className="skel skel-card" />
-            <div className="skel skel-card" />
-          </div>
-        ) : data.hosts.length === 0 ? (
-          <>
-            <EmptyState
-              variant="devices"
-              glyph="llama"
-              title="Pair your first device"
-              how="Register a machine with this server and start syncing folders between your devices."
-              ctaLabel="Pair your first device"
-              ctaTo="/hosts"
-              steps={[
-                "Run the installer on the new machine",
-                "Point it at this server with your API key",
-                "It appears here within a minute",
-              ]}
-              timeNote="takes 30s"
-            />
-            {!demo?.hasDemo ? (
-              <div className="demo-secondary">
-                <span className="muted">Or explore without setting anything up:</span>
-                <button
-                  type="button"
-                  className="action"
-                  disabled={demoBusy}
-                  onClick={() => void onSeedDemo()}
-                >
-                  {demoBusy ? "Seeding…" : "Explore a demo fleet"}
-                </button>
+      {dashboardTab === "overview" || dashboardTab === "sync" ? (
+        <div className="dashboard-workspace">
+          <section className="dashboard-panel needs-hand" id="needs-a-hand" aria-labelledby="needs-heading">
+            <PanelHeading title="Needs a hand" subtitle={newTotal > 0 ? `${newTotal} new since your last visit` : "Short, actionable signals from the fleet"} />
+            {!data ? <div className="skel skel-lines" aria-busy="true" /> : allQuiet ? (
+              <div className="quiet-state"><span className="quiet-mark" aria-hidden="true">✓</span><div><strong>All quiet here.</strong><span>Your fleet is healthy and up to date.</span></div></div>
+            ) : (
+              <div className="needs-list">
+                {failed.length ? <NeedsRow tone="critical" label={`${failed.length} failed operation${failed.length === 1 ? "" : "s"}`} detail="Review the latest backup or sync result." to="/operations" /> : null}
+                {counts.conflicts ? <NeedsRow tone="warning" label={`${counts.conflicts} pending conflict${counts.conflicts === 1 ? "" : "s"}`} detail={data.pendingConflicts.slice(0, 2).map((c) => folderNameById.get(c.folderId) ?? c.folderId).join(" · ")} to="/conflicts" /> : null}
+                {offline.length ? <NeedsRow tone="warning" label={`${offline.length} device${offline.length === 1 ? "" : "s"} offline or degraded`} detail={offline.map((h) => h.hostname).join(" · ")} to="/hosts" /> : null}
+                {updates.length ? <NeedsRow tone="info" label={`${updates.length} update${updates.length === 1 ? "" : "s"} available`} detail={updates.map((h) => h.hostname).join(" · ")} to="/hosts" /> : null}
               </div>
-            ) : null}
-          </>
-        ) : (
-          <div className="fleet-grid">
-            {data.hosts.map((h) => (
-              <Link className="fleet-card fleet-card-link" key={h.id} to={`/hosts/${encodeURIComponent(h.id)}`}>
-                <div className="fleet-card-head">
-                  <strong>{h.hostname}</strong>
-                  <span className={`badge badge-${h.status}`}>{h.status}</span>
-                </div>
-                <span className="muted">Last seen {formatTimestamp(h.lastSeen)}</span>
-                {h.tailnetIp ? <span className="muted">tailnet {h.tailnetIp}</span> : null}
-                <span>
-                  v{h.version ?? "—"}{" "}
-                  {h.updateAvailable && <span className="badge badge-update">update</span>}
-                </span>
-              </Link>
-            ))}
-          </div>
-        )}
-      </section>
+            )}
+          </section>
 
-      <div className="summary-grid">
-        <SummaryCard label="Devices" value={counts.total} />
-        <SummaryCard label="Online" value={counts.online} accent="online" />
-        <SummaryCard label="Folders" value={counts.folders} />
-        <SummaryCard label="Shares" value={counts.shares} />
-        <SummaryCard label="Snapshots" value={counts.snapshots} />
-        <SummaryCard label="Storage" value={storage ? formatBytes(storage.totalBytes) : "—"} />
-      </div>
-
-      <section className="section">
-        <div className="toolbar">
-          <h2>Storage</h2>
-          <button
-            type="button"
-            className="action"
-            disabled={storageBusy}
-            onClick={() => void onRefreshStorage()}
-          >
-            {storageBusy ? "Measuring…" : "Refresh"}
-          </button>
+          <section className="dashboard-panel fleet-roster" aria-labelledby="fleet-heading">
+            <PanelHeading title="Fleet" subtitle="Devices keeping your files in step" action={<Link to="/hosts">View devices <span aria-hidden="true">→</span></Link>} />
+            {!data ? <div className="skel skel-lines" aria-busy="true" /> : data.hosts.length === 0 ? (
+              <div className="empty-fleet"><IconLlamaFilled aria-hidden="true" /><strong>Your fleet starts with one device.</strong><Link className="action" to="/hosts">Pair a device</Link>{!demo?.hasDemo ? <button type="button" className="text-action" disabled={demoBusy} onClick={() => void onSeedDemo()}>{demoBusy ? "Seeding…" : "Explore a demo fleet"}</button> : null}</div>
+            ) : (
+              <div className="fleet-roster-list">
+                {data.hosts.slice(0, 5).map((h) => <Link className="fleet-roster-row" key={h.id} to={`/hosts/${encodeURIComponent(h.id)}`}>
+                  <span className={`roster-device roster-device--${h.status}`} aria-hidden="true"><IconHost /></span>
+                  <span className="roster-name"><strong>{h.hostname}</strong><span>{h.lastSeen ? `Last seen ${formatTimeAgo(h.lastSeen)}` : "Waiting for first check-in"}</span></span>
+                  <span className={`roster-status roster-status--${h.status}`}><span aria-hidden="true">●</span>{h.status}</span>
+                  <span className="roster-version">v{h.version ?? "—"}{h.updateAvailable ? <em>update</em> : null}</span>
+                </Link>)}
+              </div>
+            )}
+          </section>
         </div>
-        {!storage ? (
-          <div className="empty-row">
-            {storageError ? (
-              <InlineError
-                message={`Storage report unavailable — ${storageError}`}
-                onRetry={() => void onRefreshStorage()}
-              />
-            ) : (
-              <div className="skel skel-line" aria-busy="true" />
-            )}
-          </div>
-        ) : (
-          <>
-            {storageError ? (
-              <InlineError
-                message={`Storage refresh failed — ${storageError}`}
-                onRetry={() => void onRefreshStorage()}
-              />
-            ) : null}
-            {storage.backends.some((b) => b.bytes > 0) ? (
-              <div className="storage-overview">
-                <Donut
-                  data={storage.backends
-                    .filter((b) => b.bytes > 0)
-                    .map((b) => ({ label: b.label, value: b.bytes }))}
-                  size={120}
-                  thickness={16}
-                  centerLabel={formatBytes(storage.totalBytes)}
-                  centerSublabel="total"
-                  ariaLabel="Storage by source"
-                />
-              </div>
-            ) : null}
-            <table className="data">
-            <thead>
-              <tr>
-                <th>Source</th>
-                <th>Kind</th>
-                <th>Size</th>
-                <th>Objects</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {storage.backends.map((entry) => (
-                <tr key={entry.backendId ?? entry.label}>
-                  <td>{entry.label}</td>
-                  <td>
-                    <span className={`badge badge-${entry.kind}`}>{entry.kind}</span>
-                  </td>
-                  <td>{formatBytes(entry.bytes)}</td>
-                  <td className="muted">{entry.objectCount ?? "—"}</td>
-                  <td>
-                    {entry.error ? (
-                      <span className="badge badge-failed" title={entry.error}>
-                        error
-                      </span>
-                    ) : (
-                      <span className="badge badge-success">ok</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              <tr>
-                <td>
-                  <strong>Total</strong>
-                </td>
-                <td />
-                <td className="num mono">
-                  <strong>{formatBytes(storage.totalBytes)}</strong>
-                </td>
-                <td />
-                <td />
-              </tr>
-            </tbody>
-          </table>
-          </>
-        )}
-      </section>
+      ) : null}
 
-      <section className="section">
-        <h2>Recent activity</h2>
-        <table className="data">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Host</th>
-              <th>Operation</th>
-              <th>Status</th>
-              <th>Summary</th>
-            </tr>
-          </thead>
-          <tbody>
-            {!data || !data.operations.length ? (
-              <tr className="empty-row">
-                <td colSpan={5}>No operations recorded</td>
-              </tr>
-            ) : (
-              data.operations.map((op) => (
-                <tr key={String(op.id)}>
-                  <td>{formatTimestamp(op.timestamp)}</td>
-                  <td>{op.hostId}</td>
-                  <td>{op.operation}</td>
-                  <td>
-                    <span className={`badge badge-${op.status}`}>{op.status}</span>
-                    {isNewSince(op.timestamp, lastVisit) ? (
-                      <span className="chip-new">new</span>
-                    ) : null}
-                  </td>
-                  <td className="muted">
-                    <OperationSentenceView
-                      op={op}
-                      ctx={{
-                        folderName: op.folderId ? folderNameById.get(op.folderId) : undefined,
-                        hostName: hostNameById.get(op.hostId),
-                        backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined,
-                      }}
-                    />
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </section>
+      {dashboardTab === "sync" ? (
+        <section className="dashboard-panel dashboard-context-panel">
+          <PanelHeading title="Sync in plain language" subtitle="The folders and devices currently sharing work." />
+          <div className="context-cards"><ContextCard icon={<IconSyncFilled />} title="Synced folders" body="Keep a working folder identical across the Devices that share it." to="/folders" /><ContextCard icon={<IconFolderFilled />} title="Conflicts" body={counts.conflicts ? "A choice is waiting where two Devices changed the same file." : "No folder choices are waiting right now."} to="/conflicts" /></div>
+        </section>
+      ) : null}
 
-      <section className="section quick-actions">
-        <h2>Quick actions</h2>
-        <Link className="action" to="/folders">
-          Manage folders →
-        </Link>
-        <Link className="action" to="/conflicts">
-          Resolve conflicts →
-        </Link>
-      </section>
+      {dashboardTab === "protection" ? (
+        <section className="dashboard-panel protection-panel" aria-labelledby="protection-heading">
+          <PanelHeading title="Protection" subtitle="Recovery copies are separate from a successful sync." action={<Link to="/backends">Manage destinations <span aria-hidden="true">→</span></Link>} />
+          <div className="protection-summary"><div className={`protection-status ${backupVerified !== null ? "is-verified" : ""}`}><IconShieldFilled aria-hidden="true" /><div><strong>{backupVerified !== null ? "A destination was recently verified" : "Backups have not been verified yet"}</strong><span>{backupVerified !== null ? `Last checked ${formatTimeAgo(backupVerified)} ago. Completed and verified are tracked separately.` : "Run Prove it from a restic destination to confirm a recovery copy can be read."}</span></div></div><Link className="action primary" to="/backends">Open protection</Link></div>
+          <StorageSection storage={storage} storageBusy={storageBusy} storageError={storageError} onRefresh={() => void onRefreshStorage()} />
+        </section>
+      ) : null}
+
+      {dashboardTab === "overview" ? <ActivityLedger operations={data?.operations ?? []} folderNameById={folderNameById} hostNameById={hostNameById} folderBackendNameById={folderBackendNameById} lastVisit={lastVisit} onViewAll={() => setDashboardTab("activity")} /> : null}
+      {dashboardTab === "activity" ? <ActivityLedger operations={data?.operations ?? []} folderNameById={folderNameById} hostNameById={hostNameById} folderBackendNameById={folderBackendNameById} lastVisit={lastVisit} /> : null}
+
+      {dashboardTab === "overview" ? <section className="dashboard-footer-actions"><Link to="/folders">Manage synced folders <span aria-hidden="true">→</span></Link><Link to="/conflicts">Resolve conflicts <span aria-hidden="true">→</span></Link></section> : null}
     </div>
   );
 }
 
-interface SummaryCardProps {
+interface SignalTileProps {
+  icon: ReactNode;
   label: string;
   value: number | string;
-  accent?: "online" | "offline" | "conflict";
+  detail: string;
+  to: string;
+  tone: "moss" | "clay" | "teal";
 }
 
-function SummaryCard({ label, value, accent }: SummaryCardProps) {
+function SignalTile({ icon, label, value, detail, to, tone }: SignalTileProps) {
   return (
-    <div className="summary-card">
-      <span className="label">{label}</span>
-      <span className={accent ? `value badge-${accent}` : "value"}>{value}</span>
+    <Link className={`signal-tile signal-tile--${tone}`} to={to}>
+      <span className="signal-icon" aria-hidden="true">{icon}</span>
+      <span className="signal-copy"><span className="signal-label">{label}</span><strong>{value}</strong><span>{detail}</span></span>
+      <span className="signal-arrow" aria-hidden="true">↗</span>
+    </Link>
+  );
+}
+
+function HeroSignal({ label, value, tone }: { label: string; value: number; tone: "critical" | "warning" | "info" | "quiet" }) {
+  return <div className={`hero-signal hero-signal--${tone}`}><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function PanelHeading({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) {
+  return <div className="panel-heading"><div><h2>{title}</h2><p>{subtitle}</p></div>{action ? <span className="panel-heading-action">{action}</span> : null}</div>;
+}
+
+function NeedsRow({ tone, label, detail, to }: { tone: "critical" | "warning" | "info"; label: string; detail: string; to: string }) {
+  return <Link className={`needs-row needs-row--${tone}`} to={to}><span className="needs-row-mark" aria-hidden="true">{tone === "critical" ? "×" : tone === "warning" ? "!" : "↗"}</span><span><strong>{label}</strong><small>{detail}</small></span><span className="needs-row-arrow" aria-hidden="true">→</span></Link>;
+}
+
+function ContextCard({ icon, title, body, to }: { icon: ReactNode; title: string; body: string; to: string }) {
+  return <Link className="context-card" to={to}><span className="context-card-icon" aria-hidden="true">{icon}</span><span><strong>{title}</strong><small>{body}</small></span><span aria-hidden="true">→</span></Link>;
+}
+
+interface StorageSectionProps {
+  storage: StorageReport | null;
+  storageBusy: boolean;
+  storageError: string | null;
+  onRefresh: () => void;
+}
+
+function StorageSection({ storage, storageBusy, storageError, onRefresh }: StorageSectionProps) {
+  return (
+    <div className="protection-storage">
+      <div className="protection-storage-toolbar"><div><strong>Storage destinations</strong><span>Where recovery copies and working data live.</span></div><button type="button" className="action" disabled={storageBusy} onClick={onRefresh}>{storageBusy ? "Measuring…" : "Refresh"}</button></div>
+      {!storage ? (
+        storageError ? <InlineError message={`Storage report unavailable — ${storageError}`} onRetry={onRefresh} /> : <div className="skel skel-line" aria-busy="true" />
+      ) : (
+        <>
+          {storageError ? <InlineError message={`Storage refresh failed — ${storageError}`} onRetry={onRefresh} /> : null}
+          {storage.backends.some((entry) => entry.bytes > 0) ? <div className="storage-overview"><Donut data={storage.backends.filter((entry) => entry.bytes > 0).map((entry) => ({ label: entry.label, value: entry.bytes }))} size={120} thickness={16} centerLabel={formatBytes(storage.totalBytes)} centerSublabel="total" ariaLabel="Storage by source" /></div> : null}
+          <table className="data protection-table"><thead><tr><th>Destination</th><th>Kind</th><th>Size</th><th>Status</th></tr></thead><tbody>{storage.backends.map((entry) => <tr key={entry.backendId ?? entry.label}><td>{entry.label}</td><td><span className={`badge badge-${entry.kind}`}>{entry.kind}</span></td><td className="mono">{formatBytes(entry.bytes)}</td><td>{entry.error ? <span className="badge badge-failed" title={entry.error}>error</span> : <span className="badge badge-success">ready</span>}</td></tr>)}<tr><td><strong>Total</strong></td><td /><td className="mono"><strong>{formatBytes(storage.totalBytes)}</strong></td><td /></tr></tbody></table>
+        </>
+      )}
     </div>
+  );
+}
+
+interface ActivityLedgerProps {
+  operations: OperationLog[];
+  folderNameById: Map<string, string>;
+  hostNameById: Map<string, string>;
+  folderBackendNameById: Map<string, string>;
+  lastVisit: number | null;
+  onViewAll?: () => void;
+}
+
+function ActivityLedger({ operations, folderNameById, hostNameById, folderBackendNameById, lastVisit, onViewAll }: ActivityLedgerProps) {
+  return (
+    <section className="dashboard-panel activity-ledger" aria-labelledby="activity-heading">
+      <PanelHeading title="Recent activity" subtitle="A small, honest record of what changed." action={onViewAll ? <button type="button" className="text-action" onClick={onViewAll}>View all activity <span aria-hidden="true">→</span></button> : undefined} />
+      {!operations.length ? <div className="ledger-empty"><IconSyncFilled aria-hidden="true" /><span>No activity recorded yet. Your first useful change will appear here.</span></div> : <ol className="activity-list">{operations.slice(0, 8).map((op) => { const tone = activityTone(op.status); return <li className={`activity-row activity-row--${tone}`} key={String(op.id)}><span className="activity-dot" aria-hidden="true">{tone === "success" ? "✓" : tone === "critical" ? "×" : tone === "warning" ? "!" : "·"}</span><time dateTime={new Date(op.timestamp).toISOString()}><strong>{formatTimeAgo(op.timestamp)}</strong><small>{formatTimestamp(op.timestamp)}</small></time><span className="activity-content"><strong>{activityLabel(op)}</strong><small><OperationSentenceView op={op} ctx={{ folderName: op.folderId ? folderNameById.get(op.folderId) : undefined, hostName: hostNameById.get(op.hostId), backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined }} /></small></span><span className="activity-status">{op.status}{isNewSince(op.timestamp, lastVisit) ? <em>new</em> : null}</span></li>; })}</ol>}
+    </section>
   );
 }

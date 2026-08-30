@@ -17,6 +17,65 @@ function iconBase(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function filledIconBase(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      width="1em"
+      height="1em"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    />
+  );
+}
+
+/** Filled app-icon family used by the cozy dashboard signal tiles. */
+export function IconShieldFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: <path d="M12 2.2 20.3 5v5.8c0 5.4-3.4 9.4-8.3 11-4.9-1.6-8.3-5.6-8.3-11V5L12 2.2Zm-1.1 12.9 5.7-5.7-1.4-1.4-4.3 4.3-2.1-2.1-1.4 1.4 3.5 3.5Z" />,
+    ...props,
+  });
+}
+
+export function IconFolderFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: <path d="M2.2 6.2c0-1.2 1-2.2 2.2-2.2h5l1.8 2h8.4c1.2 0 2.2 1 2.2 2.2v9.6c0 1.2-1 2.2-2.2 2.2H4.4c-1.2 0-2.2-1-2.2-2.2V6.2Z" />,
+    ...props,
+  });
+}
+
+export function IconStorageFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <>
+        <ellipse cx="12" cy="5" rx="8.5" ry="3" />
+        <path d="M3.5 5v5c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5c0 1.7-3.8 3-8.5 3S3.5 6.7 3.5 5Z" />
+        <path d="M3.5 10v5c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3v-5c0 1.7-3.8 3-8.5 3s-8.5-1.3-8.5-3Z" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconSyncFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <path d="M7.2 5.1A7.8 7.8 0 0 1 19.4 8H22l-3.5 3.5L15 8h2.1a5.4 5.4 0 0 0-8.5-1.1L7.2 5.1ZM4.1 12.5 8 16h-2.1a5.4 5.4 0 0 0 8.5 1.1l1.4 1.8A7.8 7.8 0 0 1 3.6 16H1l3.1-3.5Zm2.2-2.2-3.1 3.5H6c.6-1 1.3-1.8 2.3-2.4l-2-1.1Zm11.4 3.4c-.6 1-1.3 1.8-2.3 2.4l2 1.1 3.1-3.5h-2.8Z" />
+    ),
+    ...props,
+  });
+}
+
+export function IconLlamaFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <path d="M7.1 21.2c-1.2 0-2-.8-2-2v-4.5c-1.2.3-2.4-.3-2.8-1.5-.4-1.2.2-2.4 1.4-2.8l2.1-.7.1-3.1c.1-2.4 1.6-4.3 3.7-5.1l.2-1.1c.1-.6.7-.9 1.2-.8l.8.2c.5.1.8.7.7 1.2l-.2.8h1.4l.6-.9c.3-.5.9-.6 1.4-.3l.7.5c.4.3.5.9.2 1.4l-.5.8c1.1.8 1.8 2.2 1.8 3.8v2.2l1.8.6c1.2.4 1.8 1.6 1.4 2.8-.4 1.2-1.6 1.8-2.8 1.5v4.5c0 1.2-.8 2-2 2h-1.4v-5.1h-1.4v5.1h-1.9v-5.1h-1.4v5.1H7.1ZM8.4 7.3c.6 0 1.1-.5 1.1-1.1S9 5.1 8.4 5.1 7.3 5.6 7.3 6.2s.5 1.1 1.1 1.1Z" />
+    ),
+    ...props,
+  });
+}
+
 export function IconHost(props: SVGProps<SVGSVGElement>) {
   return iconBase({
     children: (

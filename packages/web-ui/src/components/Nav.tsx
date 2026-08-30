@@ -64,6 +64,13 @@ export const GROUPS: NavGroup[] = [
     ],
   },
   {
+    label: "Protection",
+    items: [
+      { to: "/backends", icon: <IconStorage />, text: "Storage destinations", keywords: "backends storage recovery backups" },
+      { to: "/data", icon: <IconSearch />, text: "Browse recovery data", keywords: "browse files snapshots" },
+    ],
+  },
+  {
     label: "Apps",
     items: [
       { to: "/dotfiles", icon: <IconDotfile />, text: "App settings", keywords: "backup dotfiles manifests" },
@@ -71,16 +78,14 @@ export const GROUPS: NavGroup[] = [
     ],
   },
   {
-    label: "Storage & tools",
+    label: "Activity",
     items: [
-      { to: "/backends", icon: <IconStorage />, text: "Storage", keywords: "backends destinations" },
-      { to: "/data", icon: <IconSearch />, text: "Data browser", keywords: "browse files" },
+      { to: "/operations", icon: <IconActivity />, text: "Activity", keywords: "operations log history" },
     ],
   },
   {
     label: "System",
     items: [
-      { to: "/operations", icon: <IconActivity />, text: "Activity", keywords: "operations log history" },
       { to: "/admin", icon: <IconNotification />, text: "Admin", keywords: "settings server" },
     ],
   },

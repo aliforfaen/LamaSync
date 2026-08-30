@@ -6,18 +6,13 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, Host } from "@lamasync/core";
+import { IconDotfile, IconHost, IconShieldFilled, IconSyncFilled } from "./icons.tsx";
 
 const DISMISS_KEY = "lamasync_getting_started_dismissed";
 
 function readDismissed(): boolean {
   if (typeof localStorage === "undefined") return false;
   return localStorage.getItem(DISMISS_KEY) === "1";
-}
-
-interface Step {
-  label: string;
-  done: boolean;
-  to: string;
 }
 
 interface Props {
@@ -37,17 +32,8 @@ export function GettingStarted({
 }: Props) {
   const [dismissed, setDismissed] = useState<boolean>(readDismissed);
 
-  const steps: Step[] = [
-    { label: "Register a device", done: hosts.length > 0, to: "/hosts" },
-    { label: "Add a storage destination", done: backends.length > 0, to: "/backends" },
-    { label: "Create a folder", done: folders.length > 0, to: "/folders" },
-    { label: "Set it up on a device", done: hasAssignments, to: "/folders" },
-    { label: "Trigger your first sync", done: hasOperations, to: "/hosts" },
-  ];
-
-  if (dismissed || steps.every((s) => s.done)) return null;
-
-  const pendingCount = steps.filter((s) => !s.done).length;
+  const complete = hosts.length > 0 && backends.length > 0 && folders.length > 0 && hasAssignments && hasOperations;
+  if (dismissed || complete) return null;
 
   function dismiss(): void {
     if (typeof localStorage !== "undefined") {
@@ -57,28 +43,21 @@ export function GettingStarted({
   }
 
   return (
-    <section className="section getting-started">
-      <div className="toolbar">
-        <h2>Getting started</h2>
-        <span className="muted">{pendingCount} step(s) left</span>
-        <button type="button" className="action" onClick={dismiss}>
-          Dismiss
-        </button>
+    <section className="section getting-started outcome-onboarding">
+      <div className="toolbar onboarding-heading">
+        <div><h2>Make LamaSync useful</h2><p className="muted">Choose the outcome you want first. The technical details can wait.</p></div>
+        <button type="button" className="action" onClick={dismiss}>Dismiss</button>
       </div>
-      <ol className="getting-started-list">
-        {steps.map((step, index) => (
-          <li key={step.label} className={step.done ? "gs-done" : undefined}>
-            <span className="gs-marker" aria-hidden="true">
-              {step.done ? "✓" : index + 1}
-            </span>
-            {step.done ? (
-              <span className="muted">{step.label}</span>
-            ) : (
-              <Link to={step.to}>{step.label}</Link>
-            )}
-          </li>
-        ))}
-      </ol>
+      <div className="outcome-grid">
+        <OutcomeCard icon={<IconSyncFilled />} title="Keep a folder in sync" body="Choose a folder and the Devices that should share it." to="/folders" />
+        <OutcomeCard icon={<IconShieldFilled />} title="Protect a folder with backups" body="Choose what to protect, where it lives, and when it runs." to="/folders" />
+        <OutcomeCard icon={<IconDotfile />} title="Protect an app’s settings" body="Save app settings now so they are ready on another Device." to="/dotfiles" />
+        <OutcomeCard icon={<IconHost />} title="Connect another Device" body="Pair the next machine and confirm it has joined the fleet." to="/hosts" />
+      </div>
     </section>
   );
+}
+
+function OutcomeCard({ icon, title, body, to }: { icon: JSX.Element; title: string; body: string; to: string }) {
+  return <Link className="outcome-card" to={to}><span className="outcome-icon" aria-hidden="true">{icon}</span><span><strong>{title}</strong><small>{body}</small></span><span className="outcome-arrow" aria-hidden="true">→</span></Link>;
 }
