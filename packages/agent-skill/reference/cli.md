@@ -195,6 +195,28 @@ Usage: lamasync ops list [flags]
 
 Default columns: `WHEN`, `HOST`, `OP`, `STATUS`, `DUR`, `SUMMARY`, `ID`.
 
+## `lamasync backup legacy`
+
+```
+Usage: lamasync backup legacy [--prune] [--yes] [--json]
+```
+
+Report (dry-run by default) or prune orphaned legacy shared backup data under
+backup folder roots (LAMA-294). Before host-scoped destinations, ordinary
+backups wrote directly to `<folder-name>/`; they now write to
+`<folder-name>/<host-id>/`. The old shared contents that are **not** a known
+host prefix are orphaned.
+
+- Default (`--prune` omitted) is a **safe dry-run**: lists the legacy root,
+  and flags each top-level child as `legacy (orphaned)` or
+  `host-prefix (kept)`, with size + item count and a total orphaned byte
+  count. No remote mutation.
+- `--prune --yes` deletes only the orphaned top-level children. Host-scoped
+  prefixes and the legacy root itself are never touched (recomputed fresh at
+  prune time).
+- `--json` returns the raw `LegacyRootReport[]` (or `LegacyRootPruneResult[]`
+  when pruning).
+
 ## `lamasync doctor`
 
 ```

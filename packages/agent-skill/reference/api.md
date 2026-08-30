@@ -111,6 +111,8 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/operations/acquire`                      | Acquire canonical destination lock (daemon). Body `{folderId, hostId, destinationKey?}`; omitted `destinationKey` falls back to `folder:<id>` (LAMA-294) |
 | POST     | `/operations/heartbeat`                    | Heartbeat an existing lock (`destinationKey` optional) |
 | POST     | `/operations/release`                      | Release lock (`destinationKey` optional)          |
+| GET      | `/backups/legacy-root`                     | Report orphaned legacy shared backup data under backup folder roots (dry-run, admin) — LAMA-294 |
+| POST     | `/backups/legacy-root/prune`               | Prune orphaned legacy backup data. Body `{confirm: true}` (required; admin). Never touches host-scoped prefixes — LAMA-294 |
 | GET      | `/shares`                                  | List NFS / SMB shares                            |
 | POST     | `/admin/prune?olderThanMs=<ms>`            | Manually trim operation_log                      |
 | POST     | `/admin/export`                            | Archive operation_log rows older than cutoff to a gzip'd NDJSON file, then prune them (P-B cleanup #6) |

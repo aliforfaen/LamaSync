@@ -14,8 +14,8 @@ deployment remains a separate operational verification step.
 
 Fixes LAMA-292 (concurrent hosts backing up the same folder merged/starved,
 showed as `skipped: folder locked by …` **failed** rows). Commits:
-`982f990` (phase 1), `017ae24` (phase 2), plus the deferred-report helper on
-the same branch.
+`982f990` (phase 1), `017ae24` (phase 2), plus the deferred-report helper and
+the orphaned legacy-root handling on the same branch.
 
 **What changed**
 - **Lock identity is now the canonical destination/repository key**, not the
@@ -48,9 +48,14 @@ the same branch.
   (in-flight locks are transient TTL locks, safely discarded).
 - **Legacy shared backup data** sitting at the old `<folder-name>` root is
   **left in place but orphaned** — it is *not* re-homed or silently merged
-  into the new layout. After upgrade, re-run backups to repopulate the
-  per-host `<folder-name>/<host-id>` prefixes; the old root can be cleaned up
-  manually once you've confirmed the new prefixes are populated.
+  into the new layout.
+- **Handling leftover legacy data** (admin-only, safe): `GET
+  /api/v1/backups/legacy-root` (dry-run) reports the orphaned top-level
+  children of each backup folder root — anything **not** a known host-scoped
+  prefix — with size/item counts; `POST /api/v1/backups/legacy-root/prune`
+  (body `{confirm: true}`) prunes only those orphaned children. The CLI is
+  `lamasync backup legacy [--prune --yes]`. Host prefixes and the legacy root
+  are never deleted (the orphan set is recomputed fresh at prune time).
 - Do **not** point an explicit `destination` at the legacy shared root unless
   you intentionally want multiple hosts to share one namespace (that is then
   serialized by the canonical lock and reported as `deferred` on contention).

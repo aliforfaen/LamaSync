@@ -58,6 +58,7 @@ import * as conflicts from "./conflicts.ts";
 import * as snapshots from "./snapshots.ts";
 import * as browse from "./browse.ts";
 import * as notifications from "./notifications.ts";
+import * as backupLegacy from "./backup-legacy.ts";
 import * as hosts from "./hosts.ts";
 import * as registerCmd from "./register.ts";
 import * as admin from "./admin.ts";
@@ -163,6 +164,27 @@ Run 'lamasync <command> --help' for command-specific help.`,
 };
 
 const DISPATCH_TREE: Record<string, DispatchEntry> = {
+  backup: {
+    help: groupHelp(
+      "backup",
+      "Backup maintenance: host-scoped destinations and legacy-root cleanup.",
+    ),
+    subcommands: {
+      legacy: {
+        key: "legacy",
+        help: subHelp(
+          "backup legacy",
+          "Report or prune orphaned legacy shared backup data under backup folder roots.",
+          [
+            "--prune            delete orphaned legacy data (requires --yes)",
+            "--yes              confirm deletion of backup data",
+            "--json             machine-readable output",
+          ],
+        ),
+        run: async (ctx) => backupLegacy.runLegacy(ctx),
+      },
+    },
+  },
   status: {
     command: {
       help: statusHelp(),

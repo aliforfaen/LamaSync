@@ -26,6 +26,7 @@ import { pauseRoutes } from "./routes/pause.ts";
 import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts";
 import { apiKeysRoutes } from "./routes/api-keys.ts";
 import { appProfilesRoutes } from "./routes/app-profiles.ts";
+import { backupLegacyRoutes } from "./routes/backup-legacy.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -179,6 +180,7 @@ const app = new Elysia()
   .use(apiKeysRoutes)
   .use(appProfilesRoutes)
   .use(healthDrillRoutes)
+  .use(backupLegacyRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;

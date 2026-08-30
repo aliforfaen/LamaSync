@@ -740,6 +740,20 @@ export class LamaSyncApiClient {
     return this.request<BrowseJob[]>("GET", "/api/v1/browse/jobs");
   }
 
+  // LAMA-294: orphaned legacy shared backup data under backup folder roots.
+  reportLegacyRoot(): Promise<import("./types.ts").LegacyRootReport[]> {
+    return this.request("GET", "/api/v1/backups/legacy-root");
+  }
+
+  pruneLegacyRoot(confirm: boolean): Promise<import("./types.ts").LegacyRootPruneResult[]> {
+    return this.request<import("./types.ts").LegacyRootPruneResult[]>(
+      "POST",
+      "/api/v1/backups/legacy-root/prune",
+      JSON.stringify({ confirm }),
+      "application/json",
+    );
+  }
+
   // LAMA-222: reusable backends (S3 credentials stored once, referenced by
   // folders via backendId). Secrets are write-only; responses expose
   // `hasSecret` instead of the value.

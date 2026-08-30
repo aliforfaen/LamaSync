@@ -561,6 +561,38 @@ export interface OperationReport {
   dotfileDirection?: "upload" | "download" | null;
 }
 
+// LAMA-294: orphaned legacy shared backup data under backup folder roots.
+// Reports (dry-run) and prune results for the `backup legacy-root` flow.
+export interface LegacyRootOrphanEntry {
+  folderId: string;
+  folderName: string;
+  remotePath: string;
+  /** Top-level child name under the legacy root that is orphaned (or kept). */
+  name: string;
+  sizeBytes: number;
+  itemCount: number;
+  /** true when this child is a live host-scoped prefix (never pruned). */
+  isHostPrefix: boolean;
+}
+
+export interface LegacyRootReport {
+  folderId: string;
+  folderName: string;
+  remotePath: string;
+  orphaned: LegacyRootOrphanEntry[];
+  /** Total bytes of orphaned (non host-prefix) children only. */
+  orphanedBytes: number;
+}
+
+export interface LegacyRootPruneResult {
+  folderId: string;
+  folderName: string;
+  remotePath: string;
+  pruned: string[];
+  skippedHostPrefixes: string[];
+  errors: string[];
+}
+
 // WebSocket event payload broadcast on /api/v1/ws
 export type WSEvent =
   | { kind: "operation"; entry: OperationLog }
