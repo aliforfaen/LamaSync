@@ -27,10 +27,11 @@ import { showVerifiedBadge } from "../backup-health.ts";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { Donut } from "../components/Donut.tsx";
 import { Confetti, useMilestoneConfetti } from "../components/Confetti.tsx";
+import { Llama } from "../components/Llama.tsx";
 import {
   IconFolderFilled,
   IconHost,
-  IconLlamaFilled,
+  IconHostFilled,
   IconShieldFilled,
   IconStorageFilled,
   IconSyncFilled,
@@ -205,7 +206,7 @@ export function Dashboard() {
     const now = Date.now();
     let mostRecent: number | null = null;
     for (const b of data?.backends ?? []) {
-      if (showVerifiedBadge(b.lastProveAt, b.lastProveOk, now)) {
+      if (b.kind === "restic" && showVerifiedBadge(b.lastProveAt, b.lastProveOk, now)) {
         if (mostRecent === null || (b.lastProveAt ?? 0) > mostRecent) {
           mostRecent = b.lastProveAt ?? null;
         }
@@ -373,6 +374,11 @@ export function Dashboard() {
     (h) => h.status === "offline" || h.status === "degraded",
   );
   const updates = (data?.hosts ?? []).filter((h) => h.updateAvailable);
+  const hasResticDestination = data?.backends.some((backend) => backend.kind === "restic") ?? false;
+  // Verification is still a separate fact from backup completion, but an
+  // available restic destination with no recent proof is important enough to
+  // steer the verdict and the next-action list toward Protection.
+  const verificationNeedsAttention = data !== null && hasResticDestination && backupVerified === null;
 
   // LAMA-203: deltas since the previous visit (conflicts + failed ops only;
   // offline hosts and updates are state, not deltas).
@@ -383,11 +389,13 @@ export function Dashboard() {
   const newTotal = newConflicts + newFailed;
 
   const allQuiet =
-    data !== null && !counts.conflicts && !failed.length && !offline.length && !updates.length;
-  const attentionCount = failed.length + counts.conflicts + offline.length + updates.length;
+    data !== null && !counts.conflicts && !failed.length && !offline.length && !updates.length && !verificationNeedsAttention;
+  const attentionCount = failed.length + counts.conflicts + offline.length + updates.length + (verificationNeedsAttention ? 1 : 0);
   const heroTitle =
     data === null
       ? "Checking in with your fleet…"
+      : verificationNeedsAttention
+        ? "Your files need a hand."
       : data.hosts.length === 0
         ? "A quiet home for your files."
         : allQuiet
@@ -396,12 +404,14 @@ export function Dashboard() {
   const heroDescription =
     data === null
       ? "Gathering the latest device, folder, and protection signals."
+      : verificationNeedsAttention
+        ? "A recovery copy is ready to check. Start with Protection before you rely on it."
       : data.hosts.length === 0
         ? "Pair a device to start keeping your files in step and recoverable."
         : allQuiet
           ? "Everything important is moving along. Here’s the latest from your sync fleet."
           : `${attentionCount} ${attentionCount === 1 ? "item needs" : "items need"} a closer look. Start with the next useful action below.`;
-  const dashboardHeadline = data?.hosts.length ? "Your sync fleet, at a glance." : "A quiet home for your files.";
+  const dashboardHeadline = data?.hosts.length ? "Your sync fleet, at a glance." : "Welcome to LamaSync.";
 
   async function onRefreshStorage(): Promise<void> {
     setStorageBusy(true);
@@ -428,7 +438,7 @@ export function Dashboard() {
       <header className="dashboard-header">
         <div>
           <p className="dashboard-eyebrow">
-            {greetingForHour(new Date().getHours())}, friend <span aria-hidden="true">✦</span>
+            {greetingForHour(new Date().getHours())}
           </p>
           <h1>{dashboardHeadline}</h1>
           <p className="dashboard-lede">{heroDescription}</p>
@@ -502,7 +512,6 @@ export function Dashboard() {
               <Link className="hero-secondary-action" to="/folders">Manage synced folders <span aria-hidden="true">→</span></Link>
             </div>
           </div>
-          <div className="hero-llama" aria-hidden="true"><IconLlamaFilled /></div>
           <div className="hero-summary" aria-label="Current attention summary">
             <div className="hero-attention-heading">{attentionCount ? "Worth a look" : "A calm moment"}</div>
             <div className="hero-attention-list">
@@ -511,13 +520,17 @@ export function Dashboard() {
               <HeroSignal label="Offline devices" value={offline.length} tone={offline.length ? "warning" : "quiet"} />
               <HeroSignal label="Updates available" value={updates.length} tone={updates.length ? "info" : "quiet"} />
             </div>
+            <div className={`hero-verification ${verificationNeedsAttention ? "is-attention" : ""}`}>
+              <span>{data === null ? "Checking verification…" : backupVerified !== null ? `✓ Verified ${formatTimeAgo(backupVerified)}` : hasResticDestination ? "! Backups not verified yet" : "Verification starts with a restic destination"}</span>
+              {data !== null && hasResticDestination ? <Link to="/backups">Review backups <span aria-hidden="true">→</span></Link> : null}
+            </div>
           </div>
         </section>
       ) : null}
 
       {dashboardTab !== "activity" ? (
         <div className="dashboard-signals" aria-label="Fleet signals">
-          <SignalTile icon={<IconHost />} label="Devices" value={data ? `${counts.online}/${counts.total}` : "—"} detail="online now" to="/hosts" tone="moss" />
+          <SignalTile icon={<IconHostFilled />} label="Devices" value={data ? `${counts.online}/${counts.total}` : "—"} detail="online now" to="/hosts" tone="moss" />
           <SignalTile icon={<IconFolderFilled />} label="Synced folders" value={counts.folders} detail="kept in step" to="/folders" tone="clay" />
           <SignalTile icon={<IconShieldFilled />} label="Protection" value={backupVerified !== null ? "Verified" : data?.backends.length ? "Not yet" : "Set up"} detail={backupVerified !== null ? `checked ${formatTimeAgo(backupVerified)} ago` : "recovery copies"} to="/backends" tone="moss" />
           <SignalTile icon={<IconStorageFilled />} label="Storage" value={storage ? formatBytes(storage.totalBytes) : "—"} detail={storage ? "in use" : "measuring"} to="/backends" tone="teal" />
@@ -551,6 +564,7 @@ export function Dashboard() {
                 {counts.conflicts ? <NeedsRow tone="warning" label={`${counts.conflicts} pending conflict${counts.conflicts === 1 ? "" : "s"}`} detail={data.pendingConflicts.slice(0, 2).map((c) => folderNameById.get(c.folderId) ?? c.folderId).join(" · ")} to="/conflicts" /> : null}
                 {offline.length ? <NeedsRow tone="warning" label={`${offline.length} device${offline.length === 1 ? "" : "s"} offline or degraded`} detail={offline.map((h) => h.hostname).join(" · ")} to="/hosts" /> : null}
                 {updates.length ? <NeedsRow tone="info" label={`${updates.length} update${updates.length === 1 ? "" : "s"} available`} detail={updates.map((h) => h.hostname).join(" · ")} to="/hosts" /> : null}
+                {verificationNeedsAttention ? <NeedsRow tone="warning" label="Backups not verified yet" detail="Run a recovery check before you rely on this destination." to="/backups" /> : null}
               </div>
             )}
           </section>
@@ -558,7 +572,7 @@ export function Dashboard() {
           <section className="dashboard-panel fleet-roster" aria-labelledby="fleet-heading">
             <PanelHeading title="Fleet" subtitle="Devices keeping your files in step" action={<Link to="/hosts">View devices <span aria-hidden="true">→</span></Link>} />
             {!data ? <div className="skel skel-lines" aria-busy="true" /> : data.hosts.length === 0 ? (
-              <div className="empty-fleet"><IconLlamaFilled aria-hidden="true" /><strong>Your fleet starts with one device.</strong><Link className="action" to="/hosts">Pair a device</Link>{!demo?.hasDemo ? <button type="button" className="text-action" disabled={demoBusy} onClick={() => void onSeedDemo()}>{demoBusy ? "Seeding…" : "Explore a demo fleet"}</button> : null}</div>
+              <div className="empty-fleet"><Llama className="empty-fleet-illustration" pose="drift" /><strong>Your fleet starts with one device.</strong><span>Start with the device that has the files you care about most.</span><Link className="action" to="/hosts">Pair a device</Link>{!demo?.hasDemo ? <button type="button" className="text-action" disabled={demoBusy} onClick={() => void onSeedDemo()}>{demoBusy ? "Seeding…" : "Explore a demo fleet"}</button> : null}</div>
             ) : (
               <div className="fleet-roster-list">
                 {data.hosts.slice(0, 5).map((h) => <Link className="fleet-roster-row" key={h.id} to={`/hosts/${encodeURIComponent(h.id)}`}>
@@ -665,10 +679,12 @@ interface ActivityLedgerProps {
 }
 
 function ActivityLedger({ operations, folderNameById, hostNameById, folderBackendNameById, lastVisit, onViewAll }: ActivityLedgerProps) {
+  const visibleOperations = onViewAll ? operations.slice(0, 5) : operations.slice(0, 20);
+
   return (
     <section className="dashboard-panel activity-ledger" aria-labelledby="activity-heading">
       <PanelHeading title="Recent activity" subtitle="A small, honest record of what changed." action={onViewAll ? <button type="button" className="text-action" onClick={onViewAll}>View all activity <span aria-hidden="true">→</span></button> : undefined} />
-      {!operations.length ? <div className="ledger-empty"><IconSyncFilled aria-hidden="true" /><span>No activity recorded yet. Your first useful change will appear here.</span></div> : <ol className="activity-list">{operations.slice(0, 8).map((op) => { const tone = activityTone(op.status); return <li className={`activity-row activity-row--${tone}`} key={String(op.id)}><span className="activity-dot" aria-hidden="true">{tone === "success" ? "✓" : tone === "critical" ? "×" : tone === "warning" ? "!" : "·"}</span><time dateTime={new Date(op.timestamp).toISOString()}><strong>{formatTimeAgo(op.timestamp)}</strong><small>{formatTimestamp(op.timestamp)}</small></time><span className="activity-content"><strong>{activityLabel(op)}</strong><small><OperationSentenceView op={op} ctx={{ folderName: op.folderId ? folderNameById.get(op.folderId) : undefined, hostName: hostNameById.get(op.hostId), backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined }} /></small></span><span className="activity-status">{op.status}{isNewSince(op.timestamp, lastVisit) ? <em>new</em> : null}</span></li>; })}</ol>}
+      {!operations.length ? <div className="ledger-empty"><IconSyncFilled aria-hidden="true" /><span>No activity recorded yet. Your first useful change will appear here.</span></div> : <ol className="activity-list">{visibleOperations.map((op) => { const tone = activityTone(op.status); return <li className={`activity-row activity-row--${tone}`} key={String(op.id)}><span className="activity-dot" aria-hidden="true">{tone === "success" ? "✓" : tone === "critical" ? "×" : tone === "warning" ? "!" : "·"}</span><time dateTime={new Date(op.timestamp).toISOString()}><strong>{formatTimeAgo(op.timestamp)}</strong><small>{formatTimestamp(op.timestamp)}</small></time><span className="activity-content"><strong>{activityLabel(op)}</strong><small><OperationSentenceView op={op} ctx={{ folderName: op.folderId ? folderNameById.get(op.folderId) : undefined, hostName: hostNameById.get(op.hostId), backendName: op.folderId ? folderBackendNameById.get(op.folderId) : undefined }} /></small></span><span className="activity-status">{op.status}{isNewSince(op.timestamp, lastVisit) ? <em>new</em> : null}</span></li>; })}</ol>}
     </section>
   );
 }

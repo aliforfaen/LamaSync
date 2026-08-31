@@ -130,4 +130,10 @@ describe("Llama glyph", () => {
     const html = renderToStaticMarkup(<Llama />);
     expect(html).toContain('width="32"');
   });
+
+  it("renders the drift pose (umbrella + head)", () => {
+    const html = renderToStaticMarkup(<Llama pose="drift" />);
+    expect(html).toContain("M18 8.5");
+    expect(html).toContain("ellipse");
+  });
 });

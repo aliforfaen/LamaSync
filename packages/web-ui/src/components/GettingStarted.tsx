@@ -6,7 +6,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { Backend, Folder, Host } from "@lamasync/core";
-import { IconDotfile, IconHost, IconShieldFilled, IconSyncFilled } from "./icons.tsx";
+import { IconDotfileFilled, IconHostFilled, IconShieldFilled, IconSyncFilled } from "./icons.tsx";
 
 const DISMISS_KEY = "lamasync_getting_started_dismissed";
 
@@ -50,9 +50,9 @@ export function GettingStarted({
       </div>
       <div className="outcome-grid">
         <OutcomeCard icon={<IconSyncFilled />} title="Keep a folder in sync" body="Choose a folder and the Devices that should share it." to="/folders" />
-        <OutcomeCard icon={<IconShieldFilled />} title="Protect a folder with backups" body="Choose what to protect, where it lives, and when it runs." to="/folders" />
-        <OutcomeCard icon={<IconDotfile />} title="Protect an app’s settings" body="Save app settings now so they are ready on another Device." to="/dotfiles" />
-        <OutcomeCard icon={<IconHost />} title="Connect another Device" body="Pair the next machine and confirm it has joined the fleet." to="/hosts" />
+        <OutcomeCard icon={<IconShieldFilled />} title="Protect a folder with backups" body="Choose what to protect, where it lives, and when it runs." to="/backups" />
+        <OutcomeCard icon={<IconDotfileFilled />} title="Protect an app’s settings" body="Save app settings now so they are ready on another Device." to="/dotfiles" />
+        <OutcomeCard icon={<IconHostFilled />} title="Connect another Device" body="Pair the next machine and confirm it has joined the fleet." to="/hosts" />
       </div>
     </section>
   );

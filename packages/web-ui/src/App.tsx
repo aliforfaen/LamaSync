@@ -54,6 +54,7 @@ export function App() {
                   <Route path="/hosts" element={<Hosts />} />
                   <Route path="/hosts/:hostId" element={<HostDetail />} />
                   <Route path="/folders" element={<Folders />} />
+                  <Route path="/backups" element={<Folders />} />
                   <Route path="/backends" element={<Backends />} />
                   <Route path="/dotfiles" element={<Dotfiles />} />
                   <Route path="/presets" element={<Presets />} />

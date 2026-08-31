@@ -4,6 +4,10 @@ These are source illustrations for the visual direction documented in
 [`docs/cozy-dashboard-design.md`](../../../../../docs/cozy-dashboard-design.md).
 They are intentionally **not imported by the application yet**.
 
+The umbrella drift is now realized as the `drift` pose of the inline `Llama`
+SVG component (`packages/web-ui/src/components/Llama.tsx`), which replaces the
+raster in the Dashboard empty-fleet state.
+
 | Asset | Intended moment |
 | --- | --- |
 | `umbrella-loading-concept.png` | a quiet empty/loading state or subtle dashboard background |

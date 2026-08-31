@@ -8,16 +8,17 @@ import {
   type ThemeChoice,
 } from "../theme.ts";
 import {
-  IconActivity,
-  IconConflict,
-  IconDotfile,
-  IconFolder,
-  IconHome,
-  IconHost,
-  IconNotification,
-  IconPresets,
-  IconSearch,
-  IconStorage,
+  IconActivityFilled,
+  IconConflictFilled,
+  IconDotfileFilled,
+  IconFolderFilled,
+  IconHomeFilled,
+  IconHostFilled,
+  IconNotificationFilled,
+  IconPresetsFilled,
+  IconSearchFilled,
+  IconShieldFilled,
+  IconStorageFilled,
 } from "./icons.tsx";
 
 const ORDER: ThemeChoice[] = ["dark", "light", "system"];
@@ -45,7 +46,8 @@ export interface NavGroup {
 /**
  * LAMA-275 grouped left navigation (approved D2). Single source of truth for
  * the rail rendered below AND the LAMA-270 command palette, so the two can
- * never drift. Routes are unchanged — only labels and grouping follow
+ * never drift. Existing routes stay intact; the Backups home is a
+ * presentation-only lens over the existing folder data. Labels and grouping follow
  * docs/terminology.md:
  *   /hosts → Devices · /folders → Synced folders · /backends → Storage
  *   destinations · /dotfiles → App settings · /operations → Activity.
@@ -53,40 +55,41 @@ export interface NavGroup {
 export const GROUPS: NavGroup[] = [
   {
     label: "Overview",
-    items: [{ to: "/", icon: <IconHome />, text: "Dashboard", end: true, keywords: "home overview" }],
+    items: [{ to: "/", icon: <IconHomeFilled />, text: "Dashboard", end: true, keywords: "home overview" }],
   },
   {
     label: "Sync",
     items: [
-      { to: "/hosts", icon: <IconHost />, text: "Devices", keywords: "hosts fleet machines pair" },
-      { to: "/folders", icon: <IconFolder />, text: "Synced folders", keywords: "sync mount folders" },
-      { to: "/conflicts", icon: <IconConflict />, text: "Conflicts", keywords: "merge resolve" },
+      { to: "/hosts", icon: <IconHostFilled />, text: "Devices", keywords: "hosts fleet machines pair" },
+      { to: "/folders", icon: <IconFolderFilled />, text: "Synced folders", keywords: "sync mount folders" },
+      { to: "/conflicts", icon: <IconConflictFilled />, text: "Conflicts", keywords: "merge resolve" },
     ],
   },
   {
     label: "Protection",
     items: [
-      { to: "/backends", icon: <IconStorage />, text: "Storage destinations", keywords: "backends storage recovery backups" },
-      { to: "/data", icon: <IconSearch />, text: "Browse recovery data", keywords: "browse files snapshots" },
+      { to: "/backups", icon: <IconShieldFilled />, text: "Backups", keywords: "protected folders backup verification recovery" },
+      { to: "/backends", icon: <IconStorageFilled />, text: "Storage destinations", keywords: "backends storage recovery backups" },
+      { to: "/data", icon: <IconSearchFilled />, text: "Browse recovery data", keywords: "browse files snapshots" },
     ],
   },
   {
     label: "Apps",
     items: [
-      { to: "/dotfiles", icon: <IconDotfile />, text: "App settings", keywords: "backup dotfiles manifests" },
-      { to: "/presets", icon: <IconPresets />, text: "App presets", keywords: "vscode neovim zsh firefox git tmux settings backup" },
+      { to: "/dotfiles", icon: <IconDotfileFilled />, text: "App settings", keywords: "backup dotfiles manifests" },
+      { to: "/presets", icon: <IconPresetsFilled />, text: "App presets", keywords: "vscode neovim zsh firefox git tmux settings backup" },
     ],
   },
   {
     label: "Activity",
     items: [
-      { to: "/operations", icon: <IconActivity />, text: "Activity", keywords: "operations log history" },
+      { to: "/operations", icon: <IconActivityFilled />, text: "Activity", keywords: "operations log history" },
     ],
   },
   {
     label: "System",
     items: [
-      { to: "/admin", icon: <IconNotification />, text: "Admin", keywords: "settings server" },
+      { to: "/admin", icon: <IconNotificationFilled />, text: "Admin", keywords: "settings server" },
     ],
   },
 ];

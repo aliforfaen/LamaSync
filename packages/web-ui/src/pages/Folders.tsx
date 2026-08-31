@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
@@ -13,6 +13,8 @@ import { nextRunSentence } from "../next-run.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { HintText } from "../components/Hint.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { showVerifiedBadge } from "../backup-health.ts";
+import { formatTimeAgo } from "../relative-time.ts";
 import {
   BACKEND_KIND_HINTS,
   FOLDER_TYPE_HINTS,
@@ -144,7 +146,33 @@ function buildUpdateBody(form: FolderForm): Record<string, unknown> {
   return body;
 }
 
+function folderVerification(folder: Folder, backends: Backend[]): { label: string; className: string; title?: string } {
+  const destination = backends.find((backend) => backend.id === folder.backendId);
+  if (!destination) return { label: "No destination", className: "badge-conflict" };
+  if (destination.kind !== "restic") {
+    return {
+      label: "Not available",
+      className: "badge-unknown",
+      title: "Verification is available for restic storage destinations.",
+    };
+  }
+  if (showVerifiedBadge(destination.lastProveAt, destination.lastProveOk, Date.now())) {
+    return {
+      label: `Verified ${formatTimeAgo(destination.lastProveAt)}`,
+      className: "badge-success",
+      title: "A recovery copy was proven within the last 30 days.",
+    };
+  }
+  return {
+    label: "Not verified",
+    className: "badge-conflict",
+    title: "Run Prove it from this restic storage destination.",
+  };
+}
+
 export function Folders() {
+  const location = useLocation();
+  const backupMode = location.pathname === "/backups";
   const [items, setItems] = useState<FolderWithAssignments[] | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [backends, setBackends] = useState<Backend[]>([]);
@@ -230,10 +258,9 @@ export function Folders() {
   // LAMA-235: when the selected host disappears from the host list (or the
   // filter narrows to nothing), don't leave a stale filter behind.
   const hostLabel = (id: string) => hosts.find((h) => h.id === id)?.hostname ?? id;
-  const filteredItems = (items ?? []).filter(({ assignments }) =>
-    hostFilter === null
-      ? true
-      : assignments.some((a) => a.hostId === hostFilter),
+  const filteredItems = (items ?? []).filter(({ folder, assignments }) =>
+    (backupMode ? folder.type === "backup" : true) &&
+    (hostFilter === null || assignments.some((a) => a.hostId === hostFilter)),
   );
 
   // LAMA-271: shared with the empty state — the toolbar "New folder" button
@@ -245,8 +272,8 @@ export function Folders() {
       const first = backends[0];
       setForm(
         first
-          ? { ...DEFAULT_FORM, backend: first.kind, backendId: first.id }
-          : DEFAULT_FORM,
+          ? { ...DEFAULT_FORM, type: backupMode ? "backup" : DEFAULT_FORM.type, backend: first.kind, backendId: first.id }
+          : { ...DEFAULT_FORM, type: backupMode ? "backup" : DEFAULT_FORM.type },
       );
     }
     setShowForm((s) => !s);
@@ -705,7 +732,10 @@ export function Folders() {
 
   return (
     <div className="page">
-      <PageHeader title="Synced folders" purpose="Folders kept in sync or backed up across your devices." />
+      <PageHeader
+        title={backupMode ? "Backups" : "Synced folders"}
+        purpose={backupMode ? "Protected folders and whether their recovery copies were recently verified." : "Folders kept in sync or backed up across your devices."}
+      />
 <div className="toolbar">
         <label className="scope-filter" title="Show only folders set up on a specific device">
           Device
@@ -741,7 +771,7 @@ export function Folders() {
           className="action primary"
           onClick={openNewFolder}
         >
-          {showForm ? "Cancel" : "New folder"}
+          {showForm ? "Cancel" : backupMode ? "New backup" : "New folder"}
         </button>
       </div>
       {error && <div className="error">{error}</div>}
@@ -770,15 +800,11 @@ export function Folders() {
       {items !== null && filteredItems.length === 0 && !hostFilter ? (
         <EmptyState
           variant="folders"
-          title="No synced folders yet"
-          how="Create a folder, choose where its data lives, and set it up on a device to start syncing."
-          ctaLabel="New folder"
+          title={backupMode ? "No protected folders yet" : "No synced folders yet"}
+          how={backupMode ? "Create a backup folder, choose a storage destination, and set its schedule." : "Create a folder, choose where its data lives, and set it up on a device to start syncing."}
+          ctaLabel={backupMode ? "New backup" : "New folder"}
           onCta={openNewFolder}
-          steps={[
-            "Name the folder and pick a storage destination",
-            "Choose which devices it's set up on",
-            "Pick a schedule — or sync it now",
-          ]}
+          steps={backupMode ? ["Name what you want to protect", "Choose a storage destination", "Pick a schedule and verify a recovery copy"] : ["Name the folder and pick a storage destination", "Choose which devices it's set up on", "Pick a schedule — or sync it now"]}
           timeNote="takes 30s"
         />
       ) : (
@@ -794,6 +820,7 @@ export function Folders() {
           <col style={{ width: "14%" }} />
           <col style={{ width: "12%" }} />
           <col style={{ width: "12rem" }} />
+          {backupMode ? <col style={{ width: "12%" }} /> : null}
         </colgroup>
         <thead>
           <tr>
@@ -804,25 +831,27 @@ export function Folders() {
             <th>Set up on</th>
             <th>Created</th>
             <th />
+            {backupMode ? <th>Verification</th> : null}
           </tr>
         </thead>
         <tbody>
           {!items ? (
             <tr aria-busy="true">
-              <td colSpan={7}><div className="skel skel-line" /></td>
+              <td colSpan={backupMode ? 8 : 7}><div className="skel skel-line" /></td>
             </tr>
           ) : filteredItems.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={7}>
+              <td colSpan={backupMode ? 8 : 7}>
                 {hostFilter
                   ? `No folders set up on ${hostLabel(hostFilter)} yet.`
-                  : "No synced folders yet — create one, then set it up on a device to start syncing."}
+                  : backupMode ? "No protected folders yet — create a backup to start building recovery coverage." : "No synced folders yet — create one, then set it up on a device to start syncing."}
               </td>
             </tr>
           ) : (
             filteredItems.map(({ folder, assignments }) => {
               const size = sizes[folder.id];
               const isExpanded = expandedFolderId === folder.id;
+              const verification = backupMode ? folderVerification(folder, backends) : null;
               return (
               <Fragment key={folder.id}>
               <tr className={isExpanded ? "folder-row folder-row-expanded" : "folder-row"}>
@@ -905,10 +934,13 @@ export function Folders() {
                     Delete
                   </button>
                 </td>
+                {backupMode && verification ? (
+                  <td><span className={`badge ${verification.className}`} title={verification.title}>{verification.label}</span></td>
+                ) : null}
               </tr>
               {isExpanded ? (
                 <tr className="folder-expanded-row">
-                  <td colSpan={7}>
+                  <td colSpan={backupMode ? 8 : 7}>
                     {assignments.length === 0 ? (
                       <p className="muted">
                         Not set up on any device yet — use “Set up” above to add one.

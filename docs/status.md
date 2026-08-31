@@ -10,6 +10,45 @@ v0.3.4. The tag CI passed check, build, release, and Docker publication,
 producing the three binaries, agent-skill bundle, and GHCR server image.
 Production deployment remains a separate operational verification step.
 
+## LAMA-295 design pass — icon family + drift pose (2026-08-31)
+
+Web-UI design cleanup following the cozy-dashboard handoff
+(`docs/cozy-dashboard-design.md`).
+
+**What changed**
+- **Icon family unified on filled.** The nav rail still used stroke/outline
+  glyphs while the dashboard signal tiles and first-run cards used the new
+  filled family — a visible mixed-family seam. Added the missing filled glyphs
+  (`IconHomeFilled`, `IconConflictFilled`, `IconSearchFilled`,
+  `IconPresetsFilled`, `IconActivityFilled`, `IconNotificationFilled`, plus
+  filled Device and app-settings marks) and
+  switched `components/Nav.tsx` to the filled family, so all product chrome
+  uses one icon system. The llama illustrations (`Llama.tsx`) stay line-art,
+  which is the intended illustration family.
+- **Empty-fleet illustration is now an inline SVG, not a 326 KB raster.** The
+  single-file inline build (`scripts/inline-web-ui.ts` inlines JS/CSS then
+  deletes `dist/assets/`) cannot emit a PNG as a separate file, so the
+  umbrella PNG would have been base64-inlined (~435 KB) into the bundle. It
+  now renders as a new `Llama` `drift` pose (umbrella + dangling legs) in the
+  same 32-viewBox stroke style as the existing hop/sit/nap poses.
+- `assets.d.ts` (added only for the PNG import) removed; the PNGs remain in
+  `packages/web-ui/src/assets/llamas/` as source concepts.
+
+**Verification:** `bun x tsc --noEmit`, `bun run build:web-ui`, and 132 web-ui
+unit tests pass. Bundle is ~518 KB (no raster bloat).
+
+**Follow-up decisions and checks**
+- Added a first-class **Backups** rail entry at `/backups`, reusing the
+  existing folders data and controls. It lists protected folders and their
+  recovery verification state without changing API contracts.
+- Missing verification is now an actionable Protection signal when a restic
+  destination exists; completion and verification remain separate facts.
+- The umbrella `drift` pose was visually checked in the empty-fleet state and
+  retained as a subordinate line-art illustration.
+- Reconciled TUI semantic colors with the web's warm moss/teal/clay palette.
+- The ~500 KB web bundle still warrants code-splitting (separate from this
+  pass).
+
 ## LAMA-294 — host-scoped backups + canonical destination locking (phase 1–3)
 
 Fixes LAMA-292 (concurrent hosts backing up the same folder merged/starved,
@@ -472,7 +511,9 @@ live app. Both remain `backlog` on Multica.
    then perform the production update and health check.
 2. Run the managed-key migration/pairing smoke against the live fleet, with a
    rollback plan using the existing master key.
-3. Optional maintenance: split the 507 kB web bundle and expand the current
+3. Optional maintenance: split the ~518 kB web bundle and expand the current
    browser/PTY artifact set.
 4. Revisit backlog items LAMA-110, LAMA-204, LAMA-236, and LAMA-237 when the
    release is settled.
+5. LAMA-295 follow-up: the remaining optional maintenance is splitting the
+   ~500 KB web bundle; the design leftovers are resolved in the current pass.

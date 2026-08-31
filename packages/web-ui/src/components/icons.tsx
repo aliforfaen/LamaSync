@@ -67,10 +67,93 @@ export function IconSyncFilled(props: SVGProps<SVGSVGElement>) {
   });
 }
 
-export function IconLlamaFilled(props: SVGProps<SVGSVGElement>) {
+export function IconHostFilled(props: SVGProps<SVGSVGElement>) {
   return filledIconBase({
     children: (
-      <path d="M7.1 21.2c-1.2 0-2-.8-2-2v-4.5c-1.2.3-2.4-.3-2.8-1.5-.4-1.2.2-2.4 1.4-2.8l2.1-.7.1-3.1c.1-2.4 1.6-4.3 3.7-5.1l.2-1.1c.1-.6.7-.9 1.2-.8l.8.2c.5.1.8.7.7 1.2l-.2.8h1.4l.6-.9c.3-.5.9-.6 1.4-.3l.7.5c.4.3.5.9.2 1.4l-.5.8c1.1.8 1.8 2.2 1.8 3.8v2.2l1.8.6c1.2.4 1.8 1.6 1.4 2.8-.4 1.2-1.6 1.8-2.8 1.5v4.5c0 1.2-.8 2-2 2h-1.4v-5.1h-1.4v5.1h-1.9v-5.1h-1.4v5.1H7.1ZM8.4 7.3c.6 0 1.1-.5 1.1-1.1S9 5.1 8.4 5.1 7.3 5.6 7.3 6.2s.5 1.1 1.1 1.1Z" />
+      <>
+        <path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H4Z" />
+        <path d="M11 17h2v4h-2z" />
+        <path d="M7 21h10v2H7z" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconDotfileFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <path
+        fillRule="evenodd"
+        d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm6 10a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"
+      />
+    ),
+    ...props,
+  });
+}
+
+export function IconHomeFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <path
+        fillRule="evenodd"
+        d="M12 2 3 9v10a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3V9l-9-7Zm-2 13h4v7h-4z"
+      />
+    ),
+    ...props,
+  });
+}
+
+export function IconConflictFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <path
+        fillRule="evenodd"
+        d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0ZM11 9h2v5h-2V9Zm0 7h2v2h-2v-2Z"
+      />
+    ),
+    ...props,
+  });
+}
+
+export function IconSearchFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <>
+        <path
+          fillRule="evenodd"
+          d="M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15Zm0 3.5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"
+        />
+        <path d="M15.5 15.5 21 21l-1.5 1.5-5.5-5.5z" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconPresetsFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: <path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" />,
+    ...props,
+  });
+}
+
+export function IconActivityFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <path d="M2 12h4l3-9 6 18 3-9h4v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9Z" />
+    ),
+    ...props,
+  });
+}
+
+export function IconNotificationFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <>
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9Z" />
+        <path d="M10.5 20.5h3v1.5h-3z" />
+      </>
     ),
     ...props,
   });
