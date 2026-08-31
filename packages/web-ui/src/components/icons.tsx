@@ -1,4 +1,5 @@
 import type { SVGProps } from "react";
+import type { HostClass } from "@lamasync/core";
 
 function iconBase(props: SVGProps<SVGSVGElement>) {
   return (
@@ -170,6 +171,109 @@ export function IconHost(props: SVGProps<SVGSVGElement>) {
     ),
     ...props,
   });
+}
+
+// LAMA-298: per-class host icons so a laptop, server, phone, NAS, etc. are
+// visually distinct across the fleet UI. `HostClassIcon` picks the glyph for
+// a host's class (falling back to the generic IconHost for `unknown`).
+export function IconServer(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <rect x="2" y="3" width="20" height="7" rx="2" />
+        <rect x="2" y="14" width="20" height="7" rx="2" />
+        <line x1="6" y1="6.5" x2="6.01" y2="6.5" />
+        <line x1="6" y1="17.5" x2="6.01" y2="17.5" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconDesktop(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <rect x="3" y="4" width="18" height="12" rx="2" />
+        <line x1="8" y1="20" x2="16" y2="20" />
+        <line x1="12" y1="16" x2="12" y2="20" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconLaptop(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <rect x="3" y="4" width="18" height="11" rx="2" />
+        <path d="M2 19l1.2-2.4a1 1 0 0 1 .9-.55h15.8a1 1 0 0 1 .9.55L22 19H2z" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconNas(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <rect x="6" y="2" width="12" height="20" rx="2" />
+        <line x1="9" y1="7" x2="15" y2="7" />
+        <line x1="9" y1="11" x2="15" y2="11" />
+        <line x1="9" y1="15" x2="15" y2="15" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconPhone(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <rect x="7" y="2" width="10" height="20" rx="2" />
+        <line x1="11" y1="18" x2="13" y2="18" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconTablet(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <rect x="5" y="2" width="14" height="20" rx="2" />
+        <line x1="12" y1="18" x2="12.01" y2="18" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+/** Icon for a host's class; falls back to the generic IconHost for unknown. */
+export function HostClassIcon({
+  hostClass,
+  ...props
+}: SVGProps<SVGSVGElement> & { hostClass?: HostClass | null }) {
+  switch (hostClass ?? "unknown") {
+    case "server":
+      return <IconServer {...props} />;
+    case "desktop":
+      return <IconDesktop {...props} />;
+    case "laptop":
+      return <IconLaptop {...props} />;
+    case "nas":
+      return <IconNas {...props} />;
+    case "phone":
+      return <IconPhone {...props} />;
+    case "tablet":
+      return <IconTablet {...props} />;
+    default:
+      return <IconHost {...props} />;
+  }
 }
 
 export function IconFolder(props: SVGProps<SVGSVGElement>) {

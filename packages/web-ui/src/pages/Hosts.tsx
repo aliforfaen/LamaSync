@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Link } from "react-router-dom";
-import type { Host, OperationLog } from "@lamasync/core";
+import type { Host, HostClass, OperationLog } from "@lamasync/core";
 import { api } from "../api.ts";
+import { HostClassIcon } from "../components/icons.tsx";
 import { AddHostGuide } from "../components/AddHostGuide.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
@@ -96,6 +97,44 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   );
 }
 
+// LAMA-298: manual class override. The card is a Link; the select uses
+// stop-only propagation (no preventDefault) so the native dropdown still
+// opens but the click never bubbles to the anchor and triggers navigation.
+function HostClassPicker({ host, onUpdated }: { host: Host; onUpdated: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const current = host.hostClass ?? "unknown";
+  return (
+    <label className="host-class-picker">
+      <span className="host-card-label">Class</span>
+      <select
+        value={current}
+        aria-label={`Set class for ${host.hostname}`}
+        title="Device class — server/NAS always alert when offline; laptops/phones are expected to sleep"
+        disabled={busy}
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          const next = e.target.value as HostClass;
+          if (next === current) return;
+          setBusy(true);
+          void api
+            .updateHostClass(host.id, next)
+            .then(() => onUpdated())
+            .catch(() => setBusy(false));
+        }}
+      >
+        <option value="server">Server</option>
+        <option value="desktop">Desktop</option>
+        <option value="laptop">Laptop</option>
+        <option value="nas">NAS</option>
+        <option value="phone">Phone</option>
+        <option value="tablet">Tablet</option>
+        <option value="unknown">Unknown</option>
+      </select>
+    </label>
+  );
+}
+
 interface DeviceCardProps {
   host: Host;
   /** Newest backup-class operation for this device, or null (line omitted). */
@@ -103,6 +142,8 @@ interface DeviceCardProps {
   deleting: boolean;
   onDelete: (h: Host) => void;
   onRenamed: () => void;
+  /** LAMA-298: refresh after a class override is saved. */
+  onClassUpdated: () => void;
 }
 
 /**
@@ -111,11 +152,13 @@ interface DeviceCardProps {
  * (rename, copy, remove) preventDefault + stopPropagation so they never
  * trigger navigation.
  */
-function DeviceCard({ host, lastBackup, deleting, onDelete, onRenamed }: DeviceCardProps) {
+function DeviceCard({ host, lastBackup, deleting, onDelete, onRenamed, onClassUpdated }: DeviceCardProps) {
   return (
     <Link className="host-card" to={`/hosts/${encodeURIComponent(host.id)}`}>
       <div className="host-card-head">
-        <span className="device-card-glyph" aria-hidden="true" />
+        <span className="device-card-glyph device-class-glyph" aria-hidden="true">
+          <HostClassIcon hostClass={host.hostClass} className="device-class-glyph-icon" />
+        </span>
         <div className="host-card-title">
           <EditableHostname host={host} onRenamed={onRenamed} />
           <span className={`host-status host-status--${host.status}`}>
@@ -138,6 +181,9 @@ function DeviceCard({ host, lastBackup, deleting, onDelete, onRenamed }: DeviceC
         >
           {deleting ? "…" : "Remove"}
         </button>
+      </div>
+      <div className="host-card-class">
+        <HostClassPicker host={host} onUpdated={onClassUpdated} />
       </div>
       {lastBackup ? (
         <div className="host-card-last-backup">
@@ -349,6 +395,7 @@ export function Hosts() {
               deleting={deletingId === h.id}
               onDelete={(host) => void onDelete(host)}
               onRenamed={() => void refresh()}
+              onClassUpdated={() => void refresh()}
             />
           ))}
         </div>

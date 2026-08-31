@@ -57,7 +57,7 @@ import {
   stopAllMounts,
   stopMount,
 } from "./mounts.ts";
-import { osLabel, storageUsedBytes } from "./device-info.ts";
+import { detectHostClass, osLabel, readHostClassFacts, storageUsedBytes } from "./device-info.ts";
 import {
   disableMountUnit,
   isMountUnitActive,
@@ -1011,6 +1011,7 @@ async function main(): Promise<void> {
       version: VERSION,
       os: osLabel(),
       storageUsedBytes: storageUsedBytes(clientConfig.dataDir),
+      hostClass: detectHostClass(readHostClassFacts()),
     });
     lastHeartbeatAt = Date.now();
     await reportQueue.flush();
@@ -1093,6 +1094,7 @@ async function main(): Promise<void> {
           version: VERSION,
           os: osLabel(),
           storageUsedBytes: storageUsedBytes(clientConfig.dataDir),
+          hostClass: detectHostClass(readHostClassFacts()),
         });
         lastHeartbeatAt = now;
         await reportQueue.flush();

@@ -26,6 +26,15 @@ interface FolderWithAssignments {
   assignments: FolderAssignment[];
 }
 
+// LAMA-297: a group of folders in the grouped list (Shared / per-host /
+// Not set up). Each folder appears in exactly one group.
+interface FolderGroup {
+  key: string;
+  label: string;
+  subtitle?: string;
+  items: FolderWithAssignments[];
+}
+
 type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 
 type AssignRole = "source" | "target" | "both";
@@ -262,6 +271,52 @@ export function Folders() {
     (backupMode ? folder.type === "backup" : true) &&
     (hostFilter === null || assignments.some((a) => a.hostId === hostFilter)),
   );
+
+  // LAMA-297: group the list so a folder appears exactly once — under a
+  // single host section (assigned to only that host), under "Shared"
+  // (assigned to more than one host), or under "Not set up" (no device).
+  const groups = (() => {
+    const shared: FolderWithAssignments[] = [];
+    const unassigned: FolderWithAssignments[] = [];
+    const perHost = new Map<string, FolderWithAssignments[]>();
+    for (const item of filteredItems) {
+      const uniqueHosts = [...new Set(item.assignments.map((a) => a.hostId))];
+      if (uniqueHosts.length === 0) {
+        unassigned.push(item);
+      } else if (uniqueHosts.length > 1) {
+        shared.push(item);
+      } else {
+        const hostId = uniqueHosts[0];
+        const arr = perHost.get(hostId) ?? [];
+        arr.push(item);
+        perHost.set(hostId, arr);
+      }
+    }
+    const out: FolderGroup[] = [];
+    if (shared.length > 0) {
+      out.push({
+        key: "shared",
+        label: "Shared folders",
+        subtitle: "set up on more than one device",
+        items: shared,
+      });
+    }
+    for (const host of hosts) {
+      const arr = perHost.get(host.id);
+      if (arr && arr.length > 0) {
+        out.push({ key: host.id, label: host.hostname, items: arr });
+      }
+    }
+    if (unassigned.length > 0) {
+      out.push({
+        key: "unassigned",
+        label: "Not set up",
+        subtitle: "no device assigned yet",
+        items: unassigned,
+      });
+    }
+    return out;
+  })();
 
   // LAMA-271: shared with the empty state — the toolbar "New folder" button
   // and the empty-state CTA open the same existing in-page flow.
@@ -848,7 +903,15 @@ export function Folders() {
               </td>
             </tr>
           ) : (
-            filteredItems.map(({ folder, assignments }) => {
+            groups.map((group) => (
+              <Fragment key={group.key}>
+                <tr className="folder-group-header">
+                  <td colSpan={backupMode ? 8 : 7}>
+                    <strong>{group.label}</strong>
+                    <span className="folder-group-count">{group.items.length} folder{group.items.length === 1 ? "" : "s"}{group.subtitle ? ` · ${group.subtitle}` : ""}</span>
+                  </td>
+                </tr>
+                {group.items.map(({ folder, assignments }) => {
               const size = sizes[folder.id];
               const isExpanded = expandedFolderId === folder.id;
               const verification = backupMode ? folderVerification(folder, backends) : null;
@@ -1049,7 +1112,9 @@ export function Folders() {
               ) : null}
               </Fragment>
               );
-            })
+              })}
+              </Fragment>
+            ))
           )}
         </tbody>
       </table>

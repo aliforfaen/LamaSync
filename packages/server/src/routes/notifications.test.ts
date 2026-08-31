@@ -624,9 +624,9 @@ describe("host staleness sweep", () => {
   test("marks a stale host offline and emits the edge only once", async () => {
     const now = 1_800_000_000_000;
     db.run(
-      `INSERT INTO hosts (id, hostname, last_seen, status)
-       VALUES (?, ?, ?, ?)`,
-      ["host-stale", "stale-box", now - 91_000, "online"],
+      `INSERT INTO hosts (id, hostname, last_seen, status, host_class)
+       VALUES (?, ?, ?, ?, ?)`,
+      ["host-stale", "stale-box", now - 91_000, "online", "server"],
     );
 
     await runNotificationSweep(now);
@@ -644,6 +644,33 @@ describe("host staleness sweep", () => {
       )
       .all();
     expect(events.map((event) => event.type)).toEqual(["host_offline"]);
+  });
+
+  test("suppresses host_offline for an intermittent (laptop) class host", async () => {
+    const now = 1_800_000_000_000;
+    db.run(
+      `INSERT INTO hosts (id, hostname, last_seen, status, host_class)
+       VALUES (?, ?, ?, ?, ?)`,
+      ["host-laptop", "sleepy-laptop", now - 91_000, "online", "laptop"],
+    );
+
+    await runNotificationSweep(now);
+    // The host is STILL marked offline (an accurate status for a sleeping
+    // laptop) — LAMA-298 only suppresses the alert, not the status.
+    const host = db
+      .query<{ status: string | null }, [string]>(
+        "SELECT status FROM hosts WHERE id = ?",
+      )
+      .get("host-laptop");
+    expect(host?.status).toBe("offline");
+    // ...but no host_offline notification is emitted for an intermittent
+    // class that is expected to sleep.
+    const events = db
+      .query<{ type: string }, []>(
+        "SELECT type FROM notification_events WHERE host_id = 'host-laptop'",
+      )
+      .all();
+    expect(events.map((event) => event.type)).toEqual([]);
   });
 
   test("emits update_available only on false-to-true edges", async () => {

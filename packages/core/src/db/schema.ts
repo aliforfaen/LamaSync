@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS hosts (
     config_revision INTEGER DEFAULT 0,
     os          TEXT,
     storage_used_bytes INTEGER,
-    demo        INTEGER NOT NULL DEFAULT 0
+    demo        INTEGER NOT NULL DEFAULT 0,
+    host_class  TEXT NOT NULL DEFAULT 'unknown'
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -514,6 +515,11 @@ export const MIGRATIONS: string[] = [
   // longer referenced (documented; not silently re-homed).
   "UPDATE folder_assignments SET destination = (SELECT name FROM folders WHERE folders.id = folder_assignments.folder_id) || '/' || host_id WHERE folder_id IN (SELECT id FROM folders WHERE type = 'backup') AND destination IS NULL",
   "UPDATE folder_assignments SET destination = (SELECT name FROM folders WHERE folders.id = folder_assignments.folder_id) WHERE folder_id IN (SELECT id FROM folders WHERE type != 'backup') AND destination IS NULL",
+  // LAMA-298: host class (server/laptop/phone/...). The daemon seeds it on
+  // first heartbeat; the operator can override it in the web-ui. `unknown`
+  // is the fallback so existing rows (and existing dev DBs) stay valid with
+  // no backfill.
+  "ALTER TABLE hosts ADD COLUMN host_class TEXT NOT NULL DEFAULT 'unknown'",
 ];
 
 /**

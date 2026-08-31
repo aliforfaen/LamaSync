@@ -2,6 +2,19 @@
 
 export type HostStatus = "online" | "offline" | "degraded" | "unknown";
 
+// LAMA-298: host "class" — what kind of device this is. Drives per-class
+// icons in the web-ui, offline-notification routing (laptops/phones are
+// expected to sleep; servers are not), and the fleet-degraded status (only
+// an always-on host going stale degrades the fleet).
+export type HostClass =
+  | "server"
+  | "desktop"
+  | "laptop"
+  | "nas"
+  | "phone"
+  | "tablet"
+  | "unknown";
+
 export type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 export type FolderBackend = "sftp" | "s3" | "local" | "nfs" | "restic";
 export type S3Provider = "exoscale" | "aws" | "other";
@@ -170,6 +183,10 @@ export interface Host {
   // device's primary filesystem.
   os?: string | null;
   storageUsedBytes?: number | null;
+  // LAMA-298: daemon-detected host class (server/laptop/phone/...). The
+  // daemon seeds it on first heartbeat; the operator can override it in
+  // the web-ui. `unknown` is the fallback for legacy rows / uncertainty.
+  hostClass?: HostClass;
 }
 
 // LAMA-198: queued-action model. The control plane (Web UI) enqueues actions
@@ -544,6 +561,9 @@ export interface HealthReport {
   // reported by the daemon on each heartbeat.
   os?: string | null;
   storageUsedBytes?: number | null;
+  // LAMA-298: daemon-detected host class, reported on each heartbeat so
+  // the server can route offline notifications and fleet status by class.
+  hostClass?: HostClass;
 }
 
 export interface OperationReport {

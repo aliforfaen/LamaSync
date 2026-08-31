@@ -1,6 +1,6 @@
 import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
-import { isNewer, type Host, type HostStatus } from "@lamasync/core";
+import { isNewer, type Host, type HostClass, type HostStatus } from "@lamasync/core";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import { deviceMayAccessHost, principalOf } from "../auth.ts";
@@ -33,6 +33,24 @@ interface HostRow {
   config_revision: number | null;
   os: string | null;
   storage_used_bytes: number | null;
+  host_class: string | null;
+}
+
+// LAMA-298: valid host classes (datasource of truth in core/types.ts).
+const VALID_HOST_CLASSES: readonly string[] = [
+  "server",
+  "desktop",
+  "laptop",
+  "nas",
+  "phone",
+  "tablet",
+  "unknown",
+];
+
+/** Coerce an arbitrary string into a HostClass, falling back to "unknown". */
+function hostClassFrom(value: string | null | undefined): HostClass {
+  const v = value ?? "";
+  return VALID_HOST_CLASSES.includes(v) ? (v as HostClass) : "unknown";
 }
 
 /**
@@ -58,10 +76,11 @@ function rowToHost(row: HostRow, latestVersion: string | null): Host {
     configRevision: row.config_revision ?? 0,
     os: row.os,
     storageUsedBytes: row.storage_used_bytes,
+    hostClass: hostClassFrom(row.host_class),
   };
 }
 
-const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, os, storage_used_bytes FROM hosts";
+const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, os, storage_used_bytes, host_class FROM hosts";
 
 /**
  * LAMA-225: DNS-safe hostname for rename — lowercase a-z0-9 plus internal
@@ -275,6 +294,61 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       },
     },
   )
+  .patch(
+    "/hosts/:hostId/class",
+    async ({ params, body, set, store }) => {
+      // LAMA-234: device keys may only update their own host's class. (The
+      // daemon never sets this directly — the operator does, from the
+      // web-ui.)
+      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      const row = activeDb
+        .query<HostRow, [string]>(`${HOST_SELECT} WHERE id = ?`)
+        .get(params.hostId);
+      if (!row) {
+        set.status = 404;
+        return { error: "Host not found" };
+      }
+      const requested = (body as { hostClass?: string }).hostClass?.trim() ?? "";
+      if (!VALID_HOST_CLASSES.includes(requested)) {
+        set.status = 400;
+        return {
+          error: `invalid host class '${requested}'; expected one of ${VALID_HOST_CLASSES.join(", ")}`,
+        };
+      }
+      activeDb.run("UPDATE hosts SET host_class = ? WHERE id = ?", [
+        requested,
+        params.hostId,
+      ]);
+      const updated = activeDb
+        .query<HostRow, [string]>(`${HOST_SELECT} WHERE id = ?`)
+        .get(params.hostId);
+      if (!updated) {
+        set.status = 500;
+        return { error: "Failed to load host after class update" };
+      }
+      const latestVersion = await getCachedLatestVersion();
+      const host = rowToHost(updated, latestVersion);
+      broadcast({ kind: "host", host });
+      return host;
+    },
+    {
+      params: t.Object({ hostId: t.String() }),
+      body: t.Object({ hostClass: t.String() }),
+      detail: {
+        summary: "Set a host's class (server/laptop/phone/...)",
+        tags: ["Hosts"],
+        responses: {
+          200: { description: "Host record with updated host class" },
+          400: { description: "Invalid host class" },
+          404: { description: "Not found" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
   .post(
     "/register",
     async ({ body, set, store }) => {
@@ -430,7 +504,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/report/health",
     async ({ body, set, store }) => {
-      const { hostId, timestamp, status, lanIp, tailnetIp, version, os, storageUsedBytes } = body as {
+      const { hostId, timestamp, status, lanIp, tailnetIp, version, os, storageUsedBytes, hostClass } = body as {
         hostId: string;
         timestamp: number;
         status: HostStatus;
@@ -439,6 +513,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         version?: string | null;
         os?: string | null;
         storageUsedBytes?: number | null;
+        hostClass?: string | null;
       };
       // LAMA-234: heartbeats are host-bound; a device key may only report
       // its own host.
@@ -506,6 +581,13 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         sets.push("storage_used_bytes = ?");
         params.push(storageUsedBytes);
       }
+      // LAMA-298: daemon-reported host class. Only overwrite when present so
+      // an older/blank report never wipes a previously stored (or operator-
+      // overridden) value — mirrors the `version`/`os` rules above.
+      if (typeof hostClass === "string" && hostClass.length > 0) {
+        sets.push("host_class = ?");
+        params.push(hostClassFrom(hostClass));
+      }
       params.push(hostId);
       const result = activeDb.run(
         `UPDATE hosts SET ${sets.join(", ")} WHERE id = ?`,
@@ -563,6 +645,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         // (and transient blanks) don't break the report.
         os: t.Optional(t.Union([t.String(), t.Null()])),
         storageUsedBytes: t.Optional(t.Union([t.Number(), t.Null()])),
+        // LAMA-298: daemon-detected host class, reported on each heartbeat.
+        hostClass: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary: "Update host heartbeat",

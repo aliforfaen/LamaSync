@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import {
   isNewer,
   type Host,
+  type HostClass,
   type HostStatus,
   type NotificationChannel,
   type NotificationChannelKind,
@@ -148,10 +149,11 @@ interface HostRow {
   lan_ip: string | null;
   version: string | null;
   config_revision: number | null;
+  host_class: string | null;
 }
 
 const HOST_SELECT =
-  "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision FROM hosts";
+  "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, host_class FROM hosts";
 
 let activeDb: Database = defaultDb;
 const notificationState = new Map<string, NotificationState>();
@@ -181,6 +183,52 @@ export function severityForType(type: NotificationType): NotificationSeverity {
     case "host_online":
       return "info";
   }
+}
+
+// LAMA-298: host class -> severity for a host-edge notification. Always-on
+// hosts (server/nas) going offline is an alert; laptops/phones/tablets are
+// EXPECTED to sleep, so their offline edge never blasts (returns null =
+// suppressed). `host_online` stays informational for every class.
+const VALID_HOST_CLASSES: readonly string[] = [
+  "server",
+  "desktop",
+  "laptop",
+  "nas",
+  "phone",
+  "tablet",
+  "unknown",
+];
+
+function hostClassFrom(value: string | null | undefined): HostClass {
+  const v = value ?? "";
+  return VALID_HOST_CLASSES.includes(v) ? (v as HostClass) : "unknown";
+}
+
+function isAlwaysOnClass(hostClass: HostClass): boolean {
+  return hostClass === "server" || hostClass === "nas";
+}
+
+function hostClassForHost(hostId: string): HostClass {
+  try {
+    const row = activeDb
+      .query<{ host_class: string | null }, [string]>(
+        "SELECT host_class FROM hosts WHERE id = ?",
+      )
+      .get(hostId);
+    return hostClassFrom(row?.host_class);
+  } catch {
+    return "unknown";
+  }
+}
+
+function severityForHostEdge(
+  type: NotificationType,
+  hostId: string,
+): NotificationSeverity | null {
+  if (type === "host_offline") {
+    return isAlwaysOnClass(hostClassForHost(hostId)) ? "critical" : null;
+  }
+  return "info";
 }
 
 function stateKey(
@@ -292,7 +340,7 @@ function decideSeverity(
     state.edge = nextEdge;
     state.lastEmittedAt = now;
     notificationState.set(key, state);
-    return severityForType(input.type);
+    return severityForHostEdge(input.type, input.hostId);
   }
 
   if (input.type === "update_available") {
@@ -713,6 +761,7 @@ function rowToHost(row: HostRow, latestVersion: string | null): Host {
     version,
     updateAvailable,
     configRevision: row.config_revision ?? 0,
+    hostClass: hostClassFrom(row.host_class),
   };
 }
 

@@ -18,6 +18,7 @@ import type {
   FolderAssignment,
   HealthResponse,
   Host,
+  HostClass,
   HostConfig,
   NotificationChannel,
   NotificationEvent,
@@ -308,6 +309,9 @@ export const api = {
     apiGet<Host>(`/hosts/${encodeURIComponent(hostId)}`),
   patchHost: (hostId: string, body: { hostname: string }) =>
     apiPatch<Host>(`/hosts/${encodeURIComponent(hostId)}`, body),
+  // LAMA-298: override a host's daemon-detected class.
+  updateHostClass: (hostId: string, hostClass: HostClass) =>
+    apiPatch<Host>(`/hosts/${encodeURIComponent(hostId)}/class`, { hostClass }),
   deleteHost: (hostId: string) =>
     apiDelete(`/hosts/${encodeURIComponent(hostId)}`),
   getConfig: (hostId: string) =>

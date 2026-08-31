@@ -1245,6 +1245,60 @@ button.action:disabled {
   background: var(--accent-info);
 }
 
+/* LAMA-298: per-class device glyph — a tinted tile hosting the class icon
+   (server/laptop/phone/NAS/...). Overrides the CSS-drawn monitor glyph so
+   the real per-class icon renders instead. */
+.device-class-glyph {
+  position: relative;
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-md);
+  background: var(--accent-info-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-info);
+}
+.device-class-glyph::before,
+.device-class-glyph::after {
+  content: none;
+}
+.device-class-glyph-icon {
+  width: 1.4rem;
+  height: 1.4rem;
+}
+
+/* LAMA-298: per-card class override picker. */
+.host-card-class {
+  padding: 0 1rem 0.6rem;
+}
+.host-class-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+.host-class-picker .host-card-label {
+  font-size: 0.75rem;
+}
+.host-class-picker select {
+  font: inherit;
+  padding: 0.15rem 0.3rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.host-detail-icon {
+  width: 1.2em;
+  height: 1.2em;
+  vertical-align: -0.15em;
+  margin-right: 0.25rem;
+  color: var(--accent-info);
+}
+
 .host-card-title {
   flex: 1;
   min-width: 0;
@@ -1445,6 +1499,24 @@ button.action:disabled {
 
 .data.data-folders .assignment-summary {
   white-space: nowrap;
+}
+
+/* LAMA-297: grouped list headers (Shared / per-host / Not set up). */
+.folder-group-header > td {
+  background: var(--surface-muted, var(--surface));
+  border-top: 1px solid var(--border);
+  font-weight: 600;
+  padding-top: 0.55rem;
+  padding-bottom: 0.35rem;
+}
+.folder-group-header:first-child > td {
+  border-top: 0;
+}
+.folder-group-count {
+  margin-left: 0.5rem;
+  font-weight: 400;
+  color: var(--muted, var(--text-muted));
+  font-size: 0.8em;
 }
 
 .folder-expand-toggle {

@@ -30,11 +30,11 @@ import { Confetti, useMilestoneConfetti } from "../components/Confetti.tsx";
 import { Llama } from "../components/Llama.tsx";
 import {
   IconFolderFilled,
-  IconHost,
   IconHostFilled,
   IconShieldFilled,
   IconStorageFilled,
   IconSyncFilled,
+  HostClassIcon,
 } from "../components/icons.tsx";
 
 /** LAMA-265: "first backup ever seen" — a successful folder or app-settings
@@ -354,12 +354,19 @@ export function Dashboard() {
     }
   }
 
+  // LAMA-298: only an always-on host (server/NAS) going stale should make
+  // the fleet look degraded. Laptops/phones/tablets are expected to sleep;
+  // their offline status is shown on the card but never counts against the
+  // fleet's "needs attention" verdict.
+  const isAlwaysOnHost = (h: Host): boolean =>
+    h.hostClass === "server" || h.hostClass === "nas";
+
   const counts = useMemo(() => {
     const hosts = data?.hosts ?? [];
     return {
       total: hosts.length,
       online: hosts.filter((h) => h.status === "online").length,
-      offline: hosts.filter((h) => h.status === "offline" || h.status === "degraded").length,
+      offline: hosts.filter((h) => (h.status === "offline" || h.status === "degraded") && isAlwaysOnHost(h)).length,
       folders: data?.folders.length ?? 0,
       conflicts: data?.pendingConflicts.length ?? 0,
       shares: data?.shares.length ?? 0,
@@ -371,7 +378,7 @@ export function Dashboard() {
     (op) => op.status === "failed" && op.timestamp >= Date.now() - 24 * 3600 * 1000,
   );
   const offline = (data?.hosts ?? []).filter(
-    (h) => h.status === "offline" || h.status === "degraded",
+    (h) => (h.status === "offline" || h.status === "degraded") && isAlwaysOnHost(h),
   );
   const updates = (data?.hosts ?? []).filter((h) => h.updateAvailable);
   const hasResticDestination = data?.backends.some((backend) => backend.kind === "restic") ?? false;
@@ -576,7 +583,7 @@ export function Dashboard() {
             ) : (
               <div className="fleet-roster-list">
                 {data.hosts.slice(0, 5).map((h) => <Link className="fleet-roster-row" key={h.id} to={`/hosts/${encodeURIComponent(h.id)}`}>
-                  <span className={`roster-device roster-device--${h.status}`} aria-hidden="true"><IconHost /></span>
+                  <span className={`roster-device roster-device--${h.status}`} aria-hidden="true"><HostClassIcon hostClass={h.hostClass} /></span>
                   <span className="roster-name"><strong>{h.hostname}</strong><span>{h.lastSeen ? `Last seen ${formatTimeAgo(h.lastSeen)}` : "Waiting for first check-in"}</span></span>
                   <span className={`roster-status roster-status--${h.status}`}><span aria-hidden="true">●</span>{h.status}</span>
                   <span className="roster-version">v{h.version ?? "—"}{h.updateAvailable ? <em>update</em> : null}</span>

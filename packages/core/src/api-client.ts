@@ -13,6 +13,7 @@ import type {
   HealthReport,
   HealthResponse,
   Host,
+  HostClass,
   HostConfig,
   NotificationChannel,
   NotificationEvent,
@@ -225,6 +226,16 @@ export class LamaSyncApiClient {
       "PATCH",
       `/api/v1/hosts/${encodeURIComponent(hostId)}`,
       JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  // LAMA-298: override a host's daemon-detected class (server/laptop/phone/...).
+  updateHostClass(hostId: string, hostClass: HostClass): Promise<Host> {
+    return this.request<Host>(
+      "PATCH",
+      `/api/v1/hosts/${encodeURIComponent(hostId)}/class`,
+      JSON.stringify({ hostClass }),
       "application/json",
     );
   }

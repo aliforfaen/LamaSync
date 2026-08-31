@@ -4,6 +4,7 @@ import {
   VERSION,
   isNewer,
   type Host,
+  type HostClass,
   type HostStatus,
 } from "@lamasync/core";
 import { db, dbFilePath } from "../db.ts";
@@ -17,6 +18,22 @@ interface HostRow {
   status: string | null;
   lan_ip: string | null;
   version: string | null;
+  host_class: string | null;
+}
+
+const VALID_HOST_CLASSES: readonly string[] = [
+  "server",
+  "desktop",
+  "laptop",
+  "nas",
+  "phone",
+  "tablet",
+  "unknown",
+];
+
+function hostClassFrom(value: string | null | undefined): HostClass {
+  const v = value ?? "";
+  return VALID_HOST_CLASSES.includes(v) ? (v as HostClass) : "unknown";
 }
 
 function rowToHost(row: HostRow, latestVersion: string | null): Host {
@@ -34,6 +51,7 @@ function rowToHost(row: HostRow, latestVersion: string | null): Host {
     status: (row.status ?? "unknown") as HostStatus,
     version,
     updateAvailable,
+    hostClass: hostClassFrom(row.host_class),
   };
 }
 
@@ -42,7 +60,7 @@ export const healthRoutes = new Elysia({ prefix: "/api/v1" }).get(
   async () => {
     const rows = db
       .query<HostRow, []>(
-        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version FROM hosts",
+        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, host_class FROM hosts",
       )
       .all();
     // Resolve the cached latest release once so the comparison is

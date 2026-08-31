@@ -510,6 +510,52 @@ describe("PATCH /api/v1/hosts/:hostId — host rename (LAMA-225)", () => {
   });
 });
 
+describe("PATCH /api/v1/hosts/:hostId/class — host class override (LAMA-298)", () => {
+  const patchClass = (path: string, body: Record<string, unknown>) =>
+    app.handle(request(path, { method: "PATCH", body: JSON.stringify(body) }));
+
+  test("sets the host class and round-trips it on the Host record", async () => {
+    const res = await patchClass("/api/v1/hosts/host-a/class", { hostClass: "server" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.hostClass).toBe("server");
+    const row = db
+      .query<{ host_class: string | null }, [string]>(
+        "SELECT host_class FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(row?.host_class).toBe("server");
+  });
+
+  test("rejects an unknown host class with 400", async () => {
+    const res = await patchClass("/api/v1/hosts/host-a/class", { hostClass: "hovercraft" });
+    expect(res.status).toBe(400);
+  });
+
+  test("returns 404 for a missing host", async () => {
+    const res = await patchClass("/api/v1/hosts/ghost/class", { hostClass: "server" });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /api/v1/report/health — host class (LAMA-298)", () => {
+  test("heartbeat with hostClass persists it on the host row", async () => {
+    const res = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      hostClass: "laptop",
+    });
+    expect(res.status).toBe(204);
+    const row = db
+      .query<{ host_class: string | null }, [string]>(
+        "SELECT host_class FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(row?.host_class).toBe("laptop");
+  });
+});
+
 describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
   function seedDependentRows(hostId: string): void {
     // LAMA-225 P1-5: seed every host-keyed column the cascade touches.

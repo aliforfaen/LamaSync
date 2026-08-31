@@ -11,6 +11,7 @@ import type {
 } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api, errorText } from "../api.ts";
+import { HostClassIcon } from "../components/icons.tsx";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
 import { DryRunDrawer, type DryRunState } from "../components/DryRunDrawer.tsx";
@@ -301,7 +302,7 @@ export function HostDetail() {
   return (
     <div className="page">
       <div className="toolbar">
-        <h1>{host.hostname}</h1>
+        <h1><HostClassIcon hostClass={host.hostClass} className="host-detail-icon" /> {host.hostname}</h1>
         <Link className="action" to="/hosts">← All devices</Link>
         <PauseControl
           scope="host"
@@ -348,6 +349,8 @@ export function HostDetail() {
         <dl className="host-detail-dl">
           <dt>Status</dt>
           <dd><span className={`badge badge-${host.status}`}>{host.status}</span></dd>
+          <dt>Class</dt>
+          <dd><span className="badge badge-unknown">{host.hostClass ?? "unknown"}</span></dd>
           <dt>Hostname</dt>
           <dd>
             <EditableHostname host={host} onRenamed={() => void refresh()} />

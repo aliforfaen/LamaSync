@@ -57,6 +57,7 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/hosts`                                   | List every registered host                       |
 | GET      | `/hosts/:hostId`                           | Get one host by id                               |
 | PATCH    | `/hosts/:hostId`                           | Rename host's display label (id stays stable)    |
+| PATCH    | `/hosts/:hostId/class`                     | Set a host's class (`server/desktop/laptop/nas/phone/tablet/unknown`) — LAMA-298 |
 | DELETE   | `/hosts/:hostId`                           | Delete host + cascade                            |
 | POST     | `/report/health`                           | Host heartbeat                                   |
 | GET      | `/config/:hostId`                          | Bundled config (assignments + rclone section)    |
@@ -194,7 +195,7 @@ live in the OpenAPI 3 spec at `/swagger/json` under `WSEvent`.
 For exact request/response shapes and field nullability, prefer the live
 spec. The high-level shapes (verbose commentary):
 
-- `Host { id, hostname, tailnetIp?, lanIp?, lastSeen?, status, version?, updateAvailable?, configRevision? }`
+- `Host { id, hostname, tailnetIp?, lanIp?, lastSeen?, status, version?, updateAvailable?, configRevision?, os?, storageUsedBytes?, hostClass? }` — `hostClass` (LAMA-298) is the daemon-detected class (`server/desktop/laptop/nas/phone/tablet/unknown`), overridable via `PATCH /hosts/:hostId/class`. It drives per-class web-ui icons and offline-notification routing: `host_offline` is an alert only for always-on classes (`server`/`nas`); laptops/phones/tablets are expected to sleep, so their offline edge is suppressed. The fleet's "needs attention"/degraded verdict likewise only counts always-on hosts.
 - `Folder { id, name, type, createdAt?, encrypted?, cryptPassword?, backend?, backendId?, s3Bucket?, gitProvider?, gitRemote? }`
 - `FolderAssignment { id, folderId, hostId, role, localPath, remoteName?, destination?, syncExpr?, enabled, conflictStrategy?, preSyncCmd?, postSyncCmd?, ignorePath?, mountIgnorePath?, timeoutSec?, bandwidthSchedule?, maxRetries?, availableSpaceThreshold?, cacheProfile?, cacheMaxSize?, resticRepository?, resticPassword? }` — `destination` (LAMA-294) is the explicit relative path/prefix on the remote, separate from the connection alias `remoteName`; `null`/omitted uses the default. Ordinary backups host-scope by default to `<folder-name>/<host-id>`; sync/mount stay shared (`<folder-name>`). The canonical destination key is the server-side lock identity.
 - `Backend { id, name, kind, s3Provider?, s3Endpoint?, s3Region?, s3AccessKeyId?, hasSecret?, s3SecretAccessKey? (write-only), localPath?, resticRepository?, hasResticPassword?, resticPassword? (write-only), createdAt, lastProveAt?, lastProveOk? }` — `lastProveAt`/`lastProveOk` are epoch ms + boolean; null/null means "never proven". LAMA-266
