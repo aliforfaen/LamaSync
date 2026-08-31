@@ -14,13 +14,13 @@ import {
 } from "./pause-service.ts";
 
 function makeState(): PauseState {
-  // Keep the caption in a multi-day bucket so rapid sequential polls cannot
-  // cross a minute/hour boundary and turn this de-duplication test into a
-  // wall-clock race. Tests construct an absolute `until` value rather than
-  // relying on a timer or a `computeUntilMs` output.
+  // Keep the caption well inside a multi-day bucket so rapid sequential polls
+  // cannot cross a duration boundary and turn this de-duplication test into a
+  // wall-clock race. The extra hour matters because an exact N-day deadline
+  // can format as N days on one millisecond and N-1 days on the next.
   return {
     scope: "global",
-    until: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+    until: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000).toISOString(),
     mode: "pause",
   };
 }
