@@ -199,7 +199,7 @@ Default columns: `WHEN`, `HOST`, `OP`, `STATUS`, `DUR`, `SUMMARY`, `ID`.
 ## `lamasync backup legacy`
 
 ```
-Usage: lamasync backup legacy [--prune] [--yes] [--json]
+Usage: lamasync backup legacy [--prune] [--yes] [--sizes] [--json]
 ```
 
 Report (dry-run by default) or prune orphaned legacy shared backup data under
@@ -210,8 +210,10 @@ host prefix are orphaned.
 
 - Default (`--prune` omitted) is a **safe dry-run**: lists the legacy root,
   and flags each top-level child as `legacy (orphaned)`, `host-prefix (kept)`,
-  or `explicit destination (kept)`, with size + item count and a total orphaned byte
-  count. No remote mutation.
+  or `explicit destination (kept)`. Sizes are **not** computed by default
+  (shown as `—`); pass `--sizes` to include per-child byte/item counts and a
+  total orphaned byte count (slow — full recursive listing per child). No
+  remote mutation.
 - `--prune --yes` deletes only the orphaned top-level children. Host-scoped
   prefixes and the legacy root itself are never touched (recomputed fresh at
   prune time).

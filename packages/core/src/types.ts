@@ -589,8 +589,9 @@ export interface LegacyRootOrphanEntry {
   remotePath: string;
   /** Top-level child name under the legacy root that is orphaned (or kept). */
   name: string;
-  sizeBytes: number;
-  itemCount: number;
+  /** null when sizes were not requested (fast path) — see `?sizes=true`. */
+  sizeBytes: number | null;
+  itemCount: number | null;
   /** true when this child is a live host-scoped prefix (never pruned). */
   isHostPrefix: boolean;
   /** true when any live assignment explicitly uses this child/root. */
@@ -602,8 +603,9 @@ export interface LegacyRootReport {
   folderName: string;
   remotePath: string;
   orphaned: LegacyRootOrphanEntry[];
-  /** Total bytes of orphaned (non host-prefix) children only. */
-  orphanedBytes: number;
+  /** Total bytes of orphaned (non host-prefix) children only; null when
+   *  sizes were not requested (fast path). */
+  orphanedBytes: number | null;
 }
 
 export interface LegacyRootPruneResult {

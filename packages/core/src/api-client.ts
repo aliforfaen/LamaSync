@@ -752,8 +752,11 @@ export class LamaSyncApiClient {
   }
 
   // LAMA-294: orphaned legacy shared backup data under backup folder roots.
-  reportLegacyRoot(): Promise<import("./types.ts").LegacyRootReport[]> {
-    return this.request("GET", "/api/v1/backups/legacy-root");
+  // Sizes are opt-in (slow — rclone size per child); the default fast path
+  // lists orphan names only with null size fields.
+  reportLegacyRoot(includeSizes?: boolean): Promise<import("./types.ts").LegacyRootReport[]> {
+    const qs = includeSizes === true ? "?sizes=true" : "";
+    return this.request("GET", `/api/v1/backups/legacy-root${qs}`);
   }
 
   pruneLegacyRoot(confirm: boolean): Promise<import("./types.ts").LegacyRootPruneResult[]> {

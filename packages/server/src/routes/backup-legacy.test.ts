@@ -53,6 +53,18 @@ describe("backups legacy-root (LAMA-294)", () => {
     expect(await res.json()).toEqual([]);
   });
 
+  test("report accepts the opt-in sizes query param (fast path is the default)", async () => {
+    for (const path of [
+      "/api/v1/backups/legacy-root",
+      "/api/v1/backups/legacy-root?sizes=true",
+      "/api/v1/backups/legacy-root?sizes=false",
+    ]) {
+      const res = await get(path);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual([]);
+    }
+  });
+
   test("prune requires explicit confirm", async () => {
     const res = await post("/api/v1/backups/legacy-root/prune", { confirm: false });
     expect(res.status).toBe(400);

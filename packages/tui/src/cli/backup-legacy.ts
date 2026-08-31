@@ -11,7 +11,8 @@ import { wrapApiError } from "./client.ts";
 import type { CliContext } from "./dispatch.ts";
 import { printJson, printTable } from "./output.ts";
 
-function formatBytes(bytes: number): string {
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return "—";
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KiB", "MiB", "GiB", "TiB"];
   let v = bytes / 1024;
@@ -32,14 +33,19 @@ export async function runLegacy(ctx: CliContext): Promise<void> {
 }
 
 async function runLegacyReport(ctx: CliContext): Promise<void> {
-  const { client, json } = ctx;
+  const { client, json, flags } = ctx;
+  const includeSizes = flagBool(flags, "sizes");
   let reports: LegacyRootReport[];
   try {
-    reports = await client.client.reportLegacyRoot();
+    reports = await client.client.reportLegacyRoot(includeSizes);
   } catch (err) {
     throw wrapApiError(err, "backup legacy report");
   }
-  const orphanTotal = reports.reduce((sum, r) => sum + r.orphanedBytes, 0);
+  const orphanTotal = reports.reduce(
+    (sum: number | null, r) =>
+      sum === null || r.orphanedBytes === null ? null : sum + r.orphanedBytes,
+    0,
+  );
 
   if (json) {
     printJson(reports);
@@ -54,7 +60,7 @@ async function runLegacyReport(ctx: CliContext): Promise<void> {
         ? (e.isHostPrefix ? "host-prefix (kept)" : "explicit destination (kept)")
         : "legacy (orphaned)",
       size: formatBytes(e.sizeBytes),
-      items: e.itemCount,
+      items: e.itemCount === null ? "—" : e.itemCount,
     })),
   );
 
@@ -73,8 +79,12 @@ async function runLegacyReport(ctx: CliContext): Promise<void> {
     ],
     rows,
   );
+  const total =
+    orphanTotal === null
+      ? "(use --sizes for byte totals)"
+      : formatBytes(orphanTotal);
   console.log(
-    `\nOrphaned legacy backup data: ${formatBytes(orphanTotal)}. Use \`lamasync backup legacy --prune --yes\` to delete it.`,
+    `\nOrphaned legacy backup data: ${total}. Use \`lamasync backup legacy --prune --yes\` to delete it.`,
   );
 }
 

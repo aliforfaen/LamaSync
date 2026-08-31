@@ -178,6 +178,7 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
           [
             "--prune            delete orphaned legacy data (requires --yes)",
             "--yes              confirm deletion of backup data",
+            "--sizes            include per-child sizes (slow — full recursive listing)",
             "--json             machine-readable output",
           ],
         ),

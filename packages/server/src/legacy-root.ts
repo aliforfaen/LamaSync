@@ -221,8 +221,8 @@ export interface OrphanEntry {
   folderName: string;
   remotePath: string;
   name: string;
-  sizeBytes: number;
-  itemCount: number;
+  sizeBytes: number | null;
+  itemCount: number | null;
   isHostPrefix: boolean;
   isProtected: boolean;
 }
@@ -232,15 +232,24 @@ export interface LegacyRootReport {
   folderName: string;
   remotePath: string;
   orphaned: OrphanEntry[];
-  orphanedBytes: number;
+  orphanedBytes: number | null;
 }
 
 /**
  * Report orphaned top-level legacy children. Never mutates remote state.
  * Children that are a known host-scoped prefix are reported as kept but never
  * deleted; everything else under the legacy root is flagged orphaned.
+ *
+ * Sizes are opt-in: computing `rclone size` per child is a full recursive
+ * listing and is far too slow for a dry-run against S3, so it is skipped
+ * unless `includeSizes` is true (then `sizeBytes`/`itemCount`/`orphanedBytes`
+ * are `null`).
  */
-export async function reportLegacyRoots(db: Database): Promise<LegacyRootReport[]> {
+export async function reportLegacyRoots(
+  db: Database,
+  opts: { includeSizes?: boolean } = {},
+): Promise<LegacyRootReport[]> {
+  const includeSizes = opts.includeSizes === true;
   const reports: LegacyRootReport[] = [];
   for (const plan of buildLegacyRootPlans(db)) {
     const folder = loadFolder(db, plan.folderId);
@@ -257,19 +266,21 @@ export async function reportLegacyRoots(db: Database): Promise<LegacyRootReport[
       for (const name of children) {
         const isHostPrefix = hostSet.has(name);
         const isProtected = plan.protectAllChildren || isHostPrefix || protectedSet.has(name);
-        const size = await remoteSize(plan, name, configPath);
+        const size = includeSizes ? await remoteSize(plan, name, configPath) : null;
         orphaned.push({
           folderId: plan.folderId,
           folderName: plan.folderName,
           remotePath: plan.remotePath,
           name,
-          sizeBytes: size?.bytes ?? 0,
-          itemCount: size?.count ?? 0,
+          sizeBytes: size?.bytes ?? null,
+          itemCount: size?.count ?? null,
           isHostPrefix,
           isProtected,
         });
       }
-      const orphanedBytes = orphaned.reduce((sum, e) => sum + (e.isProtected ? 0 : e.sizeBytes), 0);
+      const orphanedBytes = includeSizes
+        ? orphaned.reduce((sum, e) => sum + (e.isProtected ? 0 : (e.sizeBytes ?? 0)), 0)
+        : null;
       reports.push({
         folderId: plan.folderId,
         folderName: plan.folderName,

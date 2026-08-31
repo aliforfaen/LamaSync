@@ -13,14 +13,20 @@ export function __setDb(next: Database): void {
 export const backupLegacyRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/backups/legacy-root",
-    ({ set, store }) => {
+    ({ set, store, query }) => {
       if (!requireAdmin({ principal: principalOf(store) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
-      return reportLegacyRoots(activeDb);
+      // Sizes are opt-in: computing rclone size per child is far too slow for
+      // a default dry-run against S3. The fast path lists orphan names only.
+      const includeSizes = query.sizes === true || query.sizes === "true" || query.sizes === "1";
+      return reportLegacyRoots(activeDb, { includeSizes });
     },
     {
+      query: t.Object({
+        sizes: t.Optional(t.Union([t.String(), t.Boolean()])),
+      }),
       detail: {
         summary:
           "Report orphaned legacy shared backup data under backup folder roots (dry-run)",
