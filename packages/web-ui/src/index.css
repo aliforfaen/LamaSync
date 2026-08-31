@@ -413,15 +413,52 @@ td.num {
   }
 }
 
-/* WS5 P5: wordmark — mono, tracked, two-tone; keep the layout role. */
-.nav .brand {
+/* LamaSync masthead: the generated pack mark is decorative; the wordmark is
+   live text so it stays accessible and remains usable if the art changes. */
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  color: var(--text-strong);
+  margin-right: auto;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 1.75rem;
+  flex: 0 0 2rem;
+}
+
+.brand-mark-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.brand-mark-image--light {
+  display: none;
+}
+
+[data-theme="light"] .brand-mark-image--dark {
+  display: none;
+}
+
+[data-theme="light"] .brand-mark-image--light {
+  display: block;
+}
+
+.brand-name {
   font-family: var(--font-mono);
   font-weight: 700;
   font-size: var(--font-size-base);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--text-strong);
-  margin-right: auto;
+  white-space: nowrap;
 }
 
 .brand-accent {

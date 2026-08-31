@@ -2,11 +2,12 @@
 
 These are source illustrations for the visual direction documented in
 [`docs/cozy-dashboard-design.md`](../../../../../docs/cozy-dashboard-design.md).
-They are intentionally **not imported by the application yet**.
+Only the umbrella drift is currently imported by the application; the other
+files remain supporting visual direction.
 
-The umbrella drift is now realized as the `drift` pose of the inline `Llama`
-SVG component (`packages/web-ui/src/components/Llama.tsx`), which replaces the
-raster in the Dashboard empty-fleet state.
+The umbrella drift is currently used as a subtle raster illustration in the
+Dashboard empty-fleet state. The inline `Llama` SVG component remains the
+compact, theme-aware alternative for product UI.
 
 | Asset | Intended moment |
 | --- | --- |

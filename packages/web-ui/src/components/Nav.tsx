@@ -20,6 +20,7 @@ import {
   IconShieldFilled,
   IconStorageFilled,
 } from "./icons.tsx";
+import { BrandLockup } from "./BrandLockup.tsx";
 
 const ORDER: ThemeChoice[] = ["dark", "light", "system"];
 const LABELS: Record<ThemeChoice, string> = {
@@ -132,9 +133,7 @@ export function Nav() {
         >
           {drawerOpen ? "✕" : "☰"}
         </button>
-        <span className="brand">
-          LAMA<span className="brand-accent">SYNC</span>
-        </span>
+        <BrandLockup />
       </div>
       {drawerOpen && (
         <button
@@ -145,9 +144,7 @@ export function Nav() {
         />
       )}
       <nav className={`rail${drawerOpen ? " rail-open" : ""}`} aria-label="Product navigation">
-        <span className="brand rail-brand">
-          LAMA<span className="brand-accent">SYNC</span>
-        </span>
+        <BrandLockup className="rail-brand" />
         <div className="rail-groups">
           {GROUPS.map((group) => (
             <div className="rail-group" key={group.label}>

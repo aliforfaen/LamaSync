@@ -167,6 +167,16 @@ icon or color alone.
 
 The llama is a small sign of care, not the interface's main subject.
 
+- **Primary brand mark (48px and up):** use the pack llama: a steady,
+  forward-moving silhouette with a rounded field pack, flap, buckle, and
+  shoulder strap. Its four transparent PNG variants live in
+  [`packages/web-ui/src/assets/brand/`](../packages/web-ui/src/assets/brand/).
+  Use black or light teal on the warm light theme; use white or dark moss on
+  the dark theme. It belongs in an application masthead, onboarding, release
+  material, and future app identity—not in every dashboard card. The web
+  navigation implements this as the shared `BrandLockup` component: dark moss
+  and light teal switch with the theme, while the `LamaSync` title stays live
+  code text beside the decorative image.
 - **Small UI icons (16–32px):** use filled, single-colour SVG silhouettes.
   Preserve one identifying gesture only—walking with sync arrows, drifting
   with an umbrella, or sitting beside a document. Avoid fur texture, thin
@@ -180,9 +190,13 @@ The llama is a small sign of care, not the interface's main subject.
 - **Ordinary product surfaces:** do not add llamas to data cards, navigation
   labels, or every success message. One quiet hero or empty-state treatment is
   enough.
-- Author final marks and small icons as hand-authored SVG components using
-  `currentColor`; generated art is visual direction for larger supporting
-  illustrations, not the source of the application icon system.
+- Keep the small icon family hand-authored as SVG components using
+  `currentColor`; the generated pack mark is deliberately a larger raster
+  brand asset, not the source of the application icon system.
+- For future favicons, PWA, desktop, or mobile application icons, create
+  square exports from the source mark and test them at their actual target
+  sizes. Do not reuse the 4:3 presentation PNGs directly at tiny sizes; the
+  asset README records the clear-space and accessibility rules.
 
 ## Implementation work packages
 
