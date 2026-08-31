@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS hosts (
     os          TEXT,
     storage_used_bytes INTEGER,
     demo        INTEGER NOT NULL DEFAULT 0,
-    host_class  TEXT NOT NULL DEFAULT 'unknown'
+    host_class  TEXT NOT NULL DEFAULT 'unknown',
+    host_class_overridden INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -520,6 +521,9 @@ export const MIGRATIONS: string[] = [
   // is the fallback so existing rows (and existing dev DBs) stay valid with
   // no backfill.
   "ALTER TABLE hosts ADD COLUMN host_class TEXT NOT NULL DEFAULT 'unknown'",
+  // LAMA-298: preserve an operator-selected class when daemons continue to
+  // report their best-effort detection on every heartbeat.
+  "ALTER TABLE hosts ADD COLUMN host_class_overridden INTEGER NOT NULL DEFAULT 0",
 ];
 
 /**

@@ -1,7 +1,7 @@
 # Cozy dashboard & Lama visual identity
 
-> **Status:** approved design direction, implementation handoff  
-> **Related:** LAMA-275 — design system + web/TUI shell overhaul (completed)  
+> **Status:** approved design direction, implementation handoff
+> **Related:** LAMA-275 — design system + web/TUI shell overhaul (completed)
 > **Companion issue:** LAMA-295 — Cozy dashboard and Lama visual identity
 
 ![Cozy dashboard concept](cozy-dashboard-artifacts/cozy-dashboard-concept.png)

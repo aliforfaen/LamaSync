@@ -34,6 +34,7 @@ interface HostRow {
   os: string | null;
   storage_used_bytes: number | null;
   host_class: string | null;
+  host_class_overridden: number | null;
 }
 
 // LAMA-298: valid host classes (datasource of truth in core/types.ts).
@@ -80,7 +81,7 @@ function rowToHost(row: HostRow, latestVersion: string | null): Host {
   };
 }
 
-const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, os, storage_used_bytes, host_class FROM hosts";
+const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, os, storage_used_bytes, host_class, host_class_overridden FROM hosts";
 
 /**
  * LAMA-225: DNS-safe hostname for rename — lowercase a-z0-9 plus internal
@@ -318,7 +319,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
           error: `invalid host class '${requested}'; expected one of ${VALID_HOST_CLASSES.join(", ")}`,
         };
       }
-      activeDb.run("UPDATE hosts SET host_class = ? WHERE id = ?", [
+      activeDb.run("UPDATE hosts SET host_class = ?, host_class_overridden = 1 WHERE id = ?", [
         requested,
         params.hostId,
       ]);
@@ -522,8 +523,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Forbidden" };
       }
       const previous = activeDb
-        .query<{ status: string | null }, [string]>(
-          "SELECT status FROM hosts WHERE id = ?",
+        .query<{ status: string | null; host_class_overridden: number | null }, [string]>(
+          "SELECT status, host_class_overridden FROM hosts WHERE id = ?",
         )
         .get(hostId);
       // Follow the existing `lanIp` pattern: only overwrite the column when
@@ -584,7 +585,13 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       // LAMA-298: daemon-reported host class. Only overwrite when present so
       // an older/blank report never wipes a previously stored (or operator-
       // overridden) value — mirrors the `version`/`os` rules above.
-      if (typeof hostClass === "string" && hostClass.length > 0) {
+      // Once the operator chooses a class, keep it across future heartbeats;
+      // the daemon's detection is only a seed for unclassified hosts.
+      if (
+        typeof hostClass === "string" &&
+        hostClass.length > 0 &&
+        previous?.host_class_overridden !== 1
+      ) {
         sets.push("host_class = ?");
         params.push(hostClassFrom(hostClass));
       }

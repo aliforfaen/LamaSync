@@ -525,6 +525,12 @@ describe("PATCH /api/v1/hosts/:hostId/class — host class override (LAMA-298)",
       )
       .get("host-a");
     expect(row?.host_class).toBe("server");
+    const override = db
+      .query<{ host_class_overridden: number | null }, [string]>(
+        "SELECT host_class_overridden FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(override?.host_class_overridden).toBe(1);
   });
 
   test("rejects an unknown host class with 400", async () => {
@@ -539,6 +545,9 @@ describe("PATCH /api/v1/hosts/:hostId/class — host class override (LAMA-298)",
 });
 
 describe("POST /api/v1/report/health — host class (LAMA-298)", () => {
+  const patchClass = (path: string, body: Record<string, unknown>) =>
+    app.handle(request(path, { method: "PATCH", body: JSON.stringify(body) }));
+
   test("heartbeat with hostClass persists it on the host row", async () => {
     const res = await post("/api/v1/report/health", {
       hostId: "host-a",
@@ -553,6 +562,28 @@ describe("POST /api/v1/report/health — host class (LAMA-298)", () => {
       )
       .get("host-a");
     expect(row?.host_class).toBe("laptop");
+  });
+
+  test("operator class override survives later daemon detection", async () => {
+    const override = await patchClass("/api/v1/hosts/host-a/class", {
+      hostClass: "server",
+    });
+    expect(override.status).toBe(200);
+
+    const heartbeat = await post("/api/v1/report/health", {
+      hostId: "host-a",
+      timestamp: Date.now(),
+      status: "online",
+      hostClass: "laptop",
+    });
+    expect(heartbeat.status).toBe(204);
+    const row = db
+      .query<{ host_class: string | null; host_class_overridden: number | null }, [string]>(
+        "SELECT host_class, host_class_overridden FROM hosts WHERE id = ?",
+      )
+      .get("host-a");
+    expect(row?.host_class).toBe("server");
+    expect(row?.host_class_overridden).toBe(1);
   });
 });
 
