@@ -183,20 +183,35 @@ export function normalizeLegacyChildName(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
 
-/** List the immediate children (names) of a remote path; null when the path
- *  doesn't exist. */
-async function listChildren(plan: LegacyRootPlan, configPath: string): Promise<string[] | null> {
+/** A top-level child of the legacy root. `isDir` distinguishes files (which
+ *  need `rclone deletefile`) from directories (`rclone purge`). */
+export interface LegacyChild {
+  name: string;
+  isDir: boolean;
+}
+
+/** Parse `rclone lsf` stdout into named children. Directories carry a
+ *  trailing slash marker; files do not. Pure + exported for tests. */
+export function parseLsfEntries(stdout: string): LegacyChild[] {
+  const children: LegacyChild[] = [];
+  for (const raw of stdout.split(/\r?\n/)) {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) continue;
+    const isDir = trimmed.endsWith("/");
+    const name = normalizeLegacyChildName(trimmed);
+    if (name.length > 0) children.push({ name, isDir });
+  }
+  return children;
+}
+
+/** List the immediate children of a remote path; null when the path doesn't
+ *  exist. */
+async function listChildren(plan: LegacyRootPlan, configPath: string): Promise<LegacyChild[] | null> {
   // `lsf` is non-recursive: it lists the immediate children of the path.
   const lsf = ["rclone", "lsf", `${plan.sectionName}:${plan.remotePath}`, "--config", configPath];
   const { stdout, code } = await runRclone(lsf);
   if (code !== 0) return null; // DirNotFound or other: no legacy root
-  // `rclone lsf` marks directories with a trailing slash. Remove that marker
-  // before comparing against host IDs or constructing a purge target; without
-  // this, every live host prefix looks orphaned to the cleanup command.
-  return stdout
-    .split(/\r?\n/)
-    .map(normalizeLegacyChildName)
-    .filter(Boolean);
+  return parseLsfEntries(stdout);
 }
 
 /** `rclone size --json` on a single path; returns null when missing. */
@@ -263,7 +278,8 @@ export async function reportLegacyRoots(
       const hostSet = new Set(plan.hostPrefixes);
       const protectedSet = new Set(plan.protectedChildren);
       const orphaned: OrphanEntry[] = [];
-      for (const name of children) {
+      for (const child of children) {
+        const name = child.name;
         const isHostPrefix = hostSet.has(name);
         const isProtected = plan.protectAllChildren || isHostPrefix || protectedSet.has(name);
         const size = includeSizes ? await remoteSize(plan, name, configPath) : null;
@@ -325,12 +341,17 @@ export async function pruneLegacyRoots(db: Database): Promise<PruneResult[]> {
       const skippedHostPrefixes: string[] = [];
       const errors: string[] = [];
       if (children) {
-        for (const name of children) {
+        for (const child of children) {
+          const { name, isDir } = child;
           if (plan.protectAllChildren || hostSet.has(name) || protectedSet.has(name)) {
             skippedHostPrefixes.push(name);
             continue;
           }
-          const argv = ["rclone", "purge", `${plan.sectionName}:${plan.remotePath}/${name}`, "--config", configPath];
+          // Directories use `purge` (recursive delete); files use `deletefile`.
+          // `purge` on a file fails with "is a file not a directory".
+          const argv = isDir
+            ? ["rclone", "purge", `${plan.sectionName}:${plan.remotePath}/${name}`, "--config", configPath]
+            : ["rclone", "deletefile", `${plan.sectionName}:${plan.remotePath}/${name}`, "--config", configPath];
           const { code, stderr } = await runRclone(argv);
           if (code === 0) {
             pruned.push(name);

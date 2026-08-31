@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
-import { buildLegacyRootPlans, normalizeLegacyChildName } from "./legacy-root.ts";
+import {
+  buildLegacyRootPlans,
+  normalizeLegacyChildName,
+  parseLsfEntries,
+} from "./legacy-root.ts";
 
 function makeDb(): Database {
   const db = new Database(":memory:");
@@ -37,6 +41,24 @@ function makeDb(): Database {
   `);
   return db;
 }
+
+describe("parseLsfEntries (LAMA-294)", () => {
+  test("distinguishes files from directories via the trailing slash marker", () => {
+    expect(parseLsfEntries("dir/\nfile.txt\nplain-file\nanother-dir/\n")).toEqual([
+      { name: "dir", isDir: true },
+      { name: "file.txt", isDir: false },
+      { name: "plain-file", isDir: false },
+      { name: "another-dir", isDir: true },
+    ]);
+  });
+
+  test("skips blank lines and trims whitespace", () => {
+    expect(parseLsfEntries("  spaced-dir/  \n\n\n  spaced-file  ")).toEqual([
+      { name: "spaced-dir", isDir: true },
+      { name: "spaced-file", isDir: false },
+    ]);
+  });
+});
 
 describe("buildLegacyRootPlans (LAMA-294)", () => {
   test("normalizes lsf directory markers before host-prefix comparisons", () => {
