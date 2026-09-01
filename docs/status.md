@@ -32,11 +32,12 @@ carries a one-line pointer here.
   healthy and reports server v0.3.6.
 - LAMA-299 is complete. A disposable-host end-to-end remote-update smoke is a
   useful follow-up, not a release blocker.
-- LAMA-301's server-side control plane is live, but its LXC deploy agent is
-  intentionally not provisioned yet: it needs a dedicated `deploy` key,
-  `/home/messhias/lamasync/deploy-agent.env`, the installed systemd unit, and
-  `LAMASYNC_DEPLOY_AGENT_ENABLED=true`. Until then the Admin card correctly
-  remains manual-deploy-only.
+- LAMA-301 is complete: the LXC now has the root-owned 0600 deploy-agent
+  environment file, the dedicated `deploy` key, enabled systemd unit, and
+  `LAMASYNC_DEPLOY_AGENT_ENABLED=true`. A real Admin/API deployment job was
+  claimed and completed successfully (`deploy script exited 0; API healthy
+  after deploy`); the recreated server container and agent service are both
+  healthy.
 
 ## LAMA-302 — event-triggered sync (in progress)
 
