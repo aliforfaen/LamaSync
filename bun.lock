@@ -29,6 +29,13 @@
         "ignore": "^7.0.8",
       },
     },
+    "packages/deploy-agent": {
+      "name": "@lamasync/deploy-agent",
+      "version": "0.1.0",
+      "dependencies": {
+        "@lamasync/core": "workspace:*",
+      },
+    },
     "packages/server": {
       "name": "@lamasync/server",
       "version": "0.1.0",
@@ -227,6 +234,8 @@
     "@lamasync/core": ["@lamasync/core@workspace:packages/core"],
 
     "@lamasync/daemon": ["@lamasync/daemon@workspace:packages/daemon"],
+
+    "@lamasync/deploy-agent": ["@lamasync/deploy-agent@workspace:packages/deploy-agent"],
 
     "@lamasync/server": ["@lamasync/server@workspace:packages/server"],
 
