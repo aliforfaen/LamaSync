@@ -25,10 +25,23 @@ const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts"
   __setDb: (db: Database) => void;
 };
 const { encryptSecret } = await import("../crypto.ts");
-const { __resetStatsCaches, recordSizeHistory, getStorageHistory } = (await import("../stats.ts")) as unknown as {
+type SizeMeasurer = (
+  configText: string,
+  target: string,
+) => Promise<{ bytes: number; objectCount: number | null; error: string | null }>;
+
+const {
+  __resetStatsCaches,
+  recordSizeHistory,
+  getStorageHistory,
+  folderDestinationPrefixes,
+  __setSizeMeasurer,
+} = (await import("../stats.ts")) as unknown as {
   __resetStatsCaches: () => void;
   recordSizeHistory: (db: Database, folder: Folder, size: FolderSize) => void;
   getStorageHistory: (db: Database) => Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
+  folderDestinationPrefixes: (db: Database, folder: Folder) => string[];
+  __setSizeMeasurer: (measurer: SizeMeasurer | null) => void;
 };
 
 let db: Database;
@@ -83,6 +96,12 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
+afterEach(() => {
+  // LAMA-304: the fake measurer is only installed for this file's tests;
+  // always restore the real rclone spawn path so sibling tests never see a stub.
+  if (typeof __setSizeMeasurer === "function") __setSizeMeasurer(null);
+});
+
 function insertS3BackendWithFolder(): string {
   const backendId = crypto.randomUUID();
   db.run(
@@ -95,6 +114,25 @@ function insertS3BackendWithFolder(): string {
     ["folder-s3", backendId],
   );
   return backendId;
+}
+
+function insertAssignments(
+  folderId: string,
+  rows: Array<{
+    id: string;
+    hostId: string;
+    destination?: string | null;
+    resticRepository?: string | null;
+  }>,
+): void {
+  for (const r of rows) {
+    db.run(
+      `INSERT INTO folder_assignments
+         (id, folder_id, host_id, role, local_path, destination, restic_repository, enabled)
+       VALUES (?, ?, ?, 'both', ?, ?, ?, 1)`,
+      [r.id, folderId, r.hostId, `/local/${r.hostId}`, r.destination ?? null, r.resticRepository ?? null],
+    );
+  }
 }
 
 describe("GET /api/v1/stats/storage", () => {
@@ -253,5 +291,156 @@ describe("LAMA-269: size history + storage donut/sparkline data", () => {
     const body = (await res.json()) as Record<string, FolderSize>;
     expect(body["local1"].bytes).toBeNull();
     expect(body["folder-s3"]).toBeTruthy();
+  });
+});
+
+describe("LAMA-304: per-prefix S3 folder sizing", () => {
+  test("folderDestinationPrefixes: backup folders are host-scoped by default", () => {
+    db.run(
+      "INSERT INTO folders (id, name, type, backend) VALUES ('fb', 'photos', 'backup', 's3')",
+    );
+    insertAssignments("fb", [
+      { id: "a1", hostId: "host-a" },
+      { id: "a2", hostId: "host-b" },
+    ]);
+    const folder: Folder = {
+      id: "fb",
+      name: "photos",
+      type: "backup",
+      backend: "s3",
+      backendId: "b1",
+      s3Bucket: "bucket",
+    };
+    expect(folderDestinationPrefixes(db, folder)).toEqual([
+      "photos/host-a",
+      "photos/host-b",
+    ]);
+  });
+
+  test("folderDestinationPrefixes: sync folders stay shared (folder name)", () => {
+    db.run(
+      "INSERT INTO folders (id, name, type, backend) VALUES ('fs', 'work', 'sync', 'sftp')",
+    );
+    insertAssignments("fs", [
+      { id: "s1", hostId: "host-a" },
+      { id: "s2", hostId: "host-b" },
+    ]);
+    const folder: Folder = { id: "fs", name: "work", type: "sync", backend: "sftp" };
+    expect(folderDestinationPrefixes(db, folder)).toEqual(["work"]);
+  });
+
+  test("folderDestinationPrefixes: an explicit destination wins over the default", () => {
+    db.run(
+      "INSERT INTO folders (id, name, type, backend) VALUES ('fd', 'docs', 'backup', 's3')",
+    );
+    insertAssignments("fd", [{ id: "d1", hostId: "host-a", destination: "shared/docs" }]);
+    const folder: Folder = { id: "fd", name: "docs", type: "backup", backend: "s3" };
+    expect(folderDestinationPrefixes(db, folder)).toEqual(["shared/docs"]);
+  });
+
+  test("folderDestinationPrefixes: restic-repo assignments are excluded", () => {
+    db.run(
+      "INSERT INTO folders (id, name, type, backend) VALUES ('fr', 'vault', 'backup', 's3')",
+    );
+    insertAssignments("fr", [
+      { id: "r1", hostId: "host-a", resticRepository: "restic://repo" },
+      { id: "r2", hostId: "host-b" },
+    ]);
+    const folder: Folder = { id: "fr", name: "vault", type: "backup", backend: "s3" };
+    expect(folderDestinationPrefixes(db, folder)).toEqual(["vault/host-b"]);
+  });
+
+  test("folderDestinationPrefixes: duplicate resolved destinations are de-duplicated", () => {
+    db.run(
+      "INSERT INTO folders (id, name, type, backend) VALUES ('fd2', 'videos', 'backup', 's3')",
+    );
+    insertAssignments("fd2", [
+      { id: "v1", hostId: "host-a", destination: "shared/media" },
+      { id: "v2", hostId: "host-b", destination: "shared/media" },
+    ]);
+    const folder: Folder = { id: "fd2", name: "videos", type: "backup", backend: "s3" };
+    expect(folderDestinationPrefixes(db, folder)).toEqual(["shared/media"]);
+  });
+});
+
+describe("GET /api/v1/folders/:id/size per-prefix (LAMA-304)", () => {
+  test("measures each distinct destination prefix and sums them", async () => {
+    insertS3BackendWithFolder();
+    insertAssignments("folder-s3", [
+      { id: "pa1", hostId: "host-a" },
+      { id: "pa2", hostId: "host-b" },
+    ]);
+    const targets: string[] = [];
+    __setSizeMeasurer(async (_configText, target) => {
+      targets.push(target);
+      if (target.endsWith("/host-a")) return { bytes: 100, objectCount: 2, error: null };
+      if (target.endsWith("/host-b")) return { bytes: 200, objectCount: 5, error: null };
+      return { bytes: 0, objectCount: 0, error: null };
+    });
+    const res = await app.handle(request("/api/v1/folders/folder-s3/size"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      bytes: number | null;
+      objectCount: number | null;
+      error: string | null;
+    };
+    expect(targets).toEqual([
+      "stats:cold-archive-bucket/vault/host-a",
+      "stats:cold-archive-bucket/vault/host-b",
+    ]);
+    expect(body.bytes).toBe(300);
+    expect(body.objectCount).toBe(7);
+    expect(body.error).toBeNull();
+  });
+
+  test("any prefix failure makes the folder size null with the first error", async () => {
+    insertS3BackendWithFolder();
+    insertAssignments("folder-s3", [
+      { id: "pf1", hostId: "host-a" },
+      { id: "pf2", hostId: "host-b" },
+    ]);
+    __setSizeMeasurer(async () => ({
+      bytes: 0,
+      objectCount: null,
+      error: "S3 unavailable",
+    }));
+    const res = await app.handle(request("/api/v1/folders/folder-s3/size"));
+    const body = (await res.json()) as { bytes: number | null; error: string | null };
+    expect(body.bytes).toBeNull();
+    expect(body.error).toBe("S3 unavailable");
+  });
+
+  test("no assignments yields 'no resolvable destination prefix'", async () => {
+    insertS3BackendWithFolder();
+    const res = await app.handle(request("/api/v1/folders/folder-s3/size"));
+    const body = (await res.json()) as { bytes: number | null; error: string | null };
+    expect(body.bytes).toBeNull();
+    expect(body.error).toBe("no resolvable destination prefix");
+  });
+
+  test("distinct assignments resolving to one destination are counted once", async () => {
+    const backendId = insertS3BackendWithFolder();
+    db.run(
+      "INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket) VALUES ('folder-dup', 'shared', 'backup', 's3', ?, 'cold-archive-bucket')",
+      [backendId],
+    );
+    insertAssignments("folder-dup", [
+      { id: "pd1", hostId: "host-a", destination: "shared/media" },
+      { id: "pd2", hostId: "host-b", destination: "shared/media" },
+    ]);
+    const targets: string[] = [];
+    __setSizeMeasurer(async (_configText, target) => {
+      targets.push(target);
+      return { bytes: 500, objectCount: 9, error: null };
+    });
+    const res = await app.handle(request("/api/v1/folders/folder-dup/size"));
+    const body = (await res.json()) as {
+      bytes: number | null;
+      objectCount: number | null;
+      error: string | null;
+    };
+    expect(targets).toEqual(["stats:cold-archive-bucket/shared/media"]);
+    expect(body.bytes).toBe(500);
+    expect(body.objectCount).toBe(9);
   });
 });

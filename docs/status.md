@@ -3,6 +3,19 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## LAMA-304 — per-prefix S3 folder sizes (2026-09-01)
+
+**What landed**
+- `getFolderSize()` S3 branch now measures each distinct destination prefix
+  (`rclone size --json stats:<bucket>/<prefix>`) instead of the whole bucket —
+  folders sharing a backend/bucket no longer all report the same bucket total.
+  Prefixes come from `folderDestinationPrefixes()` (assignments via core
+  `resolveDestination`; restic-repo assignments skipped). All-or-nothing: any
+  prefix failure → `bytes: null` + first error; no assignments → typed null
+  "no resolvable destination prefix". `rcloneSize()` switched to `--json`
+  parsing; backend-level report stays bucket-level. 9 new tests; suite 1322
+  pass. Not yet verified against a live S3 backend.
+
 ## LAMA-299 + LAMA-301 — fleet update & deploy control (v0.3.6 deployed)
 
 **What landed**

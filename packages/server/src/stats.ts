@@ -9,7 +9,7 @@
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { StorageReport, FolderSize } from "@lamasync/core";
+import { resolveDestination, type StorageReport, type FolderSize } from "@lamasync/core";
 import { BACKEND_SELECT, type BackendRow, getBackend, resolveFolderS3Config } from "./backends.ts";
 import { decryptSecret } from "./crypto.ts";
 import { withTempRcloneConfig } from "./temp-rclone-config.ts";
@@ -18,6 +18,15 @@ import type { Folder } from "@lamasync/core";
 const REPORT_TTL_MS = 5 * 60 * 1000;
 const FOLDER_TTL_MS = 15 * 60 * 1000;
 const RCLONE_TIMEOUT = "10s";
+interface SizeMeasure {
+  bytes: number;
+  objectCount: number | null;
+  error: string | null;
+}
+
+// Test seam (see __setSizeMeasurer below): when set, rcloneSize delegates to
+// this measurer instead of spawning rclone. null restores the real path.
+let sizeMeasurer: ((configText: string, target: string) => Promise<SizeMeasure>) | null = null;
 
 function dataDir(): string {
   return process.env.LAMASYNC_DATA_DIR ?? "/data";
@@ -57,17 +66,16 @@ async function duBytes(path: string): Promise<{ bytes: number; error: string | n
   }
 }
 
-/** `rclone size <remote>:<bucket>/<prefix>` against a temp config, 10s timeout. */
-async function rcloneSize(configText: string, remoteBucket: string): Promise<{
-  bytes: number;
-  objectCount: number | null;
-  error: string | null;
-}> {
+/** `rclone size --json <remote>:<bucket>/<prefix>` against a temp config, 10s timeout. */
+async function rcloneSize(configText: string, target: string): Promise<SizeMeasure> {
+  // Test seam: delegate to the injected measurer instead of spawning rclone.
+  if (sizeMeasurer !== null) return sizeMeasurer(configText, target);
+
   // LAMA-226 P1-6: use the shared helper so the rclone config never sits
   // on disk past the call (private dir, 0600 perms, removed on both paths).
   return withTempRcloneConfig(configText, async (configPath) => {
     const proc = Bun.spawn(
-      ["rclone", "size", remoteBucket, "--config", configPath, "--timeout", RCLONE_TIMEOUT],
+      ["rclone", "size", "--json", target, "--config", configPath, "--timeout", RCLONE_TIMEOUT],
       { stdout: "pipe", stderr: "pipe" },
     );
     const [stdout, stderr, code] = await Promise.all([
@@ -79,14 +87,13 @@ async function rcloneSize(configText: string, remoteBucket: string): Promise<{
       const detail = stderr.trim().split("\n").pop() ?? "rclone size failed";
       return { bytes: 0, objectCount: null, error: detail };
     }
-    // rclone size prints e.g. "Total objects: 42\nTotal size: 1.234 GiB (1325346 Byte)"
-    const objects = /Total objects:\s*(\d+)/.exec(stdout);
-    const bytes = /\((\d+) Byte\)/.exec(stdout);
-    return {
-      bytes: bytes ? Number.parseInt(bytes[1], 10) : 0,
-      objectCount: objects ? Number.parseInt(objects[1], 10) : null,
-      error: null,
-    };
+    // `rclone size --json` prints a single object, e.g. {"bytes": 123, "count": 42}.
+    // Default missing/wrong-typed fields to 0 (bytes) / null (count) rather than
+    // fabricating a measurement; a throw here is caught by the fallback below.
+    const parsed: { bytes?: unknown; count?: unknown } = JSON.parse(stdout);
+    const bytes = typeof parsed.bytes === "number" && Number.isFinite(parsed.bytes) ? parsed.bytes : 0;
+    const objectCount = typeof parsed.count === "number" && Number.isFinite(parsed.count) ? parsed.count : null;
+    return { bytes, objectCount, error: null };
   }).catch((err) => ({
     bytes: 0,
     objectCount: null,
@@ -195,14 +202,48 @@ export async function getStorageReport(
 export function invalidateStorageReport(): void {
   reportCache.delete("storage");
 }
+/**
+ * LAMA-304: the destination prefixes an S3 folder measures. Each assignment
+ * contributes the prefix resolved for that host; restic-backed assignments
+ * (restic_repository set) live in a restic repo, not the S3 prefix, so they
+ * are skipped. De-duplicated in insertion order. A folder with no assignment
+ * and no skip has zero measurable prefixes.
+ */
+export function folderDestinationPrefixes(db: Database, folder: Folder): string[] {
+  const rows = db
+    .query<
+      { host_id: string; remote_name: string | null; destination: string | null; restic_repository: string | null },
+      [string]
+    >(
+      "SELECT host_id, remote_name, destination, restic_repository FROM folder_assignments WHERE folder_id = ?",
+    )
+    .all(folder.id);
+  const prefixes = new Set<string>();
+  for (const row of rows) {
+    // Restic-backed assignments are measured through the repository, not the
+    // S3 prefix — skip them so we never measure a prefix with no S3 data.
+    if (row.restic_repository !== null) continue;
+    const prefix = resolveDestination(folder, {
+      hostId: row.host_id,
+      remoteName: row.remote_name,
+      destination: row.destination,
+      resticRepository: row.restic_repository,
+      // restic_password is not fetched: every assignment we process has a
+      // null restic_repository, so a restic password is irrelevant here.
+      resticPassword: undefined,
+    });
+    prefixes.add(prefix);
+  }
+  return [...prefixes];
+}
 
 /**
- * Last-known size of a single folder's working set. S3 folders measure
- * the bucket via `rclone size`; non-S3 folders are NOT measurable server-
- * side (the working set lives on the daemon host). LAMA-224 P1-7: callers
- * (the route layer) return a typed `{bytes:null, error:"not measurable
- * server-side"}` for non-S3 folders instead of measuring a path that does
- * not exist on the server.
+ * Last-known size of a single folder's working set. S3 folders measure their
+ * destination prefixes via `rclone size --json` (LAMA-304); non-S3 folders
+ * are NOT measurable server-side (the working set lives on the daemon host).
+ * LAMA-224 P1-7: callers (the route layer) return a typed `{bytes:null,
+ * error:"not measurable server-side"}` for non-S3 folders instead of
+ * measuring a path that does not exist on the server.
  */
 export async function getFolderSize(
   db: Database,
@@ -231,12 +272,37 @@ export async function getFolderSize(
       if (!backend) {
         result = { bytes: null, objectCount: null, error: "backend not found" };
       } else {
-        // Bucket-level measurement (`remote:bucket`), not prefix-level:
-        // folders sharing a bucket each report the full bucket size.
-        result = await rcloneSize(
-          s3ConfigText(backend, s3.bucket),
-          `stats:${s3.bucket}`,
-        );
+        // LAMA-304: per-prefix measurement (`remote:bucket/prefix`), not
+        // bucket-level. Folders sharing a bucket each report only their own
+        // destination prefixes. All-or-nothing — if any prefix fails, the
+        // folder reports an error rather than a misleading partial sum.
+        const prefixes = folderDestinationPrefixes(db, folder);
+        if (prefixes.length === 0) {
+          result = { bytes: null, objectCount: null, error: "no resolvable destination prefix" };
+        } else {
+          let bytes = 0;
+          let objectCount = 0;
+          let anyCountNull = false;
+          let firstError: string | null = null;
+          for (const prefix of prefixes) {
+            const r = await rcloneSize(
+              s3ConfigText(backend, s3.bucket),
+              `stats:${s3.bucket}/${prefix}`,
+            );
+            if (r.error !== null) {
+              firstError = r.error;
+              break;
+            }
+            bytes += r.bytes;
+            if (r.objectCount === null) anyCountNull = true;
+            objectCount += r.objectCount ?? 0;
+          }
+          if (firstError !== null) {
+            result = { bytes: null, objectCount: null, error: firstError };
+          } else {
+            result = { bytes, objectCount: anyCountNull ? null : objectCount, error: null };
+          }
+        }
       }
     }
   } else {
@@ -334,4 +400,16 @@ export function __folderCacheSize(): number {
 export function __resetStatsCaches(): void {
   reportCache.clear();
   folderCache.clear();
+  sizeMeasurer = null;
+}
+/**
+ * Test seam: substitute the rclone measurement. When `measurer` is non-null,
+ * `rcloneSize` delegates to it instead of spawning rclone; pass `null` to
+ * restore the real implementation. Used by the unit tests to avoid needing
+ * a live rclone/bucket for folder-size measurements.
+ */
+export function __setSizeMeasurer(
+  measurer: ((configText: string, target: string) => Promise<SizeMeasure>) | null,
+): void {
+  sizeMeasurer = measurer;
 }
