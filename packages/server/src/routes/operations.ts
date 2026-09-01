@@ -49,6 +49,7 @@ interface OpRow {
   summary: string | null;
   details: string | null;
   duration_ms: number | null;
+  trigger: string | null;
 }
 
 interface LockFolderRow {
@@ -145,6 +146,9 @@ function rowToLog(r: OpRow): OperationLog {
     summary: r.summary,
     details: r.details,
     durationMs: r.duration_ms,
+    trigger: (r.trigger === "watch" || r.trigger === "schedule" || r.trigger === "manual")
+      ? r.trigger
+      : null,
   };
 }
 
@@ -194,7 +198,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
     const safeOffset = Number.isFinite(offNum) && offNum > 0 ? Math.floor(offNum) : 0;
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const sql = `SELECT id, timestamp, host_id, folder_id, operation, status, summary, details, duration_ms
+    const sql = `SELECT id, timestamp, host_id, folder_id, operation, status, summary, details, duration_ms, trigger
                  FROM operation_log
                  ${whereSql}
                  ORDER BY timestamp DESC

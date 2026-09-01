@@ -22,12 +22,42 @@ import type {
 } from "@lamasync/core";
 
 import { CliUsageError, requireFlagString, flagBool, flagString } from "./args.ts";
+import { resolveWatchQuietSec, WATCH_QUIET_SEC_MIN, WATCH_QUIET_SEC_MAX } from "@lamasync/core";
 import { wrapApiError } from "./client.ts";
 import type { CliContext } from "./dispatch.ts";
 import { printJson, printTable } from "./output.ts";
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
 const FOLDER_BACKENDS: FolderBackend[] = ["sftp", "s3", "local", "nfs", "restic"];
+
+// LAMA-302: shared parser for the watch-settings flags. Returns the subset
+// of assignment fields the operator set, or null when no watch flag was
+// given. Used by `folders assign` (create) and `folders assign-update`.
+export function watchFlagsToBody(
+  flags: Record<string, string | boolean | Array<string | boolean>>,
+): Partial<FolderAssignment> | null {
+  const explicitNo = flagBool(flags, "no-watch");
+  const explicitYes = flagBool(flags, "watch");
+  if (explicitNo && explicitYes) {
+    throw new CliUsageError("--watch and --no-watch are mutually exclusive");
+  }
+  const out: Partial<FolderAssignment> = {};
+  if (explicitYes) out.watchEnabled = true;
+  if (explicitNo) out.watchEnabled = false;
+  const quiet = flagString(flags, "watch-quiet");
+  if (quiet !== undefined) {
+    const n = Number(quiet);
+    if (!Number.isInteger(n) || n < WATCH_QUIET_SEC_MIN || n > WATCH_QUIET_SEC_MAX) {
+      throw new CliUsageError(
+        `--watch-quiet must be an integer between ${WATCH_QUIET_SEC_MIN} and ${WATCH_QUIET_SEC_MAX} seconds`,
+      );
+    }
+    out.watchQuietSec = n;
+  }
+  if (flagBool(flags, "ignore-git-metadata")) out.ignoreGitMetadata = true;
+  if (flagBool(flags, "respect-gitignore")) out.respectGitignore = true;
+  return Object.keys(out).length > 0 ? out : null;
+}
 
 export async function runList(ctx: CliContext): Promise<void> {
   const { client, json } = ctx;
@@ -213,6 +243,8 @@ export async function runAssign(ctx: CliContext): Promise<void> {
     syncExpr: schedule,
     enabled,
   };
+  // LAMA-302: merge any watch-settings flags (default-off when absent).
+  Object.assign(body, watchFlagsToBody(flags) ?? {});
 
   let assignment: FolderAssignment;
   try {
@@ -228,6 +260,11 @@ export async function runAssign(ctx: CliContext): Promise<void> {
   console.log(`assigned ${folderId} → ${hostId} at ${localPath}`);
   if (schedule) {
     console.log(`schedule: ${schedule}`);
+  }
+  if (assignment.watchEnabled) {
+    console.log(
+      `sync after local changes: yes (wait ${resolveWatchQuietSec(assignment.watchQuietSec)}s)`,
+    );
   }
 }
 

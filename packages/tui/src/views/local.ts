@@ -67,6 +67,9 @@ export interface LocalFolder {
   gitProvider?: GitProvider | null;
   gitRemote?: string | null;
   backend?: LocalFolderBackend | null;
+  // LAMA-302: event-triggered sync watcher status (surface only; editing is
+  // via CLI `folders assign-update` / the web UI).
+  watching?: boolean;
 }
 
 export interface LocalState {
@@ -105,6 +108,7 @@ export const CACHE_PROFILE_ORDER: readonly CacheProfileKind[] = [
 export function describeFolder(folder: LocalFolder): string {
   const status = folder.lastStatus ?? "unknown";
   const type = folder.type ?? "sync";
+  const watching = folder.watching === true ? " ⏱watching" : "";
   let displayType: string = type;
   if (type === "git" && folder.gitProvider === "gh") {
     const remote = folder.gitRemote ? `:${folder.gitRemote}` : "";
@@ -116,7 +120,7 @@ export function describeFolder(folder: LocalFolder): string {
       : "";
   const backend =
     folder.backend && folder.backend !== "sftp" ? ` [${folder.backend}]` : "";
-  return `${displayType}${cache}${backend} — ${status}`;
+  return `${displayType}${cache}${backend}${watching} — ${status}`;
 }
 
 export function nextCacheProfile(
@@ -386,6 +390,7 @@ export class LocalView implements View {
           gitProvider: f.gitProvider ?? null,
           gitRemote: f.gitRemote ?? null,
           backend: f.backend ?? null,
+          watching: a?.watchEnabled === true,
         };
       });
       this.setStatus(`Loaded ${this.folders.length} folder(s).`, "success");

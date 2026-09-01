@@ -329,6 +329,20 @@ export interface FolderAssignment {
   cacheMaxSize?: string | null; // e.g. "1G" for --vfs-cache-max-size
   resticRepository?: string | null; // absolute path or rclone remote for restic snapshots
   resticPassword?: string | null; // restic repository password
+  // LAMA-302: event-triggered sync for active local worktrees. Watch settings
+  // are only honored for effective `sync` assignments (see effectiveFolderType)
+  // and are opt-in / default-off. `watchQuietSec` is the debounce window after
+  // the last local change before one debounced `runOnce`; null => the 30 s
+  // default (validated 10-300 at the API boundary). `ignoreGitMetadata`
+  // excludes the `.git/` tree from both watcher significance and the
+  // rclone/bisync filter; `respectGitignore` applies Git's actual ignore
+  // semantics (nested .gitignore, negations, .git/info/exclude, global
+  // excludes) via a deterministic filter snapshot rather than passing
+  // `.gitignore` straight to rclone.
+  watchEnabled?: boolean;       // default false
+  watchQuietSec?: number | null; // null => 30; validated range 10-300 seconds
+  ignoreGitMetadata?: boolean;   // default false; exclude .git/
+  respectGitignore?: boolean;    // default false; apply Git ignore semantics
 }
 
 export interface DotfileManifest {
@@ -418,6 +432,12 @@ export interface ResticRestoreJob {
   error?: string | null;
 }
 
+// LAMA-302: who kicked off an operation — the local filesystem watcher
+// (`watch`), the periodic cron schedule (`schedule`), or an operator action
+// (`manual`, e.g. socket sync / queued action). Additive; older rows report
+// null.
+export type TriggerOrigin = "watch" | "schedule" | "manual";
+
 export interface OperationLog {
   id: number;
   timestamp: number;
@@ -428,6 +448,7 @@ export interface OperationLog {
   summary?: string | null;
   details?: string | null;
   durationMs?: number | null;
+  trigger?: TriggerOrigin | null;
 }
 
 export type NotificationSeverity = "critical" | "default" | "info";
@@ -586,6 +607,8 @@ export interface OperationReport {
   details?: string | null;
   timestamp?: number;
   durationMs?: number | null;
+  // LAMA-302: which path started this run (watch / schedule / manual).
+  trigger?: TriggerOrigin | null;
   // Dotfile deployment tracking (LAMA-168): when set, the report also updates
   // the matching dotfile manifest's lastSyncAt/lastSyncDirection.
   dotfileAppName?: string | null;

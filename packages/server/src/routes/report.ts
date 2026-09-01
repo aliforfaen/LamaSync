@@ -30,6 +30,7 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       durationMs,
       dotfileAppName,
       dotfileDirection,
+      trigger,
     } = body as {
       hostId: string;
       folderId?: string | null;
@@ -41,6 +42,9 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       durationMs?: number | null;
       dotfileAppName?: string | null;
       dotfileDirection?: "upload" | "download" | null;
+      // LAMA-302: trigger origin (watch | schedule | manual). Optional and
+      // additive — older daemons report no trigger.
+      trigger?: string | null;
     };
     // LAMA-234: operation reports are host-bound; a device key may only
     // report operations for its own host.
@@ -51,9 +55,19 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
     const ts = typeof timestamp === "number" ? timestamp : Date.now();
 
     const result = activeDb.run(
-      `INSERT INTO operation_log (timestamp, host_id, folder_id, operation, status, summary, details, duration_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [ts, hostId, folderId ?? null, operation, status, summary ?? null, details ?? null, durationMs ?? null],
+      `INSERT INTO operation_log (timestamp, host_id, folder_id, operation, status, summary, details, duration_ms, trigger)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ts,
+        hostId,
+        folderId ?? null,
+        operation,
+        status,
+        summary ?? null,
+        details ?? null,
+        durationMs ?? null,
+        trigger && trigger !== "" ? trigger : null,
+      ],
     );
     const opId = Number(result.lastInsertRowid);
 
@@ -115,6 +129,7 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       summary: summary ?? null,
       details: details ?? null,
       durationMs: durationMs ?? null,
+      trigger: trigger && trigger !== "" ? trigger as OperationLog["trigger"] : null,
     };
     const event: WSEvent = { kind: "operation", entry };
     broadcast(event);
@@ -159,6 +174,9 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
       dotfileAppName: t.Optional(t.Union([t.String(), t.Null()])),
       dotfileDirection: t.Optional(
         t.Union([t.Literal("upload"), t.Literal("download"), t.Null()]),
+      ),
+      trigger: t.Optional(
+        t.Union([t.Literal("watch"), t.Literal("schedule"), t.Literal("manual"), t.Null()]),
       ),
     }),
     detail: {

@@ -6,6 +6,10 @@
 
 import { useState } from "react";
 import type { Folder, FolderAssignment } from "@lamasync/core";
+// LAMA-239: import the pure helper from the subpath, NOT the core barrel —
+// the barrel re-exports `initDb`/`bun:sqlite`, which Vite cannot resolve in
+// the web bundle (same pattern as HostDetail.tsx).
+import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 // Workstream 2: hint copy lives in the shared glossary now.
 import { CONFLICT_STRATEGY_HINTS, ROLE_HINTS } from "../concepts.ts";
@@ -43,6 +47,12 @@ interface EditorState {
   preSyncCmd: string;
   postSyncCmd: string;
   bandwidthSchedule: string;
+  // LAMA-302: event-triggered sync. Only shown when the assignment has
+  // effective `sync` mode (see showWatch below).
+  watchEnabled: boolean;
+  watchQuietSec: string;
+  ignoreGitMetadata: boolean;
+  respectGitignore: boolean;
 }
 
 function stateFromAssignment(a: FolderAssignment): EditorState {
@@ -60,6 +70,10 @@ function stateFromAssignment(a: FolderAssignment): EditorState {
     preSyncCmd: toStr(a.preSyncCmd),
     postSyncCmd: toStr(a.postSyncCmd),
     bandwidthSchedule: toStr(a.bandwidthSchedule),
+    watchEnabled: a.watchEnabled === true,
+    watchQuietSec: toStr(a.watchQuietSec),
+    ignoreGitMetadata: a.ignoreGitMetadata === true,
+    respectGitignore: a.respectGitignore === true,
   };
 }
 
@@ -85,6 +99,10 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
   // supports an override (sync / mount). backup / dotfile / git folders
   // ignore mode, so showing it would mislead the operator.
   const showMode = folder !== undefined && (folder.type === "sync" || folder.type === "mount");
+  // LAMA-302: watch controls only apply to an effective `sync` assignment
+  // (not mount / backup / dotfile / git). A per-host `mode: mount` override
+  // on a sync folder flips effective type to mount → no watch.
+  const showWatch = folder !== undefined && effectiveFolderType(folder, assignment) === "sync";
   const initial = stateFromAssignment(assignment);
   const [state, setState] = useState<EditorState>(initial);
   const [error, setError] = useState<string | null>(null);
@@ -176,6 +194,41 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
         ? assignment.mode
         : "inherit";
       if (state.mode !== currentMode) body.mode = state.mode;
+    }
+
+    // LAMA-302: watch settings, only for effective `sync` assignments.
+    if (showWatch) {
+      if (state.watchEnabled !== (assignment.watchEnabled === true)) {
+        body.watchEnabled = state.watchEnabled;
+      }
+      if (state.watchEnabled) {
+        // Only quiet-period when enabled; parse (invalid → reject).
+        const quietRaw = toNumOrNull(state.watchQuietSec);
+        if (Number.isNaN(quietRaw)) {
+          setError("Watch quiet period must be a number");
+          return;
+        }
+        if (quietRaw !== null) {
+          if (quietRaw < 10 || quietRaw > 300) {
+            setError("Watch quiet period must be between 10 and 300 seconds");
+            return;
+          }
+          if (quietRaw !== (assignment.watchQuietSec ?? null)) {
+            body.watchQuietSec = quietRaw;
+          }
+        } else if ((assignment.watchQuietSec ?? null) !== null) {
+          body.watchQuietSec = null;
+        }
+      } else if ((assignment.watchQuietSec ?? null) !== null) {
+        // Disabling the watch clears the quiet period back to default.
+        body.watchQuietSec = null;
+      }
+      if (state.ignoreGitMetadata !== (assignment.ignoreGitMetadata === true)) {
+        body.ignoreGitMetadata = state.ignoreGitMetadata;
+      }
+      if (state.respectGitignore !== (assignment.respectGitignore === true)) {
+        body.respectGitignore = state.respectGitignore;
+      }
     }
 
     if (Object.keys(body).length === 0) {
@@ -322,6 +375,61 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
             read-only mount on this device only. Other devices are unaffected.
           </span>
         </label>
+      ) : null}
+
+      {showWatch ? (
+        <div className="field-group">
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={state.watchEnabled}
+              onChange={(e) => set({ watchEnabled: e.target.checked })}
+            />
+            Sync after local changes
+          </label>
+          <span className="muted">
+            Waits for changes to settle, then syncs this local folder. Your
+            regular schedule still checks for changes made elsewhere.
+          </span>
+          {state.watchEnabled ? (
+            <div className="field-stack">
+              <label>
+                Wait after last change (seconds)
+                <input
+                  type="number"
+                  min={10}
+                  max={300}
+                  placeholder="30"
+                  value={state.watchQuietSec}
+                  onChange={(e) => set({ watchQuietSec: e.target.value })}
+                />
+              </label>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={state.ignoreGitMetadata}
+                  onChange={(e) => set({ ignoreGitMetadata: e.target.checked })}
+                />
+                Ignore Git metadata
+              </label>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={state.respectGitignore}
+                  onChange={(e) => set({ respectGitignore: e.target.checked })}
+                />
+                Respect <code>.gitignore</code>
+              </label>
+              {state.syncExpr.trim() === "" && (
+                <span className="muted">
+                  Tip: keep a <code>*/15 * * * *</code> schedule so changes made
+                  elsewhere still reconcile. Your existing schedule is never
+                  changed automatically.
+                </span>
+              )}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       <details className="assignment-editor-advanced">

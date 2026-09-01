@@ -11,6 +11,7 @@ import type {
   QueuedAction,
   QueuedActionStatus,
   ResticRestoreJob,
+  TriggerOrigin,
 } from "@lamasync/core";
 import { LamaSyncApiClient, VERSION, canonicalDestinationKey, defaultSocketPath, effectiveFolderType, resolveDestination } from "@lamasync/core";
 import { locateSkillAsset, SKILL_DIR, downloadSkillBundle, readInstalledSkillVersion } from "./skill-update.ts";
@@ -70,6 +71,8 @@ import {
 } from "./systemd.ts";
 import { downloadAndReplace, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
 import { DAEMON_KNOWN_FLAGS, daemonUsage } from "./usage.ts";
+import { createLinuxInotifyFactory } from "./folder-watch.ts";
+import { WatchCoordinator } from "./watch-control.ts";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CONFIG_REFRESH_MS = 5 * 60 * 1000;
@@ -615,6 +618,9 @@ async function main(): Promise<void> {
       );
       warnMissingLocalPaths();
       scheduler.refresh();
+      // LAMA-302: reconcile watch controllers against the fresh config
+      // (starts/updates/stops watchers for eligible `sync` assignments).
+      watchCoordinator.reconcile();
       // LAMA-239: fire-and-forget — a slow reconcile (systemd unit write
       // + wait) shouldn't block the cache save / heartbeat / action
       // acks. Failures log inside reconcileMountsOnRefresh.
@@ -638,6 +644,7 @@ async function main(): Promise<void> {
       summary: report.summary ?? null,
       details: report.details ?? null,
       durationMs: report.durationMs ?? null,
+      trigger: report.trigger ?? null,
     };
     operations.push(entry);
     if (operations.length > OPERATIONS_RING_SIZE) {
@@ -658,8 +665,12 @@ async function main(): Promise<void> {
 
   const runOnce = async (
     assignment: FolderAssignment,
-    opts?: { dryRun?: boolean },
+    opts?: { dryRun?: boolean; triggerOrigin?: TriggerOrigin },
   ): Promise<OperationReport | null> => {
+    // LAMA-302: attach the trigger origin to every report so the operations
+    // view can distinguish watch / schedule / manual runs.
+    const attachOrigin = (report: OperationReport): OperationReport =>
+      opts?.triggerOrigin ? { ...report, trigger: opts.triggerOrigin } : report;
     if (!hostConfig) {
       console.warn(`[run] no hostConfig cached; skipping folder=${assignment.folderId}`);
       return null;
@@ -705,8 +716,8 @@ async function main(): Promise<void> {
       // Contention / control-plane outage is a first-class deferral, not a
       // failed backup: no transfer was started, so it must not surface as a
       // permanent failure (LAMA-294 goal 4-5).
-      await reportOperation(skipReport);
-      return skipReport;
+      await reportOperation(attachOrigin(skipReport));
+      return attachOrigin(skipReport);
     }
     const lock = lockResult.handle!;
 
@@ -744,8 +755,9 @@ async function main(): Promise<void> {
         report.summary ?? undefined,
         lock,
       );
-      await reportOperation(report);
-      return report;
+      const originReport = attachOrigin(report);
+      await reportOperation(originReport);
+      return originReport;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[run] executor threw: ${msg}`);
@@ -758,8 +770,8 @@ async function main(): Promise<void> {
         summary: `executor threw: ${msg}`,
         durationMs: 0,
       };
-      await reportOperation(errReport);
-      return errReport;
+      await reportOperation(attachOrigin(errReport));
+      return attachOrigin(errReport);
     } finally {
       clearInterval(heartbeatTimer);
       cleanup();
@@ -869,7 +881,7 @@ async function main(): Promise<void> {
           // (each assignment also writes its own operation_log via runOnce).
           const outcomes: { status: "done" | "failed"; result: string }[] = [];
           for (const assignment of targets) {
-            const report = await runOnce(assignment, { dryRun });
+            const report = await runOnce(assignment, { dryRun, triggerOrigin: "manual" });
             outcomes.push(
               summarizeReport(report, `synced folder=${assignment.folderId}`),
             );
@@ -901,7 +913,7 @@ async function main(): Promise<void> {
           }
           const outcomes: { status: "done" | "failed"; result: string }[] = [];
           for (const assignment of targets) {
-            const report = await runOnce(assignment);
+            const report = await runOnce(assignment, { triggerOrigin: "manual" });
             outcomes.push(
               summarizeReport(report, `backed up folder=${assignment.folderId}`),
             );
@@ -963,7 +975,7 @@ async function main(): Promise<void> {
   const scheduler = new Scheduler({
     onTick: (assignment) => {
       // Fire-and-forget the actual sync; the scheduler contract is void.
-      void runOnce(assignment);
+      void runOnce(assignment, { triggerOrigin: "schedule" });
     },
     getAssignments: () => hostConfig?.assignments ?? [],
     getFolders: () => hostConfig?.folders ?? [],
@@ -972,6 +984,25 @@ async function main(): Promise<void> {
     // window is active (host row if present, else global row). Resolved
     // server-side; the daemon just reads the cached `hostConfig.pause`.
     getEffectivePause: () => hostConfig?.pause ?? null,
+  });
+
+  // LAMA-302: event-triggered sync watch coordinator. Linux-first (inotify
+  // via `fs.watch`); on other platforms a no-op factory keeps reconcile()
+  // uniform and the feature inert (watches are default-off regardless).
+  const watchFactory =
+    process.platform === "linux"
+      ? createLinuxInotifyFactory()
+      : { start: () => ({ close() {} }) };
+  const watchCoordinator = new WatchCoordinator({
+    factory: watchFactory,
+    getAssignments: () => hostConfig?.assignments ?? [],
+    getFolders: () => hostConfig?.folders ?? [],
+    runOnce: async (assignment) => {
+      // The daemon's runOnce returns a report (or null); the watch controller
+      // only needs to know when it settles.
+      await runOnce(assignment, { triggerOrigin: "watch" });
+    },
+    log: (msg) => console.log(msg),
   });
 
   setSwitchContext({
@@ -1033,6 +1064,8 @@ async function main(): Promise<void> {
     warnMissingLocalPaths();
     scheduler.start();
   }
+  // LAMA-302: bring up watch controllers for eligible assignments at boot.
+  watchCoordinator.reconcile();
   // LAMA-239: reconcile mounts against the effective type on boot too, so
   // a daemon restart picks up a web-UI-set override without needing a
   // 5-min refresh. (refreshConfig() above already triggers one for the
@@ -1169,7 +1202,7 @@ async function main(): Promise<void> {
           return false;
         }
       }
-      void runOnce(assignment);
+      void runOnce(assignment, { triggerOrigin: "manual" });
       return true;
     },
     onSyncAllRequest: async () => {
@@ -1181,7 +1214,7 @@ async function main(): Promise<void> {
       }
       console.log(`[socket] sync-all requested; queueing ${assignments.length} assignment(s)`);
       for (const assignment of assignments) {
-        void runOnce(assignment);
+        void runOnce(assignment, { triggerOrigin: "manual" });
       }
     },
    });
@@ -1192,6 +1225,8 @@ async function main(): Promise<void> {
   const shutdown = (signal: string): void => {
     console.log(`lamasyncd received ${signal}, shutting down`);
     scheduler.stop();
+    // LAMA-302: stop every watch controller (closes watcher handles + timers).
+    watchCoordinator.shutdown();
     socketServer.close();
     void stopAllMounts();
     clearInterval(heartbeatTimer);

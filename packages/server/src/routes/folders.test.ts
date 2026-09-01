@@ -870,3 +870,129 @@ describe("per-host restic overrides (LAMA-259 follow-up)", () => {
     expect(row?.restic_repository).toBeNull();
   });
 });
+
+// LAMA-302: event-triggered sync watch config on assignments.
+describe("watch fields on assignments (LAMA-302)", () => {
+  function insertHost(id: string): void {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('${id}','${id}')`);
+  }
+
+  async function assign(folderId: string, body: Record<string, unknown>): Promise<Response> {
+    return postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/h",
+      ...body,
+    });
+  }
+
+  test("absent watch fields preserve defaults (off on every flag)", async () => {
+    insertHost("h");
+    const folder = (await (await postJson("/api/v1/folders", { name: "w", type: "sync" })).json()) as { id: string };
+    const res = await assign(folder.id, {});
+    expect(res.status).toBe(201);
+    const a = (await res.json()) as {
+      watchEnabled: boolean;
+      watchQuietSec: number | null;
+      ignoreGitMetadata: boolean;
+      respectGitignore: boolean;
+    };
+    expect(a.watchEnabled).toBe(false);
+    expect(a.watchQuietSec).toBeNull();
+    expect(a.ignoreGitMetadata).toBe(false);
+    expect(a.respectGitignore).toBe(false);
+  });
+
+  test("create + read-back round-trips the watch config", async () => {
+    insertHost("h");
+    const folder = (await (await postJson("/api/v1/folders", { name: "w", type: "sync" })).json()) as { id: string };
+    const created = (await (await assign(folder.id, {
+      watchEnabled: true,
+      watchQuietSec: 45,
+      ignoreGitMetadata: true,
+      respectGitignore: true,
+    })).json()) as {
+      watchEnabled: boolean;
+      watchQuietSec: number | null;
+      ignoreGitMetadata: boolean;
+      respectGitignore: boolean;
+    };
+    expect(created.watchEnabled).toBe(true);
+    expect(created.watchQuietSec).toBe(45);
+    expect(created.ignoreGitMetadata).toBe(true);
+    expect(created.respectGitignore).toBe(true);
+
+    // Read back through the config route (what the daemon consumes). The
+    // main `app` only mounts foldersRoutes; mirror the LAMA-239 test that
+    // builds a separate config app on top of the same in-memory DB.
+    const { configRoutes } = await import("./config.ts");
+    const cfgApp = new Elysia().use(getAuthPlugin()).use(configRoutes);
+    const cfg = await cfgApp.handle(request(`/api/v1/config/h`, { method: "GET" }));
+    expect(cfg.status).toBe(200);
+    const cfgBody = (await cfg.json()) as { assignments: Array<{
+      watchEnabled: boolean;
+      watchQuietSec: number | null;
+    }> };
+    const match = cfgBody.assignments.find((x) => x.watchEnabled === true);
+    expect(match).toBeDefined();
+    expect(match?.watchQuietSec).toBe(45);
+  });
+
+  test("PATCH updates watch fields and clears quiet back to null", async () => {
+    insertHost("h");
+    const folder = (await (await postJson("/api/v1/folders", { name: "w", type: "sync" })).json()) as { id: string };
+    await assign(folder.id, { watchEnabled: true, watchQuietSec: 60 });
+
+    const patched = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folder.id}/assign/h`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ watchEnabled: false, watchQuietSec: null }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+    const a = (await patched.json()) as { watchEnabled: boolean; watchQuietSec: number | null };
+    expect(a.watchEnabled).toBe(false);
+    expect(a.watchQuietSec).toBeNull();
+  });
+
+  test("invalid watchQuietSec rejects cleanly with 400", async () => {
+    insertHost("h");
+    const folder = (await (await postJson("/api/v1/folders", { name: "w", type: "sync" })).json()) as { id: string };
+
+    for (const bad of [5, 301, 30.5]) {
+      const res = await assign(folder.id, { watchQuietSec: bad });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("watchQuietSec");
+    }
+
+    // PATCH path rejects too.
+    const patchRes = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folder.id}/assign/h`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ watchQuietSec: 999 }),
+      }),
+    );
+    expect(patchRes.status).toBe(400);
+  });
+
+  test("valid quiet boundary values (10 and 300) are accepted", async () => {
+    insertHost("h");
+    // Distinct folders so the UNIQUE(folder_id, host_id) constraint doesn't
+    // collide on a second assign to the same folder+host.
+    const folderA = (await (await postJson("/api/v1/folders", { name: "wa", type: "sync" })).json()) as { id: string };
+    const folderB = (await (await postJson("/api/v1/folders", { name: "wb", type: "sync" })).json()) as { id: string };
+    const res10 = await assign(folderA.id, { watchQuietSec: 10 });
+    expect(res10.status).toBe(201);
+    const res300 = await assign(folderB.id, { watchQuietSec: 300 });
+    expect(res300.status).toBe(201);
+  });
+});

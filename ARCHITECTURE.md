@@ -112,6 +112,10 @@ CREATE TABLE folder_assignments (
     available_space_threshold   INTEGER,              -- bytes; pre-flight check
     cache_profile               TEXT,                 -- normal / media / minimal
     cache_max_size              TEXT,                 -- e.g. "1G"
+    watch_enabled               INTEGER NOT NULL DEFAULT 0,  -- LAMA-302: event-triggered sync (opt-in, default off)
+    watch_quiet_sec             INTEGER,              -- LAMA-302: debounce seconds (NULL => 30; validated 10-300)
+    ignore_git_metadata         INTEGER NOT NULL DEFAULT 0,  -- exclude .git/ from watcher + bisync
+    respect_gitignore           INTEGER NOT NULL DEFAULT 0,  -- apply Git ignore semantics
     UNIQUE(folder_id, host_id)
 );
 
@@ -147,7 +151,8 @@ CREATE TABLE operation_log (
     status      TEXT NOT NULL,          -- started, success, failed, conflict, recovery, retry
     summary     TEXT,                   -- "42 files up, 3 conflicts"
     details     TEXT,                    -- JSON: file list, error messages
-    duration_ms INTEGER
+    duration_ms INTEGER,
+    trigger     TEXT                    -- LAMA-302: watch | schedule | manual (who started the run)
 );
 
 -- Per-assignment schedule + lock coordination

@@ -1,5 +1,14 @@
 import { basename, dirname, join } from "path";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { homedir, tmpdir } from "os";
 import type { ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { resolveDestination } from "@lamasync/core";
@@ -7,6 +16,7 @@ import { runHook } from "./hooks.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
 import { getRemoteName } from "./rclone.ts";
+import { materialiseGitignoreFilter } from "./gitignore.ts";
 
 export interface ExecuteOptions {
   assignment: FolderAssignment;
@@ -533,6 +543,11 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   let command: string[];
   let timeoutSec: number;
   const dry = opts.dryRun === true;
+  // LAMA-302: `respectGitignore` builds a deterministic Git-ignore filter
+  // snapshot and, if the snapshot changed, forces a safe bisync resync (the
+  // synchronization universe changed).
+  let gitignoreFilter: { path: string; cleanup: () => void } | null = null;
+  let gitignoreResync = false;
 
   switch (folder.type) {
     case "sync": {
@@ -550,7 +565,28 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         const first = !existsSync(join(sd, "bisync.state"));
         mkdirSync(sd, { recursive: true });
         command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--workdir", sd, "--resilient", "--recover", "--max-lock", "10m"];
-        if (first) command.push("--resync");
+        // LAMA-302: respectGitignore → Git ignore semantics via a filter
+        // snapshot (never pass .gitignore straight to rclone). The snapshot is
+        // merged with any .lamasyncignore patterns and, on change, forces a
+        // safe --resync rather than trusting stale bisync listings.
+        if (assignment.respectGitignore) {
+          const gf = materialiseGitignoreFilter(assignment.localPath, patterns);
+          if (gf) {
+            gitignoreFilter = gf;
+            const hashFile = join(sd, ".filter-snapshot.hash");
+            const prev = existsSync(hashFile)
+              ? readFileSync(hashFile, "utf8").trim()
+              : null;
+            if (prev !== gf.hash) {
+              gitignoreResync = true;
+              console.warn(
+                `[executor] folder=${folder.id} gitignore filter snapshot changed; forcing safe resync`,
+              );
+              writeFileSync(hashFile, gf.hash);
+            }
+          }
+        }
+        if (first || gitignoreResync) command.push("--resync");
         timeoutSec = assignment.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
       }
       break;
@@ -590,7 +626,11 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
       return report(hostId, folder.id, folder.type as FolderType, "failed", start, { summary: `unsupported folder type: ${folder.type}`, details: { folderType: folder.type } });
   }
 
-  if (exclude) command.push("--filter-from", exclude.path);
+  // LAMA-302: prefer the Git-ignore filter snapshot over .lamasyncignore
+  // when respectGitignore is on; otherwise fall back to the .lamasyncignore
+  // exclude file.
+  const filterFrom = gitignoreFilter ?? exclude;
+  if (filterFrom) command.push("--filter-from", filterFrom.path);
 
   // LAMA-114 + LAMA-273: bandwidth schedule. Slow-mode pause (resolved
   // server-side into hostConfig.pause) wins over the per-assignment
@@ -703,6 +743,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
     }
   } finally {
     exclude?.cleanup();
+    // LAMA-302: dispose the Git-ignore filter snapshot temp file.
+    gitignoreFilter?.cleanup();
     if (lanPeer.serveHandle !== null) {
       void lanPeer.serveHandle.close();
     }

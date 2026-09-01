@@ -15,6 +15,43 @@ function applyMigrations(db: Database): void {
   }
 }
 
+describe("LAMA-302 watch migrations", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.exec(SERVER_SCHEMA);
+  });
+
+  test("adds the four watch columns defaulting to off", () => {
+    // Seed a legacy assignment without the watch columns (as if it predates
+    // LAMA-302). The migration must add the columns; existing rows keep
+    // their exact schedule-only behavior (watch_enabled = 0, NULL quiet).
+    db.exec(`
+      INSERT INTO folders (id, name, type) VALUES ('f-sync', 'work', 'sync');
+      INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, enabled)
+        VALUES ('a-1', 'f-sync', 'host-a', 'both', '/work', 1);
+    `);
+
+    applyMigrations(db);
+
+    const col = db.query<{
+      watch_enabled: number;
+      watch_quiet_sec: number | null;
+      ignore_git_metadata: number;
+      respect_gitignore: number;
+    }, []>(
+      "SELECT watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore FROM folder_assignments WHERE id = 'a-1'",
+    ).get();
+    expect(col).toEqual({
+      watch_enabled: 0,
+      watch_quiet_sec: null,
+      ignore_git_metadata: 0,
+      respect_gitignore: 0,
+    });
+  });
+});
+
 describe("LAMA-294 migrations", () => {
   let db: Database;
 

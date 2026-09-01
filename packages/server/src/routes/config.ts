@@ -74,6 +74,11 @@ interface AssignmentRow {
   cache_max_size: string | null;
   restic_repository: string | null;
   restic_password: string | null;
+  // LAMA-302: watch config (only honored for effective `sync` assignments).
+  watch_enabled: number;
+  watch_quiet_sec: number | null;
+  ignore_git_metadata: number;
+  respect_gitignore: number;
 }
 
 interface ManifestRow {
@@ -143,6 +148,12 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     cacheMaxSize: r.cache_max_size,
     resticRepository: r.restic_repository,
     resticPassword: r.restic_password,
+    // LAMA-302: watch config (opt-in, default-off). Only honored by the
+    // daemon for effective `sync` assignments — never for mount/backup/etc.
+    watchEnabled: r.watch_enabled === 1,
+    watchQuietSec: r.watch_quiet_sec,
+    ignoreGitMetadata: r.ignore_git_metadata === 1,
+    respectGitignore: r.respect_gitignore === 1,
   };
 }
 
@@ -544,7 +555,8 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
         `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                 mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                 timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-                cache_profile, cache_max_size, restic_repository, restic_password
+                cache_profile, cache_max_size, restic_repository, restic_password,
+                watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore
          FROM folder_assignments WHERE host_id = ?`,
       )
       .all(hostId);

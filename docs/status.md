@@ -3,6 +3,41 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## LAMA-302 — event-triggered sync (in progress)
+
+Landed the core/server contract + the daemon watch engine + web/CLI controls.
+
+**What landed**
+- **Core/server (default-off):** four assignment watch fields
+  (`watchEnabled`, `watchQuietSec` 10-300s default 30, `ignoreGitMetadata`,
+  `respectGitignore`) in `FolderAssignment`, `SERVER_SCHEMA`+`MIGRATIONS`,
+  assign create/PATCH validation + mapping, `/config/:hostId` mapping, shared
+  core helper `folder-watch.ts` (defaults/validation). Existing folders keep
+  their exact schedule-only behavior after upgrade.
+- **Daemon watch engine:** platform-neutral `FolderWatchFactory`+
+  `WatchController` (debounce/single-flight state machine), Linux inotify
+  adapter (`fs.watch` recursive), `WatchCoordinator` reconciling one watcher
+  per eligible effective-`sync` assignment on boot/refresh/shutdown; missing
+  paths skipped and retried; mount/backup/disabled never watched.
+- **Git ignore:** `respectGitignore` builds a deterministic `ignore`-lib filter
+  snapshot (nested/negations/info-exclude/global) and forces safe `--resync`
+  on snapshot change (never passes `.gitignore` straight to rclone).
+- **Observability:** operation `trigger` (`watch`/`schedule`/`manual`) persisted
+  + surfaced on `/operations`; watch runs report `trigger: watch`.
+- **Surfaces:** CLI `folders assign`/`folders assign-update` watch flags +
+  `folders assignments` WATCH column; web-ui AssignmentEditor watch controls
+  (only for effective sync, schedule recommendation); TUI local `watching`
+  badge; agent-skill docs.
+
+**Gates:** `bun x tsc --noEmit` 0, `bun run build:web-ui` green,
+`bun test` 1239 pass / 0 fail (incl. new controller/coordinator/gitignore/inotify
+integration tests), `bun scripts/check-skill-drift.ts --strict` OK.
+
+**Not done / outstanding**
+- Live smoke/soak against a busy Git fixture (bounded-run observation).
+- TUI full watch-editing editor (deferred — the TUI has no complete
+  sync-assignment editor; edit via CLI/web).
+
 ## Current release — v0.3.4 released (2026-08-30)
 
 The post-v0.3.3 LAMA-294 locking and backup-isolation fixes are now released as

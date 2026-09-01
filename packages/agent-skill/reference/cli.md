@@ -131,7 +131,34 @@ Usage: lamasync folders assign <folderId> [flags]
   --destination <path>   explicit remote prefix (optional; shared backup use)
   --enabled              mark the assignment enabled (default)
   --disabled             mark the assignment disabled
+  --watch                sync after local changes (LAMA-302)
+  --no-watch             disable event-triggered sync (default)
+  --watch-quiet <sec>    debounce seconds (10-300, default 30)
+  --ignore-git-metadata  exclude .git/ from watcher + bisync
+  --respect-gitignore    apply Git ignore semantics
 ```
+
+> **LAMA-302:** `--watch` opts the assignment into event-triggered sync
+> (Linux-only, inotify). Only effective `sync` assignments honor it; it is
+> disabled by default and never alters an existing cron expression. The 15-min
+> `*/15 * * * *` schedule is the recommended periodic reconciliation backstop.
+
+## `lamasync folders assign-update`
+
+```
+Usage: lamasync folders assign-update <folderId> --host <hostId> [flags]
+
+  --host <hostId>        host id (required)
+  --schedule <cron>      cron expression (optional)
+  --watch                sync after local changes (LAMA-302)
+  --no-watch             disable event-triggered sync
+  --watch-quiet <sec>    debounce seconds (10-300, default 30)
+  --ignore-git-metadata  exclude .git/ from watcher + bisync
+  --respect-gitignore    apply Git ignore semantics
+```
+
+Updates an existing device assignment (watch settings, schedule) via
+`PATCH /api/v1/folders/:folderId/assign/:hostId`.
 
 ## `lamasync backends list`
 

@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     cache_max_size      TEXT,
     restic_repository   TEXT,
     restic_password     TEXT,
+    -- LAMA-302: event-triggered sync. Only honored for effective 'sync'
+    -- assignments; opt-in, default-off. watch_quiet_sec NULL => 30 s default;
+    -- validated 10-300 at the API boundary.
+    watch_enabled       INTEGER NOT NULL DEFAULT 0,
+    watch_quiet_sec     INTEGER,
+    ignore_git_metadata INTEGER NOT NULL DEFAULT 0,
+    respect_gitignore   INTEGER NOT NULL DEFAULT 0,
     demo                INTEGER NOT NULL DEFAULT 0,
     UNIQUE(folder_id, host_id)
 );
@@ -170,6 +177,8 @@ CREATE TABLE IF NOT EXISTS operation_log (
     summary     TEXT,
     details     TEXT,
     duration_ms INTEGER,
+    -- LAMA-302: trigger origin (watch | schedule | manual). NULL for legacy rows.
+    trigger     TEXT,
     demo        INTEGER NOT NULL DEFAULT 0
 );
 
@@ -533,6 +542,16 @@ export const MIGRATIONS: string[] = [
   // LAMA-298: preserve an operator-selected class when daemons continue to
   // report their best-effort detection on every heartbeat.
   "ALTER TABLE hosts ADD COLUMN host_class_overridden INTEGER NOT NULL DEFAULT 0",
+  // LAMA-302: event-triggered sync watch config. Fresh DBs get these from
+  // SERVER_SCHEMA; this is the backfill for existing ones (the duplicate
+  // column is swallowed by initDb). watch_quiet_sec is INTEGER and NULL
+  // => default; the boolean flags default to 0 so existing assignments keep
+  // their exact schedule-only behavior after upgrade.
+  "ALTER TABLE operation_log ADD COLUMN trigger TEXT",
+  "ALTER TABLE folder_assignments ADD COLUMN watch_enabled INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE folder_assignments ADD COLUMN watch_quiet_sec INTEGER",
+  "ALTER TABLE folder_assignments ADD COLUMN ignore_git_metadata INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE folder_assignments ADD COLUMN respect_gitignore INTEGER NOT NULL DEFAULT 0",
   "CREATE TABLE IF NOT EXISTS b2_management_config (id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, region TEXT NOT NULL, application_key_id TEXT NOT NULL, application_key_enc TEXT NOT NULL, updated_at INTEGER NOT NULL)",
 ];
 

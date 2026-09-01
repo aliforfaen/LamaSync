@@ -187,3 +187,55 @@ describe("POST /api/v1/report", () => {
     expect(row?.last_sync_direction).toBeNull();
   });
 });
+
+// LAMA-302: trigger origin round-trips through /report → operation_log and is
+// returned by the operations view.
+describe("LAMA-302 trigger origin", () => {
+  test("report persists trigger, and operations returns it", async () => {
+    const res = await post("/api/v1/report", {
+      hostId: "host-a",
+      folderId: "f1",
+      operation: "sync",
+      status: "success",
+      summary: "sync ok",
+      trigger: "watch",
+    });
+    expect(res.status).toBe(204);
+
+    const row = db
+      .query<{ trigger: string | null }, []>(
+        "SELECT trigger FROM operation_log ORDER BY id DESC LIMIT 1",
+      )
+      .get();
+    expect(row?.trigger).toBe("watch");
+
+    // The operations view maps it back onto the wire shape. Mount it on a
+    // small app sharing the same in-memory DB (wire operations' own handle).
+    const { operationsRoutes, __setDb: __setOpsDb } = await import("./operations.ts");
+    __setOpsDb(db);
+    const opApp = new Elysia().use(getAuthPlugin()).use(operationsRoutes);
+    const ops = await opApp.handle(
+      request(`/api/v1/operations?hostId=host-a&limit=10`, { method: "GET" }),
+    );
+    expect(ops.status).toBe(200);
+    const list = (await ops.json()) as Array<{ trigger: string | null }>;
+    expect(list[0].trigger).toBe("watch");
+  });
+
+  test("an absent trigger is stored and returned as null", async () => {
+    const res = await post("/api/v1/report", {
+      hostId: "host-a",
+      folderId: "f1",
+      operation: "sync",
+      status: "success",
+      summary: "sync ok",
+    });
+    expect(res.status).toBe(204);
+    const row = db
+      .query<{ trigger: string | null }, []>(
+        "SELECT trigger FROM operation_log ORDER BY id DESC LIMIT 1",
+      )
+      .get();
+    expect(row?.trigger).toBeNull();
+  });
+});

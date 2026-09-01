@@ -7,12 +7,14 @@
  */
 
 import type { Folder, FolderAssignment } from "@lamasync/core";
+import { resolveWatchQuietSec } from "@lamasync/core";
 
 import { CliUsageError, flagBool, flagString } from "./args.ts";
 import { wrapApiError } from "./client.ts";
 import type { CliContext } from "./dispatch.ts";
 import { printJson, printTable } from "./output.ts";
 import { confirmDestructive } from "./safety.ts";
+import { watchFlagsToBody } from "./folders.ts";
 
 export async function runUpdate(ctx: CliContext): Promise<void> {
   const { client, json, flags, parsed } = ctx;
@@ -107,6 +109,54 @@ export async function runUnassign(ctx: CliContext): Promise<void> {
   console.log(`unassigned ${folderId} from ${hostId}`);
 }
 
+// LAMA-302: update an existing assignment's watch settings (and any other
+// pass-through field the operator sets). Addressed by folder+host, matching
+// the server's PATCH /folders/:folderId/assign/:hostId.
+export async function runAssignmentUpdate(ctx: CliContext): Promise<void> {
+  const { client, json, flags, parsed } = ctx;
+  const folderId = parsed.rest[0];
+  if (!folderId) {
+    throw new CliUsageError(
+      "folders assign-update <folderId> requires a folder id as the first positional",
+    );
+  }
+  const hostId = flagString(flags, "host");
+  if (!hostId) {
+    throw new CliUsageError("folders assign-update requires --host <hostId>");
+  }
+
+  const body: Partial<FolderAssignment> = {};
+  const schedule = flagString(flags, "schedule");
+  if (schedule !== undefined) body.syncExpr = schedule;
+  const watchBody = watchFlagsToBody(flags);
+  if (watchBody) Object.assign(body, watchBody);
+
+  if (Object.keys(body).length === 0) {
+    throw new CliUsageError(
+      "folders assign-update requires at least one of --watch/--no-watch/--watch-quiet/--ignore-git-metadata/--respect-gitignore/--schedule",
+    );
+  }
+
+  let assignment: FolderAssignment;
+  try {
+    assignment = await client.client.updateAssignment(folderId, hostId, body);
+  } catch (err) {
+    throw wrapApiError(err, "update assignment");
+  }
+  if (json) {
+    printJson(assignment);
+    return;
+  }
+  console.log(`updated assignment ${folderId} → ${hostId}`);
+  if (assignment.watchEnabled) {
+    console.log(
+      `sync after local changes: yes (wait ${resolveWatchQuietSec(assignment.watchQuietSec)}s)`,
+    );
+  } else {
+    console.log("sync after local changes: no");
+  }
+}
+
 export async function runAssignments(ctx: CliContext): Promise<void> {
   const { client, json, parsed } = ctx;
   const folderId = parsed.rest[0];
@@ -131,6 +181,7 @@ export async function runAssignments(ctx: CliContext): Promise<void> {
       { header: "ROLE", key: "role" },
       { header: "PATH", key: "localPath" },
       { header: "SCHEDULE", key: "syncExpr" },
+      { header: "WATCH", key: "watch" },
       { header: "ENABLED", key: "enabled" },
       { header: "ID", key: "id" },
     ],
@@ -139,6 +190,7 @@ export async function runAssignments(ctx: CliContext): Promise<void> {
       role: a.role,
       localPath: a.localPath,
       syncExpr: a.syncExpr ?? "",
+      watch: a.watchEnabled ? `yes (${resolveWatchQuietSec(a.watchQuietSec)}s)` : "no",
       enabled: a.enabled ? "yes" : "no",
       id: a.id,
     })),

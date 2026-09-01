@@ -3,7 +3,13 @@ import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderSize, FolderType } from "@lamasync/core";
-import { normalizeAssignmentMode, normalizeDestination, resolveDestination } from "@lamasync/core";
+import {
+  normalizeAssignmentMode,
+  normalizeDestination,
+  resolveDestination,
+  isValidWatchQuietSec,
+  normalizeWatchQuietSec,
+} from "@lamasync/core";
 import { getBackend } from "../backends.ts";
 import {
   bumpConfigRevision,
@@ -150,6 +156,11 @@ interface AssignmentRow {
   cache_max_size: string | null;
   restic_repository: string | null;
   restic_password: string | null;
+  // LAMA-302: watch config. Value columns are INTEGER 0/1; quiet is NULL => 30 s.
+  watch_enabled: number;
+  watch_quiet_sec: number | null;
+  ignore_git_metadata: number;
+  respect_gitignore: number;
 }
 
 function rowToFolder(r: FolderRow): Folder {
@@ -215,6 +226,12 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     cacheMaxSize: r.cache_max_size,
     resticRepository: r.restic_repository,
     resticPassword: r.restic_password,
+    // LAMA-302: watch config. Only surfaced for effective `sync` assignments by
+    // the daemon; stored on every assignment but ignored for non-sync types.
+    watchEnabled: r.watch_enabled === 1,
+    watchQuietSec: r.watch_quiet_sec,
+    ignoreGitMetadata: r.ignore_git_metadata === 1,
+    respectGitignore: r.respect_gitignore === 1,
   };
 }
 
@@ -423,7 +440,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                   mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-                  cache_profile, cache_max_size, restic_repository, restic_password
+                  cache_profile, cache_max_size, restic_repository, restic_password,
+                  watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore
            FROM folder_assignments WHERE folder_id = ?`,
         )
         .all(params.id);
@@ -751,6 +769,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         cacheMaxSize?: string | null;
         resticRepository?: string | null;
         resticPassword?: string | null;
+        // LAMA-302: event-triggered sync watch config (default-off; only
+        // honored for effective `sync` assignments by the daemon).
+        watchEnabled?: boolean;
+        watchQuietSec?: number | null;
+        ignoreGitMetadata?: boolean;
+        respectGitignore?: boolean;
       };
       const host = db
         .query<{ id: string }, [string]>("SELECT id FROM hosts WHERE id = ?")
@@ -774,6 +798,14 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           error: "destination must be a non-empty relative path without '.' or '..' segments",
         };
       }
+      // LAMA-302: watchQuietSec must be null (=> 30 s default) or an integer
+      // within [10, 300]. Anything else is a clean 400 at the API boundary.
+      if (!isValidWatchQuietSec(b.watchQuietSec ?? null)) {
+        set.status = 400;
+        return {
+          error: "watchQuietSec must be null or an integer between 10 and 300 seconds",
+        };
+      }
       const id = crypto.randomUUID();
       // LAMA-294: resolve the destination path/prefix, kept separate from the
       // connection alias (remoteName). Default is host-scoped for backups
@@ -793,8 +825,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
            (id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
             mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
             timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-            cache_profile, cache_max_size, restic_repository, restic_password)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            cache_profile, cache_max_size, restic_repository, restic_password,
+            watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           params.id,
@@ -820,6 +853,11 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           b.cacheMaxSize ?? null,
           b.resticRepository ?? null,
           b.resticPassword ?? null,
+          // LAMA-302: watch config (opt-in, default-off).
+          b.watchEnabled === true ? 1 : 0,
+          normalizeWatchQuietSec(b.watchQuietSec),
+          b.ignoreGitMetadata === true ? 1 : 0,
+          b.respectGitignore === true ? 1 : 0,
         ],
       );
       const row = db
@@ -827,7 +865,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                   mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-                  cache_profile, cache_max_size, restic_repository, restic_password
+                  cache_profile, cache_max_size, restic_repository, restic_password,
+                  watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore
            FROM folder_assignments WHERE id = ?`,
         )
         .get(id);
@@ -879,6 +918,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         cacheMaxSize: t.Optional(t.String({ pattern: "^\\d+[KMGT]?$" })),
         resticRepository: t.Optional(t.Union([t.String(), t.Null()])),
         resticPassword: t.Optional(t.Union([t.String(), t.Null()])),
+        // LAMA-302: watch config. watchQuietSec null => default (30 s); the
+        // route also range-checks 10-300 in the handler.
+        watchEnabled: t.Optional(t.Boolean()),
+        watchQuietSec: t.Optional(t.Union([t.Number(), t.Null()])),
+        ignoreGitMetadata: t.Optional(t.Boolean()),
+        respectGitignore: t.Optional(t.Boolean()),
       }),
       detail: {
         summary: "Assign a folder to a host",
@@ -963,6 +1008,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         // and falls back, matching daemon-side behavior.
         resticRepository?: string | null;
         resticPassword?: string | null;
+        // LAMA-302: watch config (opt-in, default-off; only honored for
+        // effective `sync` assignments by the daemon).
+        watchEnabled?: boolean;
+        watchQuietSec?: number | null;
+        ignoreGitMetadata?: boolean;
+        respectGitignore?: boolean;
       };
       const sets: string[] = [];
       const args: (string | number | null)[] = [];
@@ -1069,6 +1120,31 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
             : b.resticPassword,
         );
       }
+      // LAMA-302: watch config (opt-in, default-off).
+      if (b.watchEnabled !== undefined) {
+        sets.push("watch_enabled = ?");
+        args.push(b.watchEnabled ? 1 : 0);
+      }
+      if (b.watchQuietSec !== undefined) {
+        // null on the wire resets to the default (30 s) via the stored NULL;
+        // out-of-range values are rejected before this runs.
+        if (!isValidWatchQuietSec(b.watchQuietSec)) {
+          set.status = 400;
+          return {
+            error: "watchQuietSec must be null or an integer between 10 and 300 seconds",
+          };
+        }
+        sets.push("watch_quiet_sec = ?");
+        args.push(normalizeWatchQuietSec(b.watchQuietSec));
+      }
+      if (b.ignoreGitMetadata !== undefined) {
+        sets.push("ignore_git_metadata = ?");
+        args.push(b.ignoreGitMetadata ? 1 : 0);
+      }
+      if (b.respectGitignore !== undefined) {
+        sets.push("respect_gitignore = ?");
+        args.push(b.respectGitignore ? 1 : 0);
+      }
       if (sets.length === 0) {
         set.status = 400;
         return { error: "No fields to update" };
@@ -1087,7 +1163,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
                   mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-                  cache_profile, cache_max_size, restic_repository, restic_password
+                  cache_profile, cache_max_size, restic_repository, restic_password,
+                  watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore
            FROM folder_assignments WHERE folder_id = ? AND host_id = ?`,
         )
         .get(params.id, params.hostId);
@@ -1139,6 +1216,12 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         // a partial override as "no override".
         resticRepository: t.Optional(t.Union([t.String(), t.Null()])),
         resticPassword: t.Optional(t.Union([t.String(), t.Null()])),
+        // LAMA-302: watch config (opt-in, default-off). null watchQuietSec
+        // resets to the 30 s default; out-of-range is rejected in the handler.
+        watchEnabled: t.Optional(t.Boolean()),
+        watchQuietSec: t.Optional(t.Union([t.Number(), t.Null()])),
+        ignoreGitMetadata: t.Optional(t.Boolean()),
+        respectGitignore: t.Optional(t.Boolean()),
       }, { additionalProperties: true }),
       detail: {
         summary: "Update an existing assignment",
