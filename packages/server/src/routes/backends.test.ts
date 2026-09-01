@@ -50,6 +50,10 @@ function patchJson(path: string, body: unknown): Promise<Response> {
   return Promise.resolve(app.handle(request(path, { method: "PATCH", body: JSON.stringify(body) })));
 }
 
+function putJson(path: string, body: unknown): Promise<Response> {
+  return Promise.resolve(app.handle(request(path, { method: "PUT", body: JSON.stringify(body) })));
+}
+
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(SERVER_SCHEMA);
@@ -70,6 +74,26 @@ afterEach(() => {
 });
 
 describe("POST /api/v1/backends", () => {
+  test("stores the B2 bucket-management key encrypted and never returns it", async () => {
+    const saved = await putJson("/api/v1/admin/b2-management", {
+      endpoint: "https://s3.us-east-005.backblazeb2.com",
+      region: "us-east-005",
+      applicationKeyId: "B2_MANAGEMENT_KEY_ID",
+      applicationKey: "B2_MANAGEMENT_KEY_SECRET",
+    });
+    expect(saved.status).toBe(200);
+    expect(await saved.text()).not.toContain("B2_MANAGEMENT_KEY_SECRET");
+    const row = db.query<{ application_key_enc: string }, []>(
+      "SELECT application_key_enc FROM b2_management_config",
+    ).get();
+    expect(decryptSecret(row?.application_key_enc ?? null)).toBe("B2_MANAGEMENT_KEY_SECRET");
+  });
+
+  test("requires B2 management configuration before creating a bucket", async () => {
+    const res = await postJson("/api/v1/backends/b2-buckets", { name: "valid-bucket" });
+    expect(res.status).toBe(409);
+  });
+
   test("creates an s3 backend with the secret encrypted at rest", async () => {
     const res = await postJson("/api/v1/backends", {
       name: "prod-r2",
@@ -132,6 +156,35 @@ describe("POST /api/v1/backends", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("s3Region");
+  });
+
+  test("creates a Backblaze B2 S3-compatible backend", async () => {
+    const res = await postJson("/api/v1/backends", {
+      name: "b2-archive",
+      kind: "s3",
+      s3Provider: "b2",
+      s3Endpoint: "https://s3.us-east-005.backblazeb2.com",
+      s3Region: "us-east-005",
+      s3AccessKeyId: "B2_KEY_ID",
+      s3SecretAccessKey: "B2_APPLICATION_KEY",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { s3Provider: string; s3Region: string };
+    expect(body.s3Provider).toBe("b2");
+    expect(body.s3Region).toBe("us-east-005");
+  });
+
+  test("rejects an invalid draft B2 bucket name before invoking rclone", async () => {
+    const res = await postJson("/api/v1/backends/b2-buckets", {
+      name: "b2-reserved",
+      s3Endpoint: "https://s3.us-east-005.backblazeb2.com",
+      s3Region: "us-east-005",
+      s3AccessKeyId: "B2_KEY_ID",
+      s3SecretAccessKey: "B2_APPLICATION_KEY",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("cannot start with b2-");
   });
 
   test("rejects duplicate names (case-insensitive)", async () => {

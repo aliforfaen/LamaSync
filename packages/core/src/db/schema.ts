@@ -232,6 +232,15 @@ CREATE TABLE IF NOT EXISTS backends (
     last_prove_ok      INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS b2_management_config (
+    id                  TEXT PRIMARY KEY,
+    endpoint            TEXT NOT NULL,
+    region              TEXT NOT NULL,
+    application_key_id  TEXT NOT NULL,
+    application_key_enc TEXT NOT NULL,
+    updated_at          INTEGER NOT NULL
+);
+
 -- LAMA-226: Data Browser write operations (copy/move/upload/rename/mkdir).
 -- Rows are created when an operation starts and updated as it progresses,
 -- giving the UI a pollable + WS-driven progress source. A terminal
@@ -524,6 +533,7 @@ export const MIGRATIONS: string[] = [
   // LAMA-298: preserve an operator-selected class when daemons continue to
   // report their best-effort detection on every heartbeat.
   "ALTER TABLE hosts ADD COLUMN host_class_overridden INTEGER NOT NULL DEFAULT 0",
+  "CREATE TABLE IF NOT EXISTS b2_management_config (id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, region TEXT NOT NULL, application_key_id TEXT NOT NULL, application_key_enc TEXT NOT NULL, updated_at INTEGER NOT NULL)",
 ];
 
 /**

@@ -43,7 +43,7 @@ export function isBackendKind(value: string | null): value is BackendKind {
 }
 
 export function isS3Provider(value: string | null): value is S3Provider {
-  return value === "exoscale" || value === "aws" || value === "other";
+  return value === "exoscale" || value === "aws" || value === "b2" || value === "other";
 }
 
 /** Map a backends row to the wire shape. Secrets never leave the server:

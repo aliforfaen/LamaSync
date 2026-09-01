@@ -10,6 +10,7 @@ import type {
   ApiKeySummary,
   AuthMeResponse,
   Backend,
+  B2ManagementConfig,
   BrowseResponse,
   Conflict,
   DotfileManifest,
@@ -558,6 +559,17 @@ export const api = {
     apiDelete(`/backends/${encodeURIComponent(id)}`),
   testBackend: (id: string) =>
     apiPost<{ ok: boolean; detail?: string }>(`/backends/${encodeURIComponent(id)}/test`),
+  createB2Bucket: (name: string) =>
+    apiPost<{ ok: boolean; detail?: string }>("/backends/b2-buckets", { name }),
+  getB2Management: () => apiGet<B2ManagementConfig | null>("/admin/b2-management"),
+  saveB2Management: (body: {
+    endpoint: string;
+    region: string;
+    applicationKeyId: string;
+    applicationKey?: string;
+  }) => apiPut<B2ManagementConfig>("/admin/b2-management", body),
+  testB2Management: () =>
+    apiPost<{ ok: boolean; detail?: string }>("/admin/b2-management/test"),
   // LAMA-266: backup health — "Prove it" restore tests, fire drills, and the
   // drill history feed. Both mutating calls refresh backends after success so
   // lastProveAt/lastProveOk stay current for the Dashboard badge.

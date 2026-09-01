@@ -109,7 +109,7 @@ export async function runCreate(ctx: CliContext): Promise<void> {
       const region = flagString(flags, "s3-region") ?? null;
       const providerRaw = flagString(flags, "s3-provider");
       const provider =
-        providerRaw === "exoscale" || providerRaw === "aws" || providerRaw === "other"
+        providerRaw === "exoscale" || providerRaw === "aws" || providerRaw === "b2" || providerRaw === "other"
           ? providerRaw
           : "other";
       // Backend name: the folder name; uniquified by suffix when a row

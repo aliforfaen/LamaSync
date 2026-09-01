@@ -445,6 +445,31 @@ describe("generateRcloneConfig — S3 backend (LAMA-105, LAMA-222)", () => {
     expect(cfg).toMatch(/\[lamasync-s3-generic-backend\][\s\S]*region = us-east-1/);
   });
 
+  test("Backblaze B2 emits an S3-compatible rclone remote", () => {
+    const folder = makeS3Folder({
+      id: "s3-b2",
+      name: "b2-archive",
+      type: "backup",
+    }, {
+      s3Provider: "b2",
+      s3Endpoint: "https://s3.us-east-005.backblazeb2.com",
+      s3Region: "us-east-005",
+    });
+    const assignment = makeAssignment({ folderId: "s3-b2" });
+    const out = generateRcloneConfig(
+      "host-1",
+      [folder],
+      [assignment],
+      "100.100.100.1",
+      "/backups",
+    );
+    const cfg = out.rcloneConfig;
+    expect(cfg).toMatch(/\[lamasync-s3-b2-backend\][\s\S]*type = s3/);
+    expect(cfg).toMatch(/\[lamasync-s3-b2-backend\][\s\S]*provider = Other/);
+    expect(cfg).toMatch(/\[lamasync-s3-b2-backend\][\s\S]*endpoint = https:\/\/s3\.us-east-005\.backblazeb2\.com/);
+    expect(cfg).toMatch(/\[lamasync-s3-b2-backend\][\s\S]*region = us-east-005/);
+  });
+
   test("Exoscale S3 config can be parsed by rclone when available", async () => {
     const folder = makeS3Folder({
       id: "s3-exo-live",

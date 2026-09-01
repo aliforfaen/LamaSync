@@ -18,7 +18,7 @@ import type { CliContext } from "./dispatch.ts";
 import { maskSecretsDeep, printJson, printTable } from "./output.ts";
 
 const BACKEND_KINDS: BackendKind[] = ["s3", "local", "nfs", "restic"];
-const S3_PROVIDERS: S3Provider[] = ["exoscale", "aws", "other"];
+const S3_PROVIDERS: S3Provider[] = ["exoscale", "aws", "b2", "other"];
 
 export async function runList(ctx: CliContext): Promise<void> {
   const { client, json } = ctx;

@@ -78,6 +78,24 @@ lamasync sync <folderId> --host my-laptop
 lamasync ops list --host my-laptop --limit 5 --json
 ```
 
+### Backblaze B2
+
+Choose **Backblaze B2** in the web UI, or create the same S3-compatible
+backend from the CLI. Use a B2 application key ID and application key (not
+the master application key), and copy the region and endpoint from the B2
+bucket page.
+
+```bash
+lamasync backends create \
+  --name "b2-archive" \
+  --kind s3 \
+  --s3-provider b2 \
+  --s3-endpoint https://s3.us-east-005.backblazeb2.com \
+  --s3-region us-east-005 \
+  --s3-access-key-id "$B2_KEY_ID" \
+  --s3-secret-access-key "$B2_APPLICATION_KEY"
+```
+
 ## Recipe 3 — Add a sync folder (server-side cron, daemon-side rclone)
 
 ```bash

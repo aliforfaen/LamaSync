@@ -1,7 +1,7 @@
 import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
-import type { Backend, BackendKind, S3Provider } from "@lamasync/core";
+import type { B2ManagementConfig, Backend, BackendKind, S3Provider } from "@lamasync/core";
 import {
   BACKEND_SELECT,
   type BackendRow,
@@ -16,9 +16,41 @@ import {
   testLocalDirectory,
   testResticRepository,
   testS3Connection,
+  createS3Bucket,
 } from "../backend-test.ts";
 import { encryptSecret, decryptSecret } from "../crypto.ts";
 import { bumpConfigRevision } from "../config-revision.ts";
+import { principalOf, requireAdmin } from "../auth.ts";
+
+interface B2ManagementRow {
+  endpoint: string;
+  region: string;
+  application_key_id: string;
+  application_key_enc: string;
+}
+
+const B2_MANAGEMENT_SELECT =
+  "SELECT endpoint, region, application_key_id, application_key_enc FROM b2_management_config WHERE id = 'default'";
+
+function b2ManagementConfig(): B2ManagementRow | null {
+  return activeDb.query<B2ManagementRow, []>(B2_MANAGEMENT_SELECT).get();
+}
+
+function b2ManagementView(row: B2ManagementRow | null): B2ManagementConfig | null {
+  if (!row) return null;
+  return {
+    endpoint: row.endpoint,
+    region: row.region,
+    applicationKeyId: row.application_key_id,
+    hasApplicationKey: row.application_key_enc !== "",
+  };
+}
+
+function requireB2Manager(set: { status?: unknown }, store: unknown): boolean {
+  if (requireAdmin({ principal: principalOf(store) })) return true;
+  set.status = 403;
+  return false;
+}
 
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
@@ -44,6 +76,15 @@ function validateS3Settings(
   }
   if (provider === "aws" && (!region || region.trim() === "")) {
     return "AWS S3 provider requires s3Region";
+  }
+  if (provider === "b2") {
+    if (!region || region.trim() === "") {
+      return "Backblaze B2 requires the region from its S3 endpoint";
+    }
+    if (!/^https?:\/\/s3\.[a-z0-9-]+\.backblazeb2\.com\/?$/i.test(endpoint.trim()) &&
+        !/^s3\.[a-z0-9-]+\.backblazeb2\.com$/i.test(endpoint.trim())) {
+      return "Backblaze B2 endpoint must match s3.REGION.backblazeb2.com";
+    }
   }
   return null;
 }
@@ -121,6 +162,67 @@ function validateKindFields(
 
 export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
+    "/admin/b2-management",
+    ({ set, store }) => {
+      if (!requireB2Manager(set, store)) return { error: "Admin access required" };
+      return b2ManagementView(b2ManagementConfig());
+    },
+    { detail: { summary: "Read Backblaze B2 bucket-management configuration", tags: ["Admin"] } },
+  )
+  .put(
+    "/admin/b2-management",
+    ({ body, set, store }) => {
+      if (!requireB2Manager(set, store)) return { error: "Admin access required" };
+      const b = body as {
+        endpoint?: unknown; region?: unknown; applicationKeyId?: unknown; applicationKey?: unknown;
+      };
+      const endpoint = typeof b.endpoint === "string" ? b.endpoint.trim() : "";
+      const region = typeof b.region === "string" ? b.region.trim() : "";
+      const applicationKeyId = typeof b.applicationKeyId === "string" ? b.applicationKeyId.trim() : "";
+      const applicationKey = typeof b.applicationKey === "string" ? b.applicationKey : "";
+      const existing = b2ManagementConfig();
+      if (endpoint === "" || region === "" || applicationKeyId === "" || (!existing && applicationKey === "")) {
+        set.status = 400;
+        return { error: "endpoint, region, application key ID, and application key are required" };
+      }
+      const settingsError = validateS3Settings("s3", "b2", endpoint, region);
+      if (settingsError) {
+        set.status = 400;
+        return { error: settingsError };
+      }
+      const encryptedKey = applicationKey !== "" ? encryptSecret(applicationKey) : existing?.application_key_enc;
+      if (!encryptedKey) {
+        set.status = 400;
+        return { error: "application key is required" };
+      }
+      activeDb.run(
+        "INSERT INTO b2_management_config (id, endpoint, region, application_key_id, application_key_enc, updated_at) VALUES ('default', ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET endpoint = excluded.endpoint, region = excluded.region, application_key_id = excluded.application_key_id, application_key_enc = excluded.application_key_enc, updated_at = excluded.updated_at",
+        [endpoint, region, applicationKeyId, encryptedKey, Date.now()],
+      );
+      return b2ManagementView(b2ManagementConfig());
+    },
+    {
+      body: t.Object({ endpoint: t.String(), region: t.String(), applicationKeyId: t.String(), applicationKey: t.Optional(t.String()) }),
+      detail: { summary: "Save encrypted Backblaze B2 bucket-management credentials", tags: ["Admin"] },
+    },
+  )
+  .post(
+    "/admin/b2-management/test",
+    async ({ set, store }) => {
+      if (!requireB2Manager(set, store)) return { error: "Admin access required" };
+      const config = b2ManagementConfig();
+      const applicationKey = config ? decryptSecret(config.application_key_enc) : null;
+      if (!config || !applicationKey) {
+        set.status = 409;
+        return { error: "Backblaze B2 bucket-management credentials are not configured" };
+      }
+      const outcome = await testS3Connection({ provider: "b2", accessKeyId: config.application_key_id, secretAccessKey: applicationKey, endpoint: config.endpoint, region: config.region });
+      if (!outcome.ok) set.status = 502;
+      return outcome;
+    },
+    { detail: { summary: "Test Backblaze B2 bucket-management credentials", tags: ["Admin"] } },
+  )
+  .get(
     "/backends",
     () => {
       const rows = activeDb
@@ -139,6 +241,50 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Backends"],
         responses: {
           200: { description: "Backend list" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .post(
+    "/backends/b2-buckets",
+    async ({ body, set }) => {
+      // Bucket creation uses the separately stored account-level B2 key, not
+      // a destination's transfer key. This preserves least privilege for
+      // ordinary backup operations.
+      const b = body as { name?: unknown };
+      const name = typeof b.name === "string" ? b.name.trim() : "";
+      if (!/^[a-z0-9][a-z0-9-]{4,61}[a-z0-9]$/.test(name) || name.startsWith("b2-")) {
+        set.status = 400;
+        return { error: "B2 bucket name must be 6–63 lowercase letters, numbers, or hyphens, and cannot start with b2-" };
+      }
+      const config = b2ManagementConfig();
+      const applicationKey = config ? decryptSecret(config.application_key_enc) : null;
+      if (!config || !applicationKey) {
+        set.status = 409;
+        return { error: "Configure the Backblaze B2 bucket-management key in Admin first" };
+      }
+      const outcome = await createS3Bucket({
+        provider: "b2",
+        accessKeyId: config.application_key_id,
+        secretAccessKey: applicationKey,
+        endpoint: config.endpoint,
+        region: config.region,
+      }, name);
+      if (!outcome.ok) set.status = outcome.status;
+      return outcome;
+    },
+    {
+      body: t.Object({
+        name: t.String(),
+      }),
+      detail: {
+        summary: "Create a Backblaze B2 bucket from a draft S3 configuration",
+        tags: ["Backends"],
+        responses: {
+          200: { description: "Bucket created" },
+          400: { description: "Invalid B2 configuration or bucket name" },
+          502: { description: "Backblaze/rclone reported an error" },
           401: { description: "Unauthorized" },
         },
       },

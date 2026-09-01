@@ -91,6 +91,15 @@ function validateS3Provider(
     }
     return null;
   }
+  if (provider === "b2") {
+    if (!region || region.trim() === "") {
+      return "Backblaze B2 requires the region from its S3 endpoint";
+    }
+    if (!/^https?:\/\/s3\.[a-z0-9-]+\.backblazeb2\.com\/?$/i.test(endpoint.trim()) &&
+        !/^s3\.[a-z0-9-]+\.backblazeb2\.com$/i.test(endpoint.trim())) {
+      return "Backblaze B2 endpoint must match s3.REGION.backblazeb2.com";
+    }
+  }
   return null;
 }
 

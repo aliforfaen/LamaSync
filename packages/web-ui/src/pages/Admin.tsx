@@ -4,6 +4,7 @@ import type {
   NotificationChannel,
   NotificationEvent,
   NotificationSeverity,
+  B2ManagementConfig,
 } from "@lamasync/core";
 import { api } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
@@ -121,6 +122,28 @@ export function Admin() {
   const [dbSizeBytes, setDbSizeBytes] = useState<number | null>(null);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [serverInfoError, setServerInfoError] = useState<string | null>(null);
+  const [b2Config, setB2Config] = useState<B2ManagementConfig | null>(null);
+  const [b2Endpoint, setB2Endpoint] = useState("");
+  const [b2Region, setB2Region] = useState("");
+  const [b2KeyId, setB2KeyId] = useState("");
+  const [b2Key, setB2Key] = useState("");
+  const [b2Busy, setB2Busy] = useState(false);
+  const [b2Error, setB2Error] = useState<string | null>(null);
+  const [b2Result, setB2Result] = useState<string | null>(null);
+
+  async function refreshB2Management(): Promise<void> {
+    try {
+      const config = await api.getB2Management();
+      setB2Config(config);
+      if (config) {
+        setB2Endpoint(config.endpoint);
+        setB2Region(config.region);
+        setB2KeyId(config.applicationKeyId);
+      }
+    } catch (err) {
+      setB2Error(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   async function refreshNotifications(): Promise<void> {
     setNotificationsLoading(true);
@@ -148,6 +171,7 @@ export function Admin() {
   useEffect(() => {
     void refreshNotifications();
     void refreshChannels();
+    void refreshB2Management();
     // UX workstream 4: server self-description + latest release.
     // LAMA-247 #9: each probe fails independently — a dead /health must not
     // blank the whole block into “—” placeholders nor hide why. The caption
@@ -355,6 +379,42 @@ export function Admin() {
     }
   }
 
+  async function onSaveB2Management(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    setB2Busy(true);
+    setB2Error(null);
+    setB2Result(null);
+    try {
+      const saved = await api.saveB2Management({
+        endpoint: b2Endpoint.trim(),
+        region: b2Region.trim(),
+        applicationKeyId: b2KeyId.trim(),
+        applicationKey: b2Key || undefined,
+      });
+      setB2Config(saved);
+      setB2Key("");
+      setB2Result("Backblaze B2 bucket-management key saved");
+    } catch (err) {
+      setB2Error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setB2Busy(false);
+    }
+  }
+
+  async function onTestB2Management(): Promise<void> {
+    setB2Busy(true);
+    setB2Error(null);
+    setB2Result(null);
+    try {
+      const result = await api.testB2Management();
+      setB2Result(result.detail ?? "Backblaze B2 connection works");
+    } catch (err) {
+      setB2Error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setB2Busy(false);
+    }
+  }
+
   return (
     <div className="page">
       <PageHeader title="Admin" purpose="Server health, log retention, and housekeeping." />
@@ -413,6 +473,29 @@ export function Admin() {
       </section>
 
       <AccessKeysPanel />
+
+      <section className="section">
+        <h2>Backblaze B2 bucket management</h2>
+        <p className="muted">
+          This account-level application key creates private B2 buckets with Backblaze-managed AES-256 encryption. Give it listBuckets, writeBuckets, and writeBucketEncryption; keep separate, restricted transfer keys on each destination. Lifecycle deletion and Object Lock are intentionally not configured here — LamaSync owns backup retention and recovery.
+        </p>
+        <form className="form" onSubmit={(e) => void onSaveB2Management(e)}>
+          <div className="form-row">
+            <label>Endpoint<input value={b2Endpoint} onChange={(e) => setB2Endpoint(e.target.value)} placeholder="https://s3.us-east-005.backblazeb2.com" required /></label>
+            <label>Region<input value={b2Region} onChange={(e) => setB2Region(e.target.value)} placeholder="us-east-005" required /></label>
+          </div>
+          <div className="form-row">
+            <label>Application key ID<input value={b2KeyId} onChange={(e) => setB2KeyId(e.target.value)} autoComplete="off" required /></label>
+            <label>Application key<input type="password" value={b2Key} onChange={(e) => setB2Key(e.target.value)} autoComplete="new-password" placeholder={b2Config?.hasApplicationKey ? "leave blank to keep the stored key" : "required"} required={!b2Config?.hasApplicationKey} /></label>
+          </div>
+          <div className="actions">
+            <button type="submit" className="action primary" disabled={b2Busy}>{b2Busy ? "Saving…" : "Save B2 key"}</button>
+            <button type="button" className="action" disabled={b2Busy || !b2Config?.hasApplicationKey} onClick={() => void onTestB2Management()}>Test connection</button>
+          </div>
+          {b2Result ? <div className="muted">{b2Result}</div> : null}
+          {b2Error ? <div className="error">{b2Error}</div> : null}
+        </form>
+      </section>
 
       <section className="section">
         <h2>Operation log retention</h2>

@@ -15,7 +15,7 @@ export const FOLDER_TYPE_HINTS: Record<FolderType, string> = {
 };
 
 export const BACKEND_KIND_HINTS: Record<BackendKind, string> = {
-  s3: "S3-compatible object storage (Exoscale, AWS, other).",
+  s3: "S3-compatible object storage (Backblaze B2, Exoscale, AWS, and other providers).",
   local: "A directory path — must exist at the same location on every device set up to use it.",
   nfs: "An NFS export mounted locally — same path on every device set up to use it.",
   restic: "Central backup repository — folders use it as the default backup target.",

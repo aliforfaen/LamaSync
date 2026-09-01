@@ -21,6 +21,7 @@ import type {
 import { formatTimeAgo } from "../relative-time.ts";
 
 const PROVIDERS: Array<{ value: S3Provider; label: string }> = [
+  { value: "b2", label: "Backblaze B2" },
   { value: "other", label: "Other / S3-compatible" },
   { value: "exoscale", label: "Exoscale" },
   { value: "aws", label: "AWS" },
@@ -40,6 +41,7 @@ interface FormState {
   s3Region: string;
   s3AccessKeyId: string;
   s3SecretAccessKey: string;
+  b2BucketName: string;
   localPath: string;
   resticRepository: string;
   resticPassword: string;
@@ -53,6 +55,7 @@ const EMPTY_FORM: FormState = {
   s3Region: "",
   s3AccessKeyId: "",
   s3SecretAccessKey: "",
+  b2BucketName: "",
   localPath: "",
   resticRepository: "",
   resticPassword: "",
@@ -67,6 +70,7 @@ function backendToForm(b: Backend): FormState {
     s3Region: b.s3Region ?? "",
     s3AccessKeyId: b.s3AccessKeyId ?? "",
     s3SecretAccessKey: "",
+    b2BucketName: "",
     localPath: b.localPath ?? "",
     resticRepository: b.resticRepository ?? "",
     resticPassword: "",
@@ -92,6 +96,13 @@ function validateForm(form: FormState): string | null {
       }
     }
     if (form.s3AccessKeyId.trim() === "") return "s3 access key id is required";
+    if (form.s3Provider === "b2") {
+      if (form.s3Region.trim() === "") return "Backblaze B2 requires the region from its S3 endpoint";
+      if (!/^https?:\/\/s3\.[a-z0-9-]+\.backblazeb2\.com\/?$/i.test(endpoint) &&
+          !/^s3\.[a-z0-9-]+\.backblazeb2\.com$/i.test(endpoint)) {
+        return "Backblaze B2 endpoint must match s3.REGION.backblazeb2.com";
+      }
+    }
   } else if (form.kind === "local" || form.kind === "nfs") {
     if (!form.localPath.trim().startsWith("/")) {
       return "server path must be an absolute path (starts with /)";
@@ -130,6 +141,7 @@ export function Backends() {
   const [drills, setDrills] = useState<DrillHistory["drills"] | null>(null);
   // LAMA-238: in-form connection test for an unsaved backend config.
   const [formTesting, setFormTesting] = useState(false);
+  const [bucketCreating, setBucketCreating] = useState(false);
   const [formTestResult, setFormTestResult] = useState<{
     ok: boolean;
     detail?: string;
@@ -288,6 +300,25 @@ export function Backends() {
       setError(errorText(err));
     } finally {
       setFormTesting(false);
+    }
+  }
+
+  async function onCreateB2Bucket(): Promise<void> {
+    if (busy || bucketCreating) return;
+    if (form.b2BucketName.trim() === "") {
+      setError("enter a name for the new B2 bucket");
+      return;
+    }
+    setBucketCreating(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.createB2Bucket(form.b2BucketName.trim());
+      setNotice(result.detail ?? `B2 bucket '${form.b2BucketName.trim()}' created`);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBucketCreating(false);
     }
   }
 
@@ -510,7 +541,7 @@ export function Backends() {
                   <input
                     value={form.s3Endpoint}
                     onChange={(e) => set("s3Endpoint", e.target.value)}
-                    placeholder="sos-zone.exo.io or https://…"
+                    placeholder={form.s3Provider === "b2" ? "https://s3.us-east-005.backblazeb2.com" : "sos-zone.exo.io or https://…"}
                     required={form.kind === "s3"}
                   />
                 </label>
@@ -521,7 +552,7 @@ export function Backends() {
                   <input
                     value={form.s3Region}
                     onChange={(e) => set("s3Region", e.target.value)}
-                    placeholder="us-east-1 (AWS only)"
+                    placeholder={form.s3Provider === "b2" ? "e.g. us-east-005 (required for B2)" : "us-east-1 (AWS only)"}
                   />
                 </label>
                 <label>
@@ -555,6 +586,25 @@ export function Backends() {
                   </label>
                 ) : null}
               </div>
+              {form.s3Provider === "b2" && !editingId ? (
+                <div className="form-row">
+                  <label>
+                    Create a new B2 bucket (optional)
+                    <input
+                      value={form.b2BucketName}
+                      onChange={(e) => set("b2BucketName", e.target.value)}
+                      placeholder="my-backup-bucket"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label>
+                    &nbsp;
+                    <button type="button" className="action" onClick={() => void onCreateB2Bucket()} disabled={bucketCreating}>
+                      {bucketCreating ? "Creating bucket…" : "Create bucket"}
+                    </button>
+                  </label>
+                </div>
+              ) : null}
             </>
           ) : form.kind === "local" || form.kind === "nfs" ? (
             <>

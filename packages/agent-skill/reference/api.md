@@ -86,6 +86,10 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/folders/:id/files`             | Upload a file into a folder's destination backend (multipart `file`, optional `path` subdir). Synchronous, ≤ 100 MB cap (`LAMASYNC_FOLDER_FILE_MAX_BYTES`); 409 for non-writable backends (sftp/restic) (LAMA-260) |
 | GET      | `/backends`                                | List reusable backends                           |
 | POST     | `/backends`                                | Create backend (secrets encrypted at rest)        |
+| POST     | `/backends/b2-buckets`                     | Create a B2 bucket using the encrypted account-level management key configured in Admin |
+| GET      | `/admin/b2-management`                     | Read the masked Backblaze B2 bucket-management configuration |
+| PUT      | `/admin/b2-management`                     | Save Backblaze B2 bucket-management credentials; application key is write-only and encrypted at rest |
+| POST     | `/admin/b2-management/test`                | Test the stored Backblaze B2 bucket-management credentials |
 | GET      | `/backends/:backendId`                     | Read one backend (additive `lastProveAt`/`lastProveOk` for the badge) |
 | PATCH    | `/backends/:backendId`                     | Update/rotate backend credentials                |
 | DELETE   | `/backends/:backendId`                     | Delete backend (409 while folders use it)        |

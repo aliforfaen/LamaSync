@@ -17,7 +17,9 @@ export type HostClass =
 
 export type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
 export type FolderBackend = "sftp" | "s3" | "local" | "nfs" | "restic";
-export type S3Provider = "exoscale" | "aws" | "other";
+// `b2` uses Backblaze's S3-compatible API (rather than rclone's separate
+// native `b2` remote) so it shares the reusable S3 backend model.
+export type S3Provider = "exoscale" | "aws" | "b2" | "other";
 
 export type OperationStatus =
   | "started"
@@ -69,6 +71,15 @@ export interface Backend {
   // report null/null and the badge shows "not yet verified".
   lastProveAt?: number | null;
   lastProveOk?: boolean | null;
+}
+
+/** Account-level B2 credential used only for bucket management. It stays
+ * separate from per-destination transfer credentials and is write-only. */
+export interface B2ManagementConfig {
+  endpoint: string;
+  region: string;
+  applicationKeyId: string;
+  hasApplicationKey: boolean;
 }
 
 // LAMA-259: one row in the folder-scoped backup-history slider. Shape is

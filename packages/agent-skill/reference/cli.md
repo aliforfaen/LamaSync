@@ -106,11 +106,11 @@ Usage: lamasync folders create [flags]
   --backend <kind>        sftp | s3 | local | nfs | restic (default: sftp)
   --s3-backend-id <id>    reuse a stored S3 backend (LAMA-222)
   --s3-bucket <bucket>    required when --backend=s3
-  --s3-provider <p>       exoscale | aws | other (default: other)
+  --s3-provider <p>       b2 | exoscale | aws | other (default: other)
   --s3-endpoint <url>     required when --backend=s3 (unless using backendId)
   --s3-access-key-id <k>  S3 access key id
   --s3-secret-access-key <s>  S3 secret (write-only; never echoed)
-  --s3-region <r>         region (e.g. us-east-1); required for aws
+  --s3-region <r>         region (e.g. us-east-1); required for aws and b2
   --backend-id <id>       reference a local/nfs/restic backend row
 ```
 
@@ -149,9 +149,9 @@ Usage: lamasync backends create [flags]
 
   --name <name>            backend name (required)
   --kind <kind>            s3 | local | nfs | restic (required)
-  --s3-provider <p>        exoscale | aws | other (default: other)
+  --s3-provider <p>        b2 | exoscale | aws | other (default: other)
   --s3-endpoint <url>      required (s3)
-  --s3-region <r>          required for aws
+  --s3-region <r>          required for aws and b2
   --s3-access-key-id <k>   required (s3)
   --s3-secret-access-key <s>  required (s3); write-only
   --local-path <dir>       absolute server-side directory (local/nfs)
