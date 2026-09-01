@@ -15,6 +15,7 @@ COPY packages/daemon/package.json packages/daemon/
 COPY packages/tui/package.json packages/tui/
 COPY packages/web-ui/package.json packages/web-ui/
 COPY packages/agent-skill/package.json packages/agent-skill/
+COPY packages/deploy-agent/package.json packages/deploy-agent/
 RUN bun install --frozen-lockfile
 
 # Copy sources and build the server binary.
