@@ -30,7 +30,9 @@ import type {
   QueuedActionType,
   ResticSnapshot,
   ReleaseInfo,
+  ServerDeployConfig,
   Share,
+  ServerDeployJob,
   StorageReport,
   FolderSize,
   BrowseRef,
@@ -305,6 +307,16 @@ export const api = {
     }),
   health: () => apiGet<HealthResponse>("/health"),
   latestRelease: () => apiGet<ReleaseInfo>("/release/latest"),
+  // LAMA-301: server-deploy control (Admin page).
+  serverDeployConfig: () => apiGet<ServerDeployConfig>("/server-deploys/config"),
+  listServerDeploys: (limit?: number) =>
+    apiGet<ServerDeployJob[]>(
+      limit ? `/server-deploys?limit=${limit}` : "/server-deploys",
+    ),
+  getServerDeploy: (id: string) =>
+    apiGet<ServerDeployJob>(`/server-deploys/${encodeURIComponent(id)}`),
+  requestServerDeploy: () =>
+    apiPost<ServerDeployJob>("/server-deploys", {}),
   listHosts: () => apiGet<Host[]>("/hosts"),
   getHost: (hostId: string) =>
     apiGet<Host>(`/hosts/${encodeURIComponent(hostId)}`),

@@ -5,6 +5,7 @@ import type { EffectivePause, FolderAssignment } from "@lamasync/core";
 import {
   buildRcloneCommand,
   classifyRcloneExit,
+  effectiveSyncFilterPatterns,
   effectiveBandwidthSchedule,
   isPauseActive,
   pickConflictAction,
@@ -106,6 +107,16 @@ describe("buildRcloneCommand", () => {
     const idx = argv.indexOf("--filter-from");
     expect(idx).toBeGreaterThan(-1);
     expect(argv[idx + 1]).toBe("/tmp/lamasync.exclude");
+  });
+
+  test("ignoreGitMetadata excludes .git from the sync transfer", () => {
+    expect(effectiveSyncFilterPatterns(["- node_modules/**"], "sync", true)).toEqual([
+      "- .git/**",
+      "- node_modules/**",
+    ]);
+    expect(effectiveSyncFilterPatterns(["- node_modules/**"], "mount", true)).toEqual([
+      "- node_modules/**",
+    ]);
   });
 
   test("bandwidthSchedule trims whitespace and adds --bwlimit", () => {

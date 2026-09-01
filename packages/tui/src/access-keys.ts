@@ -26,6 +26,8 @@ export function principalLabel(me: AuthMeResponse): string {
       return me.name ? `admin key "${me.name}"` : "admin key";
     case "device":
       return me.name ? `device key "${me.name}"` : "device key";
+    case "deploy":
+      return me.name ? `deploy key "${me.name}"` : "deploy key";
   }
 }
 
@@ -43,7 +45,7 @@ export type AccessKeyStatus = "active" | "revoked";
 export interface AccessKeyRowDisplay {
   id: string;
   name: string;
-  kind: "admin" | "device";
+  kind: "admin" | "device" | "deploy";
   hostId: string | null;
   /** Human bound-host label: the host id for device keys, "—" for admin. */
   boundHostLabel: string;

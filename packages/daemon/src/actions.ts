@@ -249,7 +249,8 @@ export function validateActionShape(
     type !== "trigger_sync" &&
     type !== "trigger_backup" &&
     type !== "check_update" &&
-    type !== "refresh_config"
+    type !== "refresh_config" &&
+    type !== "update_daemon"
   ) {
     return null;
   }

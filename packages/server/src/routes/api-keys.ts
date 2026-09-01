@@ -96,9 +96,13 @@ export const apiKeysRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: "name must be 64 characters or fewer" };
       }
+      // LAMA-301: `deploy` keys are the dedicated, narrowly-scoped
+      // credential for the LXC-resident deploy agent. They may only
+      // claim/progress/complete server-deploy jobs — never enqueue one.
+      const kind = body.kind === "deploy" ? "deploy" : "admin";
       let created;
       try {
-        created = insertManagedApiKey({ name, kind: "admin", hostId: null });
+        created = insertManagedApiKey({ name, kind, hostId: null });
       } catch (err) {
         set.status = 500;
         return {
@@ -115,9 +119,13 @@ export const apiKeysRoutes = new Elysia({ prefix: "/api/v1" })
       };
     },
     {
-      body: t.Object({ name: t.String() }),
+      body: t.Object({
+        name: t.String(),
+        kind: t.Optional(t.Union([t.Literal("admin"), t.Literal("deploy")])),
+      }),
       detail: {
-        summary: "Create a managed admin API key (secret returned once)",
+        summary:
+          "Create a managed admin API key (secret returned once). kind=deploy mints the narrowly-scoped deploy-agent credential.",
         tags: ["API Keys"],
         responses: {
           200: { description: "Key created with the raw secret (once)" },

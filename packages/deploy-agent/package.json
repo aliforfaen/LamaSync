@@ -1,0 +1,11 @@
+{
+  "name": "@lamasync/deploy-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun build --compile --outfile dist/lamasync-deploy-agent src/index.ts"
+  },
+  "dependencies": {
+    "@lamasync/core": "workspace:*"
+  }
+}

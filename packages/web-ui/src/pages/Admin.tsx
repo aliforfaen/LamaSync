@@ -5,11 +5,14 @@ import type {
   NotificationEvent,
   NotificationSeverity,
   B2ManagementConfig,
+  ServerDeployJob,
 } from "@lamasync/core";
 import { api } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { PairingModal } from "../components/PairingModal.tsx";
 import { AccessKeysPanel } from "../components/AccessKeysPanel.tsx";
+import { deployCardState, deployStageLabel } from "../server-deploy-ui.ts";
+import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SEVERITY_LEVELS: NotificationSeverity[] = ["critical", "default", "info"];
@@ -131,6 +134,44 @@ export function Admin() {
   const [b2Error, setB2Error] = useState<string | null>(null);
   const [b2Result, setB2Result] = useState<string | null>(null);
 
+  // LAMA-301: Server deployment card.
+  const { event: wsEvent } = useWebSocket();
+  const [deployEnabled, setDeployEnabled] = useState<boolean | null>(null);
+  const [deployJobs, setDeployJobs] = useState<ServerDeployJob[]>([]);
+  const [deployBusy, setDeployBusy] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
+  const [confirmDeploy, setConfirmDeploy] = useState(false);
+  const [showDeployTail, setShowDeployTail] = useState(false);
+
+  const refreshDeploys = async (): Promise<void> => {
+    try {
+      const [config, jobs] = await Promise.all([
+        api.serverDeployConfig(),
+        api.listServerDeploys(10),
+      ]);
+      setDeployEnabled(config.enabled);
+      setDeployJobs(jobs);
+    } catch (err) {
+      setDeployError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  async function onRequestDeploy(): Promise<void> {
+    setConfirmDeploy(false);
+    setDeployBusy(true);
+    setDeployError(null);
+    try {
+      // The server coalesces duplicates: if an active job already exists,
+      // this returns that job instead of creating a second deployment.
+      await api.requestServerDeploy();
+      await refreshDeploys();
+    } catch (err) {
+      setDeployError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeployBusy(false);
+    }
+  }
+
   async function refreshB2Management(): Promise<void> {
     try {
       const config = await api.getB2Management();
@@ -196,8 +237,28 @@ export function Admin() {
         );
       }
       setServerInfoError(problems.length > 0 ? problems.join(" — ") : null);
+      void refreshDeploys();
     })();
   }, []);
+
+  // LAMA-301: poll while a deploy is pending/running, and refresh on WS
+  // deploy events (the API itself restarts mid-deploy, so the socket will
+  // drop and reconnect — polling is the fallback).
+  const deployCard = deployCardState(deployEnabled === true, deployJobs);
+  const deployActive = deployCard.activeJob !== null;
+  useEffect(() => {
+    if (!deployActive) return;
+    const timer = setInterval(() => void refreshDeploys(), 5_000);
+    return () => clearInterval(timer);
+  }, [deployActive]);
+  useEffect(() => {
+    if (wsEvent && wsEvent.kind === "server_deploy") {
+      setDeployJobs((current) => {
+        const others = current.filter((j) => j.id !== wsEvent.job.id);
+        return [wsEvent.job, ...others];
+      });
+    }
+  }, [wsEvent]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -452,6 +513,94 @@ export function Admin() {
               </tr>
             </tbody>
           </table>
+      </section>
+
+      <section className="section">
+        <div className="toolbar">
+          <h2>Server deployment</h2>
+          {deployCard.canRequest && deployEnabled ? (
+            <button
+              type="button"
+              className="action primary"
+              disabled={deployBusy}
+              onClick={() => setConfirmDeploy(true)}
+            >
+              {deployBusy ? "Requesting…" : deployCard.requestLabel}
+            </button>
+          ) : null}
+        </div>
+        {deployError ? <div className="error">{deployError}</div> : null}
+        {deployEnabled === false ? (
+          <p className="muted">{deployCard.detail}</p>
+        ) : deployEnabled === null ? (
+          <p className="muted">checking deploy capability…</p>
+        ) : (
+          <>
+            <dl className="host-detail-dl">
+              <dt>Status</dt>
+              <dd>
+                <span
+                  className={`badge ${
+                    deployCard.kind === "active"
+                      ? "badge-started"
+                      : deployCard.kind === "failed"
+                        ? "badge-failed"
+                        : deployCard.kind === "succeeded"
+                          ? "badge-success"
+                          : "badge-unknown"
+                  }`}
+                >
+                  {deployCard.headline}
+                </span>
+              </dd>
+              <dt>Target</dt>
+              <dd className="muted">production (GHCR :latest image, container recreation)</dd>
+              {deployCard.detail ? (
+                <>
+                  <dt>Detail</dt>
+                  <dd className="muted">{deployCard.detail}</dd>
+                </>
+              ) : null}
+              {deployCard.lastJob ? (
+                <>
+                  <dt>Last deployment</dt>
+                  <dd className="muted">
+                    {new Date(deployCard.lastJob.requestedAt).toLocaleString()} by{" "}
+                    {deployCard.lastJob.requestedBy ?? "—"}
+                    {deployCard.lastJob.completedAt
+                      ? ` · completed ${new Date(deployCard.lastJob.completedAt).toLocaleString()}`
+                      : ""}
+                  </dd>
+                </>
+              ) : null}
+            </dl>
+            {deployActive && deployCard.activeJob ? (
+              <p className="muted">stage: {deployStageLabel(deployCard.activeJob)}</p>
+            ) : null}
+            {(deployCard.activeJob ?? deployCard.lastJob)?.outputTail ? (
+              <details
+                className="host-detail-config"
+                open={showDeployTail || deployActive}
+                onToggle={(e) => {
+                  const el = e.currentTarget as HTMLDetailsElement;
+                  setShowDeployTail(el.open);
+                }}
+              >
+                <summary>Output tail (sanitized, final 16 KiB)</summary>
+                <pre className="rclone-config">{
+                  (deployCard.activeJob ?? deployCard.lastJob)?.outputTail
+                }</pre>
+              </details>
+            ) : null}
+            {deployCard.kind === "failed" ? (
+              <p className="error">
+                Deployment failed. The container image state is unchanged until a
+                successful deploy — follow the rollback and health procedures in
+                <code> docs/prod-deploy.md</code>.
+              </p>
+            ) : null}
+          </>
+        )}
       </section>
 
       <section className="section">
@@ -827,6 +976,26 @@ export function Admin() {
         </table>
       </section>
 
+      {confirmDeploy && (
+        <ConfirmDialog
+          title="Deploy latest server image"
+          confirmLabel="Deploy now"
+          message={
+            <>
+              Pull the current GHCR <code>:latest</code> server image (or build locally on
+              pull failure) and recreate <code>lamasync-server</code>?
+              <br />
+              <br />
+              The API will briefly restart while the container is recreated. Data
+              volumes (SQLite database, backups) are preserved. This deploys the
+              configured production target — production tracks master/GHCR, so the
+              release version shown above may not change.
+            </>
+          }
+          onConfirm={() => void onRequestDeploy()}
+          onCancel={() => setConfirmDeploy(false)}
+        />
+      )}
       {pruneConfirmDays !== null && (
         <ConfirmDialog
           title="Prune operations"

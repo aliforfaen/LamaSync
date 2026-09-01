@@ -511,6 +511,22 @@ export function isPauseActive(
   return Number.isFinite(until) && until > now;
 }
 
+/**
+ * Produce the rclone filter rules used for an assignment. Git metadata must
+ * be excluded at transfer time when requested; watcher-side suppression alone
+ * cannot prevent bisync from copying it.
+ */
+export function effectiveSyncFilterPatterns(
+  configuredPatterns: readonly string[],
+  folderType: FolderType,
+  ignoreGitMetadata: boolean | null | undefined,
+): string[] {
+  if (ignoreGitMetadata && folderType === "sync") {
+    return ["- .git/**", ...configuredPatterns];
+  }
+  return [...configuredPatterns];
+}
+
 export async function executeAssignment(opts: ExecuteOptions): Promise<OperationReport> {
   const { assignment, folder, hostConfig, hostId, client } = opts;
   const start = Date.now();
@@ -537,7 +553,15 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   const remotePath = `${remoteName}:${resolveDestination(folder, assignment)}`;
   const filterMode = folder.type === "mount" ? "mount" : "sync";
   const filterPath = resolveFilterPath(assignment.ignorePath, assignment.mountIgnorePath ?? null, filterMode);
-  const patterns = loadFilterPatterns(filterPath, assignment.localPath);
+  const configuredPatterns = loadFilterPatterns(filterPath, assignment.localPath);
+  // This option is a transfer filter as well as a watcher-noise filter. The
+  // recursive rclone pattern keeps Git's object database out of both sides of
+  // bisync; merely ignoring inotify events would still copy `.git/`.
+  const patterns = effectiveSyncFilterPatterns(
+    configuredPatterns,
+    folder.type,
+    assignment.ignoreGitMetadata,
+  );
   const exclude = patterns.length > 0 ? writeExcludeFile(patterns) : null;
 
   let command: string[];
@@ -548,6 +572,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   // synchronization universe changed).
   let gitignoreFilter: { path: string; cleanup: () => void } | null = null;
   let gitignoreResync = false;
+  let gitignoreHashFile: string | null = null;
+  let pendingGitignoreHash: string | null = null;
 
   switch (folder.type) {
     case "sync": {
@@ -579,10 +605,11 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
               : null;
             if (prev !== gf.hash) {
               gitignoreResync = true;
+              gitignoreHashFile = hashFile;
+              pendingGitignoreHash = gf.hash;
               console.warn(
                 `[executor] folder=${folder.id} gitignore filter snapshot changed; forcing safe resync`,
               );
-              writeFileSync(hashFile, gf.hash);
             }
           }
         }
@@ -751,6 +778,26 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   }
   if (!runResult) {
     return report(hostId, folder.id, folder.type, "failed", start, { summary: "executor did not run rclone", details: { attempts } });
+  }
+
+  // Do not acknowledge a changed filter until the forced resync actually
+  // succeeded. Otherwise a transient failure would leave old bisync listings
+  // paired with a new hash and the next run could incorrectly omit --resync.
+  if (
+    gitignoreResync &&
+    pendingGitignoreHash !== null &&
+    gitignoreHashFile !== null &&
+    (runResult.exitCode === 0 || runResult.exitCode === 9) &&
+    !runResult.timedOut &&
+    !runResult.aborted
+  ) {
+    try {
+      writeFileSync(gitignoreHashFile, pendingGitignoreHash);
+    } catch (err) {
+      console.warn(
+        `[executor] folder=${folder.id} could not persist gitignore filter snapshot: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // LAMA-122 / LAMA-162: conflict handling. If bisync reported conflicts,

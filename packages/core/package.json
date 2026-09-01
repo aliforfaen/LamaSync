@@ -7,7 +7,9 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./effective-type": "./src/effective-type.ts"
+    "./effective-type": "./src/effective-type.ts",
+    "./remote-update": "./src/remote-update.ts",
+    "./version-compare": "./src/version-compare.ts"
   },
   "scripts": {
     "build": "bun build --compile --outfile dist/lamasync-core src/index.ts"

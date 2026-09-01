@@ -22,6 +22,11 @@ const ACTION_TYPES: QueuedActionType[] = [
   "trigger_backup",
   "check_update",
   "refresh_config",
+  // LAMA-299: admin-initiated remote daemon update. No caller-provided
+  // payload — the daemon targets the latest release via the release proxy
+  // and picks its own supported asset. Older daemons ack it as an unknown
+  // action; the web UI gates the button on REMOTE_DAEMON_UPDATE_MIN_VERSION.
+  "update_daemon",
 ];
 
 const PENDING_TAKE_LIMIT = 10;
@@ -124,6 +129,14 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: `Invalid action type: ${String(type)}` };
       }
+      // LAMA-299: `update_daemon` carries no caller-provided payload. The
+      // daemon always targets the latest release via the release proxy —
+      // an argv string, script URL, asset URL, or target path from the web
+      // UI would be remote code execution by another name.
+      if (type === "update_daemon" && payload !== undefined && payload !== null) {
+        set.status = 400;
+        return { error: "update_daemon does not accept a payload" };
+      }
       const host = activeDb
         .query<{ id: string }, [string]>("SELECT id FROM hosts WHERE id = ?")
         .get(params.hostId);
@@ -162,6 +175,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
           t.Literal("trigger_backup"),
           t.Literal("check_update"),
           t.Literal("refresh_config"),
+          t.Literal("update_daemon"),
         ]),
         payload: t.Optional(
           t.Union([t.Record(t.String(), t.Unknown()), t.Null()]),

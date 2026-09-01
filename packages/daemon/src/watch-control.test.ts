@@ -43,9 +43,11 @@ class FakeFactory implements FolderWatchFactory {
   stopped: string[] = [];
   start(options: { assignment: FolderAssignment }): FolderWatchHandle {
     this.started.push(options.assignment.id);
+    const assignmentId = options.assignment.id;
+    const factory = this;
     return {
       close() {
-        /* record via spy below */
+        factory.stopped.push(assignmentId);
       },
     };
   }
@@ -123,10 +125,19 @@ describe("WatchCoordinator eligibility", () => {
     // Disable it.
     assignments[0] = { ...assignments[0], enabled: false };
     coordinator.reconcile();
-    // The factory's handle.close was invoked (spy shows stop by re-reconcile
-    // removing it); assert the controller is gone via a no-op stop.
+    expect(factory.stopped).toEqual(["a"]);
     coordinator.shutdown();
     expect(factory.started.length).toBe(1);
+  });
+
+  test("a disabled assignment never starts a watcher", () => {
+    const { coordinator, factory } = makeCoordinator({
+      assignments: [assignment("a", "f", { watchEnabled: true, enabled: false })],
+      folders: [folder("f", "sync")],
+    });
+    coordinator.reconcile();
+    expect(factory.started).toEqual([]);
+    coordinator.shutdown();
   });
 
   test("reconcile restarts a watcher when the watch config changes", () => {

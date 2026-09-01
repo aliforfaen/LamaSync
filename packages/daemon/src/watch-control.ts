@@ -47,6 +47,10 @@ export class WatchCoordinator {
     for (const assignment of getAssignments()) {
       const folder = folderById.get(assignment.folderId);
       if (!folder) continue;
+      // An assignment's enabled switch is authoritative for every trigger
+      // source. A disabled assignment must not retain a live watcher which
+      // can enqueue a new bisync run after the next filesystem write.
+      if (!assignment.enabled) continue;
       if (assignment.watchEnabled !== true) continue;
       if (effectiveFolderType(folder, assignment) !== "sync") continue;
       const localPath = expandHomePath(assignment.localPath);

@@ -22,6 +22,8 @@ lamasync/                     # Bun workspace root
         effective-type.ts     # LAMA-239: effectiveFolderType() — assignment.mode resolution
         socket-path.ts        # LAMA-218: shared defaultSocketPath (XDG → ~/.lamasync)
         version-compare.ts    # LAMA-199: semver comparator for update-available detection
+        remote-update.ts      # LAMA-299: REMOTE_DAEMON_UPDATE_MIN_VERSION + daemonSupportsRemoteUpdate()
+        scrub.ts              # LAMA-301: shared deploy-output scrubber + 16 KiB tail cap
         db/
           schema.ts           # SERVER_SCHEMA + MIGRATIONS (includes LAMA-239 mode column)
           client.ts           # initDb(path) : opens SQLite + applies schema
@@ -58,6 +60,7 @@ lamasync/                     # Bun workspace root
           restic.ts           # restic config for backup/dotfile types
           conflicts.ts        # conflict resolution API
           release.ts          # GET /api/v1/release/latest (LAMA-243 server proxy)
+          server-deploys.ts   # LAMA-301: deploy-job request/history/claim/progress/complete (deploy-principal gated)
           backends.ts         # LAMA-222: reusable S3 backends CRUD + connection test
           stats.ts            # LAMA-224: storage report + folder-size endpoints
           browse.ts           # LAMA-226: Data Browser write ops (copy/move/rename/mkdir/upload)
@@ -101,6 +104,8 @@ lamasync/                     # Bun workspace root
         usage.test.ts         # usage tests
         actions.ts            # LAMA-198: trigger_sync / trigger_backup / refresh_config (LAMA-241 host-resolve)
         actions.test.ts       # action handlers + LAMA-220 backup folder filter
+        daemon-update.ts      # LAMA-299: injected update helper (preflight → release → asset → replace), shared by --update + the remote update_daemon action
+        daemon-update.test.ts # helper tests (no secret leaks asserted per outcome)
     tui/                      # @lamasync/tui — OpenTUI frontend + CLI subcommands (LAMA-227)
       src/
         index.ts              # slim entry: flags, CLI fallback, bootShell() — CLI dispatch FIRST
@@ -201,7 +206,9 @@ lamasync/                     # Bun workspace root
           Conflicts.tsx       # pending conflicts + resolve (Pending/Resolved/All)
           Operations.tsx      # operation log + active locks panel + folder/host filter
           DataBrowser.tsx     # LAMA-202/226: local/S3/restic, jobs, write ops
-          Admin.tsx           # operation-log prune + notification channels + server info
+          Admin.tsx           # operation-log prune + notification channels + server info + LAMA-301 Server deployment card
+        daemon-update.ts       # LAMA-299: pure Software-section capability/follow-up state (+test)
+        server-deploy-ui.ts    # LAMA-301: pure Admin deploy-card view-model (+test)
   scripts/
     gen-version.ts            # writes packages/core/src/version.ts from root package.json
     inline-web-ui.ts          # post-vite inliner: embeds JS/CSS into dist/index.html (single-file SPA)
@@ -216,12 +223,19 @@ lamasync/                     # Bun workspace root
       client.Dockerfile       # client test image
       client-test.sh          # install → register → backup → dotfile → log verification
       socket-send.py          # sends JSON commands to the lamasyncd Unix socket
+    deploy-agent/             # @lamasync/deploy-agent — LAMA-301 LXC-resident deploy runner (production only)
+      src/
+        index.ts              # poll/claim/complete loop + boot validation (fixed script, workdir, docker)
+        runner.ts             # injected execution core: fixed-script spawn, stage detection, health backoff
+        runner.test.ts        # injected spawner/probe tests (success, failure, health timeout, scrub, cap)
   packaging/                  # curl | bash installer + skill tarball + systemd template
     install/
       install.sh              # install lamasyncd (+ optional TUI) and systemd unit
       update.sh               # standalone self-update script
     systemd/
       lamasyncd.service       # systemd user-unit template
+    deploy-agent/
+      lamasync-deploy-agent.service # LAMA-301: LXC-resident deploy agent unit (production)
     build-skill-tarball.sh    # LAMA-230: bundles SKILL.md + reference/ into lamasync-skill-<version>.tar.gz
   .github/
     workflows/

@@ -11,6 +11,11 @@ import type {
 } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api, errorText } from "../api.ts";
+import {
+  daemonUpdateUiState,
+  latestRemoteUpdateAction,
+  remoteUpdateFollowUp,
+} from "../daemon-update.ts";
 import { HostClassIcon } from "../components/icons.tsx";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
@@ -81,6 +86,10 @@ export function HostDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   // LAMA-225: transient banner when this host's label is renamed.
   const [renamedBanner, setRenamedBanner] = useState<string | null>(null);
+  // LAMA-299: remote daemon update (Software section).
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [confirmUpdate, setConfirmUpdate] = useState(false);
   const { event } = useWebSocket();
   // LAMA-273: per-device pause / slow mode. The effective pause for this
   // device is its own row when present, else the global fleet pause.
@@ -108,9 +117,30 @@ export function HostDetail() {
     void refresh();
   }, [refresh]);
 
+  // LAMA-299: latest release for the Software section (independent probe;
+  // failure just means the section shows "unknown" for the release).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .latestRelease()
+      .then((r) => {
+        if (!cancelled) setLatestVersion(r.version);
+      })
+      .catch(() => {
+        if (!cancelled) setLatestVersion(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (event && event.kind === "host_renamed" && event.oldId === hostId) {
       setRenamedBanner(`device renamed: ${event.oldId} → ${event.hostname}`);
+      void refresh();
+    }
+    // LAMA-299: action events for this host refresh the Software status.
+    if (event && event.kind === "action" && event.action.hostId === hostId) {
       void refresh();
     }
   }, [event, hostId, refresh]);
@@ -171,6 +201,23 @@ export function HostDetail() {
   function closePreview(): void {
     setPreview(null);
     setPreviewState(null);
+  }
+
+  // LAMA-299: queue a remote daemon update (admin-only action). Duplicate
+  // clicks are prevented locally via `updateBusy` and server-side by the
+  // in-flight capability check in the Software section.
+  async function onUpdateDaemon(): Promise<void> {
+    setConfirmUpdate(false);
+    setUpdateBusy(true);
+    setError(null);
+    try {
+      await api.enqueueAction(hostId, { type: "update_daemon" });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUpdateBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -299,6 +346,27 @@ export function HostDetail() {
 
   const { host, config, manifests, operations, actions } = data;
 
+  // LAMA-299: Software-section derived state. `inFlight` also prevents
+  // duplicate pending requests; the follow-up line tracks the latest
+  // update_daemon action through queued → claimed → installed → confirmed.
+  const updateAction = useMemo(() => latestRemoteUpdateAction(actions), [actions]);
+  const updateInFlight = updateAction?.status === "pending" || updateAction?.status === "taken";
+  const updateState = useMemo(
+    () => daemonUpdateUiState(host, latestVersion, updateInFlight),
+    [host, latestVersion, updateInFlight],
+  );
+  const updateFollowUp = useMemo(
+    () => remoteUpdateFollowUp(updateAction, host.version),
+    [updateAction, host.version],
+  );
+  // Modest poll while an update action is in flight (WS is primary; this
+  // is the fallback when the socket is down).
+  useEffect(() => {
+    if (!updateInFlight) return;
+    const timer = setInterval(() => void refresh(), 5_000);
+    return () => clearInterval(timer);
+  }, [updateInFlight, refresh]);
+
   return (
     <div className="page">
       <div className="toolbar">
@@ -388,6 +456,51 @@ export function HostDetail() {
           </dt>
           <dd><code>{host.configRevision ?? 0}</code> (cached: <code>{config.host.configRevision ?? 0}</code>)</dd>
         </dl>
+      </section>
+
+      <section className="section">
+        <h2>Software</h2>
+        <dl className="host-detail-dl">
+          <dt>Installed version</dt>
+          <dd><code>v{host.version ?? "—"}</code></dd>
+          <dt>Latest release</dt>
+          <dd><code>{latestVersion ? `v${latestVersion}` : "—"}</code></dd>
+          <dt>Update</dt>
+          <dd>
+            {updateState.kind === "ready" ? (
+              <span className="badge badge-update">update available</span>
+            ) : updateState.kind === "no-update" ? (
+              <span className="badge badge-success">up to date</span>
+            ) : (
+              <span className="muted">{updateState.message}</span>
+            )}
+          </dd>
+        </dl>
+        {updateState.kind === "ready" ? (
+          <div className="actions">
+            <button
+              type="button"
+              className="action primary"
+              disabled={updateBusy || updateInFlight}
+              onClick={() => setConfirmUpdate(true)}
+            >
+              {updateBusy ? "Queueing…" : `Update daemon to v${updateState.latest}`}
+            </button>
+          </div>
+        ) : null}
+        {updateFollowUp ? (
+          <div className={updateFollowUp.kind === "failed" ? "error" : "muted"}>
+            {updateFollowUp.message}
+          </div>
+        ) : null}
+        <p className="muted">
+          Remote update runs the same release flow as <code>lamasyncd --update</code> on
+          the device: download from the release proxy, atomic binary replace, then a
+          systemd service restart. Local sync work is not cancelled by this page —
+          but the device service restarts. Devices older than the release that added
+          remote updates must bootstrap once with <code>lamasyncd --update</code> or
+          the installer.
+        </p>
       </section>
 
       <section className="section">
@@ -605,6 +718,27 @@ export function HostDetail() {
           <pre className="rclone-config">{config.rcloneConfig}</pre>
         </details>
       </section>
+
+      {confirmUpdate && updateState.kind === "ready" && (
+        <ConfirmDialog
+          title="Update daemon"
+          confirmLabel={`Update to v${updateState.latest}`}
+          message={
+            <>
+              Update the LamaSync daemon on “{host.hostname}” from
+              v{updateState.installed} to v{updateState.latest}?
+              <br />
+              <br />
+              The device downloads the release via the server's release proxy,
+              atomically replaces its binary, and restarts the
+              <code> lamasyncd.service</code> systemd unit. Local sync work is
+              not cancelled by this page, but the device service restarts.
+            </>
+          }
+          onConfirm={() => void onUpdateDaemon()}
+          onCancel={() => setConfirmUpdate(false)}
+        />
+      )}
 
       {confirmDelete && data && (
         <ConfirmDialog

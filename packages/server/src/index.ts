@@ -25,6 +25,7 @@ import { demoRoutes } from "./routes/demo.ts";
 import { pauseRoutes } from "./routes/pause.ts";
 import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts";
 import { apiKeysRoutes } from "./routes/api-keys.ts";
+import { serverDeployRoutes } from "./routes/server-deploys.ts";
 import { appProfilesRoutes } from "./routes/app-profiles.ts";
 import { backupLegacyRoutes } from "./routes/backup-legacy.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
@@ -178,6 +179,7 @@ const app = new Elysia()
   .use(pauseRoutes)
   .use(pairingRoutes)
   .use(apiKeysRoutes)
+  .use(serverDeployRoutes)
   .use(appProfilesRoutes)
   .use(healthDrillRoutes)
   .use(backupLegacyRoutes)

@@ -28,6 +28,7 @@ Three credential kinds (LAMA-234):
 | `master`  | The `LAMASYNC_API_KEY` env value on the server. Never stored in SQLite, never returned by any route, never shown in the UI. | Full super-admin surface. Existing clients keep working until re-paired. |
 | `admin`   | A managed key created via `POST /api-keys` (or the Web UI). Secret shown once at creation; revealable later only via explicit `POST /api-keys/:id/reveal`. | Full admin surface incl. managing other managed keys. |
 | `device`  | Minted by the pairing exchange, bound to exactly one host. | Only that host's daemon calls — config, registration, heartbeat/reports, claiming and completing its action queue (never enqueueing), locks, conflicts, restic snapshots + restore jobs, dotfile uploads, release checks, `/auth/me`. Assignment PATCH is limited to that host's `mode` field. |
+| `deploy`  | Managed key (LAMA-301) created via `POST /api-keys` with `kind: "deploy"`, held by the LXC-resident deploy agent. | Only the server-deploy agent routes — peek/claim/progress/complete deploy jobs. Cannot request or read jobs, cannot touch anything else. |
 
 - `401 Unauthorized`: missing, wrong, or revoked key — a device that was revoked gets 401 exactly like a bad key.
 - `403 Forbidden`: the key is valid but lacks authority for the route (device key hitting an admin route, or a device key touching another host's rows).
@@ -66,6 +67,14 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/actions/pending`                         | Daemon poll: claim pending actions               |
 | GET      | `/actions/taken?hostId=...`                | Daemon boot-time reclaim: a host's taken actions |
 | POST     | `/actions/:id/complete`                    | Daemon ack: mark action done/failed              |
+| GET      | `/server-deploys/config`                   | Whether server-deploy jobs are enabled (master/admin) — LAMA-301 |
+| POST     | `/server-deploys`                          | Request a production deploy; returns the existing active job on duplicate calls (master/admin, feature-gated) |
+| GET      | `/server-deploys`                          | Recent deploy history, newest first (master/admin) |
+| GET      | `/server-deploys/:id`                      | Deploy job status/output tail (master/admin)     |
+| GET      | `/server-deploys/pending`                  | Deploy agent: peek at the pending job (`{job: null}` when none) — deploy credential only |
+| POST     | `/server-deploys/:id/claim`                | Deploy agent: atomic claim (pending → running) — deploy credential only |
+| POST     | `/server-deploys/:id/progress`             | Deploy agent: stage/output update (scrubbed + capped server-side) — deploy credential only |
+| POST     | `/server-deploys/:id/complete`             | Deploy agent: terminal success/failure — deploy credential only |
 | GET      | `/release/latest`                          | Latest GitHub release info (proxy)               |
 | GET      | `/folders`                                 | List folders                                     |
 | POST     | `/folders`                                 | Create folder                                    |
@@ -191,7 +200,8 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 ```
 
 Events: `operation`, `host`, `host_renamed`, `lock`, `mount`, `conflict`,
-`restic_snapshot`, `restic_restore`, `action`, `browse_job`. Their shapes
+`restic_snapshot`, `restic_restore`, `action`, `browse_job`,
+`server_deploy` (LAMA-301). Their shapes
 live in the OpenAPI 3 spec at `/swagger/json` under `WSEvent`.
 
 ## Schemas
@@ -214,7 +224,8 @@ spec. The high-level shapes (verbose commentary):
 - `BrowseResponse` `backend` is `"local" | "s3" | "restic-snapshot"`; when `backend === "restic-snapshot"` the response also carries `snapshotId` and `folderId` so the UI can re-fetch without a round-trip (LAMA-259)
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
-- `QueuedAction { id, hostId, type, payload?, status, createdAt, takenAt?, completedAt?, result? }`
+- `QueuedAction { id, hostId, type, payload?, status, createdAt, takenAt?, completedAt?, result? }` — action types (LAMA-198/LAMA-299): `trigger_sync`, `trigger_backup`, `check_update`, `refresh_config`, `update_daemon`. `update_daemon` takes NO payload (enqueues 400 on any) — the daemon targets the latest release via the release proxy and picks its own asset; it is admin-only and only meaningful for daemons at or above `REMOTE_DAEMON_UPDATE_MIN_VERSION` (0.3.6). The daemon acks `done` (“installed vX; service restart requested”) BEFORE restarting its service, so `done` ≠ confirmed heartbeat — compare the host's next reported version.
+- `ServerDeployJob { id, requestedAt, requestedBy?, status: "pending"|"running"|"succeeded"|"failed", startedAt?, completedAt?, target: "production", summary?, outputTail? }` (LAMA-301) — one active production job max; `outputTail` is the sanitized final 16 KiB of the fixed update script. Only the `LAMASYNC_DEPLOY_AGENT_ENABLED=true` environment accepts new jobs (else 409 “manual deploy only”).
 - `LockInfo { folderId, lockedBy, lockedAt, lockTtl }`
 - `PauseState { scope: "global"|"host", hostId?, until (ISO), mode: "pause"|"slow", bwlimit? }` — `bwlimit` is a single-segment rclone size (e.g. "1M"); honored only when `mode === "slow"` (LAMA-273)
 - `EffectivePause { until (ISO), mode: "pause"|"slow", bwlimit: string|null }` — embedded on the `/config/:hostId` payload as `pause`; resolved server-side as the host row if present, else the global row, else null (LAMA-273)

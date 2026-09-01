@@ -38,6 +38,7 @@ import type {
   ResticRestoreJob,
   ResticSnapshot,
   Share,
+  ServerDeployJob,
   StorageReport,
   FolderSize,
 } from "./types.ts";
@@ -995,6 +996,63 @@ export class LamaSyncApiClient {
   /** Masked managed-key metadata list. Never contains secrets. */
   listApiKeys(): Promise<ApiKeySummary[]> {
     return this.request<ApiKeySummary[]>("GET", "/api/v1/api-keys");
+  }
+
+  // ---- LAMA-301: server-deploy jobs (deploy-agent surface) ----
+  // The deploy agent's dedicated `deploy` credential may only call these;
+  // admin/master keys request and read jobs via the same paths. See
+  // packages/server/src/routes/server-deploys.ts for the contract.
+
+  /** Peek at the pending production deploy job (null when none). */
+  async getPendingServerDeploy(): Promise<ServerDeployJob | null> {
+    const res = await this.request<{ job: ServerDeployJob | null }>(
+      "GET",
+      "/api/v1/server-deploys/pending",
+    );
+    return res?.job ?? null;
+  }
+
+  /**
+   * Atomically claim a pending job (pending → running). A 409 means
+   * another invocation claimed it first — callers should treat that as
+   * "no work" and return to polling.
+   */
+  claimServerDeploy(id: string): Promise<ServerDeployJob> {
+    return this.request<ServerDeployJob>(
+      "POST",
+      `/api/v1/server-deploys/${encodeURIComponent(id)}/claim`,
+      "",
+    );
+  }
+
+  /** Stage/output update; the server scrubs + caps before persisting. */
+  updateServerDeployProgress(
+    id: string,
+    body: { stage?: string | null; output?: string | null },
+  ): Promise<ServerDeployJob> {
+    return this.request<ServerDeployJob>(
+      "POST",
+      `/api/v1/server-deploys/${encodeURIComponent(id)}/progress`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  /** Terminal completion (succeeded | failed). */
+  completeServerDeploy(
+    id: string,
+    body: {
+      status: "succeeded" | "failed";
+      summary?: string | null;
+      output?: string | null;
+    },
+  ): Promise<ServerDeployJob> {
+    return this.request<ServerDeployJob>(
+      "POST",
+      `/api/v1/server-deploys/${encodeURIComponent(id)}/complete`,
+      JSON.stringify(body),
+      "application/json",
+    );
   }
 
   /** Create an admin key; `secret` is returned exactly once. */

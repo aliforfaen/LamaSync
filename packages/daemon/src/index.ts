@@ -64,12 +64,14 @@ import {
   isMountUnitActive,
   isSystemdAvailable,
   removeMountUnit,
+  restartDaemonService,
   startMountUnit,
   stopMountUnit,
   waitForMountUnitActive,
   writeMountUnit,
 } from "./systemd.ts";
 import { downloadAndReplace, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
+import { performDaemonUpdate, scrubForOutcome } from "./daemon-update.ts";
 import { DAEMON_KNOWN_FLAGS, daemonUsage } from "./usage.ts";
 import { createLinuxInotifyFactory } from "./folder-watch.ts";
 import { WatchCoordinator } from "./watch-control.ts";
@@ -944,6 +946,57 @@ async function main(): Promise<void> {
           }
           return;
         }
+        case "update_daemon": {
+          // LAMA-299: remotely initiated update. No payload is honored —
+          // the helper targets the latest release via the release proxy
+          // and selects only this daemon's own asset. Never honors
+          // LAMASYNC_UPDATE_ASSET (that override is CLI-only).
+          const outcome = await performDaemonUpdate({
+            config: {
+              serverUrl: clientConfig.serverUrl,
+              apiKey: clientConfig.apiKey,
+            },
+            getLatestRelease: () => client.getLatestRelease(),
+            checkAuth: async () => {
+              try {
+                await client.getAuthMe();
+                return true;
+              } catch {
+                return false;
+              }
+            },
+            checkRestartAvailable: isSystemdAvailable,
+            downloadAndReplace,
+          });
+          if (!outcome.ok) {
+            await ack("failed", `${outcome.phase}: ${outcome.summary}`);
+            return;
+          }
+          if (!outcome.changed) {
+            await ack("done", `already at v${outcome.currentVersion}`);
+            return;
+          }
+          // Durable ack BEFORE requesting restart: when systemd tears this
+          // process down the action must not be left orphaned in 'taken'.
+          await ack(
+            "done",
+            `installed v${outcome.latestVersion}; service restart requested`,
+          );
+          const restarted = restartDaemonService();
+          if (!restarted.ok) {
+            await ack(
+              "failed",
+              `installed v${outcome.latestVersion} but service restart failed ` +
+                `(${scrubForOutcome(restarted.reason ?? "unknown")}); ` +
+                "run `systemctl --user restart lamasyncd.service`",
+            );
+            return;
+          }
+          console.log(
+            `[action] update_daemon installed v${outcome.latestVersion}; restart issued`,
+          );
+          return;
+        }
         default: {
           await ack("failed", `unknown action type: ${String(action.type)}`);
           return;
@@ -1435,39 +1488,40 @@ if (import.meta.main) {
       process.exit(1);
     });
   } else if (process.argv.includes("--update")) {
-    // --update flag: fetch latest (via the server's release proxy), pick the
-    // matching asset, replace this binary.
+    // --update flag (refactored for LAMA-299): the same injected helper the
+    // remote `update_daemon` action uses, but operator-initiated — so the
+    // LAMASYNC_UPDATE_ASSET override and a systemd-free environment are
+    // allowed here, and no restart is requested.
     (async () => {
       const config = loadConfig();
       const client = new LamaSyncApiClient(config.serverUrl, config.apiKey);
-      const latest = await client.getLatestRelease();
-      if (!latest) {
-        console.error("lamasyncd --update: unable to reach the release proxy");
+      const outcome = await performDaemonUpdate({
+        config: { serverUrl: config.serverUrl, apiKey: config.apiKey },
+        getLatestRelease: () => client.getLatestRelease(),
+        checkAuth: async () => {
+          try {
+            await client.getAuthMe();
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        // The CLI does not restart the service — the operator does.
+        checkRestartAvailable: () => true,
+        downloadAndReplace,
+        envAssetName: process.env.LAMASYNC_UPDATE_ASSET,
+      });
+      if (!outcome.ok) {
+        console.error(`lamasyncd --update: ${outcome.phase}: ${outcome.summary}`);
         process.exit(1);
       }
-      if (!isNewer(VERSION, latest.version)) {
-        console.log(`lamasyncd --update: already at latest (v${VERSION})`);
+      if (!outcome.changed) {
+        console.log(`lamasyncd --update: already at latest (v${outcome.currentVersion})`);
         process.exit(0);
       }
-      const asset = latest.assets.find((a) => a.name === process.env.LAMASYNC_UPDATE_ASSET)
-        ?? latest.assets.find((a) => a.name === "lamasyncd")
-        ?? latest.assets.find((a) => a.name.startsWith("lamasyncd-") || a.name.startsWith("lamasync-"));
-      if (!asset) {
-        console.error(
-          `lamasyncd --update: no suitable asset in release ${latest.tag} (have: ${latest.assets.map((a) => a.name).join(", ")})`,
-        );
-        process.exit(1);
-      }
-      // argv[1] is the bunfs virtual path in compiled binaries — resolve
-      // the real on-disk binary or the rename target doesn't exist.
-      const target = resolveSelfBinaryPath();
-      const ok = await downloadAndReplace(asset.downloadUrl, target);
-      if (!ok) {
-        console.error("lamasyncd --update: download/replace failed");
-        process.exit(1);
-      }
       console.log(
-        `lamasyncd --update: replaced ${target} with ${asset.name} from ${latest.tag}`,
+        `lamasyncd --update: replaced ${resolveSelfBinaryPath()} with ${outcome.asset} ` +
+          `(now v${outcome.latestVersion}; restart the service to pick it up)`,
       );
       process.exit(0);
     })().catch((err) => {

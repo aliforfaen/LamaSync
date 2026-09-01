@@ -133,6 +133,110 @@ Production now supports managed `admin`/`device` keys alongside the master
   the Web Admin → Access keys when a device is replaced. Existing
   master-key clients keep working until re-paired — no forced cut-over.
 
+## Deploy agent (LAMA-301)
+
+The **Server deployment** card on the Admin page can request a deployment
+of the configured production environment. It works through a small
+**deploy agent** that runs on the LXC itself — NOT inside the
+`lamasync-server` container:
+
+- The server container never receives `/var/run/docker.sock`, host SSH
+  credentials, privileged mode, or a shell-execution endpoint. The only
+  thing the agent ever executes is the fixed script
+  `/home/messhias/lamasync/update.sh` with **no arguments** and the fixed
+  working directory `/home/messhias/lamasync`.
+- The agent reports stage updates (`pulling`, `building`, `recreating`,
+  `waiting for health`) and a sanitized, capped (final 16 KiB) output
+  tail to the normal API. The server scrubs bearer tokens,
+  `KEY=value` secrets, and env dumps before persisting.
+- Only one active (`pending`/`running`) production job can exist; the
+  daily 04:00 cron is unaffected (the one-active-job invariant is
+  enforced server-side, and cron doesn't go through the API).
+
+### Credential
+
+The agent uses a dedicated `deploy` managed key — NOT the master key and
+NOT a device/admin key:
+
+1. Web Admin → Access keys, or `POST /api-keys` with
+   `{ "name": "lxc deploy agent", "kind": "deploy" }`. The secret is
+   shown once.
+2. A `deploy` key can ONLY claim/progress/complete deploy jobs. It cannot
+   request jobs, read history, or touch any other route.
+3. **Rotation**: mint a new deploy key, update the env file (below),
+   `systemctl restart lamasync-deploy-agent`, then revoke the old key via
+   Access keys.
+
+### Provisioning
+
+```bash
+# 1. Build + copy the agent binary (from a dev checkout):
+bun run build   # → packages/deploy-agent/dist/lamasync-deploy-agent
+scp packages/deploy-agent/dist/lamasync-deploy-agent lamasync:/usr/local/bin/
+ssh lamasync 'chmod +x /usr/local/bin/lamasync-deploy-agent'
+
+# 2. Install the systemd unit:
+scp packaging/deploy-agent/lamasync-deploy-agent.service \
+    lamasync:/etc/systemd/system/
+
+# 3. Credential env file (root-owned 0600, read by the unit):
+ssh lamasync 'umask 077; cat > /home/messhias/lamasync/deploy-agent.env <<EOF
+LAMASYNC_SERVER_URL=http://127.0.0.1:8080
+LAMASYNC_DEPLOY_API_KEY=lmsk.<keyId>.<secret>
+EOF'
+
+# 4. The agent user needs docker CLI access (SupplementaryGroups=docker in
+#    the unit); ensure messhias is in the docker group:
+ssh lamasync 'usermod -aG docker messhias'
+
+# 5. Enable:
+ssh lamasync 'systemctl daemon-reload && systemctl enable --now lamasync-deploy-agent'
+```
+
+Network reachability: the agent talks to the API over the published
+compose port on localhost (`http://127.0.0.1:8080`) — no tailnet
+requirements beyond what the server already has.
+
+### Feature gate
+
+Deploy jobs are only accepted when the server runs with
+`LAMASYNC_DEPLOY_AGENT_ENABLED=true` (add to
+`/home/messhias/lamasync/.env` and recreate). Without the flag the Admin
+card renders **manual deploy only** with the documented SSH/update
+command — there is no button creating jobs nobody can claim.
+
+### Boot validation, timeouts, logs
+
+At boot (and re-checked every minute) the agent validates that the fixed
+script exists, is executable, the working directory exists, and `docker`
+is on PATH. With an invalid environment it logs
+`[deploy-agent] UNAVAILABLE — refusing to claim jobs until fixed: …` and
+keeps polling without claiming (so a fixed environment self-recovers).
+
+- Script timeout: **10 minutes** (killed automatically; the job records
+  `failed: deploy script exceeded 600s…`).
+- Health wait after the script exits: up to **4 minutes** of bounded
+  exponential backoff on `GET /api/v1/health` — the deploy itself
+  restarts the API, so the agent completes the same job after the API is
+  back (the SQLite volume survives the container recreation).
+- Agent crash / timeout: a `running` job older than **15 minutes** is
+  reclaimed to `pending` by the server (mirroring daemon-action
+  recovery).
+- Logs: `journalctl -u lamasync-deploy-agent -f`. Script output is also
+  appended to `/home/messhias/lamasync/update.log` by update.sh itself.
+- No automatic rollback in v1: a failed deploy leaves the operator the
+  existing rollback path above; the Admin failure state links there.
+
+### Uninstall
+
+```bash
+ssh lamasync 'systemctl disable --now lamasync-deploy-agent && \
+  rm /etc/systemd/system/lamasync-deploy-agent.service /usr/local/bin/lamasync-deploy-agent && \
+  systemctl daemon-reload'
+```
+
+Revoke the deploy key in Web Admin → Access keys afterwards.
+
 ## Container introspection
 
 ```bash

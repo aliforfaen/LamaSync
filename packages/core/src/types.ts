@@ -209,7 +209,13 @@ export type QueuedActionType =
   | "trigger_sync"
   | "trigger_backup"
   | "check_update"
-  | "refresh_config";
+  | "refresh_config"
+  // LAMA-299: admin-initiated remote daemon update. No caller-provided
+  // payload — the daemon always targets the latest release via the server's
+  // release proxy and picks its own supported asset. Older daemons report
+  // this as an unknown action type, so the UI gates the button on
+  // REMOTE_DAEMON_UPDATE_MIN_VERSION (see ./remote-update.ts).
+  | "update_daemon";
 
 export type QueuedActionStatus = "pending" | "taken" | "done" | "failed";
 
@@ -665,7 +671,11 @@ export type WSEvent =
   | { kind: "restic_restore"; job: ResticRestoreJob }
   | { kind: "action"; action: QueuedAction }
   // LAMA-226: Data Browser write-operation progress.
-  | { kind: "browse_job"; job: BrowseJob };
+  | { kind: "browse_job"; job: BrowseJob }
+  // LAMA-301: server-deploy job state change (pending/running/succeeded/
+  // failed). Broadcast so the Admin card can reconnect after the expected
+  // server restart mid-deploy.
+  | { kind: "server_deploy"; job: ServerDeployJob };
 
 export interface PruneResult {
   deleted: number;
@@ -873,11 +883,14 @@ export interface PairingSessionExchangeRequest {
 }
 
 // LAMA-234: managed API keys. The environment `LAMASYNC_API_KEY` remains the
-// `master` credential; managed keys are `admin` or `device`. Device keys are
-// bound to one host and may only touch that host's resources. A managed
-// secret is surfaced exactly twice in its lifetime: at creation and on an
-// explicit admin reveal. List/read responses carry masked metadata only.
-export type ApiKeyKind = "admin" | "device";
+// `master` credential; managed keys are `admin`, `device`, or (LAMA-301)
+// `deploy`. Device keys are bound to one host and may only touch that
+// host's resources. Deploy keys are the LXC-resident deploy agent's
+// credential: they may only claim/progress/complete server-deploy jobs —
+// never enqueue one, never touch any other route. A managed secret is
+// surfaced exactly twice in its lifetime: at creation and on an explicit
+// admin reveal. List/read responses carry masked metadata only.
+export type ApiKeyKind = "admin" | "device" | "deploy";
 
 /**
  * Resolved credential identity for one request, attached to the Elysia
@@ -887,7 +900,10 @@ export type ApiKeyKind = "admin" | "device";
 export type AuthPrincipal =
   | { kind: "master"; keyId: null; hostId: null }
   | { kind: "admin"; keyId: string; hostId: null }
-  | { kind: "device"; keyId: string; hostId: string };
+  | { kind: "device"; keyId: string; hostId: string }
+  // LAMA-301: the deploy agent's dedicated principal. Narrowly scoped —
+  // only the server-deploy claim/progress/complete routes admit it.
+  | { kind: "deploy"; keyId: string; hostId: null };
 
 /** Masked managed-key metadata. Deliberately contains no secret material. */
 export interface ApiKeySummary {
@@ -938,8 +954,35 @@ export interface ApiKeyRevokeResponse {
  * could otherwise be a device key that will 401 on every admin route).
  */
 export interface AuthMeResponse {
-  kind: "master" | "admin" | "device";
+  kind: "master" | "admin" | "device" | "deploy";
   keyId: string | null;
   name: string | null;
   hostId: string | null;
+}
+
+// LAMA-301: manual production server deploy control. The deploy agent (an
+// LXC-resident systemd service with a dedicated `deploy` credential) claims
+// pending jobs, runs the FIXED update script with no arguments, and reports
+// sanitized, capped output. The server container itself never receives
+// Docker socket access, host SSH credentials, or a shell-execution
+// endpoint — this job model is the entire deploy surface.
+export type ServerDeployStatus = "pending" | "running" | "succeeded" | "failed";
+
+export interface ServerDeployJob {
+  id: string;
+  requestedAt: number;
+  /** Managed-key id/name of the requester when available; never a secret. */
+  requestedBy: string | null;
+  status: ServerDeployStatus;
+  startedAt: number | null;
+  completedAt: number | null;
+  target: "production";
+  summary: string | null;
+  /** Scrubbed, capped (final 16 KiB) script output. */
+  outputTail: string | null;
+}
+
+/** Shape of GET /api/v1/server-deploys/config (LAMA-301). */
+export interface ServerDeployConfig {
+  enabled: boolean;
 }

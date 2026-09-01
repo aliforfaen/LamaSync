@@ -399,6 +399,26 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_host_id ON api_keys(host_id);
+
+-- LAMA-301: manual production server deploy jobs. The LXC-resident deploy
+-- agent (dedicated 'deploy' credential) claims pending jobs, runs the
+-- FIXED update script with no arguments, and reports sanitized, capped
+-- output. Only one active (pending/running) production job may exist --
+-- enforced in the route. History is trimmed on create (short audit tail);
+-- the operation-log retention prune never touches this table.
+CREATE TABLE IF NOT EXISTS server_deploy_jobs (
+    id            TEXT PRIMARY KEY,
+    requested_at  INTEGER NOT NULL,
+    requested_by  TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    started_at    INTEGER,
+    completed_at  INTEGER,
+    target        TEXT NOT NULL DEFAULT 'production',
+    summary       TEXT,
+    output_tail   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_server_deploy_jobs_status
+    ON server_deploy_jobs(status, requested_at);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -553,6 +573,10 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE folder_assignments ADD COLUMN ignore_git_metadata INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE folder_assignments ADD COLUMN respect_gitignore INTEGER NOT NULL DEFAULT 0",
   "CREATE TABLE IF NOT EXISTS b2_management_config (id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, region TEXT NOT NULL, application_key_id TEXT NOT NULL, application_key_enc TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+  // LAMA-301: manual production server deploy jobs (fresh DBs get the
+  // table from SERVER_SCHEMA; this is the idempotent backfill).
+  "CREATE TABLE IF NOT EXISTS server_deploy_jobs (id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, requested_by TEXT, status TEXT NOT NULL DEFAULT 'pending', started_at INTEGER, completed_at INTEGER, target TEXT NOT NULL DEFAULT 'production', summary TEXT, output_tail TEXT)",
+  "CREATE INDEX IF NOT EXISTS idx_server_deploy_jobs_status ON server_deploy_jobs(status, requested_at)",
 ];
 
 /**

@@ -3,6 +3,35 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## LAMA-299 + LAMA-301 — fleet update & deploy control (implemented, not yet live)
+
+**What landed**
+- **LAMA-299 remote daemon update:** `update_daemon` queued action
+  (admin-only, no payload accepted); injected `performDaemonUpdate` helper
+  shared by the remote action and the refactored `lamasyncd --update`; the
+  daemon acks `"installed vX; service restart requested"` before restarting
+  `lamasyncd.service`; Host Detail gains a Software section with a
+  capability-gated **Update daemon** button (`REMOTE_DAEMON_UPDATE_MIN_VERSION`
+  = 0.3.6 in `core/remote-update.ts`), confirmation dialog, and
+  queued → claimed → installed-awaiting-heartbeat → updated follow-up.
+- **LAMA-301 server deploy control:** `server_deploy_jobs` model + admin
+  route family + new `packages/deploy-agent` (LXC-resident systemd service,
+  dedicated `deploy` ApiKeyKind, fixed script path only, scrubbed 16 KiB
+  output tail, 10-min timeout, health backoff, stale-job reclaim) gated by
+  `LAMASYNC_DEPLOY_AGENT_ENABLED`; Admin **Server deployment** card with
+  sanitized output tail and WS + poll updates. The server container never
+  receives docker socket / SSH / shell-execution surface.
+- Version bump 0.3.5 → 0.3.6 (`package.json`, `version.ts`).
+
+**Gates:** `bun x tsc --noEmit` 0, `bun run build:web-ui` green,
+`bun scripts/check-skill-drift.ts --strict` OK (125 API rows).
+
+**Not done / outstanding**
+- Manual disposable-host smoke for LAMA-299 (queue → ack → systemd restart →
+  fresh heartbeat) and the LAMA-301 Docker disposable-environment deploy
+  smoke; production deploy itself is an operator action.
+- Deploy agent is production-only packaging until first live run.
+
 ## LAMA-302 — event-triggered sync (in progress)
 
 Landed the core/server contract + the daemon watch engine + web/CLI controls.

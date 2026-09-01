@@ -1,0 +1,53 @@
+# LAMA-301: systemd template for the LamaSync deploy agent.
+#
+# Provisioning (see docs/prod-deploy.md § "Deploy agent"):
+#   1. Build the binary:  bun run build   (→ packages/deploy-agent/dist/lamasync-deploy-agent)
+#   2. Copy it to the LXC: scp packages/deploy-agent/dist/lamasync-deploy-agent lamasync:/usr/local/bin/
+#   3. Copy this unit:     scp packaging/deploy-agent/lamasync-deploy-agent.service lamasync:/etc/systemd/system/
+#   4. Create the deploy credential (Admin → Access keys, kind=deploy) and
+#      write /home/messhias/lamasync/deploy-agent.env (0600, owned by messhias):
+#          LAMASYNC_SERVER_URL=http://127.0.0.1:8080
+#          LAMASYNC_DEPLOY_API_KEY=lmsk.<keyId>.<secret>
+#   5. systemctl daemon-reload && systemctl enable --now lamasync-deploy-agent
+#
+# Rotation: create a new deploy key, update deploy-agent.env, then
+#   systemctl restart lamasync-deploy-agent
+# Uninstall: systemctl disable --now lamasync-deploy-agent
+#   && rm /etc/systemd/system/lamasync-deploy-agent.service /usr/local/bin/lamasync-deploy-agent
+
+[Unit]
+Description=LamaSync Deploy Agent (production deploy runner)
+Documentation=https://github.com/aliforfaen/LamaSync
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=messhias
+Group=messhias
+# The agent must be a member of the docker group (or otherwise allowed to
+# talk to the daemon) so update.sh can pull/build/recreate — the agent
+# itself NEVER mounts the docker socket inside the lamasync-server
+# container; it only needs host-level docker CLI access to run update.sh.
+SupplementaryGroups=docker
+WorkingDirectory=/home/messhias/lamasync
+ExecStart=/usr/local/bin/lamasync-deploy-agent
+Environment=LAMASYNC_DEPLOY_SCRIPT=/home/messhias/lamasync/update.sh
+Environment=LAMASYNC_DEPLOY_WORKDIR=/home/messhias/lamasync
+# Secrets live in a root-owned 0600 env file — never in this unit.
+EnvironmentFile=/home/messhias/lamasync/deploy-agent.env
+Restart=on-failure
+RestartSec=30s
+# Bounded restart loop so a persistent misconfiguration can't spin forever.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lamasync-deploy-agent
+# The agent runs one fixed script with no arguments; keep it that way.
+NoNewPrivileges=true
+ProtectHome=read-only
+ReadWritePaths=/home/messhias/lamasync
+
+[Install]
+WantedBy=multi-user.target

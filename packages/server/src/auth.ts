@@ -132,6 +132,13 @@ export function resolvePrincipal(token: string | null | undefined): AuthPrincipa
     touchApiKeyLastUsed(row.id);
     return { kind: "device", keyId: row.id, hostId: row.host_id };
   }
+  // LAMA-301: deploy keys are their own narrowly-scoped principal — they
+  // must NOT collapse into the admin branch, or the deploy agent would be
+  // a general admin credential.
+  if (row.kind === "deploy") {
+    touchApiKeyLastUsed(row.id);
+    return { kind: "deploy", keyId: row.id, hostId: null };
+  }
   touchApiKeyLastUsed(row.id);
   return { kind: "admin", keyId: row.id, hostId: null };
 }
@@ -206,6 +213,9 @@ export function principalOf(store: unknown): AuthPrincipal | null {
   if (rec.kind === "admin" && typeof rec.keyId === "string") {
     return { kind: "admin", keyId: rec.keyId, hostId: null };
   }
+  if (rec.kind === "deploy" && typeof rec.keyId === "string") {
+    return { kind: "deploy", keyId: rec.keyId, hostId: null };
+  }
   if (rec.kind === "device" && typeof rec.keyId === "string" && typeof rec.hostId === "string") {
     return { kind: "device", keyId: rec.keyId, hostId: rec.hostId };
   }
@@ -226,6 +236,17 @@ export function requireAdmin(store: AuthStore): AuthPrincipal | null {
   const p = store.principal;
   if (p && (p.kind === "master" || p.kind === "admin")) return p;
   return null;
+}
+
+/**
+ * Gate for the LAMA-301 deploy-agent routes: non-null only for a `deploy`
+ * principal. Strictly narrower than requireAdmin — master and admin keys
+ * can request/read deploy jobs, but only the deploy agent may claim,
+ * progress, or complete them.
+ */
+export function requireDeployAgent(store: AuthStore): AuthPrincipal | null {
+  const p = store.principal;
+  return p && p.kind === "deploy" ? p : null;
 }
 
 /**

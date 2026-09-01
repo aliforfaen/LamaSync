@@ -10,13 +10,14 @@ auth: a break-glass pre-shared master key plus named admin and host-bound
 device keys.
 Everything is written in **TypeScript** running on **Bun**.
 
-Bun workspace with six packages under `packages/`:
+Bun workspace with seven packages under `packages/`:
 - `core` — shared types, DB schema, TOML config, API client
 - `server` — Elysia REST + WebSocket + Swagger + auth
 - `daemon` — client sync daemon (heartbeat, rclone, mounts, scheduler, Unix socket, `--update skill`)
 - `tui` — OpenTUI tabbed shell (6 views, guided wizards) AND the LAMA-229 CLI (`packages/tui/src/cli/`)
 - `web-ui` — React SPA embedded in the server binary
 - `agent-skill` — globally-installed two-tier agent-skill bundle (SKILL.md + reference/)
+- `deploy-agent` — LXC-resident production deploy runner (LAMA-301; fixed-script only, dedicated `deploy` credential)
 
 **Onboarding as a user, not a developer?** If your task is to install and
 run LamaSync as a client on your host (rather than hack on this repo), read
@@ -90,5 +91,5 @@ API endpoints and TUI views, release process): `docs/development.md`.
 
 ## Current status
 
-Project version **0.3.2**, tests green. See `docs/status.md` for the rolling
+Project version **0.3.6**, tests green. See `docs/status.md` for the rolling
 status log and the next-session work queue.

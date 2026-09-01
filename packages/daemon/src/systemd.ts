@@ -244,6 +244,29 @@ export function readDaemonService(): string | null {
   return readFileSync(path, "utf8");
 }
 
+/**
+ * Restart the known `lamasyncd.service` user unit. The unit name is a
+ * fixed literal — never interpolated from user input — so this is safe to
+ * call from the LAMA-299 remote-update path. Best-effort: returns the
+ * outcome so callers can surface a precise manual fallback.
+ */
+export function restartDaemonService(): { ok: boolean; reason?: string } {
+  if (!isSystemdAvailable()) {
+    return {
+      ok: false,
+      reason: "systemctl not available",
+    };
+  }
+  const { status, stderr } = runSystemctl(["restart", "lamasyncd.service"]);
+  if (status !== 0) {
+    return {
+      ok: false,
+      reason: `systemctl exit ${status}${stderr.trim().length > 0 ? `: ${stderr.trim()}` : ""}`,
+    };
+  }
+  return { ok: true };
+}
+
 export function installDaemonService(opts: {
   binaryPath?: string;
   socketPath?: string;
