@@ -20,6 +20,9 @@ Description=LamaSync Deploy Agent (production deploy runner)
 Documentation=https://github.com/aliforfaen/LamaSync
 After=network-online.target docker.service
 Wants=network-online.target
+# Bounded restart loop so a persistent misconfiguration can't spin forever.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -38,9 +41,6 @@ Environment=LAMASYNC_DEPLOY_WORKDIR=/home/messhias/lamasync
 EnvironmentFile=/home/messhias/lamasync/deploy-agent.env
 Restart=on-failure
 RestartSec=30s
-# Bounded restart loop so a persistent misconfiguration can't spin forever.
-StartLimitIntervalSec=600
-StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lamasync-deploy-agent

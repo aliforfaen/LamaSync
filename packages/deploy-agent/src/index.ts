@@ -241,7 +241,10 @@ health, and records a terminal result. Configuration is environment-only:
 
   void poll();
   const pollTimer = setInterval(() => void poll(), config.pollMs);
-  pollTimer.unref?.();
+  // Keep the service process alive. The environment recheck timer is safely
+  // unreferenced above, but the polling loop is the agent's primary work.
+  // If this timer is unreferenced too, a compiled Bun binary exits cleanly
+  // immediately after boot before it can claim a deploy job.
 
   const shutdown = (signal: string): void => {
     console.log(`[deploy-agent] received ${signal}, shutting down`);
