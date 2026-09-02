@@ -3,6 +3,36 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## v0.3.7 deployed + LAMA-311 sandbox discovery (2026-09-02)
+
+**Deployed**
+- Pushed master (d60685f, 54695eb, 6e3243b + two CI test-hygiene fixes:
+  stub `Bun.which` in the mkdir test — CI runners have no rclone; derive
+  the daemon-update no-update assertion from `VERSION`, not hardcoded
+  0.3.6). CI green, tagged **v0.3.7**, release assets published.
+- LXC server updated via `update.sh` (image pull + recreate, boot log
+  `LamaSync server v0.3.7`, health `{status: ok, hostCount: 4,
+  onlineCount: 3}`). cachy daemon updated to 0.3.7 via the standalone
+  updater (in-binary `--check-update` has a 15 min cooldown).
+- End-to-end proof on cachy: folder "Projects" (`~/lamasync/projects`,
+  tilde path) — with the local dir deleted, a sync run **recreates the
+  directory and bisync restores the file from S3**; ops log shows
+  `sync ok: 1 transfers, 12 B`. First transfer after the fix uploaded
+  helloworld.txt (12 B).
+
+**New issue LAMA-311 (discovered in verification)**
+- The daemon unit ships `ProtectHome=read-only` with a STATIC
+  `ReadWritePaths` allowlist (`%h/projects` is a hardcoded guess in
+  `install.sh:83` and the mount template `systemd.ts:228`). Sync/mount
+  folders under $HOME outside the allowlist fail `EROFS` on any local
+  write — masked until now because backups only read locally. cachy is
+  locally unblocked by adding `%h/lamasync` to the unit's
+  ReadWritePaths; the real fix (daemon-derived allowlist or actionable
+  EROFS hint) is tracked in LAMA-311.
+- Watch item: `browse s3` on the new "primary S3" backend returns 502
+  ("S3 request failed") from the server; bisync works fine, so the
+  backend creds are good — browse-only failure, not yet diagnosed.
+
 ## LAMA-309/308/307 — sync-folder device setup fixes (2026-09-02)
 
 **What landed**
