@@ -3,6 +3,18 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## LAMA-305 — read-only mount in initial device setup (2026-09-02)
+
+**What landed**
+- The Folders page "Set up on device…" form now offers the LAMA-239
+  per-device Mode override (Use folder default / Sync / Read-only mount)
+  for sync and mount folders, with AssignmentEditor's exact labels and
+  copy; hidden for backup/app-settings/git. `mode` rides the existing
+  `POST /folders/:id/assign` payload — no wire/route change. Verified
+  end-to-end in a live browser session against the dev server + demo
+  data: mount-mode assignment persisted (`mode=mount`), default stays
+  `inherit`, selector hidden on backup/dotfile folders. Suite 1322 pass.
+
 ## LAMA-304 — per-prefix S3 folder sizes (2026-09-01)
 
 **What landed**

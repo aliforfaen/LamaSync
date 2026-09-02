@@ -45,6 +45,9 @@ interface AssignForm {
   localPath: string;
   syncExpr: string;
   destination: string;
+  // LAMA-305: per-device mode override offered at setup time (same
+  // semantics as AssignmentEditor; only meaningful for sync/mount folders).
+  mode: "inherit" | "sync" | "mount";
 }
 
 /** Hint for a folder backend value (sftp has no glossary entry — the four
@@ -200,6 +203,7 @@ export function Folders() {
     localPath: "",
     syncExpr: "",
     destination: "",
+    mode: "inherit",
   });
   // LAMA-198: transient "queued" note after a per-assignment Sync now.
   const [syncNote, setSyncNote] = useState<string | null>(null);
@@ -413,6 +417,7 @@ export function Folders() {
       localPath: "",
       syncExpr: "",
       destination: "",
+      mode: "inherit",
     });
   }
 
@@ -438,6 +443,7 @@ export function Folders() {
         localPath: assignForm.localPath.trim(),
         syncExpr: cron || null,
         destination: assignForm.destination.trim() || null,
+        mode: assignForm.mode,
       });
       setAssigningFolder(null);
       await refresh();
@@ -700,6 +706,33 @@ export function Folders() {
                 {ROLE_HINTS.find((r) => r.value === assignForm.role)?.hint}
               </HintText>
             </label>
+            {/* LAMA-305: same per-device mode override as AssignmentEditor
+                (LAMA-239), offered at setup time. Only sync/mount folders
+                honor the override; backup/app-settings/git ignore it. */}
+            {assigningFolder.type === "sync" || assigningFolder.type === "mount" ? (
+              <label>
+                Mode
+                <select
+                  value={assignForm.mode}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "sync" || v === "mount" || v === "inherit") {
+                      setAssignForm({ ...assignForm, mode: v });
+                    }
+                  }}
+                >
+                  <option value="inherit">Use folder default</option>
+                  <option value="sync">Sync</option>
+                  <option value="mount">Read-only mount</option>
+                </select>
+                <HintText>
+                  Override how this device uses the folder. &quot;Use folder
+                  default&quot; follows the folder&apos;s type; the other two
+                  force syncing or a read-only mount on this device only.
+                  Other devices are unaffected.
+                </HintText>
+              </label>
+            ) : null}
             <label>
               Local path
               <input
