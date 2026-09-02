@@ -3,6 +3,28 @@
 Rolling status log. Updated at the end of working sessions; `AGENTS.md` only
 carries a one-line pointer here.
 
+## LAMA-309/308/307 — sync-folder device setup fixes (2026-09-02)
+
+**What landed**
+- Dogfood finding: "Set up on device" for a sync folder with a `~/…` path
+  never created the local directory and every sync failed `exit 2` —
+  rclone v1.68.2 does NOT expand `~` (verified empirically; the old comment
+  claiming it does was wrong), and the daemon deliberately left missing
+  paths to "first use" (LAMA-241). Daemon now (LAMA-309): expands assignment
+  paths centrally at config load (`expandConfigPaths`, applied in
+  refreshConfig + cache load so df/watch/mounts/systemd all see absolute
+  paths); `ensureLocalDirectory` mkdir -p's the local dir for sync (executor
+  choke point) and mount runs — never backup/dotfile (a missing backup
+  source must keep failing); mkdir failure fails the run with a clear
+  summary before rclone. LAMA-308: per-folder in-process `KeyedMutex`
+  serializes N claimed trigger_sync actions (8 duplicates previously ran
+  concurrently on one folder), and corrupted bisync-state archive names use
+  ms-precision + counter suffix (second-resolution names collided → ENOTEMPTY
+  loop). LAMA-307: Folders "Set up on device" form hints that the directory
+  is created at first sync/mount (backup paths must exist). New tests for
+  expansion, mkdir semantics, mutex, archive naming; suite 1335 pass,
+  tsc clean, skill-drift --strict OK. Committed locally, not pushed.
+
 ## LAMA-305 — read-only mount in initial device setup (2026-09-02)
 
 **What landed**
