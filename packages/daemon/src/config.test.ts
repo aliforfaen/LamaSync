@@ -1,11 +1,13 @@
-// Unit tests for daemon config helpers (LAMA-241: missing-path warnings).
+// Unit tests for daemon config helpers (LAMA-241: missing-path warnings,
+// LAMA-309: config-load path expansion).
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { expandHomePath, missingAssignmentPaths } from "./config.ts";
+import type { FolderAssignment, HostConfig } from "@lamasync/core";
+import { expandConfigPaths, expandHomePath, missingAssignmentPaths } from "./config.ts";
 
 describe("expandHomePath", () => {
   test("leaves absolute paths untouched", () => {
@@ -58,5 +60,49 @@ describe("missingAssignmentPaths", () => {
 
   test("empty assignments → no warnings", () => {
     expect(missingAssignmentPaths([], () => null)).toEqual([]);
+  });
+});
+
+// LAMA-309: assignment local paths must be expanded once at config load so
+// every consumer (rclone argv, df, watch existsSync, mounts, systemd) sees
+// an absolute path — rclone does NOT expand `~` itself.
+describe("expandConfigPaths (LAMA-309)", () => {
+  const mk = (localPath: string): FolderAssignment => ({
+    id: "a1",
+    folderId: "f1",
+    hostId: "h1",
+    role: "source",
+    localPath,
+    enabled: true,
+  });
+
+  const makeConfig = (assignments: FolderAssignment[]): HostConfig => ({
+    host: { id: "h1", hostname: "h1", status: "online" },
+    assignments,
+    folders: [],
+    manifests: [],
+    rcloneConfig: "[fake]\ntype = local\n",
+    serverTailnetIp: null,
+    peers: [],
+  });
+
+  test("expands ~ / ~/ assignment paths to absolute paths", () => {
+    const cfg = makeConfig([mk("~/sessions"), mk("/srv/data")]);
+    const out = expandConfigPaths(cfg);
+    expect(out).not.toBe(cfg);
+    expect(out.assignments[0]!.localPath).toBe(expandHomePath("~/sessions"));
+    expect(out.assignments[0]!.localPath).not.toBe("~/sessions");
+    expect(out.assignments[1]!.localPath).toBe("/srv/data");
+  });
+
+  test("returns the same reference when no path uses ~ (no needless copy)", () => {
+    const cfg = makeConfig([mk("/srv/data"), mk("/var/lib/foo")]);
+    expect(expandConfigPaths(cfg)).toBe(cfg);
+  });
+
+  test("does not mutate the input config", () => {
+    const cfg = makeConfig([mk("~/sessions")]);
+    expandConfigPaths(cfg);
+    expect(cfg.assignments[0]!.localPath).toBe("~/sessions");
   });
 });

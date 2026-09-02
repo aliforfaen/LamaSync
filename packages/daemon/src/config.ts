@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
-import { parseClientConfig, type ClientConfig } from "@lamasync/core";
+import { parseClientConfig, type ClientConfig, type HostConfig } from "@lamasync/core";
 
 const CONFIG_PATH = join(homedir(), ".config", "lamasync", "client.toml");
 const CONFIG_DIR = dirname(CONFIG_PATH);
@@ -23,8 +23,13 @@ export function loadConfig(): ClientConfig {
   return parseClientConfig(buf);
 }
 
-/** Expand a leading `~` / `~/` / `~user` in a local path. rclone expands
- *  these itself, but our pre-flight existence checks run before rclone. */
+/** Expand a leading `~` / `~/` / `~user` in a local path. rclone does NOT
+ *  expand `~` in local paths (verified on rclone v1.68.2: `rclone lsf '~/x'`
+ *  reports a directory-not-found error), so every consumer (rclone argv,
+ *  checkDiskSpace's `df`, watch-control existsSync, mounts, systemd units)
+ *  must see an absolute path. The daemon expands assignment local paths once
+ *  at config load (see expandConfigPaths); this helper stays idempotent so
+ *  per-consumer defensive use is harmless. */
 export function expandHomePath(p: string): string {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return join(homedir(), p.slice(2));
@@ -39,16 +44,36 @@ export function expandHomePath(p: string): string {
   return p;
 }
 
+/**
+ * LAMA-309: expand every assignment's local path once at config load so the
+ * whole daemon (rclone argv, checkDiskSpace `df`, watch-control existsSync,
+ * mounts, systemd units) consumes absolute paths. Idempotent — already
+ * absolute paths pass through unchanged. Returns the same reference when no
+ * assignment uses `~` so the cached config object is not needlessly copied.
+ */
+export function expandConfigPaths(config: HostConfig): HostConfig {
+  if (config.assignments.every((a) => !a.localPath.startsWith("~"))) {
+    return config;
+  }
+  return {
+    ...config,
+    assignments: config.assignments.map((a) => ({
+      ...a,
+      localPath: expandHomePath(a.localPath),
+    })),
+  };
+}
+
 export interface MissingPath {
   folderId: string;
   folderName: string;
   localPath: string;
 }
 
-/** Assignments whose local path doesn't exist yet (LAMA-241). This is a
- *  normal pre-first-use state (e.g. a tool hasn't run yet), so the daemon
- *  warns instead of failing; the first scheduled sync still reports the
- *  rclone error until the path appears. */
+/** Assignments whose local path does not exist yet (LAMA-241). This is a
+ *  normal pre-first-use state: the local directory is created lazily on the
+ *  first sync/mount run (see executor.ts ensureLocalDirectory), so the daemon
+ *  only logs an info-level note here instead of failing the assignment. */
 export function missingAssignmentPaths(
   assignments: { folderId: string; localPath: string }[],
   folderName: (folderId: string) => string | null,

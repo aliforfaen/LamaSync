@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import type { HostConfig } from "@lamasync/core";
+import { expandConfigPaths } from "./config.ts";
 
 /**
  * Cache of the last host config fetched from the server. Lets the daemon keep
@@ -24,7 +25,10 @@ export function loadCache(): HostConfig | null {
   if (!existsSync(CACHE_PATH)) return null;
   try {
     const text = readFileSync(CACHE_PATH, "utf8");
-    return JSON.parse(text) as HostConfig;
+    // LAMA-309: expand `~` assignment local paths on read too, so a cache
+    // written by a pre-fix daemon still yields absolute paths for every
+    // consumer. Idempotent for paths that are already absolute.
+    return expandConfigPaths(JSON.parse(text) as HostConfig);
   } catch (err) {
     console.warn(
       `[config-cache] failed to parse ${CACHE_PATH}: ${err instanceof Error ? err.message : String(err)}`,

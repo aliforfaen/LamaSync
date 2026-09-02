@@ -22,7 +22,7 @@ import {
   summarizeReportForAction,
   summarizeUpdateCheck,
 } from "./actions.ts";
-import { loadConfig, missingAssignmentPaths } from "./config.ts";
+import { expandConfigPaths, loadConfig, missingAssignmentPaths } from "./config.ts";
 import { CACHE_PATH, loadCache, saveCache } from "./config-cache.ts";
 import {
   UPDATE_CHECK_COOLDOWN_MS,
@@ -37,6 +37,7 @@ import {
   type SocketState,
 } from "./socket.ts";
 import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
+import { KeyedMutex } from "./keyed-mutex.ts";
 import { detectTailnetIp, TailnetReportTracker } from "./lan-peer.ts";
 import {
   acquireLock,
@@ -603,8 +604,13 @@ async function main(): Promise<void> {
   const refreshConfig = async (): Promise<boolean> => {
     try {
       const cfg = await client.getConfig(hostId);
-      hostConfig = cfg;
-      saveCache(cfg);
+      // LAMA-309: expand assignment local paths once at config load so every
+      // consumer (rclone argv, checkDiskSpace `df`, watch-control existsSync,
+      // mounts, systemd units) sees absolute paths. Persist the expanded form
+      // so the on-disk cache stays canonical even for pre-fix daemons.
+      const config = expandConfigPaths(cfg);
+      hostConfig = config;
+      saveCache(config);
       // LAMA-225: the server owns the display label. When an operator
       // renamed this host via the UI, /config/:hostId returns the new
       // hostname while this daemon still identifies by its local
@@ -665,36 +671,21 @@ async function main(): Promise<void> {
     }
   };
 
-  const runOnce = async (
-    assignment: FolderAssignment,
-    opts?: { dryRun?: boolean; triggerOrigin?: TriggerOrigin },
-  ): Promise<OperationReport | null> => {
-    // LAMA-302: attach the trigger origin to every report so the operations
-    // view can distinguish watch / schedule / manual runs.
-    const attachOrigin = (report: OperationReport): OperationReport =>
-      opts?.triggerOrigin ? { ...report, trigger: opts.triggerOrigin } : report;
-    if (!hostConfig) {
-      console.warn(`[run] no hostConfig cached; skipping folder=${assignment.folderId}`);
-      return null;
-    }
-    const folder: Folder | undefined = hostConfig.folders.find(
-      (f) => f.id === assignment.folderId,
-    );
-    if (!folder) {
-      console.warn(`[run] folder=${assignment.folderId} not in cache; refreshing`);
-      await refreshConfig();
-      return null;
-    }
-    // LAMA-239: per-host mount/sync override. Clone the folder with the
-    // effective type so every downstream branch (filter mode, disk-space
-    // pre-flight, retry loop, operation_log) reflects what THIS host will
-    // actually do, without mutating the cached folder (which is shared
-    // across all host assignments).
-    const effectiveFolder: Folder = {
-      ...folder,
-      type: effectiveFolderType(folder, assignment),
-    };
+  const runMutex = new KeyedMutex();
 
+  // LAMA-308: the run body, extracted so runOnce can serialize concurrent
+  // runs for the same folder through the in-process keyed mutex. Covers lock
+  // acquisition through executeAssignment + reporting, so two claimed
+  // `trigger_sync` actions for one folder run one after another instead of
+  // racing the same bisync state dir / mount.
+  const runLocked = async (
+    assignment: FolderAssignment,
+    folder: Folder,
+    effectiveFolder: Folder,
+    hostConfig: HostConfig,
+    opts: { dryRun?: boolean; triggerOrigin?: TriggerOrigin } | undefined,
+    attachOrigin: (report: OperationReport) => OperationReport,
+  ): Promise<OperationReport | null> => {
     // LAMA-294: the lock identity is the canonical destination/repository
     // key (host-scoped for ordinary backups), so distinct hosts with the
     // same folder no longer contend unless they intentionally share a
@@ -780,6 +771,48 @@ async function main(): Promise<void> {
     }
   };
 
+  const runOnce = async (
+    assignment: FolderAssignment,
+    opts?: { dryRun?: boolean; triggerOrigin?: TriggerOrigin },
+  ): Promise<OperationReport | null> => {
+    // LAMA-302: attach the trigger origin to every report so the operations
+    // view can distinguish watch / schedule / manual runs.
+    const attachOrigin = (report: OperationReport): OperationReport =>
+      opts?.triggerOrigin ? { ...report, trigger: opts.triggerOrigin } : report;
+    if (!hostConfig) {
+      console.warn(`[run] no hostConfig cached; skipping folder=${assignment.folderId}`);
+      return null;
+    }
+    const folder: Folder | undefined = hostConfig.folders.find(
+      (f) => f.id === assignment.folderId,
+    );
+    if (!folder) {
+      console.warn(`[run] folder=${assignment.folderId} not in cache; refreshing`);
+      await refreshConfig();
+      return null;
+    }
+    // LAMA-239: per-host mount/sync override. Clone the folder with the
+    // effective type so every downstream branch (filter mode, disk-space
+    // pre-flight, retry loop, operation_log) reflects what THIS host will
+    // actually do, without mutating the cached folder (which is shared
+    // across all host assignments).
+    const effectiveFolder: Folder = {
+      ...folder,
+      type: effectiveFolderType(folder, assignment),
+    };
+
+    // LAMA-308: serialize runs for the same folder in-process so N claimed
+    // trigger_sync actions for one folder run one after another instead of
+    // racing. Acquisition happens inside the lock so the second caller waits
+    // for the first to release its server lock before it runs.
+    // Capture the (now-narrowed) host config: TS won't preserve the null-out
+    // narrowing across the closure, and `hostConfig` is a mutable `let`.
+    const config = hostConfig;
+    return await runMutex.run(assignment.folderId, () =>
+      runLocked(assignment, folder, effectiveFolder, config, opts, attachOrigin),
+    );
+  };
+
   // LAMA-198: config-revision tracking. The server bumps `config_revision`
   // on every change that could affect a host's effective config (folders,
   // assignments, dotfile manifests, LAN peers, /register). The daemon
@@ -793,31 +826,22 @@ async function main(): Promise<void> {
     lastSeenRevision = cfg.host.configRevision ?? 0;
   };
 
-  // LAMA-241: a local path that doesn't exist yet is a normal pre-first-use
-  // state (a tool hasn't run), but the first sync fails with an rclone exit
-  // 3 that looks like a real fault. Warn once per path while it stays
-  // missing, and re-warn if it disappears again after appearing — bounded,
-  // no per-refresh spam.
-  const warnedMissingPaths = new Set<string>();
+  // LAMA-241 / LAMA-309: a local path that doesn't exist yet is a normal
+  // pre-first-use state — the directory is created lazily on the first
+  // sync/mount run (see executor.ts ensureLocalDirectory). Log a single
+  // info-level line per refresh so operators can spot a genuinely wrong
+  // path without per-refresh spam.
   const warnMissingLocalPaths = (): void => {
     const assignments = hostConfig?.assignments ?? [];
     const missing = missingAssignmentPaths(assignments, (folderId) =>
       hostConfig?.folders.find((f) => f.id === folderId)?.name ?? null,
     );
-    const current = new Set(
-      missing.map((m) => `${m.folderId}:${m.localPath}`),
-    );
-    for (const m of missing) {
-      const key = `${m.folderId}:${m.localPath}`;
-      if (!warnedMissingPaths.has(key)) {
-        console.warn(
-          `[config] folder=${m.folderName} local path missing, waiting for first use: ${m.localPath}`,
-        );
-        warnedMissingPaths.add(key);
-      }
-    }
-    for (const key of warnedMissingPaths) {
-      if (!current.has(key)) warnedMissingPaths.delete(key);
+    if (missing.length > 0) {
+      console.info(
+        `[config] ${missing.length} local path(s) missing, will be created on first run: ${missing
+          .map((m) => `${m.folderName}:${m.localPath}`)
+          .join(", ")}`,
+      );
     }
   };
 
@@ -1323,6 +1347,9 @@ async function runMountCommand(folderId: string): Promise<void> {
     console.error(`[mount-cmd] no host config available for host=${hostId}`);
     process.exit(1);
   }
+  // LAMA-309: expand assignment local paths so the mount point (used
+  // directly by startMount below) is absolute.
+  hostConfig = expandConfigPaths(hostConfig);
 
   const folder = hostConfig.folders.find((f) => f.id === folderId);
   const assignment = hostConfig.assignments.find((a) => a.folderId === folderId);

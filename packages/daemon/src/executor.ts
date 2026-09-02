@@ -127,6 +127,30 @@ export function classifyRcloneExit(
   }
 }
 
+/**
+ * LAMA-309: make sure the assignment's local directory exists for the folder
+ * types that write into it (sync / mount). `backup` and `dotfile` types are
+ * deliberately skipped — a missing source must keep failing, because creating
+ * an empty dir here then one-way-syncing could silently wipe remote data.
+ *
+ * Returns a human-readable failure summary when the directory cannot be
+ * created (EACCES / EROFS / ENOTDIR …), or `null` on success. Callers fail
+ * the run before invoking rclone.
+ */
+export function ensureLocalDirectory(
+  folderType: FolderType,
+  localPath: string,
+): string | null {
+  if (folderType !== "sync" && folderType !== "mount") return null;
+  try {
+    mkdirSync(localPath, { recursive: true });
+    return null;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return `local directory ${localPath} could not be created: ${reason}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Disk space pre-flight (LAMA-116)
 // ---------------------------------------------------------------------------
@@ -546,6 +570,20 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
     return report(hostId, folder.id, folder.type, "failed", start, { summary: "rclone binary not found in PATH", details: { reason: "rclone-missing" } });
   }
 
+  // LAMA-309: ensure the local directory exists for sync folders before
+  // building the rclone command. A missing dir is a normal pre-first-use
+  // state and is created here. (Mount folders are handled in the mount case;
+  // backup/dotfile must NOT be created — see ensureLocalDirectory.)
+  if (folder.type === "sync") {
+    const dirErr = ensureLocalDirectory(folder.type, assignment.localPath);
+    if (dirErr) {
+      return report(hostId, folder.id, folder.type, "failed", start, {
+        summary: dirErr,
+        details: { reason: "local-dir-create", localPath: assignment.localPath, folderType: folder.type },
+      });
+    }
+  }
+
   const remoteName = getRemoteName(assignment.remoteName, folder.id);
   // LAMA-294: the destination path/prefix (host-scoped for backups by
   // default) is separate from the connection alias. Two hosts with ordinary
@@ -627,10 +665,21 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
       if (dry) command.push("--dry-run");
       timeoutSec = dry ? DRY_RUN_TIMEOUT_SEC : (assignment.timeoutSec ?? DEFAULT_TIMEOUT_SEC);
       break;
-    case "mount":
+    case "mount": {
+      // LAMA-309: ensure the mount point directory exists before rclone
+      // mount (which requires an existing directory as its target).
+      const dirErr = ensureLocalDirectory(folder.type, assignment.localPath);
+      if (dirErr) {
+        exclude?.cleanup();
+        return report(hostId, folder.id, folder.type, "failed", start, {
+          summary: dirErr,
+          details: { reason: "local-dir-create", localPath: assignment.localPath, folderType: folder.type },
+        });
+      }
       command = ["mount", remotePath, assignment.localPath, "--config", opts.configPath, "--daemon"];
       timeoutSec = MOUNT_TIMEOUT_SEC;
       break;
+    }
     case "dotfile":
       if (assignment.preSyncCmd) {
         const h = await runHook(assignment.preSyncCmd, { folderId: folder.id, localPath: assignment.localPath, op: "pre" });
@@ -1005,9 +1054,26 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
 // ---------------------------------------------------------------------------
 function tail(s: string, max: number): string { return s.length <= max ? s : s.slice(s.length - max); }
 function hasBisyncCorruption(stderr: string): boolean { const n = stderr.toLowerCase(); return BISYNC_CORRUPTION_MARKERS.some((m) => n.includes(m)); }
-function archiveBisyncState(stateDir: string): string {
-  const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
-  const corrupted = `${stateDir}.corrupted.${ts}`;
+/**
+ * LAMA-308: archive the (corrupted) bisync state dir and return the new path.
+ * The timestamp carries full millisecond precision — the previous second-
+ * resolution `.corrupted.<YYYYMMDDTHHmm>` suffix collided when several
+ * recovery paths archived the same state dir within a second (concurrent
+ * `trigger_sync` runs on one folder → ENOTEMPTY loop, 7 failed runs in 2s).
+ * `now` is injectable for tests.
+ */
+export function archiveBisyncState(stateDir: string, now: Date = new Date()): string {
+  const ts = now.toISOString().replace(/[:.]/g, "");
+  const base = `${stateDir}.corrupted.${ts}`;
+  // Collision guard: if a same-millisecond archive already exists (still
+  // theoretically possible with a clock tick between the naming and rename),
+  // append an incrementing counter until the target is free.
+  let corrupted = base;
+  let n = 1;
+  while (existsSync(corrupted)) {
+    corrupted = `${base}.${n}`;
+    n += 1;
+  }
   renameSync(stateDir, corrupted);
   const p = dirname(stateDir); const prefix = `${basename(stateDir)}.corrupted.`;
   const backups = readdirSync(p, { withFileTypes: true }).filter((e) => e.isDirectory() && e.name.startsWith(prefix)).map((e) => join(p, e.name)).sort((a, b) => basename(b).localeCompare(basename(a)));

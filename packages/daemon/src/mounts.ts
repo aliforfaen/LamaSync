@@ -305,7 +305,15 @@ export async function startMount(opts: {
     }
   }
 
-  mkdirSync(opts.mountPath, { recursive: true });
+  // LAMA-309: surface a clear reason when the mount point can't be created
+  // (EACCES / EROFS / ENOTDIR …) instead of a bare fs error propagating.
+  try {
+    mkdirSync(opts.mountPath, { recursive: true });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const message = `local directory ${opts.mountPath} could not be created: ${reason}`;
+    throw new Error(message);
+  }
   const cacheDir = getCacheDir(opts.folderId);
   mkdirSync(cacheDir, { recursive: true });
 
