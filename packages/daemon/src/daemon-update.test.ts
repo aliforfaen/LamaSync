@@ -1,6 +1,6 @@
 // LAMA-299: pure tests for the injected daemon update helper. No network,
 // no filesystem effects — every dependency is injected.
-import { describe, expect, test } from "bun:test";
+import { VERSION } from "@lamasync/core";
 import type { ReleaseInfo } from "./self-update.ts";
 import {
   performDaemonUpdate,
@@ -41,13 +41,16 @@ function assertNoSecretLeak(outcome: DaemonUpdateOutcome): void {
 describe("performDaemonUpdate", () => {
   test("no update available → ok, changed=false", async () => {
     const outcome = await performDaemonUpdate(
-      baseDeps({ getLatestRelease: async () => release({ tag: "v0.3.6", version: "0.3.6" }) }),
+      baseDeps({ getLatestRelease: async () => release({ tag: `v${VERSION}`, version: VERSION }) }),
     );
+    // "no update" means latest == running version, whatever that is —
+    // derive both from the generated VERSION so version bumps don't
+    // break this test.
     expect(outcome).toEqual({
       ok: true,
       changed: false,
-      currentVersion: "0.3.6",
-      latestVersion: "0.3.6",
+      currentVersion: VERSION,
+      latestVersion: VERSION,
     });
     assertNoSecretLeak(outcome);
   });
