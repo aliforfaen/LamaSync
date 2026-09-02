@@ -1,6 +1,7 @@
 // LAMA-299: pure tests for the injected daemon update helper. No network,
 // no filesystem effects — every dependency is injected.
 import { VERSION } from "@lamasync/core";
+import { describe, expect, test } from "bun:test";
 import type { ReleaseInfo } from "./self-update.ts";
 import {
   performDaemonUpdate,
