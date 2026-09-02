@@ -403,6 +403,11 @@ describe("ensureLocalDirectory (LAMA-309)", () => {
 // before invoking rclone when the local directory cannot be created.
 describe("executeAssignment mkdir failure (LAMA-309)", () => {
   test("fails with the clear summary before invoking rclone", async () => {
+    // CI runners have no rclone, and the rclone-PATH check precedes the
+    // mkdir guard in executeAssignment. Stub the PATH probe so the mkdir
+    // failure path is exercised deterministically everywhere.
+    const origWhich = Bun.which;
+    Bun.which = () => "/usr/bin/rclone";
     const dir = mkdtempSync(join(tmpdir(), "lamasync-exec-"));
     const file = join(dir, "afile");
     writeFileSync(file, "x");
@@ -437,6 +442,7 @@ describe("executeAssignment mkdir failure (LAMA-309)", () => {
       // command switch, so rclone was never spawned for this run.
       expect(report.summary).not.toContain("rclone binary not found");
     } finally {
+      Bun.which = origWhich;
       rmSync(dir, { recursive: true, force: true });
     }
   });
