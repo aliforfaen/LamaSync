@@ -928,6 +928,76 @@ table.data tbody tr:last-child td {
   flex-wrap: wrap;
 }
 
+/* Management tables have one obvious next step. Supporting and destructive
+   operations stay available without forcing every row to reserve space for a
+   noisy run of buttons. The panel expands in-flow, so it is never clipped by
+   a scroll container and remains usable at narrow widths. */
+.row-actions--end {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+.row-menu {
+  position: relative;
+}
+
+.row-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  list-style: none;
+}
+
+.row-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.row-menu > summary::after {
+  content: "⌄";
+  margin-left: var(--space-1-5);
+  color: var(--text-muted);
+}
+
+.row-menu[open] > summary {
+  border-color: var(--accent-info);
+  background: var(--accent-info-bg);
+}
+
+.row-menu-panel {
+  display: grid;
+  gap: var(--space-1-5);
+  min-width: 11.5rem;
+  padding: var(--space-2);
+  margin-top: var(--space-1-5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.row-menu-panel .action {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.row-menu-hint {
+  display: block;
+  padding: var(--space-1) var(--space-1-5);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.35;
+}
+
 .badge-download {
   background: var(--accent-info-bg);
   color: var(--accent-info);
@@ -1030,6 +1100,247 @@ button.action:disabled {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+/* Shared create/edit treatment. A management form reads as a focused task,
+   not another list row, and carries the same title + intent across folders,
+   storage, assignments, and future management surfaces. */
+.form-panel {
+  max-width: 58rem;
+  padding: var(--space-5);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.form-panel-heading {
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.form-panel-purpose {
+  max-width: 42rem;
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+@media (max-width: 900px) {
+  .row-actions--end {
+    flex-wrap: wrap;
+  }
+}
+
+/* A full configuration table is useful at a desk, but seven compressed
+   columns are not a usable mobile interface. Keep the identity, type, and
+   available actions in view; the existing expand/detail controls reveal the
+   rest when it matters. */
+@media (max-width: 640px) {
+  .data.data-folders {
+    table-layout: auto;
+  }
+
+  /* The desktop colgroup pins a broad information table. Reset its surviving
+     columns here so the folder name, type and two actions receive the whole
+     phone-width budget instead of inheriting desktop percentages. */
+  .data.data-folders col:nth-child(1) {
+    width: auto !important;
+  }
+
+  .data.data-folders col:nth-child(2) {
+    display: none;
+  }
+
+  .data.data-folders col:nth-child(7) {
+    width: 9.5rem !important;
+  }
+
+  .data.data-folders th:nth-child(2),
+  .data.data-folders td:nth-child(2),
+  .data.data-folders col:nth-child(3),
+  .data.data-folders col:nth-child(4),
+  .data.data-folders col:nth-child(5),
+  .data.data-folders col:nth-child(6),
+  .data.data-folders col:nth-child(8),
+  .data.data-folders th:nth-child(3),
+  .data.data-folders th:nth-child(4),
+  .data.data-folders th:nth-child(5),
+  .data.data-folders th:nth-child(6),
+  .data.data-folders th:nth-child(8),
+  .data.data-folders td:nth-child(3),
+  .data.data-folders td:nth-child(4),
+  .data.data-folders td:nth-child(5),
+  .data.data-folders td:nth-child(6),
+  .data.data-folders td:nth-child(8) {
+    display: none;
+  }
+
+  .data.data-folders th,
+  .data.data-folders td {
+    padding: var(--space-2);
+  }
+
+  /* Turn the outer folder table into a compact two-column list. This avoids
+     relying on table column negotiation after the desktop-only fields are
+     removed: names own the flexible column and actions get an explicit home. */
+  .data.data-folders {
+    display: block;
+    border: 0;
+    background: transparent;
+  }
+
+  .data.data-folders > thead {
+    display: none;
+  }
+
+  .data.data-folders > tbody {
+    display: block;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+  }
+
+  .data.data-folders > tbody > tr.folder-group-header,
+  .data.data-folders > tbody > tr.folder-expanded-row {
+    display: block;
+  }
+
+  .data.data-folders > tbody > tr.folder-group-header > td,
+  .data.data-folders > tbody > tr.folder-expanded-row > td {
+    display: block;
+  }
+
+  .data.data-folders > tbody > tr.folder-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .data.data-folders > tbody > tr.folder-row > td {
+    display: none;
+    border: 0;
+  }
+
+  .data.data-folders > tbody > tr.folder-row > td:first-child,
+  .data.data-folders > tbody > tr.folder-row > td:nth-child(7) {
+    display: block;
+  }
+
+  .data.data-folders > tbody > tr.folder-row > td:first-child {
+    min-width: 0;
+  }
+
+  .data.data-folders > tbody > tr.folder-row > td:nth-child(7) {
+    grid-column: 2;
+  }
+
+  .data.data-folders .data-nested {
+    display: block;
+    width: 100%;
+    border: 0;
+    background: transparent;
+  }
+
+  .data.data-folders .data-nested thead {
+    display: none;
+  }
+
+  .data.data-folders .data-nested tbody {
+    display: block;
+  }
+
+  .data.data-folders .data-nested tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .data.data-folders .data-nested tr:last-child {
+    border-bottom: 0;
+  }
+
+  .data.data-folders .data-nested td {
+    display: none;
+    border: 0;
+    padding: var(--space-2) 0;
+  }
+
+  .data.data-folders .data-nested td:first-child,
+  .data.data-folders .data-nested td:last-child {
+    display: block;
+  }
+
+  .data.data-folders .data-nested td:last-child {
+    grid-column: 2;
+  }
+
+  .data.data-folders .folder-expand-toggle {
+    overflow: visible;
+    white-space: normal;
+  }
+
+  .data.data-folders .row-actions--end {
+    flex-wrap: nowrap;
+    gap: var(--space-1-5);
+  }
+
+  .data.data-folders .row-actions--end .action,
+  .data.data-folders .row-menu > summary {
+    padding-inline: var(--space-2);
+  }
+
+  .assignment-device-name {
+    display: block;
+    color: var(--text-strong);
+    font-weight: 500;
+  }
+
+  .data.data-folders .assignment-mobile-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    color: var(--text-muted);
+  }
+
+  .assignment-mobile-meta code {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .data.data-folders .data-nested .row-actions--end {
+    flex-wrap: nowrap;
+    gap: var(--space-1-5);
+  }
+
+  .data.data-backends {
+    table-layout: auto;
+  }
+
+  .data.data-backends th:nth-child(3),
+  .data.data-backends th:nth-child(4),
+  .data.data-backends th:nth-child(5),
+  .data.data-backends th:nth-child(6),
+  .data.data-backends th:nth-child(7),
+  .data.data-backends th:nth-child(8),
+  .data.data-backends td:nth-child(3),
+  .data.data-backends td:nth-child(4),
+  .data.data-backends td:nth-child(5),
+  .data.data-backends td:nth-child(6),
+  .data.data-backends td:nth-child(7),
+  .data.data-backends td:nth-child(8) {
+    display: none;
+  }
+
+  .data.data-backends th,
+  .data.data-backends td {
+    padding: var(--space-2);
+  }
 }
 
 .form label {
@@ -1581,6 +1892,10 @@ button.action:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.assignment-mobile-meta {
+  display: none;
 }
 
 .assignment-schedule {

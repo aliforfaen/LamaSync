@@ -325,6 +325,11 @@ export function Folders() {
   // LAMA-271: shared with the empty state — the toolbar "New folder" button
   // and the empty-state CTA open the same existing in-page flow.
   function openNewFolder(): void {
+    // Keep management work focused: a create, folder edit, and assignment
+    // editor should never compete for attention on the same page.
+    setEditingId(null);
+    setAssigningFolder(null);
+    setEditingAssignment(null);
     // LAMA-241: preselect the first configured backend instead of the
     // credential-less sftp default.
     if (!showForm) {
@@ -360,6 +365,9 @@ export function Folders() {
   }
 
   function beginEdit(folder: Folder) {
+    setShowForm(false);
+    setAssigningFolder(null);
+    setEditingAssignment(null);
     setEditingId(folder.id);
     setEditForm(folderToForm(folder));
   }
@@ -408,6 +416,9 @@ export function Folders() {
   }
 
   function beginAssign(folder: Folder, assignments: FolderAssignment[]) {
+    setShowForm(false);
+    setEditingId(null);
+    setEditingAssignment(null);
     const assignedHostIds = new Set(assignments.map((a) => a.hostId));
     const firstAvailable = hosts.find((h) => !assignedHostIds.has(h.id));
     setAssigningFolder(folder);
@@ -602,7 +613,19 @@ export function Folders() {
     isEditing = false,
   ) {
     return (
-      <form className="form" onSubmit={onSubmit}>
+      <form className="form form-panel" onSubmit={onSubmit}>
+        <div className="form-panel-heading">
+          <div>
+            <h2 className="form-title">
+              {isEditing ? `Edit “${current.name}”` : backupMode ? "New backup" : "New synced folder"}
+            </h2>
+            <p className="form-panel-purpose">
+              {isEditing
+                ? "Update the folder definition. Device setups stay unchanged."
+                : "Choose what this folder is for and where its data lives. You can set it up on devices next."}
+            </p>
+          </div>
+        </div>
         <label>
           Name
           <input
@@ -741,6 +764,17 @@ export function Folders() {
                 value={assignForm.localPath}
                 onChange={(e) => setAssignForm({ ...assignForm, localPath: e.target.value })}
               />
+              {assigningFolder.type === "backup" ? (
+                <HintText>
+                  This folder backs up the local directory as-is, so it must
+                  already exist on the device.
+                </HintText>
+              ) : (
+                <HintText>
+                  If the directory doesn&apos;t exist on the device yet, it is
+                  created automatically at the first sync or mount.
+                </HintText>
+              )}
             </label>
             {assigningFolder.type === "backup" ? (
               <label>
@@ -907,7 +941,7 @@ export function Folders() {
           <col style={{ width: "7%" }} />
           <col style={{ width: "14%" }} />
           <col style={{ width: "12%" }} />
-          <col style={{ width: "12rem" }} />
+          <col style={{ width: "10rem" }} />
           {backupMode ? <col style={{ width: "12%" }} /> : null}
         </colgroup>
         <thead>
@@ -998,37 +1032,43 @@ export function Folders() {
                   {folder.createdAt ? new Date(folder.createdAt).toLocaleString() : "—"}
                 </td>
                 <td className="table-actions">
-                  <button
-                    type="button"
-                    className="action"
-                    onClick={() => beginAssign(folder, assignments)}
-                    disabled={busy}
-                  >
-                    Set up on device…
-                  </button>
-                  <Link
-                    className="action"
-                    to={`/operations?folderId=${encodeURIComponent(folder.id)}`}
-                  >
-                    History
-                  </Link>
-                  <button
-                    type="button"
-                    className="action"
-                    onClick={() => beginEdit(folder)}
-                    disabled={busy}
-                  >
-                    Edit
-                  </button>
-
-                  <button
-                    type="button"
-                    className="action danger"
-                    onClick={() => onDelete(folder.id)}
-                    disabled={busy}
-                  >
-                    Delete
-                  </button>
+                  <div className="row-actions row-actions--end">
+                    <button
+                      type="button"
+                      className="action primary"
+                      onClick={() => beginAssign(folder, assignments)}
+                      disabled={busy}
+                    >
+                      Set up
+                    </button>
+                    <details className="row-menu">
+                      <summary aria-label={`More actions for ${folder.name}`}>More</summary>
+                      <div className="row-menu-panel">
+                        <Link
+                          className="action"
+                          to={`/operations?folderId=${encodeURIComponent(folder.id)}`}
+                        >
+                          View history
+                        </Link>
+                        <button
+                          type="button"
+                          className="action"
+                          onClick={() => beginEdit(folder)}
+                          disabled={busy}
+                        >
+                          Edit folder
+                        </button>
+                        <button
+                          type="button"
+                          className="action danger"
+                          onClick={() => onDelete(folder.id)}
+                          disabled={busy}
+                        >
+                          Delete folder
+                        </button>
+                      </div>
+                    </details>
+                  </div>
                 </td>
                 {backupMode && verification ? (
                   <td><span className={`badge ${verification.className}`} title={verification.title}>{verification.label}</span></td>
@@ -1067,7 +1107,13 @@ export function Folders() {
                               : null;
                             return (
                             <tr key={assignment.id}>
-                              <td>{hostLabel(assignment.hostId)}</td>
+                              <td>
+                                <span className="assignment-device-name">{hostLabel(assignment.hostId)}</span>
+                                <span className="assignment-mobile-meta">
+                                  <span className="badge badge-unknown">{assignment.role}</span>
+                                  <code>{assignment.localPath}</code>
+                                </span>
+                              </td>
                               <td>
                                 <span className="badge badge-unknown">{assignment.role}</span>
                               </td>
@@ -1107,32 +1153,39 @@ export function Folders() {
                                 )}
                               </td>
                               <td className="table-actions">
-                                <button
-                                  type="button"
-                                  className="action"
-                                  onClick={() => setEditingAssignment(assignment)}
-                                  disabled={busy || editingAssignment !== null}
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  className="action"
-                                  onClick={() =>
-                                    onSyncNow(folder.id, assignment.hostId)
-                                  }
-                                  disabled={busy}
-                                >
-                                  Sync now
-                                </button>
-                                <button
-                                  type="button"
-                                  className="action danger"
-                                  onClick={() => onUnassign(folder.id, assignment.hostId)}
-                                  disabled={busy}
-                                >
-                                  Unassign
-                                </button>
+                                <div className="row-actions row-actions--end">
+                                  <button
+                                    type="button"
+                                    className="action primary"
+                                    onClick={() =>
+                                      onSyncNow(folder.id, assignment.hostId)
+                                    }
+                                    disabled={busy}
+                                  >
+                                    Sync now
+                                  </button>
+                                  <details className="row-menu">
+                                    <summary aria-label={`More actions for ${hostLabel(assignment.hostId)}`}>More</summary>
+                                    <div className="row-menu-panel">
+                                      <button
+                                        type="button"
+                                        className="action"
+                                        onClick={() => setEditingAssignment(assignment)}
+                                        disabled={busy || editingAssignment !== null}
+                                      >
+                                        Edit setup
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="action danger"
+                                        onClick={() => onUnassign(folder.id, assignment.hostId)}
+                                        disabled={busy}
+                                      >
+                                        Remove from device
+                                      </button>
+                                    </div>
+                                  </details>
+                                </div>
                               </td>
                             </tr>
                             );

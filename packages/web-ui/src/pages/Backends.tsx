@@ -130,6 +130,9 @@ export function Backends() {
   const [auxError, setAuxError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Match the other management pages: the list is the default view and one
+  // deliberate action opens the create/edit panel.
+  const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, string>>({});
@@ -246,6 +249,7 @@ export function Backends() {
       }
       setForm(EMPTY_FORM);
       setEditingId(null);
+      setShowForm(false);
       setFormTestResult(null);
       await refresh();
     } catch (err) {
@@ -323,6 +327,7 @@ export function Backends() {
   }
 
   function startEdit(b: BackendRow): void {
+    setShowForm(true);
     setEditingId(b.id);
     setForm(backendToForm(b));
     setError(null);
@@ -333,6 +338,7 @@ export function Backends() {
   function cancelEdit(): void {
     setForm(EMPTY_FORM);
     setEditingId(null);
+    setShowForm(false);
     setError(null);
     setFormTestResult(null);
   }
@@ -486,6 +492,25 @@ export function Backends() {
         <span className="muted">
           {items ? `${items.length} configured` : "loading…"}
         </span>
+        <button
+          type="button"
+          className="action primary"
+          onClick={() => {
+            if (showForm) {
+              cancelEdit();
+              return;
+            }
+            setForm(EMPTY_FORM);
+            setEditingId(null);
+            setShowForm(true);
+            window.requestAnimationFrame(() => {
+              formRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+              nameInputRef.current?.focus();
+            });
+          }}
+        >
+          {showForm ? "Close editor" : "Add storage destination"}
+        </button>
       </div>
       {error && (
         <InlineError message={error} onRetry={() => void refresh()} />
@@ -495,9 +520,19 @@ export function Backends() {
       ) : null}
       {notice && <div className="all-quiet">{notice}</div>}
 
+      {showForm ? (
       <section className="section" ref={formRef}>
-        <h2>{editingId ? `Edit destination: ${form.name}` : "Add storage destination"}</h2>
-        <form className="form" onSubmit={onSubmit}>
+        <form className="form form-panel" onSubmit={onSubmit}>
+          <div className="form-panel-heading">
+            <div>
+              <h2 className="form-title">{editingId ? `Edit “${form.name}”` : "New storage destination"}</h2>
+              <p className="form-panel-purpose">
+                {editingId
+                  ? "Update connection details without changing the folders that use this destination."
+                  : "Add a reusable location once, then choose it from your folder setup."}
+              </p>
+            </div>
+          </div>
           <div className="form-row">
             <label>
               Name
@@ -701,6 +736,7 @@ export function Backends() {
           ) : null}
         </form>
       </section>
+      ) : null}
 
       <section className="section">
         <h2>Configured destinations</h2>
@@ -714,8 +750,13 @@ export function Backends() {
             how="Add where your data lives — S3 buckets, local disks, NFS exports, or a restic repository."
             ctaLabel="Add a storage destination"
             onCta={() => {
-              formRef.current?.scrollIntoView({ block: "start" });
-              nameInputRef.current?.focus();
+              setForm(EMPTY_FORM);
+              setEditingId(null);
+              setShowForm(true);
+              window.requestAnimationFrame(() => {
+                formRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+                nameInputRef.current?.focus();
+              });
             }}
             steps={[
               "Pick a kind: S3, local, NFS, or restic",
@@ -725,7 +766,7 @@ export function Backends() {
             timeNote="takes 30s"
           />
         ) : (
-          <table className="data">
+          <table className="data data-backends">
             <thead>
               <tr>
                 <th>Name</th>
@@ -794,51 +835,50 @@ export function Backends() {
                   <td>{b.folderCount ?? 0}</td>
                   <td>{renderStorageCell(b)}</td>
                   <td>
-                    <div className="row-actions">
-                      <button type="button" className="action" onClick={() => startEdit(b)}>
+                    <div className="row-actions row-actions--end">
+                      <button type="button" className="action primary" onClick={() => startEdit(b)}>
                         Edit
                       </button>
-                      <button
-                        type="button"
-                        className="action"
-                        disabled={testingId === b.id}
-                        onClick={() => void onTest(b)}
-                      >
-                        {testingId === b.id ? "Testing…" : "Test"}
-                      </button>
-                      {isRestic(b.kind) ? (
-                        <>
+                      <details className="row-menu">
+                        <summary aria-label={`More actions for ${b.name}`}>More</summary>
+                        <div className="row-menu-panel">
                           <button
                             type="button"
                             className="action"
-                            disabled={healthBusy !== null}
-                            onClick={() => void onProve(b)}
+                            disabled={testingId === b.id}
+                            onClick={() => void onTest(b)}
                           >
-                            {healthBusy === b.id ? "Proving…" : "Prove it"}
+                            {testingId === b.id ? "Testing…" : "Test connection"}
                           </button>
-                          <button
-                            type="button"
-                            className="action"
-                            disabled={healthBusy !== null}
-                            onClick={() => void onDrill(b)}
-                          >
-                            {healthBusy === b.id ? "Drilling…" : "Run fire drill"}
+                          {isRestic(b.kind) ? (
+                            <>
+                              <button
+                                type="button"
+                                className="action"
+                                disabled={healthBusy !== null}
+                                onClick={() => void onProve(b)}
+                              >
+                                {healthBusy === b.id ? "Proving…" : "Prove recovery"}
+                              </button>
+                              <button
+                                type="button"
+                                className="action"
+                                disabled={healthBusy !== null}
+                                onClick={() => void onDrill(b)}
+                              >
+                                {healthBusy === b.id ? "Drilling…" : "Run fire drill"}
+                              </button>
+                            </>
+                          ) : (
+                            <span className="row-menu-hint" title={PROVE_NEEDS_RESTIC}>
+                              Recovery proof is available for restic destinations.
+                            </span>
+                          )}
+                          <button type="button" className="action danger" onClick={() => void onDelete(b)}>
+                            Delete destination
                           </button>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          className="action"
-                          disabled
-                          title={PROVE_NEEDS_RESTIC}
-                          aria-label={`Prove it — ${PROVE_NEEDS_RESTIC}`}
-                        >
-                          Prove it
-                        </button>
-                      )}
-                      <button type="button" className="action danger" onClick={() => void onDelete(b)}>
-                        Delete
-                      </button>
+                        </div>
+                      </details>
                     </div>
                     {healthResults[b.id] ? (
                       <div className="row-actions health-result">
