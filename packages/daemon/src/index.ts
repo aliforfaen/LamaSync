@@ -422,13 +422,24 @@ async function systemdAwareStartMount(opts: {
       );
       return startMount(opts);
     }
-    const adopted = adoptMount(opts.folderId, {
+    let adopted = adoptMount(opts.folderId, {
       mountPath: opts.mountPath,
       cacheProfile: opts.cacheProfile ?? "normal",
       remotePath: opts.remotePath,
       configPath: opts.configPath,
     });
+    const deadline = Date.now() + 30_000;
+    while (adopted === null && Date.now() < deadline && isMountUnitActive(opts.folderId)) {
+      await Bun.sleep(500);
+      adopted = adoptMount(opts.folderId, {
+        mountPath: opts.mountPath,
+        cacheProfile: opts.cacheProfile ?? "normal",
+        remotePath: opts.remotePath,
+        configPath: opts.configPath,
+      });
+    }
     if (adopted === null) {
+      stopMountUnit(opts.folderId);
       console.warn(
         `[systemd] could not adopt folder=${opts.folderId}; falling back to in-process`,
       );

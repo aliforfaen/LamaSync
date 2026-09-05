@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
 const DEFAULT_INSTALL_DIR = "%h/.local/bin/lamasyncd";
@@ -37,19 +37,42 @@ export function isSystemdAvailable(): boolean {
 }
 
 /**
- * Directory holding the user's systemd units. Exposed so callers (and tests)
- * can override the location.
+ * Directory holding the persistent user systemd units — currently only the
+ * daemon's own `lamasyncd.service`. Per-mount units are transient and live
+ * under `getRuntimeUnitDir()` instead, so they never linger after logout or
+ * a reboot. Exposed so callers (and tests) can override the location.
  */
 export function getUserUnitDir(): string {
   return join(homedir(), ".config", "systemd", "user");
+}
+
+/**
+ * Directory for transient per-mount systemd user units: the runtime unit dir
+ * under `$XDG_RUNTIME_DIR` (`/run/user/<uid>/systemd/user`). Units written
+ * here are ephemeral — systemd clears the runtime dir on logout and reboot —
+ * so boot persistence comes from the daemon re-creating them from the host
+ * config (see the reconcile-on-refresh path in index.ts), not from unit
+ * files surviving. Falls back to `/run/user/<uid>/systemd/user` when
+ * `XDG_RUNTIME_DIR` is unset, mirroring systemd's own convention.
+ */
+export function getRuntimeUnitDir(): string {
+  const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  if (runtimeDir !== undefined && runtimeDir !== "") {
+    return join(runtimeDir, "systemd", "user");
+  }
+  const uid = process.getuid?.() ?? userInfo().uid;
+  return join("/run/user", String(uid), "systemd", "user");
 }
 
 export function mountUnitName(folderId: string): string {
   return `lamasync-mount-${folderId}.service`;
 }
 
+/**
+ * Path of the per-mount unit for `folderId` inside the runtime unit dir.
+ */
 export function mountUnitPath(folderId: string): string {
-  return join(getUserUnitDir(), mountUnitName(folderId));
+  return join(getRuntimeUnitDir(), mountUnitName(folderId));
 }
 
 /**
@@ -71,6 +94,7 @@ export function buildMountUnitContent(
     "[Service]",
     "Type=simple",
     `ExecStart=${installDir} --mount ${folderId}`,
+    "Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin",
     "Restart=on-failure",
     "RestartSec=10s",
     `Environment=LAMASYNC_SOCKET_PATH=${socketPath}`,
@@ -98,14 +122,15 @@ export function writeMountUnitTo(
 }
 
 /**
- * Write the mount unit for `folderId` to the user's systemd unit directory.
- * Returns the absolute path written.
+ * Write the mount unit for `folderId` into the runtime unit directory
+ * (`getRuntimeUnitDir()`), creating it first if needed. Returns the absolute
+ * path written.
  */
 export function writeMountUnit(
   folderId: string,
   opts: { installDir?: string; socketPath?: string } = {},
 ): string {
-  return writeMountUnitTo(folderId, getUserUnitDir(), opts);
+  return writeMountUnitTo(folderId, getRuntimeUnitDir(), opts);
 }
 
 export function removeMountUnit(folderId: string): void {
@@ -126,18 +151,13 @@ function runSystemctl(args: string[]): { status: number; stderr: string } {
   };
 }
 
-export function enableMountUnit(folderId: string): void {
-  const { status, stderr } = runSystemctl([
-    "enable",
-    mountUnitName(folderId),
-  ]);
-  if (status !== 0) {
-    console.warn(
-      `[systemd] enable ${mountUnitName(folderId)} failed (${status}): ${stderr.trim()}`,
-    );
-  }
-}
-
+/**
+ * Best-effort teardown: `disable --now` removes any enablement symlink and
+ * stops the unit. For an ephemeral runtime unit that was never enabled (or
+ * whose file is already gone) systemctl simply has nothing to disable and the
+ * command stays silent with a non-fatal status — acceptable here, and the
+ * index.ts caller stops the mount afterwards regardless.
+ */
 export function disableMountUnit(folderId: string): void {
   runSystemctl([
     "disable",
@@ -147,7 +167,12 @@ export function disableMountUnit(folderId: string): void {
 }
 
 export function startMountUnit(folderId: string): void {
-  runSystemctl(["start", mountUnitName(folderId)]);
+  for (const args of [["daemon-reload"], ["start", mountUnitName(folderId)]]) {
+    const { status, stderr } = runSystemctl(args);
+    if (status !== 0) {
+      throw new Error(`systemctl ${args.join(" ")} failed (${status}): ${stderr.trim()}`);
+    }
+  }
 }
 
 export function stopMountUnit(folderId: string): void {

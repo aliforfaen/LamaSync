@@ -154,21 +154,63 @@ fix to the error. After applying, trigger a fresh run:
 lamasync sync <folderId> --host <host-id>
 ```
 
-## Symptom: a mount is stuck (status `mounting` or `dead`)
+## Symptom: a mount is stuck or never becomes `mounted` (status `mounting`/`dead`)
 
-**Cause.** rclone VFS crashed, or the systemd mount unit failed to start.
-Check via:
+**Cause.** The rclone VFS crashed, or the mount failed to start. A folder only
+counts as mounted when its mount point is a **real live FUSE mount** (checked
+against `/proc/self/mountinfo`) — an existing but unmounted directory is never
+reported as mounted, so a `mounting`/`dead` status means rclone genuinely
+failed or died, not that the directory is missing. Start with the daemon logs:
+rclone startup failures log the **exit code plus the last ~8 KiB of rclone
+stderr**, so the real error is visible instead of a bare code:
+
 ```bash
+# Daemon-side [mount] lines carry the stderr tail (in-process starts).
+journalctl --user -u lamasyncd -n 200 | grep -A 40 "\[mount\]"
+# A mount started under its own unit logs the same detail to its journal.
+journalctl --user -u "lamasync-mount-<folder-id>" -n 100 2>/dev/null
 systemctl --user status "lamasync-mount-<folder-id>" 2>/dev/null
-journalctl --user -u lamasyncd -n 100
 ```
 
-**Fix.** Restart the daemon (which re-evaluates mount startup health and
-either restarts or fails loudly in the operation log):
+Common causes visible in that stderr tail:
+- `user_allow_other` is not enabled in `/etc/fuse.conf` while something needs
+  cross-user access to the mount — see the next symptom.
+- Backend/endpoint unreachable, or the rclone config references a remote that
+  no longer exists.
+
+**Fix.** Match the fix to the logged error, then restart the daemon (it
+re-evaluates mount startup health and either restarts or fails loudly in the
+operation log):
 ```bash
 systemctl --user restart lamasyncd
 lamasync local mount <folderId>     # re-arm the mount
 lamasync local ops                   # confirm "success" / "failed"
+```
+
+Per-mount units are transient: they are written to
+`$XDG_RUNTIME_DIR/systemd/user/` (the runtime dir, cleared on reboot) and
+(re)created and started by the daemon at boot and on every config refresh for
+assignments whose effective type is `mount` — there is nothing to
+`systemctl --user enable`, and nothing persists across reboots. The daemon
+service unit (`lamasyncd.service`) stays in `~/.config/systemd/user` as
+before.
+
+## Symptom: a mount works for the owning user, but root / other users / systemd services can't access it
+
+**Cause.** The daemon only passes `--allow-other` to rclone when
+`user_allow_other` is enabled (uncommented) in `/etc/fuse.conf`. Without it
+the mount still starts but is single-user, and the daemon logs a warning at
+mount start ("other users, including root via systemd, may not access this
+mount"). Passing `--allow-other` unconditionally would make libfuse refuse
+the mount for non-root users entirely.
+
+**Fix.** If the mount only ever needs the owning user, nothing to do. For
+shared/other-user access, uncomment `user_allow_other` in `/etc/fuse.conf`
+(edit as root), then re-arm the mount so rclone re-reads the config:
+```bash
+# /etc/fuse.conf — uncomment the line, then save:
+# user_allow_other
+lamasync local unmount <folderId> && lamasync local mount <folderId>
 ```
 
 ## Symptom: stale lock (folder sync blocked, but no host is actively running it)

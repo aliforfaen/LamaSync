@@ -123,6 +123,15 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
   For agents / no-TTY contexts use the CLI fallback: `LAMASYNC_NO_TUI=1 lamasync-tui`.
 - **Local state**: `~/.local/share/lamasync` (config cache),
   socket at `$XDG_RUNTIME_DIR/lamasync.sock`.
+- **Read-only mounts run as per-folder systemd user units.** For every
+  assignment whose effective type is `mount`, the daemon writes
+  `lamasync-mount-<folder-id>.service` into `$XDG_RUNTIME_DIR/systemd/user/`
+  and starts it. Those units are **ephemeral** — systemd clears the runtime
+  dir on logout/reboot — and the daemon re-creates and starts them at boot
+  and on every config refresh (`reconcileMountsOnRefresh`), so there is
+  nothing to `systemctl --user enable` and nothing to persist by hand. The
+  daemon's own unit (`~/.config/systemd/user/lamasyncd.service`) is
+  unaffected.
 
 ## Gotchas (all hit in production at least once)
 
@@ -148,6 +157,14 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
   `backup`-type folders instead. (Former "backup summaries show 0
   transfers" gotcha is fixed in LAMA-247: the JSON-log accumulator now
   reads both rclone stdout and stderr.)
+- **Mounts are single-user unless `/etc/fuse.conf` enables
+  `user_allow_other`.** The daemon only passes `--allow-other` to rclone when
+  that option is present (uncommented) in `/etc/fuse.conf`; otherwise mounts
+  still start but only the owning user can access them, and the daemon logs a
+  warning to that effect at mount start. If root, systemd services, or other
+  users must read a mount, uncomment `user_allow_other` in `/etc/fuse.conf`
+  (as root) and re-arm the mount:
+  `lamasync local unmount <folderId> && lamasync local mount <folderId>`.
 - Don't run a bare `lamasyncd` to "test" it — the systemd service owns the
   daemon; a second instance just fights over the socket.
 

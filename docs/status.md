@@ -23,6 +23,15 @@ tests, strict skill drift, and distributable binary build.
   created safely where appropriate, duplicate runs are serialized, home paths
   expand correctly, initial read-only mount setup is available, and sandbox
   release discovery is documented.
+- **LAMA-320 — mount lifecycle hardening.** `--allow-other` is passed to
+  rclone only when `/etc/fuse.conf` enables `user_allow_other` (otherwise
+  mounts start single-user with a daemon warning); mount readiness is real
+  FUSE detection via mountinfo, so a plain directory is never reported
+  mounted; failed rclone startups log the exit code plus a bounded (~8 KiB)
+  stderr tail; per-mount systemd units now live in the ephemeral
+  `$XDG_RUNTIME_DIR/systemd/user/` runtime dir and are re-created at daemon
+  boot and config refresh — nothing persists, and the daemon service unit
+  stays in `~/.config/systemd/user`.
 - **LAMA-299/301 — remote daemon update and controlled server deploy.** The
   server has no Docker socket or arbitrary shell endpoint; a narrowly scoped
   LXC deploy agent runs the fixed deployment script.
