@@ -1,12 +1,13 @@
 import type {
   Backend,
-  AppProfile,
+  ApplicationTemplate,
+  ApplicationProtection,
+  ApplicationProtectionListItem,
+  ApplicationSnapshot,
   BrowseJob,
   BrowseResponse,
   Conflict,
   ConflictResolution,
-  DotfileManifest,
-  DotfileVersion,
   Folder,
   FolderAssignment,
   FolderFileUploadResponse,
@@ -380,7 +381,7 @@ export class LamaSyncApiClient {
   }
 
   // LAMA-260: multipart file upload into a folder's destination
-  // backend. Mirrors `uploadDotfile` in shape — caller passes a
+  // backend. Mirrors the apps snapshot upload in shape — caller passes a
   // `Blob` (or `File`) + an optional `path` field. The response is
   // synchronous (no browse-jobs polling).
   async uploadFolderFile(
@@ -414,79 +415,108 @@ export class LamaSyncApiClient {
     return (await res.json()) as FolderFileUploadResponse;
   }
 
-  // Dotfiles
-  listAppProfiles(): Promise<AppProfile[]> {
-    return this.request<AppProfile[]>("GET", "/api/v1/app-profiles");
+  // ---------------------------------------------------------------------------
+  // Apps (LAMA-316): templates -> protections -> snapshots. Replaces the
+  // legacy dotfile/profile surface above.
+  // ---------------------------------------------------------------------------
+
+  // Templates (operator-owned recipes; admin-only on the server).
+  listAppTemplates(): Promise<ApplicationTemplate[]> {
+    return this.request<ApplicationTemplate[]>("GET", "/api/v1/apps/templates");
   }
 
-  createAppProfile(body: Omit<AppProfile, "id" | "createdAt" | "updatedAt">): Promise<AppProfile> {
-    return this.request<AppProfile>(
-      "POST",
-      "/api/v1/app-profiles",
-      JSON.stringify(body),
-      "application/json",
-    );
-  }
-
-  updateAppProfile(id: string, body: Partial<Omit<AppProfile, "id" | "createdAt" | "updatedAt">>): Promise<AppProfile> {
-    return this.request<AppProfile>(
-      "PUT",
-      `/api/v1/app-profiles/${encodeURIComponent(id)}`,
-      JSON.stringify(body),
-      "application/json",
-    );
-  }
-
-  deleteAppProfile(id: string): Promise<void> {
-    return this.request<void>("DELETE", `/api/v1/app-profiles/${encodeURIComponent(id)}`);
-  }
-
-  listDotfileManifests(hostId?: string): Promise<DotfileManifest[]> {
-    const qs = hostId ? `?hostId=${encodeURIComponent(hostId)}` : "";
-    return this.request<DotfileManifest[]>("GET", `/api/v1/dotfiles/manifests${qs}`);
-  }
-
-  createDotfileManifest(body: Omit<DotfileManifest, "id">): Promise<DotfileManifest> {
-    return this.request<DotfileManifest>(
-      "POST",
-      "/api/v1/dotfiles/manifests",
-      JSON.stringify(body),
-      "application/json",
-    );
-  }
-
-  updateDotfileManifest(id: string, body: Partial<DotfileManifest>): Promise<DotfileManifest> {
-    return this.request<DotfileManifest>(
-      "PUT",
-      `/api/v1/dotfiles/manifests/${encodeURIComponent(id)}`,
-      JSON.stringify(body),
-      "application/json",
-    );
-  }
-
-  deleteDotfileManifest(id: string): Promise<void> {
-    return this.request<void>("DELETE", `/api/v1/dotfiles/manifests/${encodeURIComponent(id)}`);
-  }
-
-  listDotfileVersions(appName: string): Promise<DotfileVersion[]> {
-    return this.request<DotfileVersion[]>(
+  getAppTemplate(id: string): Promise<ApplicationTemplate> {
+    return this.request<ApplicationTemplate>(
       "GET",
-      `/api/v1/dotfiles/${encodeURIComponent(appName)}`,
+      `/api/v1/apps/templates/${encodeURIComponent(id)}`,
     );
   }
 
-  async uploadDotfile(
-    appName: string,
+  createAppTemplate(
+    body: Omit<ApplicationTemplate, "id" | "createdAt" | "updatedAt" | "revision">,
+  ): Promise<ApplicationTemplate> {
+    return this.request<ApplicationTemplate>(
+      "POST",
+      "/api/v1/apps/templates",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  updateAppTemplate(
+    id: string,
+    body: Partial<Omit<ApplicationTemplate, "id" | "createdAt" | "updatedAt" | "revision">>,
+  ): Promise<ApplicationTemplate> {
+    return this.request<ApplicationTemplate>(
+      "PUT",
+      `/api/v1/apps/templates/${encodeURIComponent(id)}`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  deleteAppTemplate(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/apps/templates/${encodeURIComponent(id)}`);
+  }
+
+  // Protections (explicit binding on exactly one host).
+  listAppProtections(hostId?: string): Promise<ApplicationProtectionListItem[]> {
+    const qs = hostId ? `?hostId=${encodeURIComponent(hostId)}` : "";
+    return this.request<ApplicationProtectionListItem[]>("GET", `/api/v1/apps/protections${qs}`);
+  }
+
+  getAppProtection(id: string): Promise<ApplicationProtection> {
+    return this.request<ApplicationProtection>(
+      "GET",
+      `/api/v1/apps/protections/${encodeURIComponent(id)}`,
+    );
+  }
+
+  enrollAppProtection(
+    body: { templateId: string; hostId: string; schedule?: string | null; name?: string },
+  ): Promise<ApplicationProtection> {
+    return this.request<ApplicationProtection>(
+      "POST",
+      "/api/v1/apps/protections",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  updateAppProtection(
+    id: string,
+    body: Partial<Pick<ApplicationProtection, "name" | "enabled" | "schedule" | "destination">>,
+  ): Promise<ApplicationProtection> {
+    return this.request<ApplicationProtection>(
+      "PUT",
+      `/api/v1/apps/protections/${encodeURIComponent(id)}`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  deleteAppProtection(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/apps/protections/${encodeURIComponent(id)}`);
+  }
+
+  // Snapshots (immutable archive metadata under a protection).
+  listAppSnapshots(protectionId: string): Promise<ApplicationSnapshot[]> {
+    return this.request<ApplicationSnapshot[]>(
+      "GET",
+      `/api/v1/apps/protections/${encodeURIComponent(protectionId)}/snapshots`,
+    );
+  }
+
+  async uploadAppSnapshot(
+    protectionId: string,
     tarball: Blob,
-    opts: { description?: string; hostId?: string; uploaderHostId?: string } = {},
-  ): Promise<DotfileVersion> {
+    opts: { description?: string } = {},
+  ): Promise<ApplicationSnapshot> {
     const form = new FormData();
-    form.append("tarball", tarball, `${appName}.tar.gz`);
+    form.append("tarball", tarball, "snapshot.tar.gz");
     if (opts.description) form.append("description", opts.description);
-    if (opts.hostId) form.append("hostId", opts.hostId);
-    if (opts.uploaderHostId) form.append("uploaderHostId", opts.uploaderHostId);
     const res = await this.fetchWithTimeout(
-      `${this.baseUrl}/api/v1/dotfiles/${encodeURIComponent(appName)}`,
+      `${this.baseUrl}/api/v1/apps/protections/${encodeURIComponent(protectionId)}/snapshots`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${this.apiKey}` },
@@ -497,11 +527,19 @@ export class LamaSyncApiClient {
       const text = await res.text().catch(() => "");
       throw new LamaSyncApiError(res.status, text);
     }
-    return (await res.json()) as DotfileVersion;
+    return (await res.json()) as ApplicationSnapshot;
   }
-  async downloadDotfile(appName: string, version: string): Promise<Blob> {
+
+  getAppSnapshot(id: string): Promise<ApplicationSnapshot> {
+    return this.request<ApplicationSnapshot>(
+      "GET",
+      `/api/v1/apps/snapshots/${encodeURIComponent(id)}`,
+    );
+  }
+
+  async downloadAppSnapshot(id: string): Promise<Blob> {
     const res = await this.fetchWithTimeout(
-      `${this.baseUrl}/api/v1/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
+      `${this.baseUrl}/api/v1/apps/snapshots/${encodeURIComponent(id)}/download`,
       { headers: { Authorization: `Bearer ${this.apiKey}` } },
     );
     if (!res.ok) {
@@ -511,12 +549,10 @@ export class LamaSyncApiClient {
     return await res.blob();
   }
 
-  deleteDotfile(appName: string, version: string): Promise<void> {
-    return this.request<void>(
-      "DELETE",
-      `/api/v1/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
-    );
+  deleteAppSnapshot(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/apps/snapshots/${encodeURIComponent(id)}`);
   }
+
 
   // Operations
   listOperations(opts: {
@@ -671,12 +707,6 @@ export class LamaSyncApiClient {
     return this.request<void>("DELETE", `/api/v1/hosts/${encodeURIComponent(hostId)}`);
   }
 
-  listDotfilesForHost(hostId: string): Promise<DotfileVersion[]> {
-    return this.request<DotfileVersion[]>(
-      "GET",
-      `/api/v1/dotfiles?hostId=${encodeURIComponent(hostId)}`,
-    );
-  }
 
   // Shares
   listShares(): Promise<Share[]> {

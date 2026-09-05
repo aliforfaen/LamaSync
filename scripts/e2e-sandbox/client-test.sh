@@ -89,7 +89,7 @@ if [ -z "${HOST_ID}" ] || [ "${HOST_ID}" = "null" ]; then
 fi
 echo "==> Host ID: ${HOST_ID}"
 
-# Stop daemon so we can configure all folders/manifests before the next start
+# Stop daemon so we can configure all folders/protections before the next start
 stop_daemon
 
 # ---------------------------------------------------------------------------
@@ -117,9 +117,9 @@ curl -fsSL -X POST -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: appli
   -d "{\"hostId\":\"${HOST_ID}\",\"role\":\"source\",\"localPath\":\"${TEST_DATA_DIR}\",\"syncExpr\":\"*/1 * * * *\"}" > /dev/null
 
 # ---------------------------------------------------------------------------
-# 4. Create dotfile test data and server-side folder/manifest
+# 4. Create app-config test data and server-side folder + template/protection
 # ---------------------------------------------------------------------------
-echo "==> Creating dotfile test data..."
+echo "==> Creating app-config test data..."
 cat > "${DOTFILES_DIR}/settings.json" <<EOF
 {"theme":"dark","font":"monospace"}
 EOF
@@ -136,10 +136,17 @@ curl -fsSL -X POST -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: appli
   "${SERVER_URL}/api/v1/folders/${DOTFILE_FOLDER}/assign" \
   -d "{\"hostId\":\"${HOST_ID}\",\"role\":\"source\",\"localPath\":\"${DOTFILES_DIR}\",\"syncExpr\":\"*/1 * * * *\"}" > /dev/null
 
-echo "==> Creating dotfile manifest..."
-curl -fsSL -X POST -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
-  "${SERVER_URL}/api/v1/dotfiles/manifests" \
-  -d "{\"hostId\":\"${HOST_ID}\",\"appName\":\"sandbox-dotfiles\",\"paths\":[\"${DOTFILES_DIR}\"],\"excludes\":[\"*.log\"]}" > /dev/null
+echo "==> Creating app template..."
+TEMPLATE_ID=$(curl -fsSL -X POST -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+  "${SERVER_URL}/api/v1/apps/templates" \
+  -d "{\"name\":\"sandbox-dotfiles\",\"description\":\"Sandbox app config capture\",\"paths\":{\"paths\":{\"linux\":[{\"path\":\"${DOTFILES_DIR}\",\"classification\":\"unknown\"}]},\"excludes\":[\"*.log\"],\"notes\":null}}" | jq -r '.id')
+echo "==> Template ID: ${TEMPLATE_ID}"
+
+echo "==> Enrolling app protection on client..."
+PROTECTION_ID=$(curl -fsSL -X POST -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+  "${SERVER_URL}/api/v1/apps/protections" \
+  -d "{\"templateId\":\"${TEMPLATE_ID}\",\"hostId\":\"${HOST_ID}\",\"schedule\":\"*/1 * * * *\"}" | jq -r '.id')
+echo "==> Protection ID: ${PROTECTION_ID}"
 
 # Restart daemon so it picks up all the new config in one go
 start_daemon
@@ -190,20 +197,20 @@ if [ "${STATUS}" != "success" ]; then
   exit 1
 fi
 
-echo "==> Verifying dotfile tarball on server..."
-if curl -fsSL -H "Authorization: Bearer ${API_KEY}" "${SERVER_URL}/api/v1/dotfiles/manifests?hostId=${HOST_ID}" | jq -e '.[] | select(.appName == "sandbox-dotfiles")' > /dev/null; then
-  echo "==> Dotfile manifest exists on server"
+echo "==> Verifying app snapshot on server..."
+if curl -fsSL -H "Authorization: Bearer ${API_KEY}" "${SERVER_URL}/api/v1/apps/protections?hostId=${HOST_ID}" | jq -e '.[] | select(.name == "sandbox-dotfiles")' > /dev/null; then
+  echo "==> App protection exists on server"
 else
-  echo "ERROR: dotfile manifest not found on server" >&2
+  echo "ERROR: app protection not found on server" >&2
   exit 1
 fi
 
-VERSIONS=$(curl -fsSL -H "Authorization: Bearer ${API_KEY}" "${SERVER_URL}/api/v1/dotfiles/sandbox-dotfiles" | jq -r '.[].id')
-if [ -z "${VERSIONS}" ] || [ "${VERSIONS}" = "null" ]; then
-  echo "ERROR: no dotfile versions found on server" >&2
+SNAPSHOTS=$(curl -fsSL -H "Authorization: Bearer ${API_KEY}" "${SERVER_URL}/api/v1/apps/protections/${PROTECTION_ID}/snapshots" | jq -r '.[].id')
+if [ -z "${SNAPSHOTS}" ] || [ "${SNAPSHOTS}" = "null" ]; then
+  echo "ERROR: no app snapshots found on server" >&2
   exit 1
 fi
-echo "==> Dotfile version(s): ${VERSIONS}"
+echo "==> App snapshot(s): ${SNAPSHOTS}"
 
 # ---------------------------------------------------------------------------
 # 6. Print logs and summary

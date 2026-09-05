@@ -8,14 +8,18 @@
 |`@lamasync/server` — REST + WebSocket + Swagger + auth|done|
 |`@lamasync/daemon` — heartbeat, rclone execution, mounts, scheduler, socket server|done|
 |`@lamasync/tui` — Single tabbed shell with 6 views + guided wizards + CLI fallback (LAMA-173)|done|
-|`@lamasync/web-ui` — React SPA embedded in the server binary (Dashboard, Folders, Dotfiles, Conflicts, Admin)|done|
+|`@lamasync/web-ui` — React SPA embedded in the server binary (Dashboard, Folders, Apps, Conflicts, Admin)|done|
 |Agent skill (`lamasync` two-tier bundle: `SKILL.md` + `reference/`) — LAMA-230|done (+ installed)|
 |Docker: `Dockerfile.server`, `docker-compose.yml`|done|
 |`bun run build` → standalone binaries|working|
 |Unit tests (core + server + daemon + self-update + TUI + executor + offset + web-ui + wizard)|passing|
-|End-to-end smoke verification (health, register, folders, dotfiles, daemon, TUI, web UI)|done|
+|End-to-end smoke verification (health, register, folders, app snapshots, daemon, TUI, web UI)|done|
 
 ## Implemented features by issue
+
+Rows describe their original delivery. LAMA-316 supersedes the older
+dotfile/profile/manifests rows below; their removed paths are retained only as
+historical context.
 
 | Issue | Feature | Location |
 |-------|---------|----------|
@@ -30,6 +34,7 @@
 | LAMA-104 | Error handling (core hardening) | `server/src/routes/report.ts`, `core/src/api-client.ts`, `server/src/index.ts`, `daemon/src/lock.ts`, `daemon/src/report-queue.ts`, `daemon/src/hooks.ts` |
 | LAMA-162 | Automatic conflict strategies (`newer_wins`, `source_wins`, `keep_both`) | `core/src/types.ts`, `daemon/src/executor.ts` |
 | LAMA-109 | App-specific "backup" dotfile system | `core/src/types.ts`, `core/src/db/schema.ts`, `server/src/routes/dotfiles.ts`, `server/src/routes/config.ts`, `daemon/src/executor.ts`, `tui/src/views/dotfiles.ts` |
+| LAMA-316 | Application templates, protections, and snapshots (replaces dotfile/profile model) | `packages/core/src/{types.ts,db/schema.ts,api-client.ts}`, `packages/server/src/routes/apps.ts`, `packages/daemon/src/{executor.ts,scheduler.ts}`, `packages/web-ui/src/{api.ts,pages/{Presets,Dotfiles}.tsx}`, `packages/tui/src/cli/apps.ts` |
 | LAMA-123 | LAN peer sync | `daemon/src/lan-peer.ts`, `server/src/routes/config.ts` |
 | LAMA-124 | Encryption-at-rest | `server/src/routes/folders.ts`, `server/src/routes/config.ts` |
 | LAMA-125 | `ARCHITECTURE.md` rewrite | `ARCHITECTURE.md` |
@@ -115,6 +120,12 @@
 ### TUI
 - **Remote conflict sizes** — conflict cards show the destination size as `—`
   until a per-conflict remote stat is added; local sizes are available.
+
+### Application capture portability (LAMA-316)
+- **Linux/GNU tar verified only** — portable app archive-member rewriting uses
+  GNU tar's `--transform` behavior. No macOS or Windows clients exist in the
+  fleet yet; qualify their archive tooling before claiming app-capture support
+  on either platform.
 
 ### LAN peer tailnet preference (LAMA-223)
 - **Stale `tailnet_ip` never clears** — when a daemon's tailscale interface goes down, the field stays at its last value until the next successful detection. With tailnet preferred in peer rclone configs (P1-4), a stale address can strand peers — the daemons probe both tailnet and LAN sections before declaring the peer unreachable, so the worst case is a 5s sync delay, not a failure.

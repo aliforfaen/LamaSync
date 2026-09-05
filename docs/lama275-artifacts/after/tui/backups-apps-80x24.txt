@@ -9,7 +9,7 @@
 │   home-snapshots — sftp                                                      │
 │   photos-archive — sftp                                                      │
 │                                                                              │
-│ App settings — dotfile snapshots and restore                                 │
+│ App settings — protection snapshots (inspect/download)                       │
 │ Select an app to browse its snapshots, or choose Setup.                      │
 │                                                                              │
 │  ▶ Setup (restore all apps)                                                  │

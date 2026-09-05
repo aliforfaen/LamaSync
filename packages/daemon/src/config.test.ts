@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, rmSync } from "fs";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import type { FolderAssignment, HostConfig } from "@lamasync/core";
+import type { AppCaptureAssignment, FolderAssignment, HostConfig } from "@lamasync/core";
 import { expandConfigPaths, expandHomePath, missingAssignmentPaths } from "./config.ts";
 
 describe("expandHomePath", () => {
@@ -76,11 +76,22 @@ describe("expandConfigPaths (LAMA-309)", () => {
     enabled: true,
   });
 
-  const makeConfig = (assignments: FolderAssignment[]): HostConfig => ({
+  const makeApp = (paths: string[]): AppCaptureAssignment => ({
+    appName: "nvim",
+    hostId: "h1",
+    protectionId: "p1",
+    paths,
+    schedule: null,
+  });
+
+  const makeConfig = (
+    assignments: FolderAssignment[],
+    apps: AppCaptureAssignment[] = [],
+  ): HostConfig => ({
     host: { id: "h1", hostname: "h1", status: "online" },
     assignments,
     folders: [],
-    manifests: [],
+    apps,
     rcloneConfig: "[fake]\ntype = local\n",
     serverTailnetIp: null,
     peers: [],
@@ -96,7 +107,7 @@ describe("expandConfigPaths (LAMA-309)", () => {
   });
 
   test("returns the same reference when no path uses ~ (no needless copy)", () => {
-    const cfg = makeConfig([mk("/srv/data"), mk("/var/lib/foo")]);
+    const cfg = makeConfig([mk("/srv/data"), mk("/var/lib/foo")], [makeApp(["/srv/app"])]);
     expect(expandConfigPaths(cfg)).toBe(cfg);
   });
 
@@ -104,5 +115,17 @@ describe("expandConfigPaths (LAMA-309)", () => {
     const cfg = makeConfig([mk("~/sessions")]);
     expandConfigPaths(cfg);
     expect(cfg.assignments[0]!.localPath).toBe("~/sessions");
+  });
+
+  test("keeps logical app paths and supplies paired local resolved paths", () => {
+    const cfg = makeConfig([], [makeApp(["~/.config/nvim", "/etc/example"])]);
+    const out = expandConfigPaths(cfg);
+    expect(out).not.toBe(cfg);
+    expect(out.apps[0]!.paths).toEqual(["~/.config/nvim", "/etc/example"]);
+    expect(out.apps[0]!.resolvedPaths).toEqual([
+      expandHomePath("~/.config/nvim"),
+      "/etc/example",
+    ]);
+    expect(cfg.apps[0]!.paths[0]).toBe("~/.config/nvim");
   });
 });

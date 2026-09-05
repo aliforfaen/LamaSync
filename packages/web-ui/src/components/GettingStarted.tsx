@@ -51,7 +51,7 @@ export function GettingStarted({
       <div className="outcome-grid">
         <OutcomeCard icon={<IconSyncFilled />} title="Keep a folder in sync" body="Choose a folder and the Devices that should share it." to="/folders" />
         <OutcomeCard icon={<IconShieldFilled />} title="Protect a folder with backups" body="Choose what to protect, where it lives, and when it runs." to="/backups" />
-        <OutcomeCard icon={<IconDotfileFilled />} title="Protect an app’s settings" body="Save app settings now so they are ready on another Device." to="/dotfiles" />
+        <OutcomeCard icon={<IconDotfileFilled />} title="Protect an app’s settings" body="Enroll an app template on a device so its settings are captured as snapshots." to="/apps/templates" />
         <OutcomeCard icon={<IconHostFilled />} title="Connect another Device" body="Pair the next machine and confirm it has joined the fleet." to="/hosts" />
       </div>
     </section>

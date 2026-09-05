@@ -3,8 +3,8 @@
 The production server runs in an LXC container named `lamasync` at
 `100.113.52.108` (Tailscale only). This file is the canonical reference
 for **how to interact with that container** — SSH, updates, health checks,
-where things live. Historical context (how the current layout came to be)
-lives in `docs/status.md`.
+where things live. Historical context is archived under `docs/archive/`; this
+file and the live environment are the operational source of truth.
 
 If something on the LXC disagrees with this document, this document is
 wrong — update it as part of the same commit/PR that changes the
@@ -42,10 +42,9 @@ ssh -i ~/.ssh/lamasync_key root@lamasync
 - Hostname `lamasync` resolves to `lamasync.tail91ec23.ts.net`
   (`100.113.52.108`) via the workstation's `/etc/hosts` / Tailscale
   resolver. Direct IPs work too.
-- Root SSH from `cachy` is reportedly denied (per
-  `docs/status.md` 2026-08-10 entry) — the procedure above is from
-  `cachytop`/this host. If you need root from a different machine,
-  append its public key to `/root/.ssh/authorized_keys` on the LXC.
+- If another machine needs root access, add its public key deliberately to
+  `/root/.ssh/authorized_keys` on the LXC and record the operational change
+  here.
 
 ## Update procedure
 

@@ -66,12 +66,12 @@ neither the CLI nor the JSON response echoes them back.
 Reads (`GET`) are free. Writes (`POST`/`PATCH`/`PUT`/`DELETE` and CLI
 equivalents) need explicit user intent. Confirm before:
 
-- deleting a folder (cascades to assignments, manifests, snapshots)
+- deleting a folder (cascades to assignments and snapshots)
 - force-restoring a snapshot over a target path
 - rotating an API key
 - stopping mounts / killing the systemd unit
 - pruning the operation log (irreversible)
-- unregistering a host (cascades to dotfile history, allocations)
+- unregistering a host (cascades to app protections/snapshots, allocations)
 
 The CLI enforces this: destructive commands prompt for confirmation on a
 TTY and require `--yes` in non-interactive contexts. The agent's job is to

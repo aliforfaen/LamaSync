@@ -351,49 +351,120 @@ export interface FolderAssignment {
   respectGitignore?: boolean;    // default false; apply Git ignore semantics
 }
 
-export interface DotfileManifest {
-  id: string;
-  hostId: string;
-  appName: string;
-  paths: string[];
-  /** Optional reusable app profile that generated this manifest. */
-  profileId?: string | null;
-  excludes?: string[] | null;
-  schedule?: string | null;
-  instructions?: string | null;
-  lastSyncAt?: number | null;
-  lastSyncDirection?: "upload" | "download" | null;
-  originalUploaderHostId?: string | null;
+// ---------------------------------------------------------------------------
+// LAMA-316 — application templates, protections, snapshots (canonical "apps"
+// contract). This replaces the dotfile-manifest/profile/version model above.
+// ---------------------------------------------------------------------------
+
+/** LAMA-315 hook: stable path taxonomy. This delivery only stamps every path
+ *  as "unknown" and exposes the field; no recommendation/exclusion logic. */
+export type PathClassification =
+  | "portable_config"
+  | "machine_state"
+  | "cache"
+  | "secrets"
+  | "custom"
+  | "unknown";
+
+/** A single classified path entry inside a capture spec. */
+export interface CaptureSpecPath {
+  path: string;
+  classification: PathClassification;
+  rationale?: string | null;
+  /** Snapshot-only deterministic archive member root. Never client supplied. */
+  archivePath?: string | null;
 }
 
-/** Reusable user-defined app-settings template. */
-export interface AppProfile {
+/** The named capture-spec shape (replaces anonymous OS-keyed JSON). Extensible
+ *  for LAMA-315. `notes` carries operator instructions about the recipe. */
+export interface CaptureSpec {
+  paths: {
+    linux?: CaptureSpecPath[];
+    macos?: CaptureSpecPath[];
+    windows?: CaptureSpecPath[];
+  };
+  excludes: string[];
+  notes: string | null;
+}
+
+/** Operator-owned reusable recipe. Never a fleet rollout policy. */
+export interface ApplicationTemplate {
   id: string;
   name: string;
-  description?: string | null;
-  emoji?: string | null;
-  color?: string | null;
-  /** Suggested appdata paths keyed by operating system. */
-  paths: {
-    linux?: string[];
-    macos?: string[];
-    windows?: string[];
-  };
-  installUrl?: string | null;
-  installInstructions?: string | null;
-  restoreInstructions?: string | null;
+  origin: "built_in" | "custom";
+  description: string | null;
+  emoji: string | null;
+  color: string | null;
+  /** Candidate paths keyed by OS. */
+  paths: CaptureSpec;
+  installUrl: string | null;
+  installInstructions: string | null;
+  restoreInstructions: string | null;
+  revision: number;
   createdAt: number;
   updatedAt: number;
 }
 
-export interface DotfileVersion {
+/** The only object that makes a template active on one machine. */
+export interface ApplicationProtection {
   id: string;
-  manifestId: string;
-  timestamp: number;
-  tarballPath: string;
-  sizeBytes?: number | null;
-  checksum?: string | null;
-  description?: string | null; // optional label, e.g. "before nvim plugin rewrite"
+  templateId: string;
+  templateRevision: number;
+  hostId: string;
+  name: string;
+  enabled: boolean;
+  schedule: string | null;
+  /** Explicit extensible value; only `server_archive` is supported today. */
+  destination: "server_archive";
+  /** Copied at enrollment; never mutated by template edits. */
+  captureSpec: CaptureSpec;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Immutable archive metadata — not a mutable version of the template. */
+export interface ApplicationSnapshot {
+  id: string;
+  protectionId: string;
+  templateId: string;
+  templateRevision: number;
+  sourceHostId: string;
+  createdAt: number;
+  archivePath: string;
+  archiveFormat: "tar.gz";
+  sizeBytes: number | null;
+  checksumSha256: string | null;
+  description: string | null;
+  /** Exact host OS bucket and archive mapping captured at capture time. */
+  capturedSpec: CaptureSpec;
+  integrityStatus: "verified" | "unverified" | "failed";
+}
+
+/** Daemon wire entry delivered inside HostConfig for capture. Replaces
+ *  dotfile-manifest wire entry in that contract. */
+export interface AppCaptureAssignment {
+  appName: string;
+  hostId: string;
+  protectionId: string;
+  /** Logical configured paths, retained so the archive layout is portable. */
+  paths: string[];
+  /** Daemon-local path expansion paired by index with `paths`. */
+  resolvedPaths?: string[];
+  excludes?: string[] | null;
+  schedule?: string | null;
+  instructions?: string | null;
+}
+
+/** Concise protection list row (JOINs template identity and latest snapshot)
+ *  so list UIs need no N+1 fetches (LAMA-316). */
+export interface ApplicationProtectionListItem extends ApplicationProtection {
+  templateOrigin: "built_in" | "custom";
+  templateName: string;
+  templateEmoji: string | null;
+  templateColor: string | null;
+  latestSnapshot:
+    | { id: string; createdAt: number; sizeBytes: number | null; integrityStatus: string }
+    | null;
 }
 
 export interface Conflict {
@@ -493,10 +564,12 @@ export interface DemoState {
     hosts: number;
     folders: number;
     assignments: number;
-    backends: number;
     operations: number;
     snapshots: number;
     manifests: number;
+    templates: number;
+    protections: number;
+    appSnapshots: number;
   };
 }
 
@@ -510,6 +583,9 @@ export interface DemoSeedSummary {
   operations: number;
   snapshots: number;
   manifests: number;
+  templates: number;
+  protections: number;
+  appSnapshots: number;
   /** Number of seeded pending conflicts (LAMA-268). */
   conflicts?: number;
   /** Server-side seed directory the demo file viewer reads from. */
@@ -547,7 +623,7 @@ export interface HostConfig {
   host: Host;
   assignments: FolderAssignment[];
   folders: Folder[];
-  manifests: DotfileManifest[];
+  apps: AppCaptureAssignment[];
   rcloneConfig: string;
   serverTailnetIp: string | null;
   // LAN peers detected at config-generation time. When the current host's

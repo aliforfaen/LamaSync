@@ -15,7 +15,7 @@ lamasync/                     # Bun workspace root
   packages/
     core/                     # @lamasync/core — shared types, DB, config, API client
       src/
-        types.ts              # Host, Folder, FolderAssignment, DotfileVersion, … (wire/DB shapes)
+        types.ts              # Host, Folder, FolderAssignment, ApplicationTemplate/Protection/Snapshot, … (wire/DB shapes)
         config.ts             # TOML parsers for server & client config
         api-client.ts         # LamaSyncApiClient (all endpoint methods, incl. LAMA-243 release proxy)
         version.ts            # generated version constant (from root package.json)
@@ -52,7 +52,7 @@ lamasync/                     # Bun workspace root
           hosts.ts            # POST /register, POST /report/health, PATCH rename, DELETE
           config.ts           # GET /config/:hostId (assignments + rclone + peers)
           folders.ts          # CRUD + assign/unassign + per-host mode (LAMA-239)
-          dotfiles.ts         # manifest CRUD, upload (multipart), list, download, delete
+          apps.ts             # /api/v1/apps: template/protection CRUD + enroll, snapshot upload/list/download/delete
           operations.ts       # GET /operations (filterable, newest-first)
           report.ts           # POST /report (log + schedule_state update)
           shares.ts           # GET /api/v1/shares (NFS shares)
@@ -133,7 +133,7 @@ lamasync/                     # Bun workspace root
           doctor.ts           #   `lamasync doctor`
           local.ts            #   `lamasync local status|folders|ops|sync|sync-all|mount|unmount`
           hosts.ts            #   `lamasync hosts list|rename`
-          dotfiles.ts         #   `lamasync dotfiles list|upload|download|manifests`
+          apps.ts             #   `lamasync apps templates|protections|snapshots` (LAMA-316; replaces `dotfiles`)
           conflicts.ts        #   `lamasync conflicts list|resolve`
           snapshots.ts        #   `lamasync snapshots list`
           browse.ts           #   `lamasync browse local|s3|restic|jobs`
@@ -154,13 +154,12 @@ lamasync/                     # Bun workspace root
         views/
           local.ts            # LocalView (folder list + sync/cache/wizard hotkeys)
           fleet.ts            # FleetView (uses FleetService for live WS hosts)
-          dotfiles.ts         # DotfilesView (manifest browser + restore state machine)
+          dotfiles.ts         # app protections/snapshots browser + restore state machine (view id kept internal)
           conflicts.ts        # ConflictsView (highlighted-row resolution + confirm)
           logs.ts             # LogsView (ScrollBox + paginated operations)
           gh-selector.ts      # GhView (GitHub repo adoption via `gh` CLI)
         flows/
           backup-setup.ts     # Wizard factory: create folder + assign host
-          dotfile-manifest.ts # Wizard factory: create dotfile manifest
     agent-skill/              # CLI-first agent skill (LAMA-230); two-tier bundle
       SKILL.md                # frontmatter trigger + decision tree + safety summary
       lamasync-client.md      # separate client-install onboarding skill
@@ -202,7 +201,7 @@ lamasync/                     # Bun workspace root
           HostDetail.tsx      # per-host detail (sync now, history, assignments)
           Folders.tsx         # list + create + assign + per-host mode + host filter
           Backends.tsx        # LAMA-222 + LAMA-238: reusable backends + test connection
-          Dotfiles.tsx        # manifest list + create + per-version download/delete
+          Dotfiles.tsx        # app backups: host protections + snapshot history, upload/download/delete
           Conflicts.tsx       # pending conflicts + resolve (Pending/Resolved/All)
           Operations.tsx      # operation log + active locks panel + folder/host filter
           DataBrowser.tsx     # LAMA-202/226: local/S3/restic, jobs, write ops
@@ -221,7 +220,7 @@ lamasync/                     # Bun workspace root
     e2e-sandbox/              # full client end-to-end sandbox (Docker Compose: server + client)
       docker-compose.yml      # server (ghcr image) + client (Ubuntu, runs install.sh)
       client.Dockerfile       # client test image
-      client-test.sh          # install → register → backup → dotfile → log verification
+      client-test.sh          # install → register → backup → app snapshot → log verification
       socket-send.py          # sends JSON commands to the lamasyncd Unix socket
     deploy-agent/             # @lamasync/deploy-agent — LAMA-301 LXC-resident deploy runner (production only)
       src/
@@ -241,10 +240,12 @@ lamasync/                     # Bun workspace root
     workflows/
       ci.yml                  # type-check, test, build, release, docker push, drift-check
   docs/
+    README.md                 # living-document map + archive policy
     development.md            # full dev guide (quick start, tests, recipes, Docker, release)
     repository-layout.md      # this file
     features.md               # implemented features by LAMA issue + known limitations
-    status.md                 # current status log + next-session work queue
+    status.md                 # current status, active work queue, limitations
     agent-start.md            # short current work-order guide for coding agents
     prod-deploy.md            # production LXC ops (SSH, update, rollback)
+    archive/                  # completed handoffs/audits + prior status log
 ```

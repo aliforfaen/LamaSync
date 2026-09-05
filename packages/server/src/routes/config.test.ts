@@ -7,7 +7,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import type {
-  DotfileManifest,
   Folder,
   FolderAssignment,
   Host,
@@ -688,11 +687,30 @@ describe("GET /api/v1/config/:hostId — dotfile manifests (LAMA-168)", () => {
     expect(body.host.configRevision).toBe(5);
   });
 
-  test("returns manifest excludes and schedule to the daemon", async () => {
+  test("returns protection excludes and schedule to the daemon", async () => {
     db.run(`INSERT INTO hosts (id, hostname) VALUES ('host-1', 'test-host')`);
     db.run(
-      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths, excludes, schedule)
-       VALUES ('m1', '_global', 'nvim', '["~/.config/nvim"]', '["*.log","cache/"]', '@login')`,
+      `INSERT INTO application_templates (id, name, origin, paths, created_at, updated_at)
+       VALUES ('t1', 'nvim', 'custom', ?, 1, 1)`,
+      [
+        JSON.stringify({
+          paths: { linux: [{ path: "~/.config/nvim", classification: "unknown" }], macos: [], windows: [] },
+          excludes: ["*.log", "cache/"],
+          notes: null,
+        }),
+      ],
+    );
+    db.run(
+      `INSERT INTO application_protections
+         (id, template_id, template_revision, host_id, name, enabled, schedule, destination, capture_spec, created_at, updated_at)
+       VALUES ('p1', 't1', 1, 'host-1', 'nvim', 1, '@login', 'server_archive', ?, 1, 1)`,
+      [
+        JSON.stringify({
+          paths: { linux: [{ path: "~/.config/nvim", classification: "unknown" }], macos: [], windows: [] },
+          excludes: ["*.log", "cache/"],
+          notes: null,
+        }),
+      ],
     );
 
     process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "config-test-key";
@@ -708,9 +726,10 @@ describe("GET /api/v1/config/:hostId — dotfile manifests (LAMA-168)", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as HostConfig;
-    const manifest = body.manifests.find((m) => m.appName === "nvim");
-    expect(manifest?.excludes).toEqual(["*.log", "cache/"]);
-    expect(manifest?.schedule).toBe("@login");
+    const capture = body.apps.find((a) => a.appName === "nvim");
+    expect(capture?.excludes).toEqual(["*.log", "cache/"]);
+    expect(capture?.schedule).toBe("@login");
+    expect(capture?.paths).toEqual(["~/.config/nvim"]);
   });
 });
 

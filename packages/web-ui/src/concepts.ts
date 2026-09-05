@@ -74,10 +74,8 @@ export const MISC_HINTS = {
     "Bumps whenever server-side config changes — devices re-pull their config within ~5 minutes.",
   queuedAction:
     "Actions are queued and run on the device within ~30 seconds — nothing happens instantly.",
-  dotfileManifest:
-    "Decides which paths of an app's settings get backed up, on which devices, on what schedule.",
-  dotfileOverride:
-    "A device-scoped override takes precedence over the global one with the same app name.",
+  appProtection:
+    "An app protection binds a template to one device, and decides which paths are captured and on what schedule.",
   cacheProfile:
     "rclone VFS cache: normal = balanced, media = aggressive read-ahead for streaming, minimal = lowest disk use.",
 } as const;

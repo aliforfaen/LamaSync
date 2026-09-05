@@ -47,6 +47,9 @@ export function getDemoState(): DemoState {
     operations: countWhere("operation_log"),
     snapshots: countWhere("restic_snapshots"),
     manifests: countWhere("dotfile_manifests"),
+    templates: countWhere("application_templates"),
+    protections: countWhere("application_protections"),
+    appSnapshots: countWhere("application_snapshots"),
   };
   const total =
     counts.hosts +
@@ -55,7 +58,10 @@ export function getDemoState(): DemoState {
     counts.backends +
     counts.operations +
     counts.snapshots +
-    counts.manifests;
+    counts.manifests +
+    counts.templates +
+    counts.protections +
+    counts.appSnapshots;
   return { hasDemo: total > 0, counts };
 }
 
@@ -154,11 +160,26 @@ export function seedDemo(): DemoSeedSummary {
     }
   });
 
-  // --- a dotfile manifest on the first demo host (app-settings backup) ---
-  const manifestId = `demo-${crypto.randomUUID()}`;
+  // --- an app template + protection on the first demo host (app-settings backup) ---
+  const templateId = `demo-${crypto.randomUUID()}`;
+  const tsNow = Date.now();
+  const demoSpec = {
+    paths: {
+      linux: [{ path: "~/.config/Code/User/settings.json", classification: "unknown" }],
+      macos: [],
+      windows: [],
+    },
+    excludes: [],
+    notes: null,
+  };
   db.run(
-    "INSERT INTO dotfile_manifests (id, host_id, app_name, paths, demo) VALUES (?, ?, 'VS Code', ?, 1)",
-    [manifestId, hostIds[0], JSON.stringify(["~/.config/Code/User/settings.json"])],
+    "INSERT INTO application_templates (id, name, origin, paths, created_at, updated_at, demo) VALUES (?, 'VS Code', 'custom', ?, ?, ?, 1)",
+    [templateId, JSON.stringify(demoSpec), tsNow, tsNow],
+  );
+  const protectionId = `demo-${crypto.randomUUID()}`;
+  db.run(
+    "INSERT INTO application_protections (id, template_id, template_revision, host_id, name, enabled, schedule, destination, capture_spec, created_at, updated_at, demo) VALUES (?, ?, 1, ?, 'VS Code', 1, NULL, 'server_archive', ?, ?, ?, 1)",
+    [protectionId, templateId, hostIds[0], JSON.stringify(demoSpec), tsNow, tsNow],
   );
 
   // --- a browsable restic snapshot referencing the first demo folder ---
@@ -244,7 +265,10 @@ export function seedDemo(): DemoSeedSummary {
     backends: 1,
     operations: DEMO_OPERATIONS.length,
     snapshots: 1,
-    manifests: 1,
+    manifests: 0,
+    templates: 1,
+    protections: 1,
+    appSnapshots: 0,
     conflicts: DEMO_CONFLICTS.length,
     seedDir,
   };
@@ -264,6 +288,9 @@ export function deleteDemo(): DemoSeedSummary {
     "DELETE FROM dotfile_versions WHERE manifest_id IN (SELECT id FROM dotfile_manifests WHERE demo = 1)",
   );
   db.run("DELETE FROM dotfile_manifests WHERE demo = 1");
+  db.run("DELETE FROM application_snapshots WHERE demo = 1");
+  db.run("DELETE FROM application_protections WHERE demo = 1");
+  db.run("DELETE FROM application_templates WHERE demo = 1");
   db.run("DELETE FROM conflicts WHERE demo = 1");
   db.run("DELETE FROM folders WHERE demo = 1");
   db.run("DELETE FROM backends WHERE demo = 1");
@@ -276,6 +303,9 @@ export function deleteDemo(): DemoSeedSummary {
     operations: 0,
     snapshots: 0,
     manifests: 0,
+    templates: 0,
+    protections: 0,
+    appSnapshots: 0,
     seedDir: demoSeedDir(),
   };
 }

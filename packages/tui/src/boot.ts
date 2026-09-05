@@ -5,7 +5,7 @@
  * Slice J (LAMA-173) integrates the six foundation views:
  *   - Local      (folder list + sync/cache/wizard hotkeys)
  *   - Fleet      (live hosts via FleetService WebSocket)
- *   - Dotfiles   (app-settings manifests + backup-folder visibility)
+ *   - Dotfiles   (app protections + snapshot restore + backup-folder visibility)
  *   - Conflicts  (pending-conflict resolution)
  *   - Logs       (paginated operation log)
  *   - Gh         (GitHub repo selector for `gh` CLI adoption)

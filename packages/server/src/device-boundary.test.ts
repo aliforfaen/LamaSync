@@ -27,7 +27,7 @@ const { __setDb: __setOpsDb, operationsRoutes } = await import("./routes/operati
 const { __setDb: __setConflictsDb, conflictsRoutes } = await import("./routes/conflicts.ts");
 const { __setDb: __setResticDb, resticRoutes } = await import("./routes/restic.ts");
 const { __setDb: __setFoldersDb, foldersRoutes } = await import("./routes/folders.ts");
-const { __setDb: __setDotfilesDb, dotfilesRoutes } = await import("./routes/dotfiles.ts");
+const { __setDb: __setAppsDb, appsRoutes } = await import("./routes/apps.ts");
 const { __setDb: __setConfigRevisionDb } = await import("./config-revision.ts");
 const { __setCachedLatestVersionForTests } = await import("./release-cache.ts");
 const { __resetNotificationStateForTests } = await import("./notifications.ts");
@@ -35,6 +35,8 @@ const { __resetNotificationStateForTests } = await import("./notifications.ts");
 let db: Database;
 let app: { handle(request: Request): Promise<Response> };
 let deviceA: string; // token bound to host-a
+let deployToken: string;
+let adminToken: string;
 
 function seedRow(sql: string, args: (string | number | null)[]): void {
   db.run(sql, args);
@@ -59,7 +61,7 @@ beforeEach(() => {
   __setConflictsDb(db);
   __setResticDb(db);
   __setFoldersDb(db);
-  __setDotfilesDb(db);
+  __setAppsDb(db);
   // Register/heartbeat bump config revisions; point that seam at this db
   // too so it never touches the default path or another file's closed db.
   __setConfigRevisionDb(db);
@@ -80,27 +82,31 @@ beforeEach(() => {
     [],
   );
   seedRow(
-    "INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('dot-a', 'host-a', 'shared-app', '[]')",
+    `INSERT INTO application_templates (id, name, origin, paths, created_at, updated_at) VALUES ('tpl-a', 'shared-app', 'custom', '{"paths":{"linux":[{"path":"~/.config/app","classification":"unknown"}],"macos":[],"windows":[]},"excludes":[],"notes":null}', 1, 1)`,
     [],
   );
   seedRow(
-    "INSERT INTO dotfile_manifests (id, host_id, app_name, paths) VALUES ('dot-b', 'host-b', 'shared-app', '[]')",
+    `INSERT INTO application_protections (id, template_id, template_revision, host_id, name, enabled, destination, capture_spec, created_at, updated_at) VALUES ('prot-a', 'tpl-a', 1, 'host-a', 'shared-app', 1, 'server_archive', '{"paths":{"linux":[{"path":"~/.config/app","classification":"unknown"}],"macos":[],"windows":[]},"excludes":[],"notes":null}', 1, 1)`,
     [],
   );
   seedRow(
-    "INSERT INTO dotfile_versions (id, manifest_id, timestamp, tarball_path) VALUES ('version-a', 'dot-a', 1, 'dotfiles/shared-app/host-a.tar.gz')",
+    `INSERT INTO application_protections (id, template_id, template_revision, host_id, name, enabled, destination, capture_spec, created_at, updated_at) VALUES ('prot-b', 'tpl-a', 1, 'host-b', 'shared-app', 1, 'server_archive', '{"paths":{"linux":[{"path":"~/.config/app","classification":"unknown"}],"macos":[],"windows":[]},"excludes":[],"notes":null}', 1, 1)`,
     [],
   );
   seedRow(
-    "INSERT INTO dotfile_versions (id, manifest_id, timestamp, tarball_path) VALUES ('version-b', 'dot-b', 2, 'dotfiles/shared-app/host-b-secret.tar.gz')",
+    `INSERT INTO application_snapshots (id, protection_id, template_id, template_revision, source_host_id, created_at, archive_path, archive_format, size_bytes, checksum_sha256, captured_spec, integrity_status, demo) VALUES ('snap-a', 'prot-a', 'tpl-a', 1, 'host-a', 1, 'apps/prot-a/1.tar.gz', 'tar.gz', 10, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{"paths":{"linux":[{"path":"~/.config/app","classification":"unknown"}],"macos":[],"windows":[]},"excludes":[],"notes":null}', 'verified', 0)`,
     [],
   );
-
+  seedRow(
+    `INSERT INTO application_snapshots (id, protection_id, template_id, template_revision, source_host_id, created_at, archive_path, archive_format, size_bytes, checksum_sha256, captured_spec, integrity_status, demo) VALUES ('snap-b', 'prot-b', 'tpl-a', 1, 'host-b', 2, 'apps/prot-b/2.tar.gz', 'tar.gz', 20, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '{"paths":{"linux":[{"path":"~/.config/app","classification":"unknown"}],"macos":[],"windows":[]},"excludes":[],"notes":null}', 'verified', 0)`,
+    [],
+  );
   const a = insertManagedApiKey({ name: "device-a", kind: "device", hostId: "host-a" });
   deviceA = a.token;
   // host-b's own device key (should behave identically for host-b)
   insertManagedApiKey({ name: "device-b", kind: "device", hostId: "host-b" });
-  insertManagedApiKey({ name: "ops key", kind: "admin", hostId: null });
+  adminToken = insertManagedApiKey({ name: "ops key", kind: "admin", hostId: null }).token;
+  deployToken = insertManagedApiKey({ name: "deploy agent", kind: "deploy", hostId: null }).token;
 
   // Rows owned by host-b that device-a must never touch.
   seedRow(
@@ -131,7 +137,7 @@ beforeEach(() => {
     .use(conflictsRoutes)
     .use(resticRoutes)
     .use(foldersRoutes)
-    .use(dotfilesRoutes);
+    .use(appsRoutes);
 });
 
 afterEach(() => {
@@ -287,17 +293,31 @@ describe("cross-host access is forbidden for device keys", () => {
     expect(await statusOf(deviceA, "GET", "/api/v1/hosts/host-a/actions")).toBe(403);
   });
 
-  test("cannot list same-app dotfile metadata from another host", async () => {
-    const appList = await app.handle(as(deviceA, "GET", "/api/v1/dotfiles/shared-app"));
-    expect(appList.status).toBe(403);
-    expect(await appList.json()).toEqual({ error: "Forbidden" });
+  test("cannot list another host's app protection or snapshot", async () => {
+    expect(await statusOf(deviceA, "GET", "/api/v1/apps/protections/prot-b")).toBe(403);
+    expect(await statusOf(deviceA, "GET", "/api/v1/apps/snapshots/snap-b")).toBe(403);
+    expect(await statusOf(deviceA, "GET", "/api/v1/apps/snapshots/snap-b/download")).toBe(403);
+    // No hostId -> device keys must not leak the fleet list.
+    expect(await statusOf(deviceA, "GET", "/api/v1/apps/protections")).toBe(403);
 
-    const scoped = await app.handle(as(deviceA, "GET", "/api/v1/dotfiles?hostId=host-a"));
+    const scoped = await app.handle(as(deviceA, "GET", "/api/v1/apps/protections?hostId=host-a"));
     expect(scoped.status).toBe(200);
-    const versions = (await scoped.json()) as Array<{ id: string; tarballPath: string }>;
-    expect(versions.map(({ id, tarballPath }) => ({ id, tarballPath }))).toEqual([
-      { id: "version-a", tarballPath: "dotfiles/shared-app/host-a.tar.gz" },
-    ]);
+    const rows = (await scoped.json()) as Array<{ id: string; latestSnapshot: { id: string } | null }>;
+    expect(rows.map((r) => r.id)).toEqual(["prot-a"]);
+    expect(rows[0].latestSnapshot?.id).toBe("snap-a");
+  });
+
+  test("device cannot upload a snapshot to another host's protection", async () => {
+    const form = new FormData();
+    form.append("tarball", new File(["x"], "s.tar.gz", { type: "application/gzip" }), "s.tar.gz");
+    const upload = await app.handle(
+      new Request("http://localhost/api/v1/apps/protections/prot-b/snapshots", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceA}` },
+        body: form,
+      }),
+    );
+    expect(upload.status).toBe(403);
   });
 
   test("resource-ID rows owned by another host: action, conflict, restore job", async () => {
@@ -338,8 +358,23 @@ describe("fleet/admin surface is off-limits to device keys", () => {
     expect(await statusOf(deviceA, "GET", "/api/v1/backends")).toBe(403);
     expect(await statusOf(deviceA, "GET", "/api/v1/folders")).toBe(403);
     expect(await statusOf(deviceA, "GET", "/api/v1/admin/export")).toBe(403);
-    expect(await statusOf(deviceA, "GET", "/api/v1/app-profiles")).toBe(403);
+    expect(await statusOf(deviceA, "GET", "/api/v1/apps/templates")).toBe(403);
     expect(await statusOf(deviceA, "DELETE", "/api/v1/hosts/host-a")).toBe(403);
+  });
+});
+
+describe("app mutations require an administrator", () => {
+  test("deploy credentials cannot mutate protections or delete snapshots", async () => {
+    expect(await statusOf(deployToken, "PUT", "/api/v1/apps/protections/prot-a", { enabled: false })).toBe(403);
+    expect(await statusOf(deployToken, "DELETE", "/api/v1/apps/protections/prot-a")).toBe(403);
+    expect(await statusOf(deployToken, "DELETE", "/api/v1/apps/snapshots/snap-a")).toBe(403);
+    expect(db.query("SELECT id FROM application_protections WHERE id = 'prot-a'").get()).not.toBeNull();
+    expect(db.query("SELECT id FROM application_snapshots WHERE id = 'snap-a'").get()).not.toBeNull();
+    expect(await statusOf(deployToken, "DELETE", "/api/v1/hosts/host-a")).toBe(403);
+  });
+
+  test("managed admin credentials may update protections", async () => {
+    expect(await statusOf(adminToken, "PUT", "/api/v1/apps/protections/prot-a", { enabled: false })).toBe(200);
   });
 });
 
@@ -355,9 +390,9 @@ describe("master and admin keys keep the full surface", () => {
     expect(
       await statusOf(MASTER, "POST", "/api/v1/hosts/host-a/actions", { type: "trigger_sync" }),
     ).toBe(201);
-    const dotfiles = await app.handle(as(MASTER, "GET", "/api/v1/dotfiles/shared-app"));
-    expect(dotfiles.status).toBe(200);
-    expect((await dotfiles.json()) as Array<{ id: string }>).toHaveLength(2);
+    const protList = await app.handle(as(MASTER, "GET", "/api/v1/apps/protections"));
+    expect(protList.status).toBe(200);
+    expect((await protList.json()) as unknown[]).toHaveLength(2);
   });
 
   test("admin managed key also keeps the full surface", async () => {

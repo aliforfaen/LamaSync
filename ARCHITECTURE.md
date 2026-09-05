@@ -6,7 +6,7 @@
 ┌─ TrueNAS (Docker) ──────────────────────────────────────────┐
 │  lamasync-server                                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
-│  │ REST API │ │ Scheduler│ │ Dotfile  │ │ rclone Config  │  │
+│  │ REST API │ │ Scheduler│ │ Snapshots│ │ rclone Config  │  │
 │  │ (Elysia) │ │(heartbeat│ │ Registry │ │ Generator      │  │
 │  │          │ │ + cron)  │ │          │ │                │  │
 │  └────┬─────┘ └────┬─────┘ └────┬────┘ └───────┬────────┘  │
@@ -28,8 +28,8 @@
 Three binaries per machine:
 
 - **`lamasync-server`** — REST API + WS event stream, host & folder registry,
-  dotfile storage, scheduler, rclone config generator. Runs in Docker on
-  TrueNAS.
+  app template/protection/snapshot storage, scheduler, rclone config
+  generator. Runs in Docker on TrueNAS.
 - **`lamasyncd`** — background daemon (`systemd --user`), spawns and supervises
   rclone processes, runs cron-driven sync schedules, reports status to the
   server, exposes a Unix socket for the local TUI.
@@ -54,8 +54,16 @@ against the same API.
 | `sync`   | Bidirectional  | `rclone bisync`                  | LamaFiles between desktop + laptop    |
 | `mount`  | Remote → local | `rclone mount` + VFS cache       | Large repos you don't want downloaded |
 | `backup` | Local → server | `rclone copy` (one-way)          | `/opt/appdata`, home dir snapshots     |
-| `dotfile`| Local → server | `tar czf` + rclone `copyto`      | Per-app configs, versioned on server  |
+| `dotfile`| Local → server | `tar czf` → HTTP upload     | App-config captures, protection-driven |
 | `git`    | Local ↔ origin | `git fetch` + `git pull --rebase`| Git repos synced without re-downloading tree |
+
+An enabled **ApplicationProtection** is the scheduler vehicle for app
+captures. The daemon receives its `HostConfig.apps`
+(`AppCaptureAssignment[]`) and schedules/captures it directly — no `dotfile`
+folder or folder assignment is involved. It tars the configured paths and
+uploads the archive over HTTP multipart (no rclone `copyto`); the server
+stores it as an immutable **ApplicationSnapshot** tarball under
+`<LAMASYNC_BACKUP_DIR>/apps/<protectionId>/<timestamp>-<uuid>.tar.gz`.
 
 The `git` type runs a plain `git` binary instead of rclone. The daemon rejects
 sync when the worktree is dirty, when no `origin` remote exists, or when the
@@ -119,10 +127,11 @@ CREATE TABLE folder_assignments (
     UNIQUE(folder_id, host_id)
 );
 
--- Dotfile manifests: which paths belong to which app
+-- LEGACY (kept read-only/unused since LAMA-316): dotfile manifests used to
+-- define which paths belonged to which app; host_id '_global' rows ignored.
 CREATE TABLE dotfile_manifests (
     id            TEXT PRIMARY KEY,
-    host_id       TEXT NOT NULL,      -- hosts.id or '_global' for shared app definitions
+    host_id       TEXT NOT NULL,      -- hosts.id (legacy '_global' rows ignored)
     app_name      TEXT NOT NULL,
     paths         TEXT NOT NULL,      -- JSON array of paths
     schedule      TEXT,               -- cron expression
@@ -130,7 +139,7 @@ CREATE TABLE dotfile_manifests (
     UNIQUE(host_id, app_name)
 );
 
--- Versioned dotfile tarballs
+-- LEGACY versioned dotfile tarballs (read-only/unused since LAMA-316)
 CREATE TABLE dotfile_versions (
     id            TEXT PRIMARY KEY,
     manifest_id   TEXT NOT NULL REFERENCES dotfile_manifests(id),
@@ -141,13 +150,63 @@ CREATE TABLE dotfile_versions (
     description   TEXT                  -- optional label, e.g. "before nvim rewrite"
 );
 
+-- App templates: reusable capture recipes (LAMA-316)
+CREATE TABLE application_templates (
+    id                     TEXT PRIMARY KEY,
+    name                   TEXT NOT NULL UNIQUE,
+    origin                 TEXT NOT NULL DEFAULT 'custom',  -- built_in | custom
+    description            TEXT,
+    emoji                  TEXT,
+    color                  TEXT,
+    paths                  TEXT NOT NULL,      -- JSON CaptureSpec (candidate per-OS paths)
+    install_url            TEXT,
+    install_instructions   TEXT,
+    restore_instructions   TEXT,
+    revision               INTEGER NOT NULL DEFAULT 1,  -- bumped on every template edit
+    created_at             INTEGER NOT NULL,
+    updated_at             INTEGER NOT NULL
+);
+
+-- App protections: a template enrolled on exactly one host (LAMA-316)
+CREATE TABLE application_protections (
+    id                TEXT PRIMARY KEY,
+    template_id       TEXT NOT NULL REFERENCES application_templates(id),
+    template_revision INTEGER NOT NULL,      -- template revision captured at enroll
+    host_id           TEXT NOT NULL REFERENCES hosts(id),
+    name              TEXT NOT NULL,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    schedule          TEXT,                  -- cron expression
+    destination       TEXT NOT NULL DEFAULT 'server_archive',
+    capture_spec      TEXT NOT NULL,         -- JSON CaptureSpec copied at enroll; never mutated by template edits
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    UNIQUE(host_id, template_id)
+);
+
+-- App snapshots: immutable capture archives (LAMA-316)
+CREATE TABLE application_snapshots (
+    id                TEXT PRIMARY KEY,
+    protection_id     TEXT NOT NULL REFERENCES application_protections(id),
+    template_id       TEXT NOT NULL,
+    template_revision INTEGER NOT NULL,
+    source_host_id    TEXT NOT NULL,
+    created_at        INTEGER NOT NULL,
+    archive_path      TEXT NOT NULL,         -- relative to backup dir: apps/<protectionId>/<ts>.tar.gz
+    archive_format    TEXT NOT NULL DEFAULT 'tar.gz',
+    size_bytes        INTEGER,
+    checksum_sha256   TEXT,                  -- sha256
+    description       TEXT,
+    captured_spec     TEXT NOT NULL,         -- JSON CaptureSpec recorded server-side at upload
+    integrity_status  TEXT NOT NULL DEFAULT 'unverified'  -- verified | unverified | failed
+);
+
 -- Operation log (sync runs, backups, errors)
 CREATE TABLE operation_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp   INTEGER NOT NULL,
     host_id     TEXT NOT NULL,
     folder_id   TEXT,
-    operation   TEXT NOT NULL,          -- sync, mount, backup, dotfile_push, dotfile_pull, git
+    operation   TEXT NOT NULL,          -- sync, mount, backup, dotfile (app capture), git
     status      TEXT NOT NULL,          -- started, success, failed, conflict, recovery, retry
     summary     TEXT,                   -- "42 files up, 3 conflicts"
     details     TEXT,                    -- JSON: file list, error messages
@@ -167,6 +226,23 @@ CREATE TABLE schedule_state (
 );
 ```
 
+**LAMA-316 app contract.** ApplicationTemplate → ApplicationProtection
+(bound to exactly one host; no `_global`) → ApplicationSnapshot (immutable
+archive metadata) replace the legacy dotfile/profile model above. The legacy
+`app_profiles`, `dotfile_manifests`, and `dotfile_versions` tables are kept
+on disk read-only and unused — nothing is dropped — and the `_global` host
+sentinel is removed without an alias. An idempotent one-time migration
+(`convertLegacyAppConfig` in `core/src/db/app-config-migration.ts`) lifts
+legacy profile/manifest rows (host-specific + `_global` fan-out) into
+templates/protections. The daemon receives its capture contract as
+`HostConfig.apps` (`AppCaptureAssignment[]`), derived per host from enabled
+protections joined with templates — not from manifests. Captures are pushed
+over HTTP multipart and stored as tarballs under
+`<LAMASYNC_BACKUP_DIR>/apps/<protectionId>/<timestamp>.tar.gz`; every
+snapshot row records the server-side `capture_spec` and a sha256 checksum.
+Indexes: `idx_app_protections_host`, `idx_app_protections_template`,
+`idx_app_snapshots_protection_ts`, `idx_app_snapshots_host`.
+
 Retention: a daily prune deletes `operation_log` rows older than
 `LAMASYNC_LOG_RETENTION_DAYS` (default `90`), preserving the most recent
 entry per host so offline hosts keep their last-known status.
@@ -177,19 +253,26 @@ entry per host so offline hosts keep their last-known status.
 
 ```
 GET    /api/v1/health                          → fleet summary + host statuses
-GET    /api/v1/config/:host_id                 → full config for a host
+GET    /api/v1/config/:host_id                 → full config for a host (incl. `apps` capture assignments)
 POST   /api/v1/register                        → new host self-registration
 POST   /api/v1/report                          → client submits operation result
 POST   /api/v1/report/health                   → client heartbeat + local stats
 
-GET    /api/v1/dotfiles/manifests              → list effective manifests (global + host overrides)
-POST   /api/v1/dotfiles/manifests              → create/update a manifest
-PUT    /api/v1/dotfiles/manifests/:id          → update a manifest
-DELETE /api/v1/dotfiles/manifests/:id          → delete a manifest and its versions
-GET    /api/v1/dotfiles/:app_name              → list available versions
-GET    /api/v1/dotfiles/:app_name/:version     → download tarball
-POST   /api/v1/dotfiles/:app_name              → upload new version (multipart; records sha256 checksum)
-DELETE /api/v1/dotfiles/:app_name/:version     → prune old version
+GET    /api/v1/apps/templates                  → list app templates
+POST   /api/v1/apps/templates                  → create an app template (admin)
+GET    /api/v1/apps/templates/:id              → get a template
+PUT    /api/v1/apps/templates/:id              → update a template (admin; bumps revision)
+DELETE /api/v1/apps/templates/:id              → delete a template (admin; 409 while protections exist)
+GET    /api/v1/apps/protections                → list protections (admin: all hosts; device: own host via ?hostId=)
+POST   /api/v1/apps/protections                → enroll a template on one host (admin)
+GET    /api/v1/apps/protections/:id            → get a protection (own-host)
+PUT    /api/v1/apps/protections/:id            → update name/enabled/schedule/destination (admin)
+DELETE /api/v1/apps/protections/:id            → delete an empty protection (admin; 409 when history exists — disable it instead)
+GET    /api/v1/apps/protections/:id/snapshots  → list snapshots for a protection (own-host)
+POST   /api/v1/apps/protections/:id/snapshots  → upload capture tarball (multipart; records sha256 checksum)
+GET    /api/v1/apps/snapshots/:id              → snapshot metadata (own-host)
+GET    /api/v1/apps/snapshots/:id/download     → download snapshot tarball (own-host)
+DELETE /api/v1/apps/snapshots/:id              → delete a snapshot (admin)
 
 GET    /api/v1/folders                         → list all folders
 POST   /api/v1/folders                         → create folder definition
@@ -233,7 +316,8 @@ Credentials resolve to one of three typed principals (`AuthPrincipal` in
   A route-level allowlist in `server/src/auth.ts` confines device keys to
   their own control-plane calls (config, registration, reports, action
   queue/completions, locks, conflicts, restic snapshots + restore jobs,
-  dotfile uploads, release checks, `/auth/me`); everything else is 403 at
+  their own app protections/snapshots (list/get/upload/download), release
+  checks, `/auth/me`); everything else is 403 at
   the auth boundary. Host-bearing routes enforce ownership on top
   (`deviceMayAccessHost` / `requireAdmin`).
 
@@ -353,7 +437,7 @@ The shell's tabs are task-oriented (LAMA-275 D3/D4, approved):
   `n` network shares, `w` new backup; the footer repaints per-folder
   actions for the selected row).
 - **All devices** — live fleet via `/api/v1/ws` host events.
-- **Backups & apps** — fleet-wide backup folders + dotfile restores.
+- **Backups & apps** — fleet-wide backup folders + app snapshot restores.
 - **Conflicts** / **Activity** — pending resolutions / operation log.
 - **More** — tools & integrations; GitHub (repo adoption via `gh`) is a
   drill-in view hidden from the tab bar, reached from More or the `g`
@@ -364,32 +448,38 @@ to server REST + WS and subscribes to `/api/v1/ws` host events.
 
 ---
 
-## Dotfile Flow
+## App Capture Flow (LAMA-316)
 
-### Manifest model
+### Contract model
 
-- Manifests are keyed by `(host_id, app_name)`. `host_id = "_global"` defines a
-  shared app (e.g. `opencode`) for every host. A host-specific manifest for the
-  same `app_name` overrides the global one, enabling per-machine subsets like
-  restoring only `~/.config/opencode/agents` on an existing client.
-- Manifests carry `paths` and optional `instructions` (setup notes shown in the
-  TUI after restore).
+- **ApplicationTemplate** is a reusable capture recipe: name, per-OS candidate
+  paths as a `CaptureSpec`, and optional install/restore instructions.
+  Enrolling a template on exactly one host creates an **ApplicationProtection**
+  that copies the template's capture spec verbatim — later template edits
+  never mutate an enrolled protection. Scheduled or manual captures produce
+  immutable **ApplicationSnapshot** archives. The `_global` host sentinel and
+  the host-override manifest model are gone: there are no shared/global app
+  definitions anymore.
+- App protections schedule independently of folders. The legacy `dotfile`
+  folder type is retained only for transitional configurations and is never
+  used to schedule a second protection capture.
 
-### Backup (client → server)
+### Capture (client → server)
 
 ```
-TUI trigger / cron
+ApplicationProtection schedule / host-wide backup trigger
        │
        ▼
-lamasyncd reads effective dotfile manifest for app (e.g., opencode)
+lamasyncd runs the explicit HostConfig.apps entry for that protection
        │
        ▼
-tar czf /tmp/lamasync-dotfile-opencode-<ts>.tar.gz \
-    ~/.config/opencode
+tar czf <tmp>/lamasync-dotfile-<pid>-<ts>.tar.gz -C / <source paths>
+  (transformed to portable `home/...` or `absolute/...` archive members)
        │
        ▼
-POST /api/v1/dotfiles/opencode (multipart tarball)
-  → server stores file, computes sha256, records version in DB
+POST /api/v1/apps/protections/<protectionId>/snapshots (multipart tarball)
+  → server stores apps/<protectionId>/<ts>-<uuid>.tar.gz, computes sha256, records
+    the exact host OS capture bucket plus archive-member mapping (verified)
        │
        ▼
 Cleanup temp tarball
@@ -398,19 +488,18 @@ Cleanup temp tarball
 ### Restore (server → client)
 
 ```
-TUI: "Dotfiles"
+TUI app-settings view / `lamasync apps snapshots download`
        │
        ▼
-Setup (fresh install): restore latest version of every effective app to /
-  OR
-Select app → select version → preview file list
+Pick protection → pick snapshot → inspect archive contents
        │
        ▼
-GET /api/v1/dotfiles/opencode/<version-id>
+GET /api/v1/apps/snapshots/<snapshotId>/download
        │
        ▼
-Extract to original absolute paths (target = /) or a custom directory;
-optionally filter by subpath(s) (e.g. extract only agents/)
+Download or inspect only. Target-side application setup, preflight, conflict
+decisions, rollback, and extraction are intentionally deferred to the guided
+setup-plan executor; no current UI directly writes an app snapshot to disk.
 ```
 
 ---
@@ -423,7 +512,8 @@ When a new client registers (`POST /api/v1/register`):
    health report).
 2. Client does `GET /api/v1/config/:host_id` and receives:
    - All folder assignments with `local_path`, `role`, schedule, cache profile.
-   - All dotfile manifests with paths.
+   - All app capture assignments for the host (`HostConfig.apps`: paths and
+     schedule derived from its enabled protections).
    - rclone config fragments: each folder becomes a named remote. Encrypted
      folders emit a backend remote plus a `crypt` wrapper. When a LAN peer
      is detected, an extra peer remote is added.
@@ -613,8 +703,8 @@ lamasync/
 │   ├── server/               # @lamasync/server — Elysia REST + WS
 │   │   ├── src/auth.ts
 │   │   ├── src/ws.ts         # WS auth via Sec-WebSocket-Protocol
-│   │   └── src/routes/       # health, hosts, config, folders, dotfiles,
-│   │                          # operations, report, admin, templates, shares
+│   │   └── src/routes/       # health, hosts, config, folders, apps,
+│   │                          # operations, report, admin, shares
 │   ├── daemon/               # @lamasync/daemon — lamasyncd
 │   │   ├── src/index.ts      # heartbeat, scheduler, mount lifecycle
 │   │   ├── src/executor.ts   # rclone / git dispatch table

@@ -79,10 +79,15 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   { method: "GET", pattern: "/api/v1/restic/restore" },
   { method: "POST", pattern: "/api/v1/restic/restore" },
   { method: "POST", pattern: "/api/v1/restic/restore/*/status" },
-  // own dotfile uploads + manifest view (upload handler gates host_id)
-  { method: "GET", pattern: "/api/v1/dotfiles" },
-  { method: "GET", pattern: "/api/v1/dotfiles/manifests" },
-  { method: "POST", pattern: "/api/v1/dotfiles/*" },
+  // own app protections + snapshot upload/download (handlers gate host). `*`
+  // matches exactly one segment, so the two-segment download path needs its
+  // own pattern.
+  { method: "GET", pattern: "/api/v1/apps/protections" },
+  { method: "GET", pattern: "/api/v1/apps/protections/*" },
+  { method: "GET", pattern: "/api/v1/apps/protections/*/snapshots" },
+  { method: "POST", pattern: "/api/v1/apps/protections/*/snapshots" },
+  { method: "GET", pattern: "/api/v1/apps/snapshots/*" },
+  { method: "GET", pattern: "/api/v1/apps/snapshots/*/download" },
   // self-update release checks via the server proxy
   { method: "GET", pattern: "/api/v1/release/latest" },
   // health
@@ -247,6 +252,19 @@ export function requireAdmin(store: AuthStore): AuthPrincipal | null {
 export function requireDeployAgent(store: AuthStore): AuthPrincipal | null {
   const p = store.principal;
   return p && p.kind === "deploy" ? p : null;
+}
+
+/**
+ * Composing host-ownership gate for /api/v1/apps routes (LAMA-316): returns
+ * the principal when it may access `hostId` (master/admin any host, device
+ * only its bound host), else null. Callers 403 on null.
+ */
+export function requireHostAccess(
+  store: unknown,
+  hostId: string | null | undefined,
+): AuthPrincipal | null {
+  const p = principalOf(store);
+  return p !== null && deviceMayAccessHost(p, hostId) ? p : null;
 }
 
 /**

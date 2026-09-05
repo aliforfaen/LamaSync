@@ -8,8 +8,8 @@ import { Hosts } from "./pages/Hosts.tsx";
 import { HostDetail } from "./pages/HostDetail.tsx";
 import { Folders } from "./pages/Folders.tsx";
 import { Backends } from "./pages/Backends.tsx";
-import { Dotfiles } from "./pages/Dotfiles.tsx";
-import { Presets } from "./pages/Presets.tsx";
+import { AppBackups } from "./pages/Dotfiles.tsx";
+import { AppTemplates } from "./pages/Presets.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
 import { Operations } from "./pages/Operations.tsx";
 import { Admin } from "./pages/Admin.tsx";
@@ -56,8 +56,8 @@ export function App() {
                   <Route path="/folders" element={<Folders />} />
                   <Route path="/backups" element={<Folders />} />
                   <Route path="/backends" element={<Backends />} />
-                  <Route path="/dotfiles" element={<Dotfiles />} />
-                  <Route path="/presets" element={<Presets />} />
+                  <Route path="/apps/backups" element={<AppBackups />} />
+                  <Route path="/apps/templates" element={<AppTemplates />} />
                   <Route path="/conflicts" element={<Conflicts />} />
                   <Route path="/operations" element={<Operations />} />
                   <Route path="/data" element={<DataBrowser />} />

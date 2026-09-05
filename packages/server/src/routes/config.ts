@@ -2,7 +2,6 @@ import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import type {
-  DotfileManifest,
   EffectivePause,
   Folder,
   FolderAssignment,
@@ -29,6 +28,7 @@ interface HostRow {
   status: string | null;
   lan_ip: string | null;
   config_revision: number | null;
+  os?: string | null;
 }
 
 // SFTP credentials embedded in the generated rclone config so the daemon
@@ -79,17 +79,6 @@ interface AssignmentRow {
   watch_quiet_sec: number | null;
   ignore_git_metadata: number;
   respect_gitignore: number;
-}
-
-interface ManifestRow {
-  id: string;
-  host_id: string;
-  app_name: string;
-  paths: string;
-  excludes: string | null;
-  schedule: string | null;
-  instructions: string | null;
-  profile_id: string | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
@@ -157,31 +146,66 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
   };
 }
 
-function rowToManifest(r: ManifestRow): DotfileManifest {
-  let paths: string[] = [];
-  let excludes: string[] | null = null;
+interface AppProtectionRow {
+  id: string;
+  template_id: string;
+  template_revision: number;
+  host_id: string;
+  name: string;
+  schedule: string | null;
+  capture_spec: string;
+}
+
+type OsKey = "linux" | "macos" | "windows";
+
+function osKeyFor(os: string | null | undefined): OsKey {
+  switch ((os ?? "").toLowerCase()) {
+    case "macos":
+    case "darwin":
+    case "mac":
+    case "osx":
+      return "macos";
+    case "windows":
+    case "win32":
+    case "win64":
+    case "win":
+      return "windows";
+    default:
+      return "linux";
+  }
+}
+
+function parseCaptureSpec(raw: string): {
+  paths: Record<OsKey, { path: string }[]>;
+  excludes: string[];
+  notes: string | null;
+} {
   try {
-    paths = JSON.parse(r.paths);
+    const v = JSON.parse(raw) as {
+      paths?: Record<string, unknown>;
+      excludes?: unknown;
+      notes?: unknown;
+    };
+    const bucket = (os: string): { path: string }[] => {
+      const arr = v.paths?.[os];
+      if (!Array.isArray(arr)) return [];
+      return arr.map((e) => {
+        if (typeof e === "string") return { path: e };
+        if (typeof e === "object" && e !== null) {
+          const path = (e as Record<string, unknown>).path;
+          return { path: typeof path === "string" ? path : "" };
+        }
+        return { path: "" };
+      });
+    };
+    return {
+      paths: { linux: bucket("linux"), macos: bucket("macos"), windows: bucket("windows") },
+      excludes: Array.isArray(v.excludes) ? v.excludes.filter((e): e is string => typeof e === "string") : [],
+      notes: typeof v.notes === "string" ? v.notes : null,
+    };
   } catch {
-    paths = [];
+    return { paths: { linux: [], macos: [], windows: [] }, excludes: [], notes: null };
   }
-  if (r.excludes) {
-    try {
-      excludes = JSON.parse(r.excludes);
-    } catch {
-      excludes = [];
-    }
-  }
-  return {
-    id: r.id,
-    hostId: r.host_id,
-    appName: r.app_name,
-    paths,
-    profileId: r.profile_id,
-    excludes,
-    schedule: r.schedule,
-    instructions: r.instructions,
-  };
 }
 
 // LAMA-273: shared helper that resolves the effective pause for one host.
@@ -543,7 +567,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     }
     const host = activeDb
       .query<HostRow, [string]>(
-        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, config_revision FROM hosts WHERE id = ?",
+        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, config_revision, os FROM hosts WHERE id = ?",
       )
       .get(hostId);
     if (!host) {
@@ -572,21 +596,29 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
           .all(...folderIds)
       : [];
 
-    const globalManifestRows = activeDb
-      .query<ManifestRow, []>(
-        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions, profile_id
-         FROM dotfile_manifests WHERE host_id = '_global'`,
-      )
-      .all();
-    const hostManifestRows = activeDb
-      .query<ManifestRow, [string]>(
-        `SELECT id, host_id, app_name, paths, excludes, schedule, instructions, profile_id
-         FROM dotfile_manifests WHERE host_id = ?`,
+    // LAMA-316: the daemon capture contract is now delivered from explicit
+    // protections (enabled only). `_global` no longer participates.
+    const appProtections = activeDb
+      .query<AppProtectionRow, [string]>(
+        `SELECT p.id, p.template_id, p.template_revision, p.host_id, p.name, p.schedule, p.capture_spec
+           FROM application_protections p
+          WHERE p.host_id = ? AND p.enabled = 1`,
       )
       .all(hostId);
-    const manifestRowsByApp = new Map<string, ManifestRow>();
-    for (const r of globalManifestRows) manifestRowsByApp.set(r.app_name, r);
-    for (const r of hostManifestRows) manifestRowsByApp.set(r.app_name, r);
+    const apps = appProtections.map((p) => {
+      const spec = parseCaptureSpec(p.capture_spec);
+      const os = osKeyFor(host.os);
+      const bucket = spec.paths[os] ?? [];
+      return {
+        appName: p.name,
+        hostId: p.host_id,
+        protectionId: p.id,
+        paths: bucket.map((x) => x.path),
+        excludes: spec.excludes,
+        schedule: p.schedule,
+        instructions: spec.notes,
+      };
+    });
 
     const allHostRows = activeDb
       .query<HostRow, []>(
@@ -596,7 +628,6 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
 
     const assignments = assignmentRows.map(rowToAssignment);
     const folders = folderRows.map(rowToFolder);
-    const manifests = Array.from(manifestRowsByApp.values()).map(rowToManifest);
 
     // LAMA-232: restic-kind backends provide the default repository +
     // password for restic folders whose assignment doesn't override them.
@@ -657,7 +688,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
       },
       assignments,
       folders,
-      manifests,
+      apps,
       rcloneConfig: generated.rcloneConfig,
       serverTailnetIp,
       peers: generated.peers,

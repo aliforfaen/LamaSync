@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { DotfileManifest, Folder, FolderAssignment } from "@lamasync/core";
+import type { AppCaptureAssignment, Folder, FolderAssignment } from "@lamasync/core";
 import { Scheduler } from "./scheduler.ts";
 
 function makeAssignment(overrides: Partial<FolderAssignment> = {}): FolderAssignment {
@@ -24,11 +24,11 @@ function makeFolder(overrides: Partial<Folder> = {}): Folder {
   };
 }
 
-function makeManifest(overrides: Partial<DotfileManifest> = {}): DotfileManifest {
+function makeApp(overrides: Partial<AppCaptureAssignment> = {}): AppCaptureAssignment {
   return {
-    id: "m1",
-    hostId: "_global",
     appName: "myapp",
+    hostId: "_global",
+    protectionId: "prot1",
     paths: ["/tmp/x"],
     schedule: null,
     ...overrides,
@@ -133,50 +133,43 @@ describe("Scheduler", () => {
     scheduler.stop();
   });
 
-  test("dotfile assignment reads schedule from manifest", async () => {
+  test("application protection fires directly at @reboot without a folder assignment", async () => {
     const ticks: string[] = [];
     const scheduler = new Scheduler({
-      onTick: (a) => { ticks.push(a.id); },
-      getAssignments: () => [
-        makeAssignment({ id: "a-dot", folderId: "f-dot", syncExpr: null }),
-      ],
-      getFolders: () => [makeFolder({ id: "f-dot", name: "myapp", type: "dotfile" })],
-      getManifests: () => [makeManifest({ appName: "myapp", schedule: "@reboot" })],
+      onTick: () => undefined,
+      getAssignments: () => [],
+      getApps: () => [makeApp({ protectionId: "p-direct", schedule: "@reboot" })],
+      onAppTick: (app) => { ticks.push(app.protectionId); },
       rebootDelayMs: 10,
     });
 
     scheduler.start();
     await new Promise((r) => setTimeout(r, 50));
-    expect(ticks).toEqual(["a-dot"]);
+    expect(ticks).toEqual(["p-direct"]);
     scheduler.stop();
   });
 
-  test("dotfile manifest cron schedule wins over empty assignment syncExpr", () => {
+  test("application protection cron is scheduled without a folder assignment", () => {
     const scheduler = new Scheduler({
       onTick: () => undefined,
-      getAssignments: () => [
-        makeAssignment({ id: "a-dot", folderId: "f-dot", syncExpr: null }),
-      ],
-      getFolders: () => [makeFolder({ id: "f-dot", name: "myapp", type: "dotfile" })],
-      getManifests: () => [makeManifest({ appName: "myapp", schedule: "0 0 * * *" })],
+      getAssignments: () => [],
+      getApps: () => [makeApp({ protectionId: "p-cron", schedule: "0 0 * * *" })],
     });
 
     scheduler.start();
-    const next = scheduler.nextRunFor(
-      makeAssignment({ id: "a-dot", folderId: "f-dot", syncExpr: null }),
-    );
+    const next = scheduler.nextRunForApp(makeApp({ protectionId: "p-cron", schedule: "0 0 * * *" }));
     expect(next).not.toBeNull();
     expect(next!.getTime()).toBeGreaterThan(Date.now());
     scheduler.stop();
   });
 
-  test("non-dotfile assignment ignores manifest schedule", async () => {
+  test("legacy dotfile assignments no longer duplicate an application protection capture", async () => {
     const ticks: string[] = [];
     const scheduler = new Scheduler({
       onTick: (a) => { ticks.push(a.id); },
-      getAssignments: () => [makeAssignment({ syncExpr: null })],
-      getFolders: () => [makeFolder({ type: "sync" })],
-      getManifests: () => [makeManifest({ schedule: "@reboot" })],
+      getAssignments: () => [makeAssignment({ id: "legacy-dot", syncExpr: "@reboot" })],
+      getFolders: () => [makeFolder({ type: "dotfile" })],
+      getApps: () => [makeApp({ schedule: "@reboot" })],
       rebootDelayMs: 10,
     });
 

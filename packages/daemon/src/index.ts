@@ -3,6 +3,7 @@ import { networkInterfaces } from "os";
 import { homedir } from "os";
 import { join } from "path";
 import type {
+  AppCaptureAssignment,
   Folder,
   FolderAssignment,
   HostConfig,
@@ -29,7 +30,7 @@ import {
   markUpdateCheckAttempted,
   withinUpdateCooldown,
 } from "./update-check.ts";
-import { executeAssignment, executeResticRestore } from "./executor.ts";
+import { captureAppSnapshot, executeAssignment, executeResticRestore, isPauseActive } from "./executor.ts";
 import { Scheduler } from "./scheduler.ts";
 import {
   buildSocketState,
@@ -813,6 +814,55 @@ async function main(): Promise<void> {
     );
   };
 
+  /** Run one explicit application protection without a legacy folder bridge. */
+  const runAppOnce = async (
+    app: AppCaptureAssignment,
+    opts?: { triggerOrigin?: TriggerOrigin },
+  ): Promise<OperationReport | null> => {
+    const attachOrigin = (report: OperationReport): OperationReport =>
+      opts?.triggerOrigin ? { ...report, trigger: opts.triggerOrigin } : report;
+    const config = hostConfig;
+    if (!config) {
+      console.warn(`[app] no hostConfig cached; skipping protection=${app.protectionId}`);
+      return null;
+    }
+    if (isPauseActive(config.pause)) {
+      const report: OperationReport = {
+        hostId,
+        folderId: null,
+        operation: "app-capture",
+        status: "failed",
+        summary: `app capture skipped: paused until ${config.pause!.until}`,
+        durationMs: 0,
+      };
+      await reportOperation(attachOrigin(report));
+      return attachOrigin(report);
+    }
+    return await runMutex.run(`app:${app.protectionId}`, async () => {
+      try {
+        const report = await captureAppSnapshot({ app, hostId, client });
+        console.log(
+          `[app] protection=${app.protectionId} status=${report.status} summary=${report.summary ?? ""}`,
+        );
+        const originReport = attachOrigin(report);
+        await reportOperation(originReport);
+        return originReport;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const report: OperationReport = {
+          hostId,
+          folderId: null,
+          operation: "app-capture",
+          status: "failed",
+          summary: `app capture threw: ${msg}`,
+          durationMs: 0,
+        };
+        await reportOperation(attachOrigin(report));
+        return attachOrigin(report);
+      }
+    });
+  };
+
   // LAMA-198: config-revision tracking. The server bumps `config_revision`
   // on every change that could affect a host's effective config (folders,
   // assignments, dotfile manifests, LAN peers, /register). The daemon
@@ -926,6 +976,11 @@ async function main(): Promise<void> {
             folderTypes,
           });
           const folderId = typeof payload["folderId"] === "string" ? payload["folderId"] : null;
+          // App protections are first-class backups, not dotfile folder
+          // assignments. A host-wide backup trigger includes every enabled
+          // protection; a folder-scoped trigger deliberately does not guess
+          // which application the caller meant.
+          const appTargets = folderId === null ? (hostConfig?.apps ?? []) : [];
           if (folderId && targets.length === 0) {
             await ack(
               "failed",
@@ -933,7 +988,7 @@ async function main(): Promise<void> {
             );
             return;
           }
-          if (targets.length === 0) {
+          if (targets.length === 0 && appTargets.length === 0) {
             await ack("done", "no backup assignments configured");
             return;
           }
@@ -942,6 +997,12 @@ async function main(): Promise<void> {
             const report = await runOnce(assignment, { triggerOrigin: "manual" });
             outcomes.push(
               summarizeReport(report, `backed up folder=${assignment.folderId}`),
+            );
+          }
+          for (const app of appTargets) {
+            const report = await runAppOnce(app, { triggerOrigin: "manual" });
+            outcomes.push(
+              summarizeReport(report, `captured app=${app.appName}`),
             );
           }
           const summary = summarizeBatchSync(outcomes, { verb: "backed up" });
@@ -1056,7 +1117,10 @@ async function main(): Promise<void> {
     },
     getAssignments: () => hostConfig?.assignments ?? [],
     getFolders: () => hostConfig?.folders ?? [],
-    getManifests: () => hostConfig?.manifests ?? [],
+    getApps: () => hostConfig?.apps ?? [],
+    onAppTick: (app) => {
+      void runAppOnce(app, { triggerOrigin: "schedule" });
+    },
     // LAMA-273: scheduler skips scheduled runs while the effective pause
     // window is active (host row if present, else global row). Resolved
     // server-side; the daemon just reads the cached `hostConfig.pause`.

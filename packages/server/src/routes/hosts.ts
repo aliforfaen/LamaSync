@@ -1,9 +1,11 @@
 import { Elysia, t } from "elysia";
+import { unlinkSync } from "fs";
+import { join } from "path";
 import type { Database } from "bun:sqlite";
 import { isNewer, type Host, type HostClass, type HostStatus } from "@lamasync/core";
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
-import { deviceMayAccessHost, principalOf } from "../auth.ts";
+import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
 import { getCachedLatestVersion } from "../release-cache.ts";
 import {
   bumpConfigRevision,
@@ -13,6 +15,8 @@ import {
   __setDb as __setNotificationDb,
   emitNotification,
 } from "../notifications.ts";
+
+const BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR || "/backups";
 
 // Test seam: mirrors the pattern used by every other route file in this
 // directory so unit tests can substitute the production DB.
@@ -107,16 +111,13 @@ function cascadeHostId(database: Database, oldId: string, newId: string): void {
     "UPDATE folder_assignments SET host_id = ? WHERE host_id = ?",
     [newId, oldId],
   );
+  // LAMA-316: protections are host-bound; snapshots record the source host.
   database.run(
-    "UPDATE dotfile_manifests SET host_id = ? WHERE host_id = ?",
+    "UPDATE application_protections SET host_id = ? WHERE host_id = ?",
     [newId, oldId],
   );
-  // LAMA-225 P1-5: dotfile_manifests.original_uploader_host_id is also a
-  // host-keyed reference (the Dotfiles UI renders it via hostLabel). One
-  // missed column left orphaned uploaders on re-key. Both columns update
-  // in the same transaction so partial failures abort the whole lift.
   database.run(
-    "UPDATE dotfile_manifests SET original_uploader_host_id = ? WHERE original_uploader_host_id = ?",
+    "UPDATE application_snapshots SET source_host_id = ? WHERE source_host_id = ?",
     [newId, oldId],
   );
   database.run(
@@ -465,27 +466,57 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
 .delete(
     "/hosts/:hostId",
-    ({ params, set }) => {
-      const result = activeDb.run("DELETE FROM hosts WHERE id = ?", [params.hostId]);
-      if (result.changes === 0) {
+    ({ params, set, store }) => {
+      if (!requireAdmin({ principal: principalOf(store) })) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      const existing = activeDb
+        .query<{ id: string }, [string]>("SELECT id FROM hosts WHERE id = ?")
+        .get(params.hostId);
+      if (!existing) {
         set.status = 404;
         return { error: "Host not found" };
       }
-      activeDb.run("DELETE FROM folder_assignments WHERE host_id = ?", [params.hostId]);
-      const manifestIds = activeDb
+      const protectionIds = activeDb
         .query<{ id: string }, [string]>(
-          "SELECT id FROM dotfile_manifests WHERE host_id = ?",
+          "SELECT id FROM application_protections WHERE host_id = ?",
         )
         .all(params.hostId)
         .map((r) => r.id);
-      if (manifestIds.length > 0) {
-        const placeholders = manifestIds.map(() => "?").join(",");
-        activeDb.run(
-          `DELETE FROM dotfile_versions WHERE manifest_id IN (${placeholders})`,
-          manifestIds,
-        );
+      const archivePaths: string[] = [];
+      if (protectionIds.length > 0) {
+        const placeholders = protectionIds.map(() => "?").join(",");
+        const snapshotRows = activeDb
+          .query<{ archive_path: string }, string[]>(
+            `SELECT archive_path FROM application_snapshots WHERE protection_id IN (${placeholders})`,
+          )
+          .all(...protectionIds);
+        archivePaths.push(...snapshotRows.map((row) => row.archive_path));
       }
-      activeDb.run("DELETE FROM dotfile_manifests WHERE host_id = ?", [params.hostId]);
+      // Delete dependants before their parent so behavior is correct whether
+      // SQLite foreign-key enforcement is on or off. Archive file deletion is
+      // deliberately after the DB transaction: an I/O hiccup must not leave
+      // a half-deleted host record.
+      activeDb.transaction(() => {
+        activeDb.run("DELETE FROM folder_assignments WHERE host_id = ?", [params.hostId]);
+        if (protectionIds.length > 0) {
+          const placeholders = protectionIds.map(() => "?").join(",");
+          activeDb.run(
+            `DELETE FROM application_snapshots WHERE protection_id IN (${placeholders})`,
+            protectionIds,
+          );
+        }
+        activeDb.run("DELETE FROM application_protections WHERE host_id = ?", [params.hostId]);
+        activeDb.run("DELETE FROM hosts WHERE id = ?", [params.hostId]);
+      })();
+      for (const archivePath of archivePaths) {
+        try {
+          unlinkSync(join(BACKUP_DIR, archivePath));
+        } catch {
+          /* best-effort */
+        }
+      }
       set.status = 204;
       return null;
     },

@@ -27,7 +27,7 @@ Three credential kinds (LAMA-234):
 |-----------|------------|-------|
 | `master`  | The `LAMASYNC_API_KEY` env value on the server. Never stored in SQLite, never returned by any route, never shown in the UI. | Full super-admin surface. Existing clients keep working until re-paired. |
 | `admin`   | A managed key created via `POST /api-keys` (or the Web UI). Secret shown once at creation; revealable later only via explicit `POST /api-keys/:id/reveal`. | Full admin surface incl. managing other managed keys. |
-| `device`  | Minted by the pairing exchange, bound to exactly one host. | Only that host's daemon calls — config, registration, heartbeat/reports, claiming and completing its action queue (never enqueueing), locks, conflicts, restic snapshots + restore jobs, dotfile uploads, release checks, `/auth/me`. Assignment PATCH is limited to that host's `mode` field. |
+| `device`  | Minted by the pairing exchange, bound to exactly one host. | Only that host's daemon calls — config, registration, heartbeat/reports, claiming and completing its action queue (never enqueueing), locks, conflicts, restic snapshots + restore jobs, its own app protections + their snapshots (list/get/download/upload), release checks, `/auth/me`. Assignment PATCH is limited to that host's `mode` field. Templates are admin-only. |
 | `deploy`  | Managed key (LAMA-301) created via `POST /api-keys` with `kind: "deploy"`, held by the LXC-resident deploy agent. | Only the server-deploy agent routes — peek/claim/progress/complete deploy jobs. Cannot request or read jobs, cannot touch anything else. |
 
 - `401 Unauthorized`: missing, wrong, or revoked key — a device that was revoked gets 401 exactly like a bad key.
@@ -59,7 +59,7 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/hosts/:hostId`                           | Get one host by id                               |
 | PATCH    | `/hosts/:hostId`                           | Rename host's display label (id stays stable)    |
 | PATCH    | `/hosts/:hostId/class`                     | Set a host's class (`server/desktop/laptop/nas/phone/tablet/unknown`) — LAMA-298 |
-| DELETE   | `/hosts/:hostId`                           | Delete host + cascade                            |
+| DELETE   | `/hosts/:hostId`                           | Delete host + app history cascade (admin; dependent rows are removed atomically) |
 | POST     | `/report/health`                           | Host heartbeat                                   |
 | GET      | `/config/:hostId`                          | Bundled config (assignments + rclone section)    |
 | POST     | `/hosts/:hostId/actions`                   | Enqueue a control-plane action (master/admin)   |
@@ -106,19 +106,21 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/backends/:backendId/prove`               | Run a "Prove it" restore test against the backend's latest restic snapshot into a private tempdir (LAMA-266) |
 | POST     | `/backends/:backendId/drill`               | Run a full fire drill (liveness probe + prove-it + audit row + notification) (LAMA-266) |
 | POST     | `/backends/test`                           | Test a backend DRAFT without persisting (write-only secret fields may fall back to the stored value via `backendId`) |
-| GET      | `/dotfiles/manifests`                      | List dotfile manifests                           |
-| POST     | `/dotfiles/manifests`                      | Create a manifest                                |
-| PUT      | `/dotfiles/manifests/:id`                  | Update a manifest                                |
-| DELETE   | `/dotfiles/manifests/:id`                  | Delete a manifest + cascade                      |
-| GET      | `/app-profiles`                            | List user-defined reusable app profiles          |
-| POST     | `/app-profiles`                            | Create a reusable app profile                    |
-| PUT      | `/app-profiles/:id`                         | Update a reusable app profile                    |
-| DELETE   | `/app-profiles/:id`                         | Delete a profile; linked manifests are preserved |
-| GET      | `/dotfiles?hostId=...`                     | List dotfile versions for a host                 |
-| GET      | `/dotfiles/:appName`                       | List versions of a dotfile app (master/admin)   |
-| POST     | `/dotfiles/:appName`                       | Upload a new version (multipart `tarball`)       |
-| GET      | `/dotfiles/:appName/:version`              | Download a tarball                               |
-| DELETE   | `/dotfiles/:appName/:version`              | Delete a version (DB row + file)                 |
+| GET      | `/apps/templates`                          | List app templates (admin)                       |
+| POST     | `/apps/templates`                          | Create an app template (admin; 409 on duplicate name) |
+| GET      | `/apps/templates/:id`                      | Read one app template (admin)                    |
+| PUT      | `/apps/templates/:id`                      | Update an app template (admin; bumps `revision`; never touches protections) |
+| DELETE   | `/apps/templates/:id`                      | Delete an app template (409 while protections use it) |
+| GET      | `/apps/protections?hostId=...`             | List app protections (admin: all hosts; device: `hostId` required and must be its own) |
+| POST     | `/apps/protections`                        | Enroll a protection from a template (admin; 409 on duplicate host+template) |
+| GET      | `/apps/protections/:id`                    | Read one protection (device: own host only)      |
+| PUT      | `/apps/protections/:id`                    | Update name/enabled/schedule/destination (admin; capture spec never editable) |
+| DELETE   | `/apps/protections/:id`                    | Delete an empty protection (admin; 409 when snapshot history exists — disable it instead) |
+| GET      | `/apps/protections/:id/snapshots`          | List a protection's snapshots                    |
+| POST     | `/apps/protections/:id/snapshots`          | Upload a snapshot (multipart `tarball`; 409 while the protection is disabled) |
+| GET      | `/apps/snapshots/:id`                      | Read one snapshot row                            |
+| GET      | `/apps/snapshots/:id/download`             | Download a snapshot tarball                      |
+| DELETE   | `/apps/snapshots/:id`                      | Delete a snapshot row + archive file (admin)     |
 | POST     | `/report`                                  | Append an `operation_log` row                    |
 | GET      | `/operations`                              | Query the operation log                          |
 | GET      | `/operations/locks`                        | List active destination locks                    |
@@ -215,8 +217,11 @@ spec. The high-level shapes (verbose commentary):
 - `Backend { id, name, kind, s3Provider?, s3Endpoint?, s3Region?, s3AccessKeyId?, hasSecret?, s3SecretAccessKey? (write-only), localPath?, resticRepository?, hasResticPassword?, resticPassword? (write-only), createdAt, lastProveAt?, lastProveOk? }` — `lastProveAt`/`lastProveOk` are epoch ms + boolean; null/null means "never proven". LAMA-266
 - `OperationLog { id, timestamp, hostId, folderId?, operation, status, summary?, details?, durationMs?, trigger? }` — drill runs use `host_id = "_backup-health-drill"`, `operation = "backup_drill"`, `folder_id = NULL`. LAMA-266. LAMA-302 adds the optional `trigger` (`"watch" | "schedule" | "manual"`) — who started the run — accepted on `POST /report` and returned on `GET /operations`; older rows report `null`.
 - `HealthDrill { id, backendId, kind: "prove"|"drill", ranAt, ok, detail? }` — one row per prove/drill run; `detail` is a scrubbed failure summary (never raw restic stderr and never secrets). LAMA-266
-- `DotfileManifest { id, hostId, appName, paths[], excludes[]?, schedule?, instructions?, lastSyncAt?, lastSyncDirection?, originalUploaderHostId? }`
-- `DotfileVersion { id, manifestId, timestamp, tarballPath, sizeBytes?, checksum?, description? }`
+- `CaptureSpecPath { path, classification: "portable_config"|"machine_state"|"cache"|"secrets"|"custom"|"unknown", rationale?, archivePath? }` — LAMA-315 taxonomy; this delivery only stamps `"unknown"`. `archivePath` is server-generated snapshot metadata, never client input.
+- `CaptureSpec { paths: { linux?: CaptureSpecPath[], macos?: CaptureSpecPath[], windows?: CaptureSpecPath[] }, excludes: string[], notes: string|null }` — per-OS candidate paths + exclude globs + operator notes.
+- `ApplicationTemplate { id, name, origin: "built_in"|"custom", description?, emoji?, color?, paths: CaptureSpec, installUrl?, installInstructions?, restoreInstructions?, revision, createdAt, updatedAt }` — operator-owned recipe; admin-only routes.
+- `ApplicationProtection { id, templateId, templateRevision, hostId, name, enabled, schedule?, destination: "server_archive", captureSpec: CaptureSpec, createdAt, updatedAt }` — a template bound to exactly one host; `captureSpec` is copied at enrollment and never mutated by template edits. List responses (GET `/apps/protections`) extend this with `templateOrigin`/`templateName`/`templateEmoji`/`templateColor` plus the joined `latestSnapshot` (`{ id, createdAt, sizeBytes, integrityStatus } | null`).
+- `ApplicationSnapshot { id, protectionId, templateId, templateRevision, sourceHostId, createdAt, archivePath, archiveFormat: "tar.gz", sizeBytes?, checksumSha256?, description?, capturedSpec: CaptureSpec, integrityStatus: "verified"|"unverified"|"failed" }` — immutable archive metadata; `capturedSpec` records only the source host's OS bucket and its server-generated archive-member mappings at capture time, never client-supplied.
 - `ResticSnapshot { id, snapshotId, folderId, hostId, timestamp, paths[], sizeBytes?, tags? }`
 - `FolderSnapshot { id, time, host?, paths? }` (LAMA-259) — `id` is restic's snapshot id; `time` is epoch ms. Slider feed.
 - `FolderSnapshotsResponse { snapshots: FolderSnapshot[] }` (LAMA-259)
@@ -240,7 +245,7 @@ spec. The high-level shapes (verbose commentary):
 
 - The DB file is `<LAMASYNC_DATA_DIR>/lamasync.db`. Don't move or rename
   it while the server is running.
-- Tarballs live under `<LAMASYNC_BACKUP_DIR>/dotfiles/<appName>/<timestamp>.tar.gz`.
+- App snapshot tarballs live under `<LAMASYNC_BACKUP_DIR>/apps/<protectionId>/<timestamp>-<uuid>.tar.gz` (the DB stores the path relative to `LAMASYNC_BACKUP_DIR`).
 - `operation_log` retention is `LAMASYNC_LOG_RETENTION_DAYS` (default 90).
   Prune manually via `POST /api/v1/admin/prune?olderThanMs=<ms>` (safety
   rule 5: explicit intent for any destructive API call).

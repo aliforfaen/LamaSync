@@ -1,5 +1,5 @@
 import { CronExpressionParser } from "cron-parser";
-import type { DotfileManifest, EffectivePause, Folder, FolderAssignment } from "@lamasync/core";
+import type { AppCaptureAssignment, EffectivePause, Folder, FolderAssignment } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core";
 
 const DEFAULT_REBOOT_DELAY_MS = 30_000;
@@ -7,10 +7,11 @@ const DEFAULT_REBOOT_DELAY_MS = 30_000;
 export interface SchedulerOptions {
   onTick: (assignment: FolderAssignment) => void | Promise<void>;
   getAssignments: () => FolderAssignment[];
-  /** Folder metadata so dotfile assignments can resolve manifest schedules. */
+  /** Folder metadata used to suppress mount assignments on the cron loop. */
   getFolders?: () => Folder[];
-  /** Manifest metadata so dotfile assignment schedules can be read from manifests. */
-  getManifests?: () => DotfileManifest[];
+  /** LAMA-316: explicit capture commitments, independent of folders. */
+  getApps?: () => AppCaptureAssignment[];
+  onAppTick?: (app: AppCaptureAssignment) => void | Promise<void>;
   /** Delay before firing @reboot assignments (default 30s). */
   rebootDelayMs?: number;
   /** LAMA-273: effective pause for the host. When `until > now` the
@@ -54,6 +55,9 @@ export class Scheduler {
     for (const a of this.opts.getAssignments()) {
       this.schedule(a);
     }
+    for (const app of this.opts.getApps?.() ?? []) {
+      this.scheduleApp(app);
+    }
   }
 
   refresh(): void {
@@ -84,6 +88,18 @@ export class Scheduler {
     }
   }
 
+  /** Next scheduled capture for an application protection, or null. */
+  nextRunForApp(app: AppCaptureAssignment): Date | null {
+    const parsed = this.parseSchedule(app.schedule);
+    const key = this.appTimerKey(app);
+    if (parsed.kind !== "cron" || !this.timers.has(key)) return null;
+    try {
+      return CronExpressionParser.parse(parsed.expr!, { currentDate: new Date() }).next().toDate();
+    } catch {
+      return null;
+    }
+  }
+
   /** Visible for testing: parse a schedule expression into its kind. */
   parseSchedule(expr: string | null | undefined): ParsedSchedule {
     if (!expr) return { kind: "unknown" };
@@ -105,12 +121,14 @@ export class Scheduler {
     // entirely. (backup/dotfile/git modes are unaffected by the override
     // — see effectiveFolderType — so they keep their schedule.)
     if (folder && effectiveFolderType(folder, assignment) === "mount") return null;
-    if (folder?.type === "dotfile") {
-      const manifests = this.opts.getManifests?.() ?? [];
-      const manifest = manifests.find((m) => m.appName === folder.name);
-      if (manifest?.schedule) return manifest.schedule;
-    }
+    // App protections have their own scheduler below. A legacy dotfile
+    // assignment must not schedule a second capture of the same protection.
+    if (folder?.type === "dotfile") return null;
     return assignment.syncExpr ?? null;
+  }
+
+  private appTimerKey(app: AppCaptureAssignment): string {
+    return `app:${app.protectionId}`;
   }
 
   private schedule(assignment: FolderAssignment): void {
@@ -132,6 +150,29 @@ export class Scheduler {
         if (schedule && schedule.startsWith("@")) {
           console.warn(
             `[scheduler] unknown special schedule for assignment=${assignment.id}: ${schedule}`,
+          );
+        }
+        return;
+    }
+  }
+
+  private scheduleApp(app: AppCaptureAssignment): void {
+    const schedule = app.schedule;
+    const parsed = this.parseSchedule(schedule);
+    switch (parsed.kind) {
+      case "@reboot":
+        this.scheduleAppOneShot(app, parsed.kind);
+        return;
+      case "@login":
+        this.scheduleAppOneShot(app, parsed.kind);
+        return;
+      case "cron":
+        this.scheduleAppCron(app, parsed.expr!);
+        return;
+      case "unknown":
+        if (schedule && schedule.startsWith("@")) {
+          console.warn(
+            `[scheduler] unknown special schedule for app protection=${app.protectionId}: ${schedule}`,
           );
         }
         return;
@@ -238,6 +279,81 @@ export class Scheduler {
     // Don't keep the event loop alive on its own — the parent process holds it.
     timer.unref?.();
     this.timers.set(assignment.id, timer);
+  }
+
+  private scheduleAppOneShot(
+    app: AppCaptureAssignment,
+    kind: "@reboot" | "@login",
+  ): void {
+    const key = this.appTimerKey(app);
+    if (this.firedSpecial.has(key)) return;
+    const delay = kind === "@reboot" ? (this.opts.rebootDelayMs ?? DEFAULT_REBOOT_DELAY_MS) : 0;
+    if (kind === "@login" && !this.isUserSession()) {
+      console.warn(
+        `[scheduler] @login app protection=${app.protectionId} running at startup because no desktop/user session was detected`,
+      );
+    }
+    const timer = setTimeout(() => {
+      const pause = this.currentPause();
+      if (pause) {
+        console.log(
+          `[scheduler] app capture skipped: paused until ${pause.until} (protection=${app.protectionId})`,
+        );
+        this.timers.delete(key);
+        const retryDelay = Math.max(1_000, Math.min(60_000, Date.parse(pause.until) - Date.now()));
+        const retry = setTimeout(() => {
+          this.timers.delete(key);
+          if (this.running) this.scheduleApp(app);
+        }, retryDelay);
+        retry.unref?.();
+        this.timers.set(key, retry);
+        return;
+      }
+      this.timers.delete(key);
+      this.firedSpecial.add(key);
+      void Promise.resolve(this.opts.onAppTick?.(app)).catch((err) => {
+        console.error(
+          `[scheduler] app capture error protection=${app.protectionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }, delay);
+    timer.unref?.();
+    this.timers.set(key, timer);
+  }
+
+  private scheduleAppCron(app: AppCaptureAssignment, expr: string): void {
+    const key = this.appTimerKey(app);
+    let next: Date;
+    try {
+      next = CronExpressionParser.parse(expr, { currentDate: new Date() }).next().toDate();
+    } catch (err) {
+      console.warn(
+        `[scheduler] invalid cron for app protection=${app.protectionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    const timer = setTimeout(() => {
+      const pause = this.currentPause();
+      if (pause) {
+        console.log(
+          `[scheduler] app capture skipped: paused until ${pause.until} (protection=${app.protectionId})`,
+        );
+        if (this.running) this.scheduleApp(app);
+        return;
+      }
+      this.timers.delete(key);
+      void Promise.resolve(this.opts.onAppTick?.(app))
+        .catch((err) => {
+          console.error(
+            `[scheduler] app capture error protection=${app.protectionId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        })
+        .finally(() => {
+          if (this.running) this.scheduleApp(app);
+        });
+    }, Math.max(0, next.getTime() - Date.now()));
+    timer.unref?.();
+    this.timers.set(key, timer);
   }
 
   private isUserSession(): boolean {

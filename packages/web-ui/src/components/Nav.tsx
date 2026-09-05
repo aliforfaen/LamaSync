@@ -47,11 +47,10 @@ export interface NavGroup {
 /**
  * LAMA-275 grouped left navigation (approved D2). Single source of truth for
  * the rail rendered below AND the LAMA-270 command palette, so the two can
- * never drift. Existing routes stay intact; the Backups home is a
- * presentation-only lens over the existing folder data. Labels and grouping follow
- * docs/terminology.md:
- *   /hosts → Devices · /folders → Synced folders · /backends → Storage
- *   destinations · /dotfiles → App settings · /operations → Activity.
+ * never drift. Labels and grouping follow docs/terminology.md:
+ *   /hosts → Devices · /folders → Managed folders · /backends → Storage
+ *   destinations · /apps/templates → App templates · /apps/backups → App
+ *   backups · /operations → Activity.
  */
 export const GROUPS: NavGroup[] = [
   {
@@ -62,7 +61,7 @@ export const GROUPS: NavGroup[] = [
     label: "Sync",
     items: [
       { to: "/hosts", icon: <IconHostFilled />, text: "Devices", keywords: "hosts fleet machines pair" },
-      { to: "/folders", icon: <IconFolderFilled />, text: "Synced folders", keywords: "sync mount folders" },
+      { to: "/folders", icon: <IconFolderFilled />, text: "Managed folders", keywords: "sync mount folders" },
       { to: "/conflicts", icon: <IconConflictFilled />, text: "Conflicts", keywords: "merge resolve" },
     ],
   },
@@ -77,8 +76,8 @@ export const GROUPS: NavGroup[] = [
   {
     label: "Apps",
     items: [
-      { to: "/dotfiles", icon: <IconDotfileFilled />, text: "App settings", keywords: "backup dotfiles manifests" },
-      { to: "/presets", icon: <IconPresetsFilled />, text: "App presets", keywords: "vscode neovim zsh firefox git tmux settings backup" },
+      { to: "/apps/backups", icon: <IconDotfileFilled />, text: "App backups", keywords: "backup protection snapshots upload download" },
+      { to: "/apps/templates", icon: <IconPresetsFilled />, text: "App templates", keywords: "vscode neovim zsh firefox git tmux settings template enroll protect" },
     ],
   },
   {

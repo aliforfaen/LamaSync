@@ -76,6 +76,9 @@ describe("LAMA-264 demo mode", () => {
       operations: number;
       snapshots: number;
       manifests: number;
+      templates: number;
+      protections: number;
+      appSnapshots: number;
     };
     expect(body.hosts).toBe(3);
     expect(body.folders).toBe(3);
@@ -83,12 +86,17 @@ describe("LAMA-264 demo mode", () => {
     expect(body.backends).toBe(1);
     expect(body.operations).toBe(13);
     expect(body.snapshots).toBe(1);
-    expect(body.manifests).toBe(1);
+    expect(body.manifests).toBe(0);
+    expect(body.templates).toBe(1);
+    expect(body.protections).toBe(1);
+    expect(body.appSnapshots).toBe(0);
 
     // Every seeded row is flagged demo = 1.
     expect(countWhere("hosts")).toBe(3);
     expect(countWhere("operation_log")).toBe(13);
     expect(countWhere("restic_snapshots")).toBe(1);
+    expect(countWhere("application_templates")).toBe(1);
+    expect(countWhere("application_protections")).toBe(1);
 
     // GET now reports hasDemo.
     const get = await app.handle(request("/api/v1/demo"));

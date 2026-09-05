@@ -1,6 +1,6 @@
 ---
 name: lamasync
-description: Operate a LamaSync fleet — manage folders, hosts, backends, sync triggers, and operation history. Use when the task touches `lamasync`, `lamasyncd`, sync fleet, rclone fleet, backup host, `register host`, `add folder`, `set up backup`, `check for update`, `snapshot`, `lamasync 401`, or `lamasync auth failed`. CLI-first; the REST/WS API is the documented escape hatch.
+description: Operate a LamaSync fleet — manage folders, hosts, backends, sync triggers, app templates/protections/snapshots, and operation history. Use when the task touches `lamasync`, `lamasyncd`, `lamasync apps`, sync fleet, rclone fleet, backup host, `register host`, `add folder`, `set up backup`, `check for update`, `snapshot`, `app template`, `app protection`, `enroll app`, `app backup`, `lamasync 401`, or `lamasync auth failed`. CLI-first; the REST/WS API is the documented escape hatch.
 ---
 
 # lamasync
@@ -27,6 +27,12 @@ keys are the trust boundary. The tailnet provides transport encryption.
 4. **Need to do something destructive (delete folder, force restore, prune
    ops, rotate key, stop mounts)?** That is safety rule 5 below: confirm
    intent with the operator first, then pass `--yes` if the command asks.
+5. **Need to set up or operate an app backup?** The model is templates →
+   protections → snapshots: `lamasync apps templates create` defines what
+   to capture, `lamasync apps protections enroll` binds a template to one
+   host, and `lamasync apps snapshots upload/list/download` move archives
+   (templates, enrollment, and destructive ops are admin-only; a device
+   key reaches only its own host's protections + snapshots).
 
 All commands take `--json` for machine output and obey a stable exit code
 contract (see `reference/cli.md`): `0` ok, `1` runtime, `2` usage error,
@@ -107,8 +113,9 @@ working with the fleet:
 - `lamasync`, `lamasyncd`
 - `sync fleet`, `rclone fleet`, `backup host`
 - `register host`, `add folder`, `set up backup`
-- `check for update`, `snapshot`, `lamasync 401`,
-  `lamasync auth failed`
+- `check for update`, `snapshot`, `app template`, `app protection`,
+  `enroll app`, `app backup`, `app snapshot`, `lamasync apps`,
+  `lamasync 401`, `lamasync auth failed`
 
 If the user is asking something about the Web UI / Management pages rather
 than the CLI / API, the doc URLs in the Web UI itself are usually enough —

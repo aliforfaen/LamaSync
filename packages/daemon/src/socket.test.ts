@@ -320,7 +320,7 @@ describe("dispatch — switch-to-mount", () => {
         folders: [
           { id: folderId, name: "docs", type: "sync", createdAt: 0 },
         ],
-        manifests: [],
+        apps: [],
         rcloneConfig: "[remote]\ntype = local\n",
         serverTailnetIp: null,
         peers: [],
@@ -397,7 +397,7 @@ describe("dispatch — switch-to-mount", () => {
         folders: [
           { id: folderId, name: "docs", type: "mount", createdAt: 0 },
         ],
-        manifests: [],
+        apps: [],
         rcloneConfig: "",
         serverTailnetIp: null,
         peers: [],
@@ -462,7 +462,7 @@ describe("dispatch — switch-to-mount", () => {
         folders: [
           { id: folderId, name: "docs", type: "sync", createdAt: 0 },
         ],
-        manifests: [],
+        apps: [],
         rcloneConfig: "",
         serverTailnetIp: null,
         peers: [],
@@ -535,7 +535,7 @@ describe("dispatch — switch-to-sync", () => {
         folders: [
           { id: folderId, name: "docs", type: "mount", createdAt: 0 },
         ],
-        manifests: [],
+        apps: [],
         rcloneConfig: "",
         serverTailnetIp: null,
         peers: [],
@@ -601,7 +601,7 @@ describe("dispatch — switch-to-sync", () => {
         folders: [
           { id: folderId, name: "docs", type: "sync", createdAt: 0 },
         ],
-        manifests: [],
+        apps: [],
         rcloneConfig: "",
         serverTailnetIp: null,
         peers: [],

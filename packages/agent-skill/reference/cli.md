@@ -379,67 +379,197 @@ Usage: lamasync folders assignments <folderId> [--json]
 Lists every host assignment for a folder (hostId, role, path, schedule,
 enabled).
 
-## `lamasync dotfiles list`
+## `lamasync apps templates list`
 
 ```
-Usage: lamasync dotfiles list [--host <id>] [--json]
+Usage: lamasync apps templates list [--json]
 ```
 
-Lists dotfile manifests. `--host _global` is the global default; an actual
-host id is host-specific.
+Lists app templates (operator-owned recipes): name, origin, per-OS
+candidate-path counts, revision, id. Templates are admin-only on the
+server; device keys get 403.
 
-## `lamasync dotfiles manifests list`
-
-```
-Usage: lamasync dotfiles manifests list [flags]
-
-  --host <id>    filter by host (omit for _global)
-  --json         machine-readable JSON output
-```
-
-## `lamasync dotfiles manifests create`
+## `lamasync apps templates get`
 
 ```
-Usage: lamasync dotfiles manifests create --app-name NAME --paths p1,p2 [flags]
+Usage: lamasync apps templates get <id> [--json]
+```
 
-  --app-name <name>        app name (required)
-  --paths <p1,p2>          comma-separated paths (required)
-  --host <id|_global>      target host (default: _global)
-  --excludes <e1,e2>       comma-separated exclude globs
-  --schedule '<cron>'      sync schedule
-  --instructions '<text>'  operator notes
+Reads one app template, including its full `CaptureSpec` (per-OS paths,
+excludes, notes) and install/restore instructions.
+
+## `lamasync apps templates create`
+
+```
+Usage: lamasync apps templates create --name <name> [flags]
+
+  --name <name>                  template name (required)
+  --origin <built_in|custom>     template origin (default: custom)
+  --description <text>           template description
+  --emoji <emoji>                single emoji for the web UI card
+  --color <color>                color for the web UI card
+  --linux-paths <p1,p2>          comma-separated Linux candidate paths
+  --macos-paths <p1,p2>          comma-separated macOS candidate paths
+  --windows-paths <p1,p2>        comma-separated Windows candidate paths
+  --install-url <url>            install instructions URL
+  --install-instructions <text>  install steps
+  --restore-instructions <text>  restore steps
   --json
 ```
 
-## `lamasync dotfiles manifests delete`
+Creates a reusable recipe. Path flags fill the template's capture spec;
+the CLI stamps each path `classification: "unknown"` (LAMA-315 exposes the
+taxonomy; no classifier exists yet).
+
+Application capture is currently verified on Linux with GNU tar. macOS and
+Windows path buckets can be authored for future devices, but should not be
+treated as capture-ready until their archive tooling is qualified.
+
+## `lamasync apps templates update`
 
 ```
-Usage: lamasync dotfiles manifests delete <id> [--yes]
+Usage: lamasync apps templates update <id> [flags]
+
+  --name <name>                  new template name
+  --origin <built_in|custom>     template origin
+  --description <text>           template description
+  --emoji <emoji>                single emoji for the web UI card
+  --color <color>                color for the web UI card
+  --linux-paths <p1,p2>          comma-separated Linux candidate paths
+  --macos-paths <p1,p2>          comma-separated macOS candidate paths
+  --windows-paths <p1,p2>        comma-separated Windows candidate paths
+  --install-url <url>            install instructions URL
+  --install-instructions <text>  install steps
+  --restore-instructions <text>  restore steps
+  --json
+```
+
+PATCH-style: only the flags you set are sent. Editing a template bumps its
+`revision` but never mutates the `captureSpec` of existing protections —
+re-enroll to pick up the new recipe.
+
+## `lamasync apps templates delete`
+
+```
+Usage: lamasync apps templates delete <id> [--yes]
 
   --yes, -y    skip the confirmation prompt (required non-interactively)
 ```
 
-DESTRUCTIVE (safety rule 5) — cascades to all versions of the manifest.
+DESTRUCTIVE (safety rule 5). The server 409s while any protection uses the
+template — delete those protections first.
 
-## `lamasync dotfiles upload`
-
-```
-Usage: lamasync dotfiles upload --app <name> --file <tarball> [flags]
-
-  --app <name>          app name (required)
-  --file <tarball>      tarball file path (required)
-  --description <text>  optional label
-  --host <id>           target host (omit for _global)
-```
-
-## `lamasync dotfiles download`
+## `lamasync apps protections list`
 
 ```
-Usage: lamasync dotfiles download --app <name> --version <id> --out <path>
+Usage: lamasync apps protections list [--host <id>] [--json]
 ```
 
-`--out` is required; the downloaded tarball is written there. The plain
-JSON output only reports size + MIME.
+Lists host-bound enrollments. Each row joins template identity (name /
+emoji) and the latest snapshot. `--host` filters by device; admin keys may
+omit it to see the whole fleet (device keys must pass their own host).
+
+## `lamasync apps protections get`
+
+```
+Usage: lamasync apps protections get <id> [--json]
+```
+
+Reads one protection: template id + captured revision, host, enabled,
+schedule, destination, and the enrollment-time copy of the capture spec.
+
+## `lamasync apps protections enroll`
+
+```
+Usage: lamasync apps protections enroll --template <id> --host <hostId> [flags]
+
+  --template <id>      app template id (required)
+  --host <hostId>      host to enroll (required)
+  --schedule '<cron>'  capture schedule
+  --name <name>        protection name (default: template name)
+  --json
+```
+
+Binds a template to exactly one host (admin). The template's capture spec
+is copied at enrollment; later template edits never touch the protection.
+409 if the host already has a protection for that template.
+
+## `lamasync apps protections update`
+
+```
+Usage: lamasync apps protections update <id> [flags]
+
+  --enabled <true|false>  enable or disable capture
+  --schedule '<cron>'     new capture schedule
+  --name <name>           new protection name
+  --json
+```
+
+PATCH-style: only the flags you set are sent. Disabling a protection stops
+scheduled capture; uploads against it 409 while disabled.
+
+## `lamasync apps protections delete`
+
+```
+Usage: lamasync apps protections delete <id> [--yes]
+
+  --yes, -y    skip the confirmation prompt (required non-interactively)
+```
+
+DESTRUCTIVE (safety rule 5). Only an empty protection can be deleted. The
+server returns 409 when snapshot history exists; use `update <id> --enabled
+false` to stop future capture while retaining recoverable history.
+
+## `lamasync apps snapshots list`
+
+```
+Usage: lamasync apps snapshots list --protection <id> [--json]
+
+  --protection <id>  protection id (required)
+  --json
+```
+
+Lists immutable archive metadata under a protection: timestamp, size,
+integrity status, checksum prefix, description, id.
+
+## `lamasync apps snapshots upload`
+
+```
+Usage: lamasync apps snapshots upload --protection <id> --file <tarball> [flags]
+
+  --protection <id>    protection id (required)
+  --file <tarball>     tarball file path (required)
+  --description <text> optional label
+  --json
+```
+
+Uploads a tarball as a new snapshot (multipart `tarball` field). The
+server computes size + sha256, records the protection's capture spec as
+`capturedSpec`, and returns the stored row. There is no implicit
+protection creation — an unknown protection 404s and a disabled one 409s.
+
+## `lamasync apps snapshots download`
+
+```
+Usage: lamasync apps snapshots download --snapshot <id> [--out <path>]
+
+  --snapshot <id>    snapshot id (required)
+  --out <path>       output file path (required without --json)
+  --json
+```
+
+Downloads the snapshot tarball to `--out`. `--json` reports the raw bytes
+metadata only (`{ok: true, size, type}`); no file is written.
+
+## `lamasync apps snapshots delete`
+
+```
+Usage: lamasync apps snapshots delete <id> [--yes]
+
+  --yes, -y    skip the confirmation prompt (required non-interactively)
+```
+
+DESTRUCTIVE (safety rule 5). Deletes the snapshot row + its archive file.
 
 ## `lamasync conflicts list`
 

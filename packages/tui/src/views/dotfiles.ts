@@ -1,11 +1,14 @@
-// Dotfiles view: lists manifests from the server, browses versions, and lets
-// the user restore a tarball. Implements the foundation `View` contract — the
-// outer container is built once in the constructor; per-step refreshes mutate
-// only the body Box (cheap). The legacy `DotfilesController` /
-// `RenderDotfilesOpts` types remain exported as a back-compat surface, but
-// the runtime `renderDotfiles` factory was removed in the LAMA-173 review
-// passes — the only caller was the now-retired `packages/tui/src/index.ts`
-// shell entry, and the View contract drives the new boot path.
+// Dotfiles view (ViewId "dotfiles"): lists this host's app protections from
+// the server and lets the user inspect each snapshot archive. Target-side
+// restore is deliberately unavailable until the setup-plan executor supplies
+// preflight, conflict choices, and rollback. Implements the foundation `View`
+// contract — the outer container
+// is built once in the constructor; per-step refreshes mutate only the body
+// Box (cheap). The legacy `DotfilesController` / `RenderDotfilesOpts` types
+// remain exported as a back-compat surface, but the runtime `renderDotfiles`
+// factory was removed in the LAMA-173 review passes — the only caller was the
+// now-retired `packages/tui/src/index.ts` shell entry, and the View contract
+// drives the new boot path.
 
 import {
   Box,
@@ -28,8 +31,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import type {
-  DotfileManifest,
-  DotfileVersion,
+  ApplicationProtectionListItem,
+  ApplicationSnapshot,
   Folder,
   LamaSyncApiClient,
 } from "@lamasync/core";
@@ -45,20 +48,19 @@ import type {
   ViewContext,
   ViewId,
 } from "../app/view-manager.ts";
-import { createDotfileManifestWizard } from "../flows/dotfile-manifest.ts";
 import { computeRestoreDiff, formatDiffPreview } from "../dotfiles-diff.ts";
 
 // -----------------------------------------------------------------------------
 // Public types — kept stable for any consumer still importing the pre-slice
-// names. The action surface narrows to the gestures the new View exposes:
-// refresh, open the manifest wizard, and back to the previous step.
+// names. The action surface narrows to the gestures the View exposes:
+// refresh and back to the previous step.
 // -----------------------------------------------------------------------------
 
-export type DotfilesAction = "refresh" | "manifest" | "menu" | "quit" | "back";
+export type DotfilesAction = "refresh" | "menu" | "quit" | "back";
 
 type Step =
   | "app"
-  | "version"
+  | "snapshot"
   | "preview"
   | "extract"
   | "subpaths"
@@ -68,20 +70,24 @@ type Step =
 
 export interface DotfilesState {
   step: Step;
-  manifests: DotfileManifest[];
+  /** Protections bound to the current host (list rows carry template
+   *  identity + latest snapshot so the picker needs no extra fetches). */
+  protections: ApplicationProtectionListItem[];
   backupFolders: BackupFolderRow[];
-  apps: string[];
-  appName: string | null;
+  /** Selected protection id + display name for the browse steps. */
+  protectionId: string | null;
+  protectionName: string | null;
+  /** Selected protection's capture-spec notes (restore instructions). */
   instructions: string | null;
-  versions: DotfileVersion[];
-  version: DotfileVersion | null;
+  snapshots: ApplicationSnapshot[];
+  snapshot: ApplicationSnapshot | null;
   previewText: string;
   previewError: string | null;
   /**
    * Absolute path to the downloaded tarball on disk. Populated by
-   * `selectVersion` once the preview step has a successful tar -tzf read;
+   * `selectSnapshot` once the preview step has a successful tar -tzf read;
    * reused by the confirm-step diff and the actual extract so we never
-   * re-download. Cleared on a fresh version pick.
+   * re-download. Cleared on a fresh snapshot pick.
    */
   extractStagingDir: string | null;
   /**
@@ -116,8 +122,8 @@ export interface DotfilesController {  view: VNode;
 
 const STEP_BACK: Record<Step, Step> = {
   app: "app",
-  version: "app",
-  preview: "version",
+  snapshot: "app",
+  preview: "snapshot",
   extract: "preview",
   subpaths: "extract",
   confirm: "subpaths",
@@ -125,17 +131,21 @@ const STEP_BACK: Record<Step, Step> = {
   setup: "app",
 };
 
-const SETUP_KEY = "__setup__";
-
-/** App-list row description: instructions plus deployment info (LAMA-168). */
-function describeManifestRow(manifest: DotfileManifest | undefined): string {
-  if (!manifest) return "dotfile snapshots";
-  const parts: string[] = [manifest.instructions ?? "dotfile snapshots"];
-  if (manifest.lastSyncAt) {
-    const when = new Date(manifest.lastSyncAt).toLocaleString();
-    parts.push(`last ${manifest.lastSyncDirection ?? "sync"}: ${when}`);
+/** Protection-row description: notes, template, schedule, latest snapshot. */
+function describeProtectionRow(p: ApplicationProtectionListItem): string {
+  const parts: string[] = [];
+  const notes = p.captureSpec.notes?.trim();
+  if (notes) parts.push(notes);
+  const templateLabel = p.templateEmoji
+    ? `${p.templateEmoji} ${p.templateName}`
+    : p.templateName;
+  if (templateLabel && templateLabel !== p.name) parts.push(templateLabel);
+  if (p.latestSnapshot) {
+    parts.push(`latest ${new Date(p.latestSnapshot.createdAt).toLocaleString()}`);
   }
-  return parts.join(" — ");
+  if (!p.enabled) parts.push("disabled");
+  else if (p.schedule) parts.push(`schedule: ${p.schedule}`);
+  return parts.length > 0 ? parts.join(" — ") : "app snapshots";
 }
 
 // -----------------------------------------------------------------------------
@@ -146,6 +156,20 @@ interface AppRow {
   name: string;
   description: string;
   value: string;
+}
+
+/**
+ * The legacy restore path is intentionally additive until the guided
+ * migration executor exists. `--skip-old-files` means an existing target
+ * entry is never overwritten; the preview makes those preserved entries
+ * visible before the command runs.
+ */
+export function preservingExtractArgs(
+  tarPath: string,
+  target: string,
+  subpaths: string[],
+): string[] {
+  return ["tar", "xzf", "--skip-old-files", tarPath, "-C", target, ...subpaths];
 }
 
 /** Fleet-wide backup-type folder, rendered as a read-only visibility list. */
@@ -163,7 +187,7 @@ function describeBackupFolder(f: Folder): string {
   return parts.length > 0 ? parts.join(" · ") : "storage destination";
 }
 
-interface VersionRow {
+interface SnapshotRow {
   name: string;
   description: string;
   value: string;
@@ -173,7 +197,7 @@ interface VersionRow {
  * Dotfiles browser + restore view. Implements the foundation `View` contract.
  * The container is built once in the constructor; per-step refreshes swap the
  * body Box's children. The Enter key advances within the state machine; the
- * Shell dispatches `r` / `n` / number keys through the hotkey table.
+ * Shell dispatches `r` through the hotkey table.
  */
 export class DotfilesView implements View {
   static readonly id: ViewId = "dotfiles";
@@ -188,13 +212,13 @@ export class DotfilesView implements View {
 
   private readonly state: DotfilesState = {
     step: "app",
-    manifests: [],
+    protections: [],
     backupFolders: [],
-    apps: [],
-    appName: null,
+    protectionId: null,
+    protectionName: null,
     instructions: null,
-    versions: [],
-    version: null,
+    snapshots: [],
+    snapshot: null,
     previewText: "",
     previewError: null,
     extractStagingDir: null,
@@ -235,22 +259,17 @@ export class DotfilesView implements View {
         Box({ flexDirection: "column", flexGrow: 1 }, this.bodyBox),
       ),
     );
-    // Defer first paint to onShow(): the manifest list comes from the API,
+    // Defer first paint to onShow(): the protection list comes from the API,
     // so there is nothing meaningful to render before then.
   }
 
   // ---------------------------------------------------------------------------
-  // Hotkeys — refresh, open the manifest wizard.
+  // Hotkeys — refresh the protection list.
   // ---------------------------------------------------------------------------
 
   hotkeys(): ReadonlyArray<Hotkey> {
     return [
       { key: "r", label: "refresh", run: () => void this.refresh() },
-      {
-        key: "n",
-        label: "new manifest…",
-        run: () => this.openManifestWizard(),
-      },
     ];
   }
 
@@ -267,7 +286,6 @@ export class DotfilesView implements View {
 
   onHide(): void {
     this.loadId++;
-    this.restoreAllInProgress = false;
     this.ctx = null;
   }
 
@@ -286,8 +304,9 @@ export class DotfilesView implements View {
     }
     if (name === "return" || name === "enter") {
       if (this.state.step === "preview") {
-        this.state.step = "extract";
-        this.renderBody();
+        // A tar listing is safe to inspect, but extraction is not a recovery
+        // plan. Do not turn this legacy browser into an implicit target-side
+        // restore path while LAMA-310's guarded executor is still pending.
         return true;
       }
       if (this.state.step === "confirm") {
@@ -297,7 +316,7 @@ export class DotfilesView implements View {
         // confirm already steps back via STEP_BACK at the top of handleKey.
         if (
           this.state.confirmError === null &&
-          this.state.version !== null &&
+          this.state.snapshot !== null &&
           this.state.extractStagingDir !== null
         ) {
           void this.runConfirmedExtract();
@@ -327,10 +346,10 @@ export class DotfilesView implements View {
     if (!ctx) return;
     const loadId = ++this.loadId;
     try {
-      // Manifests are the interactive part; folders are a visibility list, so
-      // a folders-fetch failure must not blank the app picker.
-      const [manifests, folders] = await Promise.all([
-        ctx.api.listDotfileManifests(ctx.hostname),
+      // Protections are the interactive part; folders are a visibility list,
+      // so a folders-fetch failure must not blank the protection picker.
+      const [protections, folders] = await Promise.all([
+        ctx.api.listAppProtections(ctx.hostname),
         ctx.api.listFolders().catch(() => [] as Folder[]),
       ]);
       if (loadId !== this.loadId) return;
@@ -338,60 +357,56 @@ export class DotfilesView implements View {
         .filter((f) => f.type === "backup")
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((f) => ({ name: f.name, description: describeBackupFolder(f) }));
-      const seen = new Set<string>();
-      for (const m of manifests) seen.add(m.appName);
-      this.state.manifests = manifests;
-      this.state.apps = [...seen].sort();
+      this.state.protections = protections;
       this.state.loadError = null;
-      // If the user has no manifests, route to the setup step so the body
+      // If the host has no protections, route to the setup step so the body
       // explains how to bootstrap. The user can press r again once a
-      // manifest exists to return to the app picker.
-      if (this.state.apps.length === 0 && this.state.step === "app") {
+      // protection exists to return to the picker.
+      if (this.state.protections.length === 0 && this.state.step === "app") {
         this.state.step = "setup";
         this.state.extractResult =
-          "No app settings backups yet — press n to create one, or run a sync on an app settings folder.";
+          "No app protections on this host yet — enroll one with `lamasync apps protections enroll` (or the Web UI), then press r.";
       }
       // P1 (TuiDotfilesGh.ReviewDotfilesGh): if we were stuck on setup
-      // because manifests were empty, but a new refresh now surfaces some,
-      // drop back to the app picker so the user can actually pick one.
-      if (this.state.apps.length > 0 && this.state.step === "setup") {
+      // because protections were empty, but a new refresh now surfaces some,
+      // drop back to the protection picker so the user can actually pick one.
+      if (this.state.protections.length > 0 && this.state.step === "setup") {
         this.state.step = "app";
         this.state.extractResult = null;
       }
     } catch (err) {
       if (loadId !== this.loadId) return;
       this.state.loadError = friendlyError(err);
-      this.state.manifests = [];
-      this.state.apps = [];
+      this.state.protections = [];
     }
     this.renderBody();
   }
 
-  private async selectApp(appName: string): Promise<void> {
+  private async selectProtection(protectionId: string): Promise<void> {
     const ctx = this.ctx;
     if (!ctx) return;
     const loadId = ++this.loadId;
-    this.state.appName = appName;
-    const manifest = this.state.manifests.find((m) => m.appName === appName);
-    this.state.instructions = manifest?.instructions ?? null;
+    const protection = this.state.protections.find((p) => p.id === protectionId);
+    this.state.protectionId = protectionId;
+    this.state.protectionName = protection?.name ?? null;
+    this.state.instructions = protection?.captureSpec.notes ?? null;
     try {
-      const versions = await ctx.api.listDotfileVersions(appName);
+      const snapshots = await ctx.api.listAppSnapshots(protectionId);
       if (loadId !== this.loadId) return;
-      this.state.versions = versions;
-      this.state.step = "version";
+      this.state.snapshots = snapshots;
+      this.state.step = "snapshot";
     } catch (err) {
       if (loadId !== this.loadId) return;
-      this.state.versions = [];
+      this.state.snapshots = [];
       this.state.loadError = friendlyError(err);
     }
     this.renderBody();
   }
 
-  private async selectVersion(version: DotfileVersion): Promise<void> {
+  private async selectSnapshot(snapshot: ApplicationSnapshot): Promise<void> {
     const ctx = this.ctx;
-    const appName = this.state.appName;
-    if (!ctx || !appName) return;
-    this.state.version = version;
+    if (!ctx) return;
+    this.state.snapshot = snapshot;
     this.state.previewError = null;
     this.state.confirmPreview = null;
     this.state.confirmError = null;
@@ -401,10 +416,10 @@ export class DotfilesView implements View {
     const loadId = ++this.loadId;
     this.renderBody();
     try {
-      const blob = await ctx.api.downloadDotfile(appName, version.id);
+      const blob = await ctx.api.downloadAppSnapshot(snapshot.id);
       if (loadId !== this.loadId) return;
       const dir = await mkdtemp(join(tmpdir(), "lamasync-dot-"));
-      const tarPath = join(dir, `${version.id}.tar.gz`);
+      const tarPath = join(dir, `${snapshot.id}.tar.gz`);
       await mkdir(dir, { recursive: true });
       if (loadId !== this.loadId) return;
       await Bun.write(tarPath, blob);
@@ -436,51 +451,6 @@ export class DotfilesView implements View {
     this.renderBody();
   }
 
-  private restoreAllInProgress = false;
-
-  private async runRestoreAllLatest(): Promise<void> {
-    const ctx = this.ctx;
-    if (!ctx) return;
-    if (this.restoreAllInProgress) return;
-    this.restoreAllInProgress = true;
-    const loadId = ++this.loadId;
-    this.state.step = "setup";
-    this.state.extractResult = "Restoring latest versions of all apps…";
-    this.renderBody();
-
-    const results: string[] = [];
-    let bailed = false;
-    for (const appName of this.state.apps) {
-      if (loadId !== this.loadId) { bailed = true; break; }
-      try {
-        const versions = await ctx.api.listDotfileVersions(appName);
-        if (loadId !== this.loadId) { bailed = true; break; }
-        const latest = versions[0];
-        if (!latest) {
-          results.push(`${appName}: no versions`);
-          continue;
-        }
-        await this.extractTarball(appName, latest, "/", [], { fromRestoreAll: true, externalLoadId: loadId });
-        if (loadId !== this.loadId) { bailed = true; break; }
-        results.push(`${appName}: restored latest (${latest.id})`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        results.push(`${appName}: failed — ${msg}`);
-      }
-    }
-    this.restoreAllInProgress = false;
-    if (bailed) {
-      // Outer loop superseded: leave room for the next run by stamping a
-      // fresh loadId so a subsequent manual refresh / restore attempt
-      // doesn't get stuck behind a stale guard.
-      this.loadId++;
-      this.renderBody();
-      return;
-    }
-    this.state.extractResult = results.join("\n");
-    this.renderBody();
-  }
-
   /**
    * Step-bound extract: invoked from the confirm step's Enter handler.
    * Parses the comma-separated subpaths from `state.extractSubpaths`, jumps
@@ -491,54 +461,71 @@ export class DotfilesView implements View {
   private async runConfirmedExtract(): Promise<void> {
     const ctx = this.ctx;
     if (!ctx) return;
-    const version = this.state.version;
-    if (!version) return;
+    const snapshot = this.state.snapshot;
+    if (!snapshot) return;
     const subpaths = this.state.extractSubpaths
       .split(",")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
     await this.extractTarball(
-      this.state.appName ?? "",
-      version,
+      this.state.protectionName ?? "",
+      snapshot,
       this.state.extractTarget,
       subpaths,
     );
   }
 
   private async extractTarball(
-    appName: string,
-    version: DotfileVersion,
+    protectionName: string,
+    snapshot: ApplicationSnapshot,
     target: string,
     subpaths: string[],
-    opts?: { fromRestoreAll?: boolean; externalLoadId?: number },
   ): Promise<void> {
     const ctx = this.ctx;
-    // Honour an outer loop's loadId (runRestoreAllLatest) so per-app
-    // increments don't trip the outer guard. Otherwise increment locally.
-    // P1 fix (TuiDotfilesGh.ReviewDotfilesGh, round 4): the inner
-    // ++this.loadId used to invalidate the outer loop's loadId check
-    // after the first app, leaving restoreAllInProgress=true.
-    const loadId =
-      opts?.externalLoadId !== undefined ? opts.externalLoadId : ++this.loadId;
-    if (!ctx || !appName) return;
+    if (!ctx || !protectionName) return;
+    // LAMA-316 deliberately stops at inspection/download. Application data
+    // needs a target-side setup plan, preflight, revalidation and rollback;
+    // the old direct tar extraction cannot provide that safety contract.
+    // Keep this method as a hard stop while its private callers are removed by
+    // the setup-wizard delivery, so no hidden UI path can write to a target.
+    if (!this.directRestoreAvailable()) {
+      this.state.extractResult = "Direct app restoration is unavailable. Use the upcoming setup wizard to review a change plan first.";
+      this.state.step = "preview";
+      this.renderBody();
+      return;
+    }
+
+    const loadId = ++this.loadId;
     if (!target) {
       this.state.extractResult = "Target directory required.";
       this.renderBody();
       return;
     }
     try {
-      const blob = await ctx.api.downloadDotfile(appName, version.id);
+      const blob = await ctx.api.downloadAppSnapshot(snapshot.id);
       if (this.loadId !== loadId) return;
       const stagingDir = await mkdtemp(join(tmpdir(), "lamasync-x-"));
-      const tarPath = join(stagingDir, `${version.id}.tar.gz`);
+      const tarPath = join(stagingDir, `${snapshot.id}.tar.gz`);
       await mkdir(target, { recursive: true });
       await Bun.write(tarPath, blob);
+      if (this.loadId !== loadId) return;
+      // Revalidate immediately before the write. The later migration wizard
+      // will return a full target-side change plan; this bridge keeps the
+      // existing local restore conservative by refusing to write when the
+      // target can no longer be inspected.
+      let preview;
+      try {
+        preview = await computeRestoreDiff(tarPath, target);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.state.extractResult = `Restore stopped before writing: unable to re-check ${target}: ${message}`;
+        return;
+      }
       if (this.loadId !== loadId) return;
       // Re-check the loadId BEFORE awaiting the spawn's stderr/exit; a stale
       // op hidden by Esc/hide must not overwrite current state.step.
       if (this.loadId !== loadId) return;
-      const args = ["tar", "xzf", tarPath, "-C", target];
-      if (subpaths.length > 0) args.push(...subpaths);
+      const args = preservingExtractArgs(tarPath, target, subpaths);
       const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
       const errText = await new Response(proc.stderr).text();
       if (this.loadId !== loadId) return;
@@ -547,20 +534,19 @@ export class DotfilesView implements View {
       if (exit !== 0) {
         this.state.extractResult = `tar failed (${exit}): ${errText}`;
       } else {
-        this.state.extractResult = `Extracted to ${target}${
+        const preserved = preview.counts.SAME + preview.counts.CHANGED;
+        this.state.extractResult = `Restored ${preview.counts.NEW} missing file(s) to ${target}; preserved ${preserved} existing file(s)${
           subpaths.length ? ` (${subpaths.length} subpath(s))` : ""
-        }`;
-        if (!opts?.fromRestoreAll) this.state.step = "done";
-        // Best-effort deployment tracking (LAMA-168): record the download on
-        // the manifest so last-sync/direction show up in server UIs.
+        }.`;
+        this.state.step = "done";
+        // Best-effort restore tracking: record the restore in the operation
+        // log so server UIs show app-restore activity.
         void ctx.api
           .reportOperation({
             hostId: ctx.hostname,
-            operation: "dotfile-restore",
+            operation: "app-restore",
             status: "success",
-            summary: `restored ${appName} (${version.id})`,
-            dotfileAppName: appName,
-            dotfileDirection: "download",
+            summary: `restored ${protectionName} (${snapshot.id})`,
           })
           .catch(() => {});
       }
@@ -574,12 +560,9 @@ export class DotfilesView implements View {
     if (this.loadId === loadId) this.renderBody();
   }
 
-  private openManifestWizard(): void {
-    const ctx = this.ctx;
-    if (!ctx) {
-      return;
-    }
-    ctx.openWizard(createDotfileManifestWizard({ ctx }));
+  /** The setup-plan executor is intentionally not delivered yet. */
+  private directRestoreAvailable(): boolean {
+    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -633,8 +616,8 @@ export class DotfilesView implements View {
     switch (this.state.step) {
       case "app":
         return this.renderAppStep();
-      case "version":
-        return this.renderVersionStep();
+      case "snapshot":
+        return this.renderSnapshotStep();
       case "preview":
         return this.renderPreviewStep();
       case "extract":
@@ -671,65 +654,17 @@ export class DotfilesView implements View {
         Text({ content: "Press Esc to return." }),
       ];
     }
-    if (this.state.apps.length === 0) {
+    if (this.state.protections.length === 0) {
       return [
         ...backups,
-        Text({ content: "Loading apps…" }),
-        Text({ content: "Press n to create an app settings backup, r to refresh." }),
+        Text({ content: "Loading app protections…" }),
+        Text({ content: "Press r to refresh." }),
       ];
     }
-    const rows: AppRow[] = [
-      {
-        name: "Setup (restore all apps)",
-        description: "fresh-install restore",
-        value: SETUP_KEY,
-      },
-      ...this.state.apps.map((name) => {
-        const manifest = this.state.manifests.find(
-          (m) => m.appName === name,
-        );
-        return {
-          name,
-          description: describeManifestRow(manifest),
-          value: name,
-        };
-      }),
-    ];
-    const select = Select({
-      options: rows,
-      flexGrow: 1,
-      selectedBackgroundColor: PALETTE_BG.accent,
-      selectedTextColor: SELECTION.fg,
-    });
-    select.on("itemSelected", (_i: number, opt: AppRow) => {
-      if (opt.value === SETUP_KEY) {
-        void this.runRestoreAllLatest();
-        return;
-      }
-      void this.selectApp(opt.value);
-    });
-    return [
-      ...backups,
-      Text({ content: "App settings — dotfile snapshots and restore" }),
-      Text({ content: "Select an app to browse its snapshots, or choose Setup." }),
-      Text({ content: "" }),
-      select,
-      Text({ content: "Press r to refresh, n for new manifest." }),
-    ];
-  }
-
-  private renderVersionStep(): VNode[] {
-    if (this.state.versions.length === 0) {
-      return [
-        Text({ content: `App: ${this.state.appName ?? "?"}` }),
-        Text({ content: "(no versions for this app)" }),
-        Text({ content: "Press Esc to return." }),
-      ];
-    }
-    const rows: VersionRow[] = this.state.versions.map((v) => ({
-      name: new Date(v.timestamp).toISOString(),
-      description: v.description ? `${v.id} — ${v.description}` : v.id,
-      value: v.id,
+    const rows: AppRow[] = this.state.protections.map((p) => ({
+      name: p.name,
+      description: describeProtectionRow(p),
+      value: p.id,
     }));
     const select = Select({
       options: rows,
@@ -737,13 +672,48 @@ export class DotfilesView implements View {
       selectedBackgroundColor: PALETTE_BG.accent,
       selectedTextColor: SELECTION.fg,
     });
-    select.on("itemSelected", (_i: number, opt: VersionRow) => {
-      const version = this.state.versions.find((v) => v.id === opt.value);
-      if (!version) return;
-      void this.selectVersion(version);
+    select.on("itemSelected", (_i: number, opt: AppRow) => {
+      void this.selectProtection(opt.value);
     });
     return [
-      Text({ content: `App: ${this.state.appName ?? "?"}` }),
+      ...backups,
+      Text({ content: "App backups — app protections and snapshots" }),
+      Text({
+        content:
+          "Select a protection to inspect its snapshots. Enroll protections on this host with the Web UI or `lamasync apps protections enroll`. Guided setup and recovery are coming separately.",
+      }),
+      Text({ content: "" }),
+      select,
+      Text({ content: "Press r to refresh." }),
+    ];
+  }
+
+  private renderSnapshotStep(): VNode[] {
+    if (this.state.snapshots.length === 0) {
+      return [
+        Text({ content: `Protection: ${this.state.protectionName ?? "?"}` }),
+        Text({ content: "(no snapshots for this protection)" }),
+        Text({ content: "Press Esc to return." }),
+      ];
+    }
+    const rows: SnapshotRow[] = this.state.snapshots.map((s) => ({
+      name: new Date(s.createdAt).toISOString(),
+      description: s.description ? `${s.id} — ${s.description}` : s.id,
+      value: s.id,
+    }));
+    const select = Select({
+      options: rows,
+      flexGrow: 1,
+      selectedBackgroundColor: PALETTE_BG.accent,
+      selectedTextColor: SELECTION.fg,
+    });
+    select.on("itemSelected", (_i: number, opt: SnapshotRow) => {
+      const snapshot = this.state.snapshots.find((s) => s.id === opt.value);
+      if (!snapshot) return;
+      void this.selectSnapshot(snapshot);
+    });
+    return [
+      Text({ content: `Protection: ${this.state.protectionName ?? "?"}` }),
       this.state.instructions
         ? Text({ content: `Instructions: ${formatMarkdownText(this.state.instructions, this.renderer?.width ?? 80)}` })
         : Text({ content: "" }),
@@ -775,11 +745,11 @@ export class DotfilesView implements View {
       previewNodes.push(Text({ content: this.state.previewText || "(empty tarball)" }));
     }
     return [
-      Text({ content: `Preview: ${this.state.version?.id ?? "?"}` }),
+      Text({ content: `Preview: ${this.state.snapshot?.id ?? "?"}` }),
       this.state.instructions
         ? Text({ content: `Instructions: ${formatMarkdownText(this.state.instructions, this.renderer?.width ?? 80)}` })
         : Text({ content: "" }),
-      Text({ content: "Press Enter to extract, Esc to go back." }),
+      Text({ content: "Inspect-only: direct extraction is disabled until the guided setup plan is available. Press Esc to go back." }),
       ...previewNodes,
     ];
   }
@@ -789,14 +759,14 @@ export class DotfilesView implements View {
       placeholder: "Target directory (absolute path)",
       value: this.state.extractTarget,
       onEnter: (value) => {
-        if (!this.state.version) return;
+        if (!this.state.snapshot) return;
         this.state.extractTarget = value;
         this.state.step = "subpaths";
         this.renderBody();
       },
     });
     return [
-      Text({ content: `Extract: ${this.state.version?.id ?? "?"}` }),
+      Text({ content: `Extract: ${this.state.snapshot?.id ?? "?"}` }),
       Text({
         content:
           "Enter target directory and press Enter. Use / to restore to original absolute paths.",
@@ -811,20 +781,20 @@ export class DotfilesView implements View {
       placeholder: "Subpaths to extract, comma-separated (empty = all)",
       value: this.state.extractSubpaths,
       onEnter: (value) => {
-        if (!this.state.version) return;
+        if (!this.state.snapshot) return;
         this.state.extractSubpaths = value;
         // P-B item #15: instead of extracting immediately, jump to the
         // confirm step where the user sees what restore would change.
         // `runConfirmStep` computes the diff against the chosen target +
         // subpaths filter and transitions to "confirm" (or — when the
         // download failed and there's no tarball to diff against —
-        // bounces back to the version picker).
+        // bounces back to the snapshot picker).
         void this.runConfirmStep();
       },
     });
     return [
       Text({ content: `Extract to: ${this.state.extractTarget}` }),
-      Text({ content: `Version: ${this.state.version?.id ?? "?"}` }),
+      Text({ content: `Snapshot: ${this.state.snapshot?.id ?? "?"}` }),
       Text({
         content:
           "Enter subpaths (e.g. agents/,settings.json) or leave empty for all.",
@@ -848,13 +818,13 @@ export class DotfilesView implements View {
   private async runConfirmStep(): Promise<void> {
     const ctx = this.ctx;
     if (!ctx) return;
-    const version = this.state.version;
+    const snapshot = this.state.snapshot;
     const tarball = this.state.extractStagingDir;
-    if (!version || !tarball) {
+    if (!snapshot || !tarball) {
       // Missing staging dir = tar download failed earlier; bounce back so
-      // the user can pick a different version.
-      this.state.confirmError = "tarball preview not available — return to version list.";
-      this.state.step = "version";
+      // the user can pick a different snapshot.
+      this.state.confirmError = "tarball preview not available — return to the snapshot list.";
+      this.state.step = "snapshot";
       this.renderBody();
       return;
     }
@@ -882,7 +852,7 @@ export class DotfilesView implements View {
   private renderConfirmStep(): VNode[] {
     if (this.state.confirmError) {
       return [
-        Text({ content: `Confirm: ${this.state.version?.id ?? "?"}` }),
+        Text({ content: `Confirm: ${this.state.snapshot?.id ?? "?"}` }),
         Text({ content: `[!] ${this.state.confirmError}` }),
         Text({ content: "Press Esc to step back." }),
       ];
@@ -890,11 +860,11 @@ export class DotfilesView implements View {
     const preview = this.state.confirmPreview ?? "(no preview)";
     return [
       Text({
-        content: `Confirm restore: ${this.state.version?.id ?? "?"} → ${this.state.extractTarget}`,
+        content: `Confirm restore: ${this.state.snapshot?.id ?? "?"} → ${this.state.extractTarget}`,
       }),
       Text({
         content:
-          "Press Enter to extract, Esc to cancel (diff is preview-only; nothing written yet).",
+          "Press Enter to restore missing files only. Existing target files are preserved; guided replace is coming soon. Esc cancels.",
       }),
       Text({ content: "" }),
       Text({ content: preview }),
@@ -904,7 +874,7 @@ export class DotfilesView implements View {
   private renderDoneStep(): VNode[] {
     return [
       Text({ content: this.state.extractResult ?? "Done." }),
-      Text({ content: "Press Enter to return to app list, Esc to step back." }),
+      Text({ content: "Press Enter to return to the protection list, Esc to step back." }),
     ];
   }
 
@@ -913,7 +883,7 @@ export class DotfilesView implements View {
       ...this.renderBackupFolders(),
       Text({ content: "Fresh-install setup" }),
       Text({ content: this.state.extractResult ?? "Working…" }),
-      Text({ content: "Press n to add an app settings backup, r to refresh." }),
+      Text({ content: "Press r to refresh." }),
       hotkeyFooter(this.hotkeys().map((h) => ({ key: h.key, label: h.label }))),
     ];
   }

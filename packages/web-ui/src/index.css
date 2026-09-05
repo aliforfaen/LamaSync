@@ -990,6 +990,37 @@ table.data tbody tr:last-child td {
   width: 100%;
 }
 
+/* Menu entries are intentionally semantic buttons/links, not miniature
+   table actions. Give both forms the same compact target and hover state so
+   new menus cannot fall back to browser-default controls. */
+.row-menu-panel > button,
+.row-menu-panel > a {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.4rem var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1.35;
+  text-align: left;
+  text-decoration: none;
+}
+
+.row-menu-panel > button:hover,
+.row-menu-panel > a:hover {
+  background: var(--surface-inset);
+}
+
+.row-menu-panel > .danger {
+  color: var(--color-error);
+}
+
 .row-menu-hint {
   display: block;
   padding: var(--space-1) var(--space-1-5);

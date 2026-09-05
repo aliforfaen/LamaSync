@@ -1,4 +1,4 @@
-import { basename, dirname, join } from "path";
+import { basename, dirname, isAbsolute, join, relative } from "path";
 import {
   existsSync,
   mkdirSync,
@@ -10,13 +10,14 @@ import {
   writeFileSync,
 } from "fs";
 import { homedir, tmpdir } from "os";
-import type { ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
+import type { AppCaptureAssignment, ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { resolveDestination } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
 import { getRemoteName } from "./rclone.ts";
 import { materialiseGitignoreFilter } from "./gitignore.ts";
+import { expandHomePath } from "./config.ts";
 
 export interface ExecuteOptions {
   assignment: FolderAssignment;
@@ -1098,38 +1099,180 @@ function report(hostId: string, folderId: string, operation: FolderType, status:
 // ---------------------------------------------------------------------------
 // Dotfile upload
 // ---------------------------------------------------------------------------
-async function runDotfileUpload(opts: ExecuteOptions, hostConfig: HostConfig, start: number): Promise<OperationReport> {
-  const { assignment, folder, hostId, client } = opts;
-  const manifest = hostConfig.manifests.find((m) => m.appName === folder.name);
-  if (!manifest || manifest.paths.length === 0) return report(hostId, folder.id, folder.type, "failed", start, { summary: "no dotfile manifest", details: { folderName: folder.name } });
+export interface AppCaptureOptions {
+  app: AppCaptureAssignment;
+  client: LamaSyncApiClient;
+  hostId: string;
+}
+
+function appCaptureReport(
+  hostId: string,
+  status: OperationStatus,
+  start: number,
+  body: { summary: string; details: Record<string, unknown> },
+): OperationReport {
+  return {
+    hostId,
+    folderId: null,
+    operation: "app-capture",
+    status,
+    summary: body.summary,
+    details: JSON.stringify(body.details),
+    durationMs: Date.now() - start,
+  };
+}
+
+/**
+ * Produce a portable archive member root from a logical capture path.
+ *
+ * A home-relative path deliberately does not contain the source account name:
+ * `~/.config/nvim` becomes `home/.config/nvim`. Absolute paths live beneath
+ * `absolute/`, so they cannot collide with the portable home namespace. This
+ * value is also recorded in the immutable snapshot spec by the server.
+ */
+export function appArchivePath(path: string): string | null {
+  const toSegments = (raw: string): string[] | null => {
+    const segments = raw.replaceAll("\\", "/").split("/");
+    if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) return null;
+    return segments;
+  };
+  if (path === "~") return "home";
+  if (path.startsWith("~/")) {
+    const segments = toSegments(path.slice(2));
+    return segments ? `home/${segments.join("/")}` : null;
+  }
+  if (path.startsWith("/")) {
+    const segments = toSegments(path.slice(1));
+    return segments ? `absolute/${segments.join("/")}` : null;
+  }
+  const windows = /^([A-Za-z]):[\\/](.*)$/.exec(path);
+  if (windows) {
+    const segments = toSegments(windows[2]!);
+    return segments ? `windows/${windows[1]!.toLowerCase()}/${segments.join("/")}` : null;
+  }
+  return null;
+}
+
+function sourceArchiveMember(path: string): string | null {
+  if (!isAbsolute(path)) return null;
+  const member = relative("/", path);
+  if (member.length === 0 || member.startsWith("../")) return null;
+  return member;
+}
+
+/** Escape a GNU tar transform's regular-expression side. */
+function tarTransformPattern(path: string): string {
+  return path.replace(/[\\|.^$*+?()[\]{}]/g, "\\$&");
+}
+
+/** Escape a GNU tar transform's replacement side. */
+function tarTransformReplacement(path: string): string {
+  return path.replace(/[\\|&]/g, "\\$&");
+}
+
+/** Build boundary-aware transforms for one source/member mapping. */
+export function appArchiveTransforms(sourceMember: string, archivePath: string): string[] {
+  const sourcePattern = tarTransformPattern(sourceMember);
+  const archiveReplacement = tarTransformReplacement(archivePath);
+  return [
+    `--transform=s|^${sourcePattern}/|${archiveReplacement}/|`,
+    `--transform=s|^${sourcePattern}$|${archiveReplacement}|`,
+  ];
+}
+
+/**
+ * Capture one explicit application protection. This intentionally has no
+ * FolderAssignment dependency: an application protection is its own
+ * scheduled backup commitment, not a disguised dotfile folder.
+ *
+ * Archive entries use the portable layout described by `appArchivePath` rather
+ * than bare basenames. The actual local source path is kept separate, which
+ * means `~` expands for capture but never leaks the source username into a
+ * migration archive.
+ */
+export async function captureAppSnapshot(opts: AppCaptureOptions): Promise<OperationReport> {
+  const { app, hostId, client } = opts;
+  const start = Date.now();
+  if (app.paths.length === 0) {
+    return appCaptureReport(hostId, "failed", start, {
+      summary: "app protection has no paths",
+      details: { protectionId: app.protectionId, appName: app.appName },
+    });
+  }
+  const archiveInputs: string[] = [];
+  const transforms: string[] = [];
+  for (const [index, path] of app.paths.entries()) {
+    const archivePath = appArchivePath(path);
+    if (archivePath === null) {
+      return appCaptureReport(hostId, "failed", start, {
+        summary: `app path is invalid: ${path}`,
+        details: { protectionId: app.protectionId, path },
+      });
+    }
+    const resolvedPath = app.resolvedPaths?.[index] ?? expandHomePath(path);
+    const sourceMember = sourceArchiveMember(resolvedPath);
+    if (sourceMember === null) {
+      return appCaptureReport(hostId, "failed", start, {
+        summary: `app path is not supported on this host: ${path}`,
+        details: { protectionId: app.protectionId, path, resolvedPath },
+      });
+    }
+    if (!existsSync(resolvedPath)) {
+      return appCaptureReport(hostId, "failed", start, {
+        summary: `app path missing: ${path}`,
+        details: { protectionId: app.protectionId, missing: path, resolvedPath },
+      });
+    }
+    archiveInputs.push(sourceMember);
+    // Two boundary-aware transforms prevent `/tmp/foo` from accidentally
+    // rewriting a separately selected `/tmp/foobar` path.
+    transforms.push(...appArchiveTransforms(sourceMember, archivePath));
+  }
   const tmpDir = join(tmpdir(), `lamasync-dotfile-${process.pid}-${start}`);
   mkdirSync(tmpDir, { recursive: true });
   const tarball = join(tmpDir, `${start}.tar.gz`);
-  const byParent = new Map<string, string[]>();
-  for (const path of manifest.paths) {
-    const p = dirname(path);
-    const n = byParent.get(p); if (n) n.push(basename(path)); else byParent.set(p, [basename(path)]);
-  }
-  for (const p of manifest.paths) { if (!existsSync(p)) return report(hostId, folder.id, folder.type, "failed", start, { summary: `dotfile path missing: ${p}`, details: { missing: p } }); }
-  const inputs = Array.from(byParent, ([pp, bn]) => ["-C", pp, ...bn]).flat();
-  const excludeArgs = (manifest.excludes ?? []).flatMap((e) => ["--exclude", e]);
-  const tar = Bun.spawn(["tar", "czf", tarball, ...excludeArgs, ...inputs], { stdout: "pipe", stderr: "pipe" });
-  const tarStderr = await new Response(tar.stderr).text();
-  if (await tar.exited !== 0) return report(hostId, folder.id, folder.type, "failed", start, { summary: `tar failed (exit ${await tar.exited})`, details: { tarStderr: tail(tarStderr, 1000) } });
-  const size = existsSync(tarball) ? statSync(tarball).size : 0;
+  const excludeArgs = (app.excludes ?? []).flatMap((e) => ["--exclude", e]);
   try {
-    const version = await client.uploadDotfile(folder.name, Bun.file(tarball), {
-      description: `scheduled backup from ${hostId}`,
-      hostId: manifest.hostId,
-      uploaderHostId: hostId,
-    });
-    return report(hostId, folder.id, folder.type, "success", start, { summary: `dotfile ok: ${manifest.paths.length} paths, ${formatBytes(size)} uploaded`, details: { versionId: version.id, tarball, sizeBytes: size, paths: manifest.paths } });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return report(hostId, folder.id, folder.type, "failed", start, { summary: `dotfile upload failed: ${msg}`, details: { tarball, sizeBytes: size, paths: manifest.paths, error: msg } });
+    const tar = Bun.spawn(["tar", "czf", tarball, "-C", "/", ...excludeArgs, ...transforms, "--", ...archiveInputs], { stdout: "pipe", stderr: "pipe" });
+    const tarStderr = await new Response(tar.stderr).text();
+    const tarExit = await tar.exited;
+    if (tarExit !== 0) {
+      return appCaptureReport(hostId, "failed", start, {
+        summary: `app archive failed (exit ${tarExit})`,
+        details: { protectionId: app.protectionId, tarStderr: tail(tarStderr, 1000) },
+      });
+    }
+    const size = existsSync(tarball) ? statSync(tarball).size : 0;
+    try {
+      const snapshot = await client.uploadAppSnapshot(app.protectionId, Bun.file(tarball), {
+        description: `scheduled snapshot from ${hostId}`,
+      });
+      return appCaptureReport(hostId, "success", start, {
+        summary: `app capture ok: ${app.paths.length} paths, ${formatBytes(size)} uploaded`,
+        details: { protectionId: app.protectionId, snapshotId: snapshot.id, sizeBytes: size, paths: app.paths },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return appCaptureReport(hostId, "failed", start, {
+        summary: `app capture upload failed: ${msg}`,
+        details: { protectionId: app.protectionId, sizeBytes: size, paths: app.paths, error: msg },
+      });
+    }
   } finally {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
+}
+
+async function runDotfileUpload(opts: ExecuteOptions, hostConfig: HostConfig, start: number): Promise<OperationReport> {
+  const { folder, hostId, client } = opts;
+  const app = hostConfig.apps.find((candidate) => candidate.appName === folder.name);
+  if (!app) {
+    return report(hostId, folder.id, folder.type, "failed", start, {
+      summary: "no app protection",
+      details: { folderName: folder.name },
+    });
+  }
+  return captureAppSnapshot({ app, hostId, client });
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,11 +1346,12 @@ async function runResticDotfileUpload(opts: ExecuteOptions, start: number): Prom
   if (!Bun.which("restic")) {
     return report(hostId, folder.id, folder.type, "failed", start, { summary: "restic binary not found in PATH", details: { reason: "restic-missing" } });
   }
-  const manifest = hostConfig.manifests.find((m) => m.appName === folder.name);
-  if (!manifest || manifest.paths.length === 0) {
-    return report(hostId, folder.id, folder.type, "failed", start, { summary: "no dotfile manifest", details: { folderName: folder.name } });
+  const app = hostConfig.apps.find((a) => a.appName === folder.name);
+  if (!app || app.paths.length === 0) {
+    return report(hostId, folder.id, folder.type, "failed", start, { summary: "no app protection", details: { folderName: folder.name } });
   }
-  for (const p of manifest.paths) {
+  const resolvedPaths = app.resolvedPaths ?? app.paths.map(expandHomePath);
+  for (const p of resolvedPaths) {
     if (!existsSync(p)) {
       return report(hostId, folder.id, folder.type, "failed", start, { summary: `dotfile path missing: ${p}`, details: { missing: p } });
     }
@@ -1216,7 +1360,7 @@ async function runResticDotfileUpload(opts: ExecuteOptions, start: number): Prom
   const repo = assignment.resticRepository!;
   const password = assignment.resticPassword!;
   const passwordFile = makeTempFile("restic-password", password);
-  const filesFrom = makeTempFile("restic-files-from", manifest.paths.join("\n") + "\n");
+  const filesFrom = makeTempFile("restic-files-from", resolvedPaths.join("\n") + "\n");
   try {
     const init = await initResticRepo(repo, passwordFile.path);
     if (!init.ok) {
@@ -1225,7 +1369,7 @@ async function runResticDotfileUpload(opts: ExecuteOptions, start: number): Prom
 
     const timeoutSec = assignment.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
     const tags = ["lamasync", `folder:${folder.id}`, `host:${hostId}`, "dotfile"];
-    const excludeArgs = (manifest.excludes ?? []).flatMap((e) => ["--exclude", e]);
+    const excludeArgs = (app.excludes ?? []).flatMap((e) => ["--exclude", e]);
     const result = await runResticBackup(repo, passwordFile.path, [...excludeArgs, "--files-from", filesFrom.path], tags, timeoutSec);
 
     if (!result.ok) {
@@ -1237,7 +1381,7 @@ async function runResticDotfileUpload(opts: ExecuteOptions, start: number): Prom
       hostId,
       snapshotId: result.snapshotId ?? "unknown",
       timestamp: Date.now(),
-      paths: manifest.paths,
+      paths: app.paths,
       tags,
     };
     try {
@@ -1247,7 +1391,7 @@ async function runResticDotfileUpload(opts: ExecuteOptions, start: number): Prom
       console.warn(`[executor] failed to report restic snapshot: ${msg}`);
     }
 
-    return report(hostId, folder.id, folder.type, "success", start, { summary: `restic dotfile ok: ${manifest.paths.length} paths, snapshot ${result.snapshotId ?? "unknown"}`, details: { snapshotId: result.snapshotId, durationMs: result.durationMs, paths: manifest.paths } });
+    return report(hostId, folder.id, folder.type, "success", start, { summary: `restic dotfile ok: ${app.paths.length} paths, snapshot ${result.snapshotId ?? "unknown"}`, details: { snapshotId: result.snapshotId, durationMs: result.durationMs, paths: app.paths } });
   } finally {
     passwordFile.cleanup();
     filesFrom.cleanup();

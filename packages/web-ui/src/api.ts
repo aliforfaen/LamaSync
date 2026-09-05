@@ -3,18 +3,19 @@
 // API key and the global fetch API. Imports types only from core.
 
 import type {
-  AppProfile,
   ApiKeyCreateResponse,
   ApiKeyRevealResponse,
   ApiKeyRevokeResponse,
   ApiKeySummary,
+  ApplicationProtection,
+  ApplicationProtectionListItem,
+  ApplicationSnapshot,
+  ApplicationTemplate,
   AuthMeResponse,
   Backend,
   B2ManagementConfig,
   BrowseResponse,
   Conflict,
-  DotfileManifest,
-  DotfileVersion,
   Folder,
   FolderAssignment,
   HealthResponse,
@@ -249,7 +250,7 @@ export function apiDelete<T = void>(path: string): Promise<T> {
 }
 
 /**
- * Fetch a binary response (e.g. a dotfile tarball) with the auth header.
+ * Fetch a binary response (e.g. an app-snapshot tarball) with the auth header.
  * A plain `<a href>` would not send `Authorization`, so callers that want
  * to offer a download must fetch the bytes and trigger a save via an
  * object URL.
@@ -387,44 +388,99 @@ export const api = {
       `/folders/${encodeURIComponent(folderId)}/assign/${encodeURIComponent(hostId)}`,
       body,
     ),
-  listManifests: (hostId?: string) =>
-    apiGet<DotfileManifest[]>(
-      hostId
-        ? `/dotfiles/manifests?hostId=${encodeURIComponent(hostId)}`
-        : "/dotfiles/manifests",
-    ),
-  createManifest: (body: Partial<DotfileManifest>) =>
-    apiPost<DotfileManifest>("/dotfiles/manifests", body),
-  updateManifest: (id: string, body: Partial<DotfileManifest>) =>
-    apiPut<DotfileManifest>(`/dotfiles/manifests/${encodeURIComponent(id)}`, body),
-  deleteManifest: (id: string) =>
-    apiDelete(`/dotfiles/manifests/${encodeURIComponent(id)}`),
-  listAppProfiles: () => apiGet<AppProfile[]>("/app-profiles"),
-  createAppProfile: (
-    body: Omit<AppProfile, "id" | "createdAt" | "updatedAt">,
-  ) => apiPost<AppProfile>("/app-profiles", body),
-  updateAppProfile: (
+  // LAMA-316: application templates — reusable capture recipes owned by the
+  // operator. A template never reaches a device by itself; enrolling it on a
+  // host creates a protection.
+  listAppTemplates: () => apiGet<ApplicationTemplate[]>("/apps/templates"),
+  getAppTemplate: (id: string) =>
+    apiGet<ApplicationTemplate>(`/apps/templates/${encodeURIComponent(id)}`),
+  createAppTemplate: (
+    body: Omit<
+      ApplicationTemplate,
+      "id" | "origin" | "revision" | "createdAt" | "updatedAt"
+    >,
+  ) => apiPost<ApplicationTemplate>("/apps/templates", body),
+  updateAppTemplate: (
     id: string,
-    body: Partial<Omit<AppProfile, "id" | "createdAt" | "updatedAt">>,
-  ) => apiPut<AppProfile>(`/app-profiles/${encodeURIComponent(id)}`, body),
-  deleteAppProfile: (id: string) =>
-    apiDelete(`/app-profiles/${encodeURIComponent(id)}`),
-  listDotfileVersions: (appName: string) =>
-    apiGet<DotfileVersion[]>(
-      `/dotfiles/${encodeURIComponent(appName)}`,
+    body: Partial<
+      Omit<ApplicationTemplate, "id" | "origin" | "revision" | "createdAt" | "updatedAt">
+    >,
+  ) => apiPut<ApplicationTemplate>(`/apps/templates/${encodeURIComponent(id)}`, body),
+  deleteAppTemplate: (id: string) =>
+    apiDelete(`/apps/templates/${encodeURIComponent(id)}`),
+  // LAMA-316: protections bind one template to one host (enrollment copies the
+  // template's capture spec; later template edits never mutate protections).
+  listAppProtections: (hostId?: string) =>
+    apiGet<ApplicationProtectionListItem[]>(
+      hostId
+        ? `/apps/protections?hostId=${encodeURIComponent(hostId)}`
+        : "/apps/protections",
     ),
-  deleteDotfileVersion: (appName: string, version: string) =>
-    apiDelete(
-      `/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
+  getAppProtection: (id: string) =>
+    apiGet<ApplicationProtection>(`/apps/protections/${encodeURIComponent(id)}`),
+  enrollAppProtection: (body: {
+    templateId: string;
+    hostId: string;
+    schedule?: string | null;
+    name?: string;
+  }) => apiPost<ApplicationProtection>("/apps/protections", body),
+  updateAppProtection: (
+    id: string,
+    body: Partial<
+      Pick<ApplicationProtection, "name" | "enabled" | "schedule" | "destination">
+    >,
+  ) => apiPut<ApplicationProtection>(`/apps/protections/${encodeURIComponent(id)}`, body),
+  deleteAppProtection: (id: string) =>
+    apiDelete(`/apps/protections/${encodeURIComponent(id)}`),
+  // LAMA-316: immutable snapshots captured per protection (never created
+  // implicitly — the server rejects unknown protections and disabled ones).
+  listAppSnapshots: (protectionId: string) =>
+    apiGet<ApplicationSnapshot[]>(
+      `/apps/protections/${encodeURIComponent(protectionId)}/snapshots`,
     ),
-  downloadDotfileVersion: async (appName: string, version: string) => {
+  uploadAppSnapshot: async (
+    protectionId: string,
+    file: Blob,
+    opts: { description?: string } = {},
+  ) => {
+    const key = getApiKey();
+    if (!key) {
+      notifyUnauthorized();
+      throw new ApiError(401, "missing api key");
+    }
+    const form = new FormData();
+    // The file may come from another realm (drag-drop), so `instanceof` is
+    // unreliable — a checked property probe keeps the label without an
+    // unchecked cast.
+    const filename =
+      "name" in file && typeof file.name === "string" && file.name.length > 0
+        ? file.name
+        : "snapshot.tar.gz";
+    form.append("tarball", file, filename);
+    if (opts.description) form.append("description", opts.description);
+    const res = await fetch(
+      `/api/v1/apps/protections/${encodeURIComponent(protectionId)}/snapshots`,
+      { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: form },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 401) notifyUnauthorized();
+      throw new ApiError(res.status, text);
+    }
+    return (await res.json()) as ApplicationSnapshot;
+  },
+  getAppSnapshot: (id: string) =>
+    apiGet<ApplicationSnapshot>(`/apps/snapshots/${encodeURIComponent(id)}`),
+  deleteAppSnapshot: (id: string) =>
+    apiDelete(`/apps/snapshots/${encodeURIComponent(id)}`),
+  downloadAppSnapshot: async (id: string) => {
     const blob = await apiBlob(
-      `/dotfiles/${encodeURIComponent(appName)}/${encodeURIComponent(version)}`,
+      `/apps/snapshots/${encodeURIComponent(id)}/download`,
     );
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${appName}-${version}.tar.gz`;
+    a.download = `app-snapshot-${id.slice(0, 8)}.tar.gz`;
     document.body.appendChild(a);
     a.click();
     a.remove();

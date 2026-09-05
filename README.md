@@ -32,9 +32,10 @@ same binary.
 - **Backups with a heartbeat** — backup-type folders push data to your
   storage destination on a schedule you set in plain language (hourly, daily,
   on boot). You see every run in the Activity view.
-- **App settings that survive reinstalls** — register which config files
-  belong to which app (nvim, your shell, editor settings…) and restore them
-  from any device after a fresh install.
+- **App settings that survive reinstalls** — protect named configuration paths
+  for nvim, your shell, editor settings, and more; inspect or download an
+  immutable snapshot when setting up a new device. Guided target-side restore
+  is the next safety-focused step.
 - **One web/terminal view of the whole fleet** — devices, storage
   destinations, pending conflicts, recent activity: everything in one place,
   reachable from a browser or an SSH terminal.
@@ -45,8 +46,9 @@ same binary.
 ## Features
 
 - **Folder types**: `sync` (two-way, `rclone bisync`), `backup` (one-way
-  `rclone copy`), `mount` (read-only remote mount, VFS-cached), `dotfile`
-  (versioned app settings backups), `git` (repo sync without re-cloning).
+  `rclone copy`), `mount` (read-only remote mount, VFS-cached), and `git`
+  (repo sync without re-cloning). App settings use separate templates,
+  per-device protections, and immutable snapshots.
 - **Reusable storage destinations** — SFTP, S3, local/NFS paths, and restic
   repos, referenced by any number of folders.
 - **Conflict strategies** per folder, in plain language.
@@ -54,8 +56,8 @@ same binary.
   boot, on login, or a custom cron expression.
 - **`.lamasyncignore`** per-folder exclude patterns (plus a mount variant).
 - **Pre/post hooks** — shell scripts that run around each sync.
-- **Versioned app settings backups** with per-version restore, for any device
-  or globally.
+- **Versioned app settings backups** with host-bound protections, schedules,
+  snapshot history, inspection, and download.
 - **Live WebSocket** for operation events (the Activity view updates as runs
   finish).
 - **Terminal UI + CLI in one binary** — task-oriented tabs (This device, All
@@ -173,8 +175,8 @@ The terminal UI (task-oriented tabs, 80-column-friendly):
 │   home-snapshots — sftp                                                      │
 │   photos-archive — sftp                                                      │
 │                                                                              │
-│ App settings — dotfile snapshots and restore                                 │
-│ Select an app to browse its snapshots, or choose Setup.                      │
+│ App settings — protection snapshots                                           │
+│ Select an app to inspect or download its snapshots.                           │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -185,8 +187,8 @@ The terminal UI (task-oriented tabs, 80-column-friendly):
 1. A device registers itself (`POST /api/v1/register`) and reports health on a
    heartbeat.
 2. The daemon pulls its config (`GET /api/v1/config/:deviceId`) — folder
-   assignments with schedules/hooks/conflict strategy, app settings backup
-   manifests, and a generated rclone config fragment. A `config_revision`
+   assignments with schedules/hooks/conflict strategy, enabled app protections,
+   and a generated rclone config fragment. A `config_revision`
    bump makes devices re-pull immediately instead of waiting for the 5-minute
    timer.
 3. The scheduler fires (cron preset, custom expression, `@reboot`, or

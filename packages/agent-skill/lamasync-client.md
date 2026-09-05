@@ -9,15 +9,16 @@ description: Install and operate LamaSync as a client on this host — prereqs, 
 
 LamaSync is a personal sync-fleet system: one central `lamasync-server`
 (REST + WebSocket + SQLite, tailnet-only) and a lightweight `lamasyncd`
-daemon per client host that runs `rclone` for folder syncs, backups, and
-dotfile versions on server-pushed schedules. All control (folders,
-assignments, schedules) lives on the server; the daemon just heartbeats,
-pulls its config bundle, and executes.
+daemon per client host that runs `rclone` for folder syncs, backups, mounts,
+and app-protection snapshot captures on server-pushed schedules. All control
+(folders, assignments, schedules) lives on the server; the daemon just
+heartbeats, pulls its config bundle, and executes.
 
 Use this skill when your task is to **set this host up as a LamaSync
 client** or operate the local daemon. For direct server API operations
-(folders, assignments, dotfiles, operation log), see the `lamasync` skill
-(CLI-first; `reference/api.md` is the REST/WS escape hatch).
+(folders, assignments, app templates/protections/snapshots, operation log),
+see the `lamasync` skill (CLI-first; `reference/api.md` is the REST/WS
+escape hatch).
 
 ## Fleet facts (current production)
 
@@ -102,9 +103,10 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
 ## Day-2 usage
 
 - **Everything is configured server-side.** Folders, host assignments,
-  schedules, dotfile manifests: use the Web UI (`http://100.113.52.108:8080/`,
-  log in with the API key) or the REST API (`lamasync` skill →
-  `reference/api.md`). There is no local config of jobs on the client.
+  schedules, app templates/protections: use the Web UI
+  (`http://100.113.52.108:8080/`, log in with the API key) or the REST API
+  (`lamasync` skill → `reference/api.md`). There is no local config of jobs
+  on the client.
 - The daemon re-pulls its config on heartbeat when the server's
   `config_revision` changes, plus a 5-minute poll. To apply a new
   assignment immediately, enqueue an action:
@@ -140,11 +142,12 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
   `/run/user/<uid>`). `backup`-type folders (read local → write remote)
   work anywhere; `sync`-type folders that must **write** outside those
   paths need the unit's `ReadWritePaths` extended.
-- Dotfile manifests **hard-fail the whole run if any listed path is
-  missing** on the host — keep host-specific manifests host-specific
-  (create them with `hostId` set), or use `backup`-type folders instead.
-  (Former "backup summaries show 0 transfers" gotcha is fixed in LAMA-247:
-  the JSON-log accumulator now reads both rclone stdout and stderr.)
+- App-protection capture **hard-fails the whole run if any listed path is
+  missing** on the host — keep per-host capture specs host-specific
+  (protections are already bound to one host at enrollment), or use
+  `backup`-type folders instead. (Former "backup summaries show 0
+  transfers" gotcha is fixed in LAMA-247: the JSON-log accumulator now
+  reads both rclone stdout and stderr.)
 - Don't run a bare `lamasyncd` to "test" it — the systemd service owns the
   daemon; a second instance just fights over the socket.
 

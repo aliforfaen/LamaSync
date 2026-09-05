@@ -587,6 +587,26 @@ describe("POST /api/v1/report/health — host class (LAMA-298)", () => {
   });
 });
 
+describe("DELETE /api/v1/hosts/:hostId", () => {
+  test("removes application history before its host with foreign keys enabled", async () => {
+    db.run(`INSERT INTO application_templates (id, name, origin, paths, created_at, updated_at)
+      VALUES ('tpl-delete', 'nvim-delete', 'custom', '{"paths":{},"excludes":[],"notes":null}', 1, 1)`);
+    db.run(`INSERT INTO application_protections
+      (id, template_id, template_revision, host_id, name, enabled, destination, capture_spec, created_at, updated_at)
+      VALUES ('prot-delete', 'tpl-delete', 1, 'host-a', 'nvim', 1, 'server_archive', '{"paths":{},"excludes":[],"notes":null}', 1, 1)`);
+    db.run(`INSERT INTO application_snapshots
+      (id, protection_id, template_id, template_revision, source_host_id, created_at, archive_path, captured_spec, integrity_status)
+      VALUES ('snap-delete', 'prot-delete', 'tpl-delete', 1, 'host-a', 1, 'apps/prot-delete/no-file.tar.gz', '{"paths":{},"excludes":[],"notes":null}', 'verified')`);
+    db.exec("PRAGMA foreign_keys = ON");
+
+    const response = await app.handle(request("/api/v1/hosts/host-a", { method: "DELETE" }));
+    expect(response.status).toBe(204);
+    expect(db.query("SELECT id FROM hosts WHERE id = 'host-a'").get()).toBeNull();
+    expect(db.query("SELECT id FROM application_protections WHERE id = 'prot-delete'").get()).toBeNull();
+    expect(db.query("SELECT id FROM application_snapshots WHERE id = 'snap-delete'").get()).toBeNull();
+  });
+});
+
 describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
   function seedDependentRows(hostId: string): void {
     // LAMA-225 P1-5: seed every host-keyed column the cascade touches.
@@ -599,9 +619,19 @@ describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
       [hostId],
     );
     db.run(
-      `INSERT INTO dotfile_manifests (id, host_id, app_name, paths, original_uploader_host_id)
-       VALUES ('dm-1', ?, 'git', '["~/.gitconfig"]', ?)`,
-      [hostId, hostId],
+      `INSERT INTO application_templates (id, name, origin, paths, created_at, updated_at)
+       VALUES ('tpl-1', 'git', 'custom', '{"paths":{},"excludes":[],"notes":null}', 1, 1)`,
+      [],
+    );
+    db.run(
+      `INSERT INTO application_protections (id, template_id, template_revision, host_id, name, enabled, destination, capture_spec, created_at, updated_at)
+       VALUES ('pr-1', 'tpl-1', 1, ?, 'git', 1, 'server_archive', '{"paths":{},"excludes":[],"notes":null}', 1, 1)`,
+      [hostId],
+    );
+    db.run(
+      `INSERT INTO application_snapshots (id, protection_id, template_id, template_revision, source_host_id, created_at, archive_path, captured_spec, integrity_status)
+       VALUES ('sn-1', 'pr-1', 'tpl-1', 1, ?, 1, 'apps/pr-1/1.tar.gz', '{"paths":{},"excludes":[],"notes":null}', 'verified')`,
+      [hostId],
     );
     db.run(
       `INSERT INTO operation_log (timestamp, host_id, operation, status, summary)
@@ -681,13 +711,13 @@ describe("POST /api/v1/register — renamed-host re-key (LAMA-225)", () => {
     expect(rr).toEqual([{ target_host_id: "cachy" }]);
     const ne = db.query<{ host_id: string | null }, []>("SELECT host_id FROM notification_events").all();
     expect(ne).toEqual([{ host_id: "cachy" }]);
-    // LAMA-225 P1-5: dotfile_manifests has TWO host-keyed columns.
-    const dm = db
-      .query<{ host_id: string; original_uploader_host_id: string | null }, []>(
-        "SELECT host_id, original_uploader_host_id FROM dotfile_manifests",
-      )
+    // LAMA-316: protections are host-bound; snapshots record source host.
+    const pr = db.query<{ host_id: string }, []>("SELECT host_id FROM application_protections").all();
+    expect(pr).toEqual([{ host_id: "cachy" }]);
+    const ssrc = db
+      .query<{ source_host_id: string }, []>("SELECT source_host_id FROM application_snapshots")
       .all();
-    expect(dm).toEqual([{ host_id: "cachy", original_uploader_host_id: "cachy" }]);
+    expect(ssrc).toEqual([{ source_host_id: "cachy" }]);
     // Locks/schedule: locked_by column re-keyed.
     const fl = db.query<{ locked_by: string | null }, []>("SELECT locked_by FROM folder_locks").all();
     expect(fl).toEqual([{ locked_by: "cachy" }]);

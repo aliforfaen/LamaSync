@@ -5,7 +5,7 @@ import { healthRoutes } from "./routes/health.ts";
 import { hostsRoutes } from "./routes/hosts.ts";
 import { configRoutes } from "./routes/config.ts";
 import { foldersRoutes } from "./routes/folders.ts";
-import { dotfilesRoutes } from "./routes/dotfiles.ts";
+import { appsRoutes } from "./routes/apps.ts";
 import { reportRoutes } from "./routes/report.ts";
 import { sharesRoutes } from "./routes/shares.ts";
 import { adminRoutes, pruneOperationLog } from "./routes/admin.ts";
@@ -26,7 +26,6 @@ import { pauseRoutes } from "./routes/pause.ts";
 import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts";
 import { apiKeysRoutes } from "./routes/api-keys.ts";
 import { serverDeployRoutes } from "./routes/server-deploys.ts";
-import { appProfilesRoutes } from "./routes/app-profiles.ts";
 import { backupLegacyRoutes } from "./routes/backup-legacy.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
@@ -98,7 +97,7 @@ const app = new Elysia()
           { name: "Hosts", description: "Registration and heartbeat" },
           { name: "Config", description: "Host configuration distribution" },
           { name: "Folders", description: "Folder and assignment management" },
-          { name: "Dotfiles", description: "Dotfile version storage" },
+          { name: "Apps", description: "Application templates, protections, and snapshots" },
           {
             name: "Operations",
             description: "Job reporting and log queries",
@@ -135,10 +134,6 @@ const app = new Elysia()
             description:
               "LAMA-262 pairing-session endpoints — admin issues short codes, devices exchange them for the API key.",
           },
-          {
-            name: "App Profiles",
-            description: "User-defined reusable app-settings profiles",
-          },
         ],
         components: {
           securitySchemes: {
@@ -160,7 +155,7 @@ const app = new Elysia()
   .use(hostsRoutes)
   .use(configRoutes)
   .use(foldersRoutes)
-  .use(dotfilesRoutes)
+  .use(appsRoutes)
   .use(reportRoutes)
   .use(sharesRoutes)
   .use(adminRoutes)
@@ -180,7 +175,6 @@ const app = new Elysia()
   .use(pairingRoutes)
   .use(apiKeysRoutes)
   .use(serverDeployRoutes)
-  .use(appProfilesRoutes)
   .use(healthDrillRoutes)
   .use(backupLegacyRoutes)
   .onError(({ code, error, set }): ErrorResponse => {

@@ -53,7 +53,7 @@ import * as sync from "./sync.ts";
 import * as ops from "./ops.ts";
 import * as doctor from "./doctor.ts";
 import * as local from "./local.ts";
-import * as dotfiles from "./dotfiles.ts";
+import * as apps from "./apps.ts";
 import * as conflicts from "./conflicts.ts";
 import * as snapshots from "./snapshots.ts";
 import * as browse from "./browse.ts";
@@ -81,7 +81,7 @@ interface DispatchEntry {
   /** Module key inside its parent command's dispatcher (e.g. "list"). */
   key?: string;
   /** Subcommands surfaced under this node. Empty/missing = leaf. May
-   *  itself contain nested groups (e.g. `dotfiles manifests create`). */
+   *  itself contain nested groups (e.g. `apps templates create`). */
   subcommands?: Record<string, DispatchEntry>;
   /**
    * When set, this node is itself a command (leaf). Subcommand entries
@@ -121,10 +121,13 @@ Commands:
   sync [folderId]         Trigger a sync (--host, optional --folder)
   ops list                List recent activity (--status, --host, --folder, --limit)
   doctor                  Structured health report (env, server, socket, version) — runs even without client.toml
-  dotfiles list           List app settings backups (dotfile manifests)
-  dotfiles manifests      CRUD over app settings backup manifests
-  dotfiles upload         Upload a new app settings backup version
-  dotfiles download       Download an app settings backup tarball
+  apps templates list      List app templates (capture-spec recipes)
+  apps templates create    Create an app template (--name, --origin, --paths)
+  apps protections list    List app protections (--host filters by device)
+  apps protections enroll  Enroll an app template on a host
+  apps snapshots list      List snapshots of a protection (--protection)
+  apps snapshots upload    Upload an app snapshot tarball (--protection, --file)
+  apps snapshots download  Download an app snapshot tarball (--snapshot, --out)
   conflicts list          List manual sync conflicts
   conflicts resolve       Resolve a conflict
   snapshots list          List restic snapshots
@@ -397,90 +400,207 @@ const DISPATCH_TREE: Record<string, DispatchEntry> = {
       run: async (ctx) => doctor.run(ctx),
     },
   },
-  dotfiles: {
+  apps: {
     help: groupHelp(
-      "dotfiles",
-      "Manage app settings backups (dotfile manifests).",
+      "apps",
+      "Application backups: templates, host protections, and snapshots (LAMA-316).",
     ),
     subcommands: {
-      list: {
-        key: "list",
-        help: subHelp(
-          "dotfiles list",
-          "List app settings backups (dotfile manifests; --host filters by device).",
-          ["--host <id>", "--json"],
-        ),
-        run: async (ctx) => dotfiles.runList(ctx),
-      },
-      manifests: {
+      templates: {
         help: groupHelp(
-          "dotfiles manifests",
-          "CRUD over /api/v1/dotfiles/manifests.",
+          "apps templates",
+          "Operator-owned app recipes (capture-spec templates).",
         ),
         subcommands: {
           list: {
             key: "list",
             help: subHelp(
-              "dotfiles manifests list",
-              "List app settings backups (dotfile manifests; --host filters by device).",
-              ["--host <id>", "--json"],
+              "apps templates list",
+              "List app templates.",
+              ["--json"],
             ),
-            run: async (ctx) => dotfiles.runManifestsList(ctx),
+            run: async (ctx) => apps.runTemplatesList(ctx),
+          },
+          get: {
+            key: "get",
+            help: subHelp(
+              "apps templates get <id>",
+              "Get one app template.",
+              ["--json"],
+            ),
+            run: async (ctx) => apps.runTemplateGet(ctx),
           },
           create: {
             key: "create",
             help: subHelp(
-              "dotfiles manifests create",
-              "Create an app settings backup manifest.",
+              "apps templates create",
+              "Create an app template.",
               [
-                "--app-name <name>        app name (required)",
-                "--paths <p1,p2>          comma-separated paths (required)",
-                "--host <id|_global>      target host (default: _global)",
-                "--excludes <e1,e2>       comma-separated exclude globs",
-                "--schedule '<cron>'      sync schedule",
-                "--instructions '<text>'  operator notes",
+                "--name <name>                  template name (required)",
+                "--origin <built_in|custom>     template origin (default: custom)",
+                "--description <text>           template description",
+                "--emoji <emoji>                single emoji for the web UI card",
+                "--color <color>                color for the web UI card",
+                "--linux-paths <p1,p2>          comma-separated Linux candidate paths",
+                "--macos-paths <p1,p2>          comma-separated macOS candidate paths",
+                "--windows-paths <p1,p2>        comma-separated Windows candidate paths",
+                "--install-url <url>            install instructions URL",
+                "--install-instructions <text>  install steps",
+                "--restore-instructions <text>  restore steps",
                 "--json",
               ],
             ),
-            run: async (ctx) => dotfiles.runManifestCreate(ctx),
+            run: async (ctx) => apps.runTemplateCreate(ctx),
+          },
+          update: {
+            key: "update",
+            help: subHelp(
+              "apps templates update <id>",
+              "Update an app template (PATCH-style; only the flags you set are sent).",
+              [
+                "--name <name>                  new template name",
+                "--origin <built_in|custom>     template origin",
+                "--description <text>           template description",
+                "--emoji <emoji>                single emoji for the web UI card",
+                "--color <color>                color for the web UI card",
+                "--linux-paths <p1,p2>          comma-separated Linux candidate paths",
+                "--macos-paths <p1,p2>          comma-separated macOS candidate paths",
+                "--windows-paths <p1,p2>        comma-separated Windows candidate paths",
+                "--install-url <url>            install instructions URL",
+                "--install-instructions <text>  install steps",
+                "--restore-instructions <text>  restore steps",
+                "--json",
+              ],
+            ),
+            run: async (ctx) => apps.runTemplateUpdate(ctx),
           },
           delete: {
             key: "delete",
             help: subHelp(
-              "dotfiles manifests delete <id>",
-              "Delete an app settings backup manifest and cascade its versions (DESTRUCTIVE — safety rule 5).",
+              "apps templates delete <id>",
+              "Delete an app template (409 while protections use it; DESTRUCTIVE — safety rule 5).",
               ["--yes, -y    skip the confirmation prompt (required non-interactively)"],
             ),
-            run: async (ctx) => dotfiles.runManifestDelete(ctx),
+            run: async (ctx) => apps.runTemplateDelete(ctx),
           },
         },
       },
-      upload: {
-        key: "upload",
-        help: subHelp(
-          "dotfiles upload",
-          "Upload a new dotfile tarball version.",
-          [
-            "--app <name>          app name (required)",
-            "--file <tarball>      tarball file path (required)",
-            "--description <text> optional label",
-            "--host <id>           target host (omit for _global)",
-          ],
+      protections: {
+        help: groupHelp(
+          "apps protections",
+          "Host-bound enrollments of an app template.",
         ),
-        run: async (ctx) => dotfiles.runUpload(ctx),
+        subcommands: {
+          list: {
+            key: "list",
+            help: subHelp(
+              "apps protections list",
+              "List app protections (--host filters by device).",
+              ["--host <id>", "--json"],
+            ),
+            run: async (ctx) => apps.runProtectionsList(ctx),
+          },
+          get: {
+            key: "get",
+            help: subHelp(
+              "apps protections get <id>",
+              "Get one app protection.",
+              ["--json"],
+            ),
+            run: async (ctx) => apps.runProtectionGet(ctx),
+          },
+          enroll: {
+            key: "enroll",
+            help: subHelp(
+              "apps protections enroll",
+              "Enroll an app template on exactly one host.",
+              [
+                "--template <id>      app template id (required)",
+                "--host <hostId>      host to enroll (required)",
+                "--schedule '<cron>'  capture schedule",
+                "--name <name>        protection name (default: template name)",
+                "--json",
+              ],
+            ),
+            run: async (ctx) => apps.runProtectionEnroll(ctx),
+          },
+          update: {
+            key: "update",
+            help: subHelp(
+              "apps protections update <id>",
+              "Update an app protection (enabled / schedule / name).",
+              [
+                "--enabled <true|false>  enable or disable capture",
+                "--schedule '<cron>'     new capture schedule",
+                "--name <name>           new protection name",
+                "--json",
+              ],
+            ),
+            run: async (ctx) => apps.runProtectionUpdate(ctx),
+          },
+          delete: {
+            key: "delete",
+            help: subHelp(
+              "apps protections delete <id>",
+              "Delete an app protection (snapshots are kept; DESTRUCTIVE — safety rule 5).",
+              ["--yes, -y    skip the confirmation prompt (required non-interactively)"],
+            ),
+            run: async (ctx) => apps.runProtectionDelete(ctx),
+          },
+        },
       },
-      download: {
-        key: "download",
-        help: subHelp(
-          "dotfiles download",
-          "Download a dotfile tarball (writes to --out).",
-          [
-            "--app <name>          app name",
-            "--version <id>        version id",
-            "--out <path>          output file path (required)",
-          ],
+      snapshots: {
+        help: groupHelp(
+          "apps snapshots",
+          "Immutable app archive metadata under a protection.",
         ),
-        run: async (ctx) => dotfiles.runDownload(ctx),
+        subcommands: {
+          list: {
+            key: "list",
+            help: subHelp(
+              "apps snapshots list",
+              "List snapshots under a protection.",
+              ["--protection <id>  protection id (required)", "--json"],
+            ),
+            run: async (ctx) => apps.runSnapshotsList(ctx),
+          },
+          upload: {
+            key: "upload",
+            help: subHelp(
+              "apps snapshots upload",
+              "Upload an app snapshot tarball.",
+              [
+                "--protection <id>    protection id (required)",
+                "--file <tarball>     tarball file path (required)",
+                "--description <text> optional label",
+                "--json",
+              ],
+            ),
+            run: async (ctx) => apps.runSnapshotUpload(ctx),
+          },
+          download: {
+            key: "download",
+            help: subHelp(
+              "apps snapshots download",
+              "Download an app snapshot tarball (writes to --out).",
+              [
+                "--snapshot <id>    snapshot id (required)",
+                "--out <path>       output file path (required without --json)",
+                "--json",
+              ],
+            ),
+            run: async (ctx) => apps.runSnapshotDownload(ctx),
+          },
+          delete: {
+            key: "delete",
+            help: subHelp(
+              "apps snapshots delete <id>",
+              "Delete an app snapshot (archive file is removed; DESTRUCTIVE — safety rule 5).",
+              ["--yes, -y    skip the confirmation prompt (required non-interactively)"],
+            ),
+            run: async (ctx) => apps.runSnapshotDelete(ctx),
+          },
+        },
       },
     },
   },
@@ -939,7 +1059,7 @@ async function runCliInner(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
 
   // parseArgs caps `command` at depth 2 and spills deeper words into
-  // `rest`, but the dispatch tree has depth-3 paths (`dotfiles manifests
+  // `rest`, but the dispatch tree has depth-3 paths (`apps templates
   // create`). Re-join the positional words and let walkTree consume as
   // many as the tree allows; the remainder is the command's `rest`.
   const words = [...parsed.command, ...parsed.rest];
@@ -1039,7 +1159,7 @@ function walkTree(words: string[]): WalkResult | null {
   // Group nodes (have subcommands but no command) act as namespaces. Walk
   // greedily: stop at the first word that isn't a registered subcommand —
   // that word (and the rest) belongs to the command's positional args
-  // (e.g. `folders delete <id>`, `dotfiles manifests delete <id>`).
+  // (e.g. `folders delete <id>`, `apps templates delete <id>`).
   let consumed = 1;
   while (consumed < words.length && node.subcommands) {
     const next: DispatchEntry | undefined = node.subcommands[words[consumed] ?? ""];
@@ -1061,10 +1181,10 @@ function walkTree(words: string[]): WalkResult | null {
 
 /** Every full invocation path the dispatch tree accepts — leaves and
  *  intermediate groups alike (e.g. "folders", "folders list",
- *  "dotfiles manifests", "dotfiles manifests create"). The drift check
+ *  "apps templates", "apps templates create"). The drift check
  *  (`scripts/check-skill-drift.ts`) imports this so it doesn't have to
  *  scrape the binary's top-level `Commands:` section, which never lists
- *  children of nested groups (e.g. `dotfiles manifests list|create|delete`
+ *  children of nested groups (e.g. `apps templates list|create|delete`
  *  is invisible to the top-level help). */
 export function listInvocations(): string[] {
   const out: string[] = [];

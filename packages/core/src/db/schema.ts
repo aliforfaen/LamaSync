@@ -115,6 +115,65 @@ CREATE TABLE IF NOT EXISTS dotfile_versions (
     description   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS application_templates (
+    id                   TEXT PRIMARY KEY,
+    name                 TEXT NOT NULL UNIQUE,
+    origin               TEXT NOT NULL DEFAULT 'custom',
+    description          TEXT,
+    emoji                TEXT,
+    color                TEXT,
+    paths                TEXT NOT NULL, -- JSON CaptureSpec
+    install_url          TEXT,
+    install_instructions TEXT,
+    restore_instructions TEXT,
+    revision             INTEGER NOT NULL DEFAULT 1,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+    demo                 INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS application_protections (
+    id                TEXT PRIMARY KEY,
+    template_id       TEXT NOT NULL REFERENCES application_templates(id),
+    template_revision INTEGER NOT NULL,
+    host_id           TEXT NOT NULL REFERENCES hosts(id),
+    name              TEXT NOT NULL,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    schedule          TEXT,
+    destination       TEXT NOT NULL DEFAULT 'server_archive',
+    capture_spec      TEXT NOT NULL, -- JSON CaptureSpec
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    demo              INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(host_id, template_id)
+);
+
+CREATE TABLE IF NOT EXISTS application_snapshots (
+    id                 TEXT PRIMARY KEY,
+    protection_id      TEXT NOT NULL REFERENCES application_protections(id),
+    template_id        TEXT NOT NULL,
+    template_revision  INTEGER NOT NULL,
+    source_host_id     TEXT NOT NULL,
+    created_at         INTEGER NOT NULL,
+    archive_path       TEXT NOT NULL,
+    archive_format     TEXT NOT NULL DEFAULT 'tar.gz',
+    size_bytes         INTEGER,
+    checksum_sha256    TEXT,
+    description        TEXT,
+    captured_spec      TEXT NOT NULL, -- JSON CaptureSpec
+    integrity_status   TEXT NOT NULL DEFAULT 'unverified',
+    demo               INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_protections_host
+    ON application_protections(host_id);
+CREATE INDEX IF NOT EXISTS idx_app_protections_template
+    ON application_protections(template_id);
+CREATE INDEX IF NOT EXISTS idx_app_snapshots_protection_ts
+    ON application_snapshots(protection_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_app_snapshots_host
+    ON application_snapshots(source_host_id);
+
 CREATE TABLE IF NOT EXISTS restic_snapshots (
     id            TEXT PRIMARY KEY,
     folder_id     TEXT NOT NULL REFERENCES folders(id),
@@ -577,6 +636,18 @@ export const MIGRATIONS: string[] = [
   // table from SERVER_SCHEMA; this is the idempotent backfill).
   "CREATE TABLE IF NOT EXISTS server_deploy_jobs (id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, requested_by TEXT, status TEXT NOT NULL DEFAULT 'pending', started_at INTEGER, completed_at INTEGER, target TEXT NOT NULL DEFAULT 'production', summary TEXT, output_tail TEXT)",
   "CREATE INDEX IF NOT EXISTS idx_server_deploy_jobs_status ON server_deploy_jobs(status, requested_at)",
+  // LAMA-316: application templates/protections/snapshots contract (replaces
+  // the dotfile/profile model). Schema lives in SERVER_SCHEMA for fresh DBs;
+  // these CREATE TABLE IF NOT EXISTS entries are the idempotent safety net
+  // for existing databases ("already exists" is swallowed by initDb's
+  // try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS application_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, origin TEXT NOT NULL DEFAULT 'custom', description TEXT, emoji TEXT, color TEXT, paths TEXT NOT NULL, install_url TEXT, install_instructions TEXT, restore_instructions TEXT, revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, demo INTEGER NOT NULL DEFAULT 0)",
+  "CREATE TABLE IF NOT EXISTS application_protections (id TEXT PRIMARY KEY, template_id TEXT NOT NULL REFERENCES application_templates(id), template_revision INTEGER NOT NULL, host_id TEXT NOT NULL REFERENCES hosts(id), name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, schedule TEXT, destination TEXT NOT NULL DEFAULT 'server_archive', capture_spec TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, demo INTEGER NOT NULL DEFAULT 0, UNIQUE(host_id, template_id))",
+  "CREATE TABLE IF NOT EXISTS application_snapshots (id TEXT PRIMARY KEY, protection_id TEXT NOT NULL REFERENCES application_protections(id), template_id TEXT NOT NULL, template_revision INTEGER NOT NULL, source_host_id TEXT NOT NULL, created_at INTEGER NOT NULL, archive_path TEXT NOT NULL, archive_format TEXT NOT NULL DEFAULT 'tar.gz', size_bytes INTEGER, checksum_sha256 TEXT, description TEXT, captured_spec TEXT NOT NULL, integrity_status TEXT NOT NULL DEFAULT 'unverified', demo INTEGER NOT NULL DEFAULT 0)",
+  "CREATE INDEX IF NOT EXISTS idx_app_protections_host ON application_protections(host_id)",
+  "CREATE INDEX IF NOT EXISTS idx_app_protections_template ON application_protections(template_id)",
+  "CREATE INDEX IF NOT EXISTS idx_app_snapshots_protection_ts ON application_snapshots(protection_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_app_snapshots_host ON application_snapshots(source_host_id)",
 ];
 
 /**

@@ -64,8 +64,8 @@ other pieces (see `docs/development.md` for the full dev guide and recipes).
 
 ## Branch & PR workflow
 
-- Work on a feature branch off `master` (the repo uses per-phase branches for
-  larger programs — see `docs/product-finish-plan.md` for a worked example).
+- Work on a focused feature branch off `master`; keep larger programs split
+  into reviewable, independently verifiable changes.
 - Push and open a PR; CI runs **check** (tsc + tests + drift) and **build**
   (bun build + web dist) on every PR. `release`/`docker` jobs run on `v*`
   tags and `master` pushes.
@@ -78,7 +78,8 @@ other pieces (see `docs/development.md` for the full dev guide and recipes).
 
 - `AGENTS.md` — project overview, quick start, conventions.
 - `docs/agent-start.md` — current work-order routing (agents).
-- `docs/status.md` — rolling status log + next-session queue.
+- `docs/status.md` — current status, active queue, and limitations.
+- `docs/README.md` — living-document map and archive policy.
 - `docs/features.md` — feature history by Multica issue.
 - `docs/development.md` — full dev guide, recipes, release process.
 - `docs/prod-deploy.md` — production LXC operations (SSH/update/rollback).

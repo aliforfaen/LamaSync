@@ -205,7 +205,8 @@ export function Folders() {
     destination: "",
     mode: "inherit",
   });
-  // LAMA-198: transient "queued" note after a per-assignment Sync now.
+  // LAMA-198/LAMA-306: transient "queued" note after a per-assignment
+  // sync or backup action.
   const [syncNote, setSyncNote] = useState<string | null>(null);
   // UX workstream 4: inline cron validation on the assign form.
   const [assignCronError, setAssignCronError] = useState<string | null>(null);
@@ -502,6 +503,31 @@ export function Folders() {
       const hostName = hosts.find((h) => h.id === hostId)?.hostname ?? hostId;
       setSyncNote(
         `Sync of “${folderName}” queued on ${hostName} — runs on the daemon within ~30 s`,
+      );
+      window.setTimeout(() => setSyncNote(null), 6000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // LAMA-306: backup pages use the same host-scoped action queue as the
+  // existing Host Detail control, but include folderId so the daemon runs
+  // only this protected folder instead of every backup on the device.
+  async function onBackupNow(folderId: string, hostId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.enqueueAction(hostId, {
+        type: "trigger_backup",
+        payload: { folderId },
+      });
+      const folderName =
+        items?.find((i) => i.folder.id === folderId)?.folder.name ?? folderId;
+      const hostName = hosts.find((h) => h.id === hostId)?.hostname ?? hostId;
+      setSyncNote(
+        `Backup of “${folderName}” queued on ${hostName} — runs on the daemon within ~30 s`,
       );
       window.setTimeout(() => setSyncNote(null), 6000);
     } catch (err) {
@@ -1157,12 +1183,16 @@ export function Folders() {
                                   <button
                                     type="button"
                                     className="action primary"
-                                    onClick={() =>
-                                      onSyncNow(folder.id, assignment.hostId)
-                                    }
+                                    onClick={() => {
+                                      if (backupMode) {
+                                        void onBackupNow(folder.id, assignment.hostId);
+                                      } else {
+                                        void onSyncNow(folder.id, assignment.hostId);
+                                      }
+                                    }}
                                     disabled={busy}
                                   >
-                                    Sync now
+                                    {backupMode ? "Backup now" : "Sync now"}
                                   </button>
                                   <details className="row-menu">
                                     <summary aria-label={`More actions for ${hostLabel(assignment.hostId)}`}>More</summary>

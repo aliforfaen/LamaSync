@@ -52,7 +52,9 @@ export function expandHomePath(p: string): string {
  * assignment uses `~` so the cached config object is not needlessly copied.
  */
 export function expandConfigPaths(config: HostConfig): HostConfig {
-  if (config.assignments.every((a) => !a.localPath.startsWith("~"))) {
+  const assignmentsNeedExpansion = config.assignments.some((a) => a.localPath.startsWith("~"));
+  const appsNeedExpansion = config.apps.some((app) => app.paths.some((path) => path.startsWith("~")));
+  if (!assignmentsNeedExpansion && !appsNeedExpansion) {
     return config;
   }
   return {
@@ -60,6 +62,12 @@ export function expandConfigPaths(config: HostConfig): HostConfig {
     assignments: config.assignments.map((a) => ({
       ...a,
       localPath: expandHomePath(a.localPath),
+    })),
+    // Keep logical app paths for archive/recovery mapping, alongside the
+    // daemon-local paths Bun, tar, and existsSync actually need.
+    apps: config.apps.map((app) => ({
+      ...app,
+      resolvedPaths: app.paths.map(expandHomePath),
     })),
   };
 }

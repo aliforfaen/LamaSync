@@ -1,7 +1,7 @@
 // Command-path tests: real dispatch → real command module → real
 // LamaSyncApiClient, with only the transport (globalThis.fetch) stubbed.
 // These pin the exit-code contract (LAMA-229: 401/403 → exit 3) and the
-// third-level `dotfiles manifests` dispatch.
+// third-level `apps templates` dispatch.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
@@ -361,27 +361,41 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
     });
   });
 
-  test("'dotfiles manifests create' dispatches to create (POST), not list", async () => {
+  test("'apps templates create' dispatches to create (POST), not list", async () => {
     responder = (req) => {
       expect(req.method).toBe("POST");
       return new Response(
         JSON.stringify({
-          id: "manifest-1",
-          hostId: "_global",
-          appName: "nvim",
-          paths: ["~/.config/nvim"],
-          excludes: null,
-          schedule: null,
-          instructions: null,
-          lastSyncAt: null,
+          id: "tpl-1",
+          name: "nvim",
+          origin: "custom",
+          description: null,
+          emoji: null,
+          color: null,
+          paths: {
+            paths: {
+              linux: [
+                { path: "~/.config/nvim", classification: "unknown" },
+              ],
+            },
+            excludes: [],
+            notes: null,
+          },
+          installUrl: null,
+          installInstructions: null,
+          restoreInstructions: null,
+          revision: 1,
+          createdAt: 1,
+          updatedAt: 1,
         }),
         { status: 201, headers: { "Content-Type": "application/json" } },
       );
     };
     await runCli([
-      "dotfiles", "manifests", "create",
-      "--app-name", "nvim",
-      "--paths", "~/.config/nvim",
+      "apps", "templates", "create",
+      "--name", "nvim",
+      "--origin", "custom",
+      "--linux-paths", "~/.config/nvim",
       "--server", "http://lamasync.test",
       "--api-key", "good-key-1234567890",
       "--json",
@@ -389,16 +403,78 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
     expect(recorded).toHaveLength(1);
     expect(recorded[0]?.method).toBe("POST");
     expect(recorded[0]?.url).toBe(
-      "http://lamasync.test/api/v1/dotfiles/manifests",
+      "http://lamasync.test/api/v1/apps/templates",
     );
-    expect(recorded[0]?.body).toContain('"appName":"nvim"');
+    expect(recorded[0]?.body).toContain('"name":"nvim"');
+    expect(recorded[0]?.body).toContain('"origin":"custom"');
     expect(exitCode).toBeUndefined();
   });
 
-  test("'dotfiles manifests delete <id> --yes' dispatches to delete (DELETE)", async () => {
+  test("'apps protections enroll' dispatches to enroll (POST) with a --json envelope", async () => {
+    responder = (req) => {
+      expect(req.method).toBe("POST");
+      return new Response(
+        JSON.stringify({
+          id: "prot-1",
+          templateId: "tpl-1",
+          templateRevision: 1,
+          hostId: "host-1",
+          name: "nvim",
+          enabled: true,
+          schedule: null,
+          destination: "server_archive",
+          captureSpec: {
+            paths: { linux: [] },
+            excludes: [],
+            notes: null,
+          },
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      );
+    };
+    await runCli([
+      "apps", "protections", "enroll",
+      "--template", "tpl-1",
+      "--host", "host-1",
+      "--server", "http://lamasync.test",
+      "--api-key", "good-key-1234567890",
+      "--json",
+    ]);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.method).toBe("POST");
+    expect(recorded[0]?.url).toBe(
+      "http://lamasync.test/api/v1/apps/protections",
+    );
+    expect(recorded[0]?.body).toContain('"templateId":"tpl-1"');
+    expect(recorded[0]?.body).toContain('"hostId":"host-1"');
+    expect(exitCode).toBeUndefined();
+    // --json envelope: the raw created protection is the stdout payload.
+    const envelope = JSON.parse(stdout);
+    expect(envelope).toMatchObject({
+      id: "prot-1",
+      templateId: "tpl-1",
+      hostId: "host-1",
+      name: "nvim",
+    });
+  });
+
+  test("'apps templates delete' without --yes stays behind confirm (exit 2)", async () => {
+    const code = await runExpectingExit([
+      "apps", "templates", "delete", "tpl-1",
+      "--server", "http://lamasync.test",
+      "--api-key", "good-key-1234567890",
+    ]);
+    expect(code).toBe(2);
+    // confirmDestructive fired before any network write.
+    expect(recorded).toHaveLength(0);
+  });
+
+  test("'apps protections delete <id> --yes' dispatches to delete (DELETE)", async () => {
     responder = () => new Response(null, { status: 204 });
     await runCli([
-      "dotfiles", "manifests", "delete", "manifest-1",
+      "apps", "protections", "delete", "prot-1",
       "--yes",
       "--server", "http://lamasync.test",
       "--api-key", "good-key-1234567890",
@@ -407,20 +483,11 @@ describe("CLI command path against a stubbed transport (LAMA-229)", () => {
     expect(recorded).toHaveLength(1);
     expect(recorded[0]?.method).toBe("DELETE");
     expect(recorded[0]?.url).toBe(
-      "http://lamasync.test/api/v1/dotfiles/manifests/manifest-1",
+      "http://lamasync.test/api/v1/apps/protections/prot-1",
     );
     expect(exitCode).toBeUndefined();
-  });
-
-  test("'dotfiles manifests delete' without --yes stays behind confirm (exit 2)", async () => {
-    const code = await runExpectingExit([
-      "dotfiles", "manifests", "delete", "manifest-1",
-      "--server", "http://lamasync.test",
-      "--api-key", "good-key-1234567890",
-    ]);
-    expect(code).toBe(2);
-    // confirmDestructive fired before any network write.
-    expect(recorded).toHaveLength(0);
+    const envelope = JSON.parse(stdout);
+    expect(envelope).toMatchObject({ ok: true, id: "prot-1" });
   });
 
   test("'notifications test' POSTs to /notifications/test", async () => {

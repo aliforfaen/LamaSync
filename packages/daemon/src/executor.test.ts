@@ -8,6 +8,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import type { EffectivePause, FolderAssignment } from "@lamasync/core";
 import {
+  appArchivePath,
+  appArchiveTransforms,
   archiveBisyncState,
   buildRcloneCommand,
   classifyRcloneExit,
@@ -18,6 +20,32 @@ import {
   isPauseActive,
   pickConflictAction,
 } from "./executor.ts";
+
+describe("appArchivePath", () => {
+  test("uses a portable home namespace and a separate absolute namespace", () => {
+    expect(appArchivePath("~/.config/foo/settings.json")).toBe(
+      "home/.config/foo/settings.json",
+    );
+    expect(appArchivePath("/etc/foo/settings.json")).toBe(
+      "absolute/etc/foo/settings.json",
+    );
+  });
+
+  test("rejects root, relative, and traversal paths", () => {
+    expect(appArchivePath("/")).toBeNull();
+    expect(appArchivePath("relative/settings.json")).toBeNull();
+    expect(appArchivePath("~/.config/../secrets")).toBeNull();
+  });
+});
+
+describe("appArchiveTransforms", () => {
+  test("matches only a selected source path or its descendants", () => {
+    expect(appArchiveTransforms("tmp/lamasync/foo", "home/.config/foo")).toEqual([
+      "--transform=s|^tmp/lamasync/foo/|home/.config/foo/|",
+      "--transform=s|^tmp/lamasync/foo$|home/.config/foo|",
+    ]);
+  });
+});
 
 describe("buildRcloneCommand", () => {
   test("sync emits bisync with resilient flags and workdir", () => {
@@ -330,7 +358,7 @@ describe("executeAssignment pause refusal (LAMA-273)", () => {
         host: { id: "h1", hostname: "h1", status: "online" },
         assignments: [],
         folders: [],
-        manifests: [],
+        apps: [],
         rcloneConfig: "[fake]\ntype = local\n",
         serverTailnetIp: null,
         peers: [],
@@ -427,7 +455,7 @@ describe("executeAssignment mkdir failure (LAMA-309)", () => {
           host: { id: "h1", hostname: "h1", status: "online" },
           assignments: [],
           folders: [],
-          manifests: [],
+          apps: [],
           rcloneConfig: "[fake]\ntype = local\n",
           serverTailnetIp: null,
           peers: [],

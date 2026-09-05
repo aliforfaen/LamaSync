@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type {
-  DotfileManifest,
+  ApplicationProtectionListItem,
   FolderAssignment,
   Host,
   HostConfig,
@@ -33,7 +33,7 @@ import { InlineError } from "../components/InlineError.tsx";
 interface DetailData {
   host: Host;
   config: HostConfig;
-  manifests: DotfileManifest[];
+  protections: ApplicationProtectionListItem[];
   operations: OperationLog[];
   actions: QueuedAction[];
 }
@@ -100,14 +100,14 @@ export function HostDetail() {
   const refresh = useCallback(async (): Promise<void> => {
     if (!hostId) return;
     try {
-      const [host, config, manifests, operations, actions] = await Promise.all([
+      const [host, config, protections, operations, actions] = await Promise.all([
         api.getHost(hostId),
         api.getConfig(hostId),
-        api.listManifests(hostId),
+        api.listAppProtections(hostId),
         api.listOperationsForHost(hostId, 20),
         api.listHostActions(hostId),
       ]);
-      setData({ host, config, manifests, operations, actions });
+      setData({ host, config, protections, operations, actions });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -313,6 +313,30 @@ export function HostDetail() {
     }
   }
 
+  // LAMA-317: these hooks must run on the loading/error renders too. Keeping
+  // them below the early returns changes hook order when the host data arrives
+  // and React replaces the page with a blank render.
+  const updateAction = useMemo(
+    () => latestRemoteUpdateAction(data?.actions ?? []),
+    [data?.actions],
+  );
+  const updateInFlight = updateAction?.status === "pending" || updateAction?.status === "taken";
+  const updateState = useMemo(
+    () => (data ? daemonUpdateUiState(data.host, latestVersion, updateInFlight) : null),
+    [data, latestVersion, updateInFlight],
+  );
+  const updateFollowUp = useMemo(
+    () => (data ? remoteUpdateFollowUp(updateAction, data.host.version) : null),
+    [data, updateAction],
+  );
+  // Modest poll while an update action is in flight (WS is primary; this
+  // is the fallback when the socket is down).
+  useEffect(() => {
+    if (!updateInFlight) return;
+    const timer = setInterval(() => void refresh(), 5_000);
+    return () => clearInterval(timer);
+  }, [updateInFlight, refresh]);
+
   if (!hostId) {
     return (
       <div className="page">
@@ -344,28 +368,7 @@ export function HostDetail() {
     );
   }
 
-  const { host, config, manifests, operations, actions } = data;
-
-  // LAMA-299: Software-section derived state. `inFlight` also prevents
-  // duplicate pending requests; the follow-up line tracks the latest
-  // update_daemon action through queued → claimed → installed → confirmed.
-  const updateAction = useMemo(() => latestRemoteUpdateAction(actions), [actions]);
-  const updateInFlight = updateAction?.status === "pending" || updateAction?.status === "taken";
-  const updateState = useMemo(
-    () => daemonUpdateUiState(host, latestVersion, updateInFlight),
-    [host, latestVersion, updateInFlight],
-  );
-  const updateFollowUp = useMemo(
-    () => remoteUpdateFollowUp(updateAction, host.version),
-    [updateAction, host.version],
-  );
-  // Modest poll while an update action is in flight (WS is primary; this
-  // is the fallback when the socket is down).
-  useEffect(() => {
-    if (!updateInFlight) return;
-    const timer = setInterval(() => void refresh(), 5_000);
-    return () => clearInterval(timer);
-  }, [updateInFlight, refresh]);
+  const { host, config, protections, operations, actions } = data;
 
   return (
     <div className="page">
@@ -467,16 +470,16 @@ export function HostDetail() {
           <dd><code>{latestVersion ? `v${latestVersion}` : "—"}</code></dd>
           <dt>Update</dt>
           <dd>
-            {updateState.kind === "ready" ? (
+            {updateState?.kind === "ready" ? (
               <span className="badge badge-update">update available</span>
-            ) : updateState.kind === "no-update" ? (
+            ) : updateState?.kind === "no-update" ? (
               <span className="badge badge-success">up to date</span>
             ) : (
-              <span className="muted">{updateState.message}</span>
+              <span className="muted">{updateState?.message ?? "loading update status…"}</span>
             )}
           </dd>
         </dl>
-        {updateState.kind === "ready" ? (
+        {updateState?.kind === "ready" ? (
           <div className="actions">
             <button
               type="button"
@@ -629,16 +632,23 @@ export function HostDetail() {
       </section>
 
       <section className="section">
-        <h2>App settings backups ({manifests.length})</h2>
-        {manifests.length === 0 ? (
-          <div className="empty-row">No app settings backups yet</div>
+        <h2>App protections ({protections.length})</h2>
+        {protections.length === 0 ? (
+          <div className="empty-row">No app protections on this device yet</div>
         ) : (
           <ul className="assignment-list">
-            {manifests.map((m) => (
-              <li key={m.id}>
-                <strong>{m.appName}</strong>
-                <span>{m.paths.join(", ")}</span>
-                {m.schedule ? <span className="muted">cron: {m.schedule}</span> : null}
+            {protections.map((protection) => (
+              <li key={protection.id}>
+                <strong>{protection.name}</strong>
+                <span>{protection.templateName}</span>
+                {protection.enabled ? (
+                  <span className="badge badge-success">Enabled</span>
+                ) : (
+                  <span className="badge badge-unknown">Disabled</span>
+                )}
+                {protection.schedule ? (
+                  <span className="muted">{protection.schedule}</span>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -719,7 +729,7 @@ export function HostDetail() {
         </details>
       </section>
 
-      {confirmUpdate && updateState.kind === "ready" && (
+      {confirmUpdate && updateState?.kind === "ready" && (
         <ConfirmDialog
           title="Update daemon"
           confirmLabel={`Update to v${updateState.latest}`}
