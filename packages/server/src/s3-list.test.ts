@@ -192,4 +192,45 @@ describe("listS3Objects", () => {
       S3ListObjectsError,
     );
   });
+
+  // LAMA-320 follow-up: Backblaze B2's S3 API rejects presigned query
+  // parameters on ListObjectsV2 (403 AccessDenied), so auth must ride in the
+  // Authorization header — the URL carries only the list params.
+  test("signs via Authorization header, never via presigned query params", async () => {
+    let capturedUrl: string | null = null;
+    let capturedHeaders: Headers | null = null;
+    const fetchImpl = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      capturedUrl = url.toString();
+      capturedHeaders = new Headers(init?.headers);
+      return Promise.resolve(
+        new Response(
+          `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`,
+          { status: 200 },
+        ),
+      );
+    };
+
+    await listS3Objects(s3Config(), "backups/", 1000, fetchImpl);
+
+    const url = new URL(capturedUrl!);
+    for (const key of url.searchParams.keys()) {
+      expect(key.startsWith("X-Amz-")).toBe(false);
+    }
+    expect(url.searchParams.get("list-type")).toBe("2");
+    expect(url.searchParams.get("prefix")).toBe("backups/");
+
+    const authorization = capturedHeaders!.get("Authorization") ?? "";
+    expect(authorization.startsWith("AWS4-HMAC-SHA256 ")).toBe(true);
+    expect(authorization).toContain(
+      `Credential=${AWS_TEST_ACCESS_KEY}/`,
+    );
+    expect(authorization).toContain(
+      "SignedHeaders=host;x-amz-content-sha256;x-amz-date",
+    );
+    expect(authorization).toContain("Signature=");
+    expect(capturedHeaders!.get("x-amz-date")).toBeTruthy();
+    expect(capturedHeaders!.get("x-amz-content-sha256")).toBe(
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+  });
 });

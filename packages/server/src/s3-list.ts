@@ -24,6 +24,10 @@ export class S3ListObjectsError extends Error {
   }
 }
 
+/** SHA-256 of an empty request body — the canonical payload hash for GET. */
+const EMPTY_PAYLOAD_SHA256 =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 export interface SignRequestResult {
   signature: string;
   canonicalRequest: string;
@@ -120,44 +124,42 @@ export async function listS3Objects(
   const amzDate = formatAmzDate(now);
   const dateStamp = formatDateStamp(now);
   const credentialScope = `${dateStamp}/${region}/s3/aws4_request`;
-
-  const authQuery: Record<string, string> = {
-    ...query,
-    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-    "X-Amz-Credential": `${accessKeyId}/${credentialScope}`,
-    "X-Amz-Date": amzDate,
-    "X-Amz-SignedHeaders": "host",
-  };
-
+  // LAMA-320 follow-up: Backblaze B2's S3 API rejects presigned query
+  // parameters on ListObjectsV2 with 403 AccessDenied ("Unauthenticated
+  // requests are not allowed for this api"), while header-based SigV4 (what
+  // rclone uses) is accepted. Sign via the Authorization header instead:
+  // date and content hash ride as headers, the URL carries only list params.
   const signed = await signRequest(
     "GET",
     url.host,
     url.pathname,
-    authQuery,
-    "UNSIGNED-PAYLOAD",
+    query,
+    EMPTY_PAYLOAD_SHA256,
     accessKeyId,
     secretAccessKey,
     region,
     "s3",
     now,
+    { "x-amz-content-sha256": EMPTY_PAYLOAD_SHA256, "x-amz-date": amzDate },
   );
-
-  url.searchParams.set("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
-  url.searchParams.set("X-Amz-Credential", `${accessKeyId}/${credentialScope}`);
-  url.searchParams.set("X-Amz-Date", amzDate);
-  url.searchParams.set("X-Amz-SignedHeaders", "host");
-  url.searchParams.set("X-Amz-Signature", signed.signature);
+  const authorization =
+    `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${credentialScope}, ` +
+    `SignedHeaders=host;x-amz-content-sha256;x-amz-date, ` +
+    `Signature=${signed.signature}`;
 
   let response: Response;
   try {
     response = await fetchImpl(url.toString(), {
       method: "GET",
-      headers: { "x-amz-content-sha256": "UNSIGNED-PAYLOAD" },
+      headers: {
+        Authorization: authorization,
+        "x-amz-content-sha256": EMPTY_PAYLOAD_SHA256,
+        "x-amz-date": amzDate,
+      },
     });
   } catch (err) {
     throw new S3ListObjectsError(`S3 request failed: ${err instanceof Error ? err.message : String(err)}`, err);
   }
-
   const bodyText = await response.text();
   if (!response.ok) {
     throw new S3ListObjectsError(`S3 request returned ${response.status}: ${bodyText.slice(0, 200)}`);
