@@ -46,8 +46,8 @@ function b2ManagementView(row: B2ManagementRow | null): B2ManagementConfig | nul
   };
 }
 
-function requireB2Manager(set: { status?: unknown }, store: unknown): boolean {
-  if (requireAdmin({ principal: principalOf(store) })) return true;
+function requireB2Manager(set: { status?: unknown }, request: Request): boolean {
+  if (requireAdmin({ principal: principalOf(request) })) return true;
   set.status = 403;
   return false;
 }
@@ -163,16 +163,16 @@ function validateKindFields(
 export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/admin/b2-management",
-    ({ set, store }) => {
-      if (!requireB2Manager(set, store)) return { error: "Admin access required" };
+    ({set, request}) => {
+      if (!requireB2Manager(set, request)) return { error: "Admin access required" };
       return b2ManagementView(b2ManagementConfig());
     },
     { detail: { summary: "Read Backblaze B2 bucket-management configuration", tags: ["Admin"] } },
   )
   .put(
     "/admin/b2-management",
-    ({ body, set, store }) => {
-      if (!requireB2Manager(set, store)) return { error: "Admin access required" };
+    ({body, set, request}) => {
+      if (!requireB2Manager(set, request)) return { error: "Admin access required" };
       const b = body as {
         endpoint?: unknown; region?: unknown; applicationKeyId?: unknown; applicationKey?: unknown;
       };
@@ -208,8 +208,8 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/admin/b2-management/test",
-    async ({ set, store }) => {
-      if (!requireB2Manager(set, store)) return { error: "Admin access required" };
+    async ({set, request}) => {
+      if (!requireB2Manager(set, request)) return { error: "Admin access required" };
       const config = b2ManagementConfig();
       const applicationKey = config ? decryptSecret(config.application_key_enc) : null;
       if (!config || !applicationKey) {

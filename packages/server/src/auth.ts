@@ -1,38 +1,48 @@
-// LAMA-234: authentication resolves each Bearer token ONCE into a typed
-// `AuthPrincipal` (master / admin / device) and attaches it to the Elysia
-// request store; route helpers gate on it (see `requireAdmin` /
-// `deviceMayAccessHost` below).
+// LAMA-234 + LAMA-296: authentication resolves each request ONCE into a
+// typed `AuthPrincipal` (master / admin / device / deploy / mobile /
+// web-session) and makes it available to route handlers through
+// `principalOf(request)`.
 //
-// Credential sources, in order:
-//   1. master — the environment `LAMASYNC_API_KEY` (super-admin, matches all
-//      existing master-key clients; constant-time compare, never deleted).
-//   2. managed `admin` or `device` — looked up via the api_keys table by the
-//      token's embedded key id, hash-compared constant-time. Revoked rows
-//      resolve to null, so future requests get 401 exactly like a bad key.
+// Request-local identity: Elysia's `store` object is a shared singleton
+// across every request (verified empirically: concurrent requests blead
+// `store.principal` writes into each other). Principals are therefore kept
+// in a module-level WeakMap keyed by the Request object — GC'd with the
+// request, never shared, safe under concurrency.
 //
-// The WebSocket upgrade flow is NOT bearer-authenticated here (it uses the
-// Sec-WebSocket-Protocol header inside ws.ts, which reuses `resolvePrincipal`).
+// Credential sources, in order of precedence:
+//   1. master — the environment `LAMASYNC_API_KEY` (super-admin, matches
+//      all existing master-key clients; constant-time compare).
+//   2. managed `admin` / `device` / `deploy` — looked up via the api_keys
+//      table by the token's embedded key id, hash-compared constant-time.
+//      Revoked rows resolve to null → 401. UNKNOWN api-key kinds fail
+//      closed (never default to admin).
+//   3. mobile NATIVE token — looked up via mobile_registrations by its
+//      SHA-256 hash. Confined to /api/v1/mobile/me + check-in.
+//   4. mobile WEB session — the `__Host-lamasync-mobile` cookie. Accepted
+//      ONLY when no Authorization header is present; an invalid bearer
+//      NEVER falls back to the cookie. Cookie mutations additionally
+//      require an exact trusted Origin + the session CSRF token.
+//
+// Pre-auth exemption is exact method+path only (pairing exchange, mobile
+// enrollment exchange, mobile web-session bootstrap) — never a broad
+// /mobile bypass.
+//
+// The WebSocket upgrade flow is NOT bearer-authenticated here (ws.ts
+// handles its own upgrade auth and reuses `resolvePrincipal` + the live
+// session lookup).
 
 import { Elysia } from "elysia";
 import { timingSafeEqual } from "node:crypto";
 import { findApiKeyByToken, isApiKeyRowRevoked, touchApiKeyLastUsed } from "./api-keys.ts";
+import {
+  MOBILE_SESSION_COOKIE,
+  canonicalOrigin,
+  deriveCsrfToken,
+  readCookieHeader,
+  resolveLiveSession,
+  resolveNativeHost,
+} from "./mobile-store.ts";
 import type { AuthPrincipal } from "@lamasync/core";
-
-/**
- * Paths under /api/ that are intentionally NOT protected by the bearer
- * check. Each entry is matched as a literal prefix, so order matters only
- * for ties. Today the only exempt path is the pairing-code exchange
- * endpoint — see the comment next to the constant for the design rationale.
- *
- * Add to this list only when (a) the endpoint can be exercised by a caller
- * that does not yet have the bearer key, AND (b) the endpoint proves caller
- * intent another way (the pairing exchange proves intent by knowing the
- * short, single-use code; the WS endpoint proves it via the
- * Sec-WebSocket-Protocol token).
- */
-export const AUTH_EXEMPT_PATHS: string[] = [
-  "/api/v1/pairing/",
-];
 
 /** Constant-time string comparison (length-mismatch safe). */
 function safeEqual(a: string, b: string): boolean {
@@ -43,14 +53,58 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
+// ---------------------------------------------------------------------------
+// Pre-auth exemptions (exact method + path; `*` = one segment)
+// ---------------------------------------------------------------------------
+
+/**
+ * Routes under /api/ that are intentionally NOT protected by the bearer /
+ * cookie check. Each entry is an exact method+path pattern where `*`
+ * matches exactly one path segment. Entries exist only when (a) the caller
+ * cannot yet hold the bearer/session (the pairing exchange and the mobile
+ * enrollment exchange prove intent with a short single-use secret; the
+ * mobile web-session bootstrap proves intent with the web grant in the
+ * body), and (b) the route itself re-checks state and rejects invalid
+ * calls.
+ */
+export const AUTH_EXEMPT_ROUTES: ReadonlyArray<{ method: string; pattern: string }> = [
+  // Legacy CLI pairing (LAMA-262): device exchanges a short code for a key.
+  { method: "POST", pattern: "/api/v1/pairing/*/exchange" },
+  // Mobile enrollment exchange (LAMA-296): app exchanges QR id+secret.
+  { method: "POST", pattern: "/api/v1/mobile/enrollments/*/exchange" },
+  // Mobile web-session bootstrap (LAMA-296): app exchanges web grant for a
+  // session cookie. Never a native bearer (native token here → 403 in the
+  // route) and never a broad /mobile bypass.
+  { method: "POST", pattern: "/api/v1/mobile/web-session" },
+];
+
+/** Segment-exact wildcard match shared by the exemption + allowlists. */
+function pathMatchesPattern(pathSegments: string[], pattern: string): boolean {
+  const patSegments = pattern.split("/").filter((s) => s.length > 0);
+  if (patSegments.length !== pathSegments.length) return false;
+  for (let i = 0; i < patSegments.length; i++) {
+    if (patSegments[i] !== "*" && patSegments[i] !== pathSegments[i]) return false;
+  }
+  return true;
+}
+
+function routeAllowed(
+  list: ReadonlyArray<{ method: string; pattern: string }>,
+  pathname: string,
+  method: string,
+): boolean {
+  const segments = pathname.split("/").filter((s) => s.length > 0);
+  return list.some(
+    (r) => r.method === method && pathMatchesPattern(segments, r.pattern),
+  );
+}
+
 // LAMA-234: device-key route allowlist. A device principal may ONLY reach
 // the daemon's own control-plane calls (config, self-registration, heartbeat
 // + operation reports, its own action queue/completions, its own dotfile
 // uploads, conflicts, restic snapshots + restore jobs, release checks).
 // Everything else — fleet lists, backends/secrets, key management, admin
 // operations — gets 403 at the auth boundary before any route logic runs.
-// `*` matches exactly one path segment. The per-route handlers still enforce
-// host-ownership on top of this (deviceMayAccessHost / requireAdmin).
 const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   // self-registration + own host detail
   { method: "POST", pattern: "/api/v1/register" },
@@ -100,29 +154,36 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   { method: "PATCH", pattern: "/api/v1/folders/*/assign/*" },
 ];
 
-/** Segment-exact wildcard match for the device route allowlist. */
-function pathMatchesDevicePattern(pathSegments: string[], pattern: string): boolean {
-  const patSegments = pattern.split("/").filter((s) => s.length > 0);
-  if (patSegments.length !== pathSegments.length) return false;
-  for (let i = 0; i < patSegments.length; i++) {
-    if (patSegments[i] !== "*" && patSegments[i] !== pathSegments[i]) return false;
-  }
-  return true;
-}
+// LAMA-296: a mobile NATIVE principal may only reach its own identity +
+// check-in routes. Fleet admin, config, keys, other hosts, the web-session
+// bootstrap — everything else is 403 at the boundary. (Cookie web sessions
+// are NOT confined here: an admin web session is the SPA's full management
+// surface.)
+export const MOBILE_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: string }> = [
+  { method: "GET", pattern: "/api/v1/mobile/me" },
+  { method: "POST", pattern: "/api/v1/mobile/check-in" },
+];
 
 /** True when a device principal is allowed to reach this route at all. */
 export function deviceMayCallRoute(pathname: string, method: string): boolean {
-  const segments = pathname.split("/").filter((s) => s.length > 0);
-  return DEVICE_ALLOWED_ROUTES.some(
-    (r) => r.method === method && pathMatchesDevicePattern(segments, r.pattern),
-  );
+  return routeAllowed(DEVICE_ALLOWED_ROUTES, pathname, method);
 }
+
+/** True when a mobile native principal is allowed to reach this route. */
+export function mobileMayCallRoute(pathname: string, method: string): boolean {
+  return routeAllowed(MOBILE_ALLOWED_ROUTES, pathname, method);
+}
+
+// ---------------------------------------------------------------------------
+// Principal resolution
+// ---------------------------------------------------------------------------
 
 /**
  * Resolve a raw Bearer token to a typed principal, or null when the token
- * is invalid, unknown, or belongs to a revoked managed key. Revoked keys
- * intentionally collapse to null (→ 401) so callers can't distinguish
- * "bad key" from "revoked key".
+ * is invalid, unknown, or revoked. Sources: master env key, managed
+ * api_keys (admin/device/deploy), then mobile native credentials. Unknown
+ * api-key kinds fail CLOSED (return null) — a future credential kind must
+ * be taught here before it can act.
  */
 export function resolvePrincipal(token: string | null | undefined): AuthPrincipal | null {
   if (typeof token !== "string" || token.length === 0) return null;
@@ -131,7 +192,14 @@ export function resolvePrincipal(token: string | null | undefined): AuthPrincipa
     return { kind: "master", keyId: null, hostId: null };
   }
   const row = findApiKeyByToken(token);
-  if (!row || isApiKeyRowRevoked(row)) return null;
+  if (!row || isApiKeyRowRevoked(row)) {
+    // Not a managed key (or revoked): try the mobile native credential.
+    // A revoked native registration resolves to null → 401, identical to a
+    // bad token.
+    const hostId = resolveNativeHost(token);
+    if (hostId !== null) return { kind: "mobile", hostId };
+    return null;
+  }
   if (row.kind === "device") {
     if (typeof row.host_id !== "string" || row.host_id.length === 0) return null;
     touchApiKeyLastUsed(row.id);
@@ -144,102 +212,87 @@ export function resolvePrincipal(token: string | null | undefined): AuthPrincipa
     touchApiKeyLastUsed(row.id);
     return { kind: "deploy", keyId: row.id, hostId: null };
   }
-  touchApiKeyLastUsed(row.id);
-  return { kind: "admin", keyId: row.id, hostId: null };
-}
-
-/** Shape of the principal-carrying store the auth plugin provides. */
-export interface AuthStore {
-  principal: AuthPrincipal | null;
-}
-
-export function getAuthPlugin() {
-  const API_KEY = process.env.LAMASYNC_API_KEY;
-  if (!API_KEY || API_KEY.length === 0) {
-    console.error("FATAL: LAMASYNC_API_KEY environment variable is required");
-    process.exit(1);
+  if (row.kind === "admin") {
+    touchApiKeyLastUsed(row.id);
+    return { kind: "admin", keyId: row.id, hostId: null };
   }
-  return new Elysia({ name: "lamasync-auth" })
-    .state("principal", null as AuthPrincipal | null)
-    .onRequest(({ request, set, store }) => {
-      // Only enforce the Bearer token on the versioned API surface. WebSocket
-      // upgrades authenticate via Sec-WebSocket-Protocol inside the ws route's
-      // `open` handler; skip both the bearer check and any pre-flight for
-      // the WebSocket upgrade header.
-      const url = new URL(request.url);
-      if (!url.pathname.startsWith("/api/")) {
-        return;
-      }
-      const upgrade = request.headers.get("upgrade") ?? "";
-      if (upgrade.toLowerCase() === "websocket") {
-        return;
-      }
-      // LAMA-262: the pairing-code exchange endpoint is auth-exempt by
-      // design. The device has no API key yet — that's the whole point of
-      // the pairing flow — so requiring a Bearer would be a chicken/egg.
-      // The single-use short code IS the proof of intent; without the
-      // code the exchange endpoint returns 404 / 409 / 410 anyway.
-      // The companion endpoints (`POST /pairing` to create a session and
-      // `GET /pairing/:code` to poll its status) DO require the bearer —
-      // only the unauthenticated exchange is exempt.
-      for (const exempt of AUTH_EXEMPT_PATHS) {
-        if (url.pathname.startsWith(`${exempt}`) && url.pathname.endsWith("/exchange")) {
-          return;
-        }
-      }
-      const header = request.headers.get("authorization") ?? "";
-      const match = /^Bearer\s+(.+)$/.exec(header);
-      const principal = resolvePrincipal(match?.[1]);
-      if (!principal) {
-        set.status = 401;
-        return { error: "Unauthorized" };
-      }
-      // LAMA-234: device keys are confined to their own control-plane calls
-      // at the auth boundary — everything else is 403 before route logic.
-      if (principal.kind === "device" && !deviceMayCallRoute(url.pathname, request.method)) {
-        set.status = 403;
-        return { error: "Forbidden" };
-      }
-      store.principal = principal;
-    });
+  // Unknown api_keys.kind — fail closed. Never default to admin.
+  return null;
 }
 
 /**
- * Narrow a request store (possibly untyped in route plugins composed via
- * `.use()`) to the auth principal. The single inline cast lives here; route
- * handlers only ever call this and the gates below.
+ * Resolve a live mobile web session from its cookie secret, or null.
+ * Re-validates revocation/expiry on every request (and after restarts).
  */
-export function principalOf(store: unknown): AuthPrincipal | null {
-  if (store === null || typeof store !== "object") return null;
-  const raw = (store as { principal?: unknown }).principal;
-  if (raw === null || typeof raw !== "object") return null;
-  const rec = raw as Record<string, unknown>;
-  if (rec.kind === "master") return { kind: "master", keyId: null, hostId: null };
-  if (rec.kind === "admin" && typeof rec.keyId === "string") {
-    return { kind: "admin", keyId: rec.keyId, hostId: null };
+export function resolveCookieSession(
+  secret: string,
+  nowMs: number = Date.now(),
+): AuthPrincipal | null {
+  const live = resolveLiveSession(secret, nowMs);
+  if (!live) return null;
+  const { session, registration } = live;
+  return {
+    kind: "web-session",
+    sessionId: session.id,
+    hostId: session.registration_id,
+    admin: session.admin === 1,
+    csrfToken: deriveCsrfToken(secret),
+    expiresAt: session.expires_at,
+    displayName: registration.display_name,
+    clientType: registration.client_type,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Request-local principal storage
+// ---------------------------------------------------------------------------
+
+/** Per-request principals keyed by the Request object (GC-safe, never shared
+ *  across concurrent requests — Elysia's shared store is NOT used). */
+const principalByRequest = new WeakMap<Request, AuthPrincipal>();
+
+export function attachPrincipal(request: Request, principal: AuthPrincipal | null): void {
+  if (principal === null) principalByRequest.delete(request);
+  else principalByRequest.set(request, principal);
+}
+
+/**
+ * Narrow a value to the request-local principal. Accepts a Request, an
+ * Elysia per-request context (`{ request }`), or a `{ principal }` object
+ * (unit tests / pure helpers). Unknown shapes and unmapped requests
+ * resolve to null — never to admin.
+ */
+export function principalOf(target: unknown): AuthPrincipal | null {
+  if (target === null || typeof target !== "object") return null;
+  if (target instanceof Request) {
+    return principalByRequest.get(target) ?? null;
   }
-  if (rec.kind === "deploy" && typeof rec.keyId === "string") {
-    return { kind: "deploy", keyId: rec.keyId, hostId: null };
-  }
-  if (rec.kind === "device" && typeof rec.keyId === "string" && typeof rec.hostId === "string") {
-    return { kind: "device", keyId: rec.keyId, hostId: rec.hostId };
-  }
+  const rec = target as Record<string, unknown>;
+  if (rec.request instanceof Request) return principalOf(rec.request);
+  if ("principal" in rec) return principalOf(rec.principal);
   return null;
 }
 
 /** Current request principal (null only on auth-exempt routes). */
-export function currentPrincipal(store: AuthStore): AuthPrincipal | null {
-  return store.principal;
+export function currentPrincipal(target: Request | { request: Request }): AuthPrincipal | null {
+  return principalOf(target);
+}
+
+/** Shape of the principal-carrying object the gates below accept. */
+export interface AuthStore {
+  principal: AuthPrincipal | null;
 }
 
 /**
- * Gate for admin-only routes: non-null when the caller is master or a
- * managed admin key. Route handlers return 403 when this is null (they
- * should never see it null for bearer'd requests; a 401 would have fired).
+ * Gate for admin-only routes: non-null when the caller is master, a managed
+ * admin key, or an admin web session (LAMA-296 mobile cookie session whose
+ * grant carried admin). Route handlers return 403 when null.
  */
 export function requireAdmin(store: AuthStore): AuthPrincipal | null {
   const p = store.principal;
-  if (p && (p.kind === "master" || p.kind === "admin")) return p;
+  if (!p) return null;
+  if (p.kind === "master" || p.kind === "admin") return p;
+  if (p.kind === "web-session" && p.admin) return p;
   return null;
 }
 
@@ -256,22 +309,23 @@ export function requireDeployAgent(store: AuthStore): AuthPrincipal | null {
 
 /**
  * Composing host-ownership gate for /api/v1/apps routes (LAMA-316): returns
- * the principal when it may access `hostId` (master/admin any host, device
- * only its bound host), else null. Callers 403 on null.
+ * the principal when it may access `hostId` (master/admin/web-session any
+ * host, device only its bound host), else null. Callers 403 on null.
  */
 export function requireHostAccess(
-  store: unknown,
+  target: Request | { request: Request },
   hostId: string | null | undefined,
 ): AuthPrincipal | null {
-  const p = principalOf(store);
+  const p = principalOf(target);
   return p !== null && deviceMayAccessHost(p, hostId) ? p : null;
 }
 
 /**
- * Host-ownership gate for daemon-facing routes. Master and admin keys may
- * act on any host (admin = full management surface). A device key may only
- * act on the host it is bound to. Device keys with a mismatched host are
- * rejected — never trust a client-supplied hostId alone.
+ * Host-ownership gate for daemon-facing routes. Master and admin keys (and
+ * LAMA-296 admin web sessions) may act on any host; a device key may only
+ * act on the host it is bound to. A mobile NATIVE principal is never
+ * granted host access here. Mismatched hosts are rejected — never trust a
+ * client-supplied hostId alone.
  */
 export function deviceMayAccessHost(
   principal: AuthPrincipal | null,
@@ -279,8 +333,97 @@ export function deviceMayAccessHost(
 ): boolean {
   if (!principal) return false;
   if (principal.kind === "master" || principal.kind === "admin") return true;
+  if (principal.kind === "web-session") return principal.admin && typeof hostId === "string";
   if (principal.kind === "device" && typeof hostId === "string") {
     return principal.hostId === hostId;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Auth plugin (per-request boundary)
+// ---------------------------------------------------------------------------
+
+function isSafeMethod(method: string): boolean {
+  return method === "GET" || method === "HEAD" || method === "OPTIONS";
+}
+
+export function getAuthPlugin() {
+  const API_KEY = process.env.LAMASYNC_API_KEY;
+  if (!API_KEY || API_KEY.length === 0) {
+    console.error("FATAL: LAMASYNC_API_KEY environment variable is required");
+    process.exit(1);
+  }
+  return new Elysia({ name: "lamasync-auth" }).onRequest(({ request, set }) => {
+    // Only enforce on the versioned API surface. WebSocket upgrades
+    // authenticate inside the ws route's `open` handler.
+    const url = new URL(request.url);
+    if (!url.pathname.startsWith("/api/")) return;
+    const upgrade = request.headers.get("upgrade") ?? "";
+    if (upgrade.toLowerCase() === "websocket") return;
+
+    // Exact pre-auth exemptions (pairing exchange, mobile exchange,
+    // mobile web-session bootstrap) — see AUTH_EXEMPT_ROUTES.
+    if (routeAllowed(AUTH_EXEMPT_ROUTES, url.pathname, request.method)) return;
+
+    // LAMA-296: an Authorization header, when present, is authoritative —
+    // an invalid bearer is a 401 and NEVER falls back to the session
+    // cookie. Web grants are opaque and resolve to null here → 401 on any
+    // normal REST call; only the bootstrap route accepts them (in its
+    // body, not as a bearer).
+    const header = request.headers.get("authorization") ?? "";
+    const bearer = /^Bearer\s+(.+)$/.exec(header)?.[1];
+    if (bearer !== undefined && bearer !== null) {
+      const principal = resolvePrincipal(bearer);
+      if (!principal) {
+        set.status = 401;
+        return { error: "Unauthorized" };
+      }
+      // Confine device + mobile native principals to their allowlists at
+      // the boundary before any route logic runs.
+      if (principal.kind === "device" && !deviceMayCallRoute(url.pathname, request.method)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (principal.kind === "mobile" && !mobileMayCallRoute(url.pathname, request.method)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      attachPrincipal(request, principal);
+      return;
+    }
+
+    // No Authorization header: mobile web-session cookie?
+    const cookie = readCookieHeader(request.headers.get("cookie"), MOBILE_SESSION_COOKIE);
+    if (cookie !== null) {
+      const principal = resolveCookieSession(cookie);
+      if (!principal || principal.kind !== "web-session") {
+        // Stale/revoked/expired cookie — 401, not anonymous.
+        set.status = 401;
+        return { error: "Unauthorized" };
+      }
+      if (!isSafeMethod(request.method)) {
+        // Cookie-authenticated mutations require the exact trusted Origin
+        // AND the session CSRF token. Origin is the configured canonical
+        // origin — never Host/forwarding headers.
+        const trusted = canonicalOrigin();
+        const origin = request.headers.get("origin");
+        if (trusted === null || origin === null || origin !== trusted) {
+          set.status = 400;
+          return { error: "cross-origin request rejected" };
+        }
+        const csrf = request.headers.get("x-csrf-token");
+        if (csrf === null || !safeEqual(csrf, principal.csrfToken)) {
+          set.status = 403;
+          return { error: "missing or invalid CSRF token" };
+        }
+      }
+      attachPrincipal(request, principal);
+      return;
+    }
+
+    // Neither bearer nor cookie: non-exempt API routes require auth.
+    set.status = 401;
+    return { error: "Unauthorized" };
+  });
 }

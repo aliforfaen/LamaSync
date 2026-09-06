@@ -27,6 +27,8 @@ import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts"
 import { apiKeysRoutes } from "./routes/api-keys.ts";
 import { serverDeployRoutes } from "./routes/server-deploys.ts";
 import { backupLegacyRoutes } from "./routes/backup-legacy.ts";
+import { mobileRoutes } from "./routes/mobile.ts";
+import { setPeerServerForRateLimit } from "./mobile-store.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -134,6 +136,11 @@ const app = new Elysia()
             description:
               "LAMA-262 pairing-session endpoints — admin issues short codes, devices exchange them for the API key.",
           },
+          {
+            name: "Mobile",
+            description:
+              "LAMA-296 Android-companion endpoints — enrollment, exchange, web-session bootstrap, native identity, check-in, revocation.",
+          },
         ],
         components: {
           securitySchemes: {
@@ -177,6 +184,7 @@ const app = new Elysia()
   .use(serverDeployRoutes)
   .use(healthDrillRoutes)
   .use(backupLegacyRoutes)
+  .use(mobileRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;
@@ -197,6 +205,9 @@ export type App = typeof app;
 console.log(`LamaSync server v${VERSION} listening on http://${app.server!.hostname}:${app.server!.port}`);
 console.log(`Swagger UI: http://${app.server!.hostname}:${app.server!.port}/swagger`);
 console.log(`WebSocket:  ws://${app.server!.hostname}:${app.server!.port}/api/v1/ws (subprotocol: lamasync-auth, <base64(apiKey)>)`);
+// The mobile exchange throttler keys on the TCP peer address; point it at
+// the live server once listening.
+setPeerServerForRateLimit(app.server);
 
 // Unit tests compose route plugins directly rather than importing this entry
 // point. The explicit env gates also keep the background timer out of any

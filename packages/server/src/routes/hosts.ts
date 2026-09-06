@@ -173,9 +173,9 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/hosts/:hostId",
-    async ({ params, set, store }) => {
+    async ({params, set, request}) => {
       // LAMA-234: a device key may only read its own host record.
-      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), params.hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -204,10 +204,10 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .patch(
     "/hosts/:hostId",
-    async ({ params, body, set, store }) => {
+    async ({params, body, set, request}) => {
       // LAMA-234: device keys may only rename their own host (and the
       // daemon never renames itself — admin/TUI paths do).
-      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), params.hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -298,11 +298,11 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .patch(
     "/hosts/:hostId/class",
-    async ({ params, body, set, store }) => {
+    async ({params, body, set, request}) => {
       // LAMA-234: device keys may only update their own host's class. (The
       // daemon never sets this directly — the operator does, from the
       // web-ui.)
-      if (!deviceMayAccessHost(principalOf(store), params.hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), params.hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -353,7 +353,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/register",
-    async ({ body, set, store }) => {
+    async ({body, set, request}) => {
       const { id, hostname, tailnetIp } = body as {
         id: string;
         hostname: string;
@@ -362,7 +362,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       // LAMA-234: a device key may register/self-identify its own host
       // id only. (Pairing mints the device key bound to this same id, so
       // re-registration after a rename keeps working.)
-      if (!deviceMayAccessHost(principalOf(store), id)) {
+      if (!deviceMayAccessHost(principalOf(request), id)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -466,8 +466,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
 .delete(
     "/hosts/:hostId",
-    ({ params, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({params, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -535,7 +535,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/report/health",
-    async ({ body, set, store }) => {
+    async ({body, set, request}) => {
       const { hostId, timestamp, status, lanIp, tailnetIp, version, os, storageUsedBytes, hostClass } = body as {
         hostId: string;
         timestamp: number;
@@ -549,7 +549,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       };
       // LAMA-234: heartbeats are host-bound; a device key may only report
       // its own host.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }

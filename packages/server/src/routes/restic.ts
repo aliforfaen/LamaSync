@@ -80,13 +80,13 @@ function parseJson<T>(value: string | null, fallback: T): T {
 export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/restic/snapshots",
-    ({ query, set, store }) => {
+    ({query, set, request}) => {
       const { folderId, hostId } = query as {
         folderId?: string;
         hostId?: string;
       };
       // LAMA-234: a device key must scope snapshot lists to its own host.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -125,7 +125,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/restic/snapshots",
-    ({ body, set, store }) => {
+    ({body, set, request}) => {
       const {
         folderId,
         hostId,
@@ -145,7 +145,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
       };
       // LAMA-234: snapshots are host-bound; a device key may only report
       // its own host's snapshots.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -202,14 +202,14 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/restic/restore",
-    ({ query, set, store }) => {
+    ({query, set, request}) => {
       const { targetHostId, status } = query as {
         targetHostId?: string;
         status?: string;
       };
       // LAMA-234: a device key must scope restore-job lists to its own
       // target host.
-      if (!deviceMayAccessHost(principalOf(store), targetHostId)) {
+      if (!deviceMayAccessHost(principalOf(request), targetHostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -248,7 +248,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/restic/restore",
-    ({ body, set, store }) => {
+    ({body, set, request}) => {
       const { snapshotId, folderId, targetHostId, targetPath, include } = body as {
         snapshotId: string;
         folderId: string;
@@ -258,7 +258,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
       };
       // LAMA-234: restore jobs target one host; a device key may only
       // create jobs for its own host.
-      if (!deviceMayAccessHost(principalOf(store), targetHostId)) {
+      if (!deviceMayAccessHost(principalOf(request), targetHostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -305,7 +305,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/restic/restore/:id/status",
-    ({ params, body, set, store }) => {
+    ({params, body, set, request}) => {
       const { status, error } = body as {
         status: ResticRestoreJob["status"];
         error?: string | null;
@@ -320,7 +320,7 @@ export const resticRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Restore job not found" };
       }
       // LAMA-234: only the job's target host may update it.
-      if (!deviceMayAccessHost(principalOf(store), existing.target_host_id)) {
+      if (!deviceMayAccessHost(principalOf(request), existing.target_host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
       }

@@ -70,9 +70,11 @@ function requestNoAuth(path: string, init: RequestInit = {}): Request {
 }
 
 beforeEach(() => {
-  // Re-set the crypto env every test: afterEach restores the outer env
-  // (possibly deleting the values above), so later crypto-using tests
-  // must re-pin them.
+  // Re-set the auth + crypto env every test: afterEach restores the outer
+  // env (possibly deleting the values above), so later tests that compose
+  // the auth plugin must re-pin them.
+  process.env.LAMASYNC_API_KEY =
+    process.env.LAMASYNC_API_KEY ?? "pairing-test-key-1234567890";
   process.env.LAMASYNC_SECRET_KEY =
     process.env.LAMASYNC_SECRET_KEY ?? "pairing-test-secret-1234567890";
   process.env.LAMASYNC_DATA_DIR =

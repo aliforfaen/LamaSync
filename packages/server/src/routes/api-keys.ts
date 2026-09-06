@@ -32,8 +32,8 @@ export function __setDb(next: Database): void {
 
 // -- shared helpers --------------------------------------------------------
 
-function adminOnly<T extends { status?: unknown }>(set: T, store: unknown): AuthPrincipal | null {
-  const principal = requireAdmin({ principal: principalOf(store) });
+function adminOnly<T extends { status?: unknown }>(set: T, request: Request): AuthPrincipal | null {
+  const principal = requireAdmin({ principal: principalOf(request) });
   if (!principal) {
     set.status = 403;
     return null;
@@ -67,8 +67,8 @@ function rowById(id: string): ApiKeyRow | null {
 export const apiKeysRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/api-keys",
-    ({ store, set }) => {
-      if (!adminOnly(set, store)) return;
+    ({set, request}) => {
+      if (!adminOnly(set, request)) return;
       return listRows().map(apiKeyRowToSummary);
     },
     {
@@ -85,8 +85,8 @@ export const apiKeysRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/api-keys",
-    ({ body, store, set }) => {
-      if (!adminOnly(set, store)) return;
+    ({body, set, request}) => {
+      if (!adminOnly(set, request)) return;
       const name = (body.name ?? "").trim();
       if (name.length === 0) {
         set.status = 400;
@@ -138,8 +138,8 @@ export const apiKeysRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/api-keys/:id/reveal",
-    ({ params, store, set }) => {
-      if (!adminOnly(set, store)) return;
+    ({params, set, request}) => {
+      if (!adminOnly(set, request)) return;
       const row = rowById(params.id);
       if (!row) {
         set.status = 404;
@@ -182,8 +182,8 @@ export const apiKeysRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/api-keys/:id/revoke",
-    ({ params, body, store, set }) => {
-      if (!adminOnly(set, store)) return;
+    ({params, body, set, request}) => {
+      if (!adminOnly(set, request)) return;
       const row = rowById(params.id);
       if (!row) {
         set.status = 404;
@@ -215,27 +215,52 @@ export const apiKeysRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/auth/me",
-    ({ store }) => {
-      const principal = principalOf(store) ?? { kind: "master", keyId: null, hostId: null };
+    ({ request, set }) => {
+      const principal = principalOf(request) ?? { kind: "master", keyId: null, hostId: null };
+      // LAMA-296 session mode: a cookie-authenticated mobile web session.
+      if (principal.kind === "web-session") {
+        return {
+          authenticated: true,
+          mode: "session",
+          kind: "mobile-session",
+          keyId: null,
+          name: principal.displayName,
+          hostId: principal.hostId,
+          displayName: principal.displayName,
+          clientType: principal.clientType,
+          expiresAt: principal.expiresAt,
+          csrfToken: principal.csrfToken,
+        } as const;
+      }
+      if (principal.kind === "mobile") {
+        // Unreachable: the auth boundary confines mobile native tokens to
+        // /mobile/*. Kept explicit rather than lying about the wire kind.
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
       let name: string | null = null;
       if (principal.kind !== "master" && principal.keyId) {
         const row = rowById(principal.keyId);
         name = row?.name ?? null;
       }
       return {
+        authenticated: true,
+        mode: "bearer",
         kind: principal.kind,
         keyId: principal.keyId,
         hostId: principal.hostId,
         name,
-      };
+      } as const;
     },
     {
       detail: {
-        summary: "Identify the current credential (master/admin/device)",
+        summary:
+          "Identify the current credential / SPA auth discovery. Bearer mode: master/admin/device/deploy. Session mode: mobile web session (kind mobile-session + csrfToken). Invalid bearer never falls back to the cookie.",
         tags: ["API Keys"],
         responses: {
-          200: { description: "Credential identity" },
+          200: { description: "Credential identity (bearer or session mode)" },
           401: { description: "Unauthorized" },
+          403: { description: "Mobile native token (confined to /mobile/*)" },
         },
       },
     },
