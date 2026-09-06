@@ -61,6 +61,7 @@ LAMASYNC_NO_TUI=1 \
 | `LAMASYNC_SHARES` | server shares route | `null` (falls back to `shares.json`) |
 | `PORT` | server | `8080` |
 | `LAMASYNC_SERVER_URL` | TUI | `http://localhost:8080` (env fallback) |
+| `LAMASYNC_ORIGIN` | server (mobile flow) | unset — mobile enrollment exchange/bootstrap return 503 until set to a canonical `https://` origin |
 | `LAMASYNC_NO_TUI` | TUI | — (set to `"1"` for CLI fallback) |
 | `LAMASYNC_SOCKET_PATH` | daemon, TUI local mode | `$XDG_RUNTIME_DIR/lamasync.sock` (falls back to `~/.lamasync/lamasync.sock` when XDG is unset) |
 
@@ -119,6 +120,65 @@ passing and 9 skipped on 2026-08-30). Worth knowing by name:
 3. Register the view in `packages/tui/src/boot.ts` inside the `views` array. The `Shell` builds `ViewSpec`s automatically.
 4. Add a hotkey dispatch path: only if your view owns internal keys, set `ViewSpec.handleKey = view.handleKey.bind(view)`; otherwise global hotkeys via `view.hotkeys()`.
 5. Add a unit test in `packages/tui/src/views/x.test.ts` if the view has pure logic; gate any renderer-bound test behind `process.env.LAMASYNC_TUI_TEST_VIEWS === "1"`.
+
+## Android companion (LAMA-296 phase 1)
+
+The Android app is a **standalone Gradle project** (`android/`) that is
+deliberately outside the Bun workspace: `bun` never discovers it, and its
+build needs neither the Bun toolchain nor the repo's `node_modules`.
+
+Toolchain (recorded in `android/gradle/libs.versions.toml`, verified
+2026-09-06):
+
+| Component | Version |
+|-----------|---------|
+| JDK | 17 (`JAVA_HOME=/usr/lib/jvm/java-17-openjdk` on the dev box) |
+| Android SDK | `/opt/android-sdk` (`ANDROID_HOME`), platform android-35 |
+| Gradle | 8.11.1 (wrapper `./android/gradlew`) |
+| Android Gradle Plugin | 8.9.3 |
+| Kotlin | 2.2.21 (android + compose + serialization plugins) |
+| compileSdk / targetSdk / minSdk | 35 / 35 / 26 |
+| Jetpack Compose BOM | 2025.07.00 (material3), CameraX 1.4.2, ML Kit barcode 17.3.0 |
+
+The SDK is pinned to compileSdk 35 on purpose: SDK 36 components require a
+provisioning step this project does not perform, and the whole chosen matrix
+runs against the platforms already installed — `gradlew` provisions **no**
+new SDK components. `applicationId` is `app.lamasync.companion` (stable once
+chosen) with `versionName 0.1.0`.
+
+Build, lint, and unit-test (49 JVM tests; instrumented tests need a device/AVD):
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+export ANDROID_HOME=/opt/android-sdk
+
+./android/gradlew -p android assembleDebug          # → android/app/build/outputs/apk/debug/app-debug.apk
+./android/gradlew -p android lintDebug              # 0 errors expected (warnings are version-available notices)
+./android/gradlew -p android testDebugUnitTest      # 49 unit tests, no device required
+./android/gradlew -p android connectedDebugAndroidTest  # 7 instrumented tests (booted AVD / device)
+```
+
+### HTTPS prerequisite for the Android flow
+
+The QR flow is an **HTTPS-only** contract:
+
+- The server must run with `LAMASYNC_ORIGIN` set to the canonical
+  `https://` origin clients reach (`https://fleet.example.com`, never a
+  tailnet IP over plain HTTP). Without it, mobile enrollment
+  create/exchange and the web-session bootstrap return 503.
+- The app only accepts `https://` origins with normal certificate
+  validation; the QR's `serverOrigin` is that same canonical origin.
+- Existing HTTP tailnet installations keep working for the existing desktop
+  clients — they simply cannot enroll an Android device until an HTTPS front
+  door exists.
+
+Local TLS development: run the server behind any HTTPS reverse proxy whose
+certificate the device trusts. Debug builds additionally trust
+user-installed CA certificates (`android/app/src/debug/res/xml/network_security_config.xml`;
+no cleartext is ever permitted). Install your local CA on the device/AVD
+(`adb push` + Settings → Security → Install a user certificate, or
+`emulator`'s `-writable-system` CA path) so debug builds accept it. Release
+builds never reference that file and use normal platform validation.
 
 ## Docker
 

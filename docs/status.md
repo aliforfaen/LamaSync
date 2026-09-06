@@ -12,6 +12,26 @@ tests, strict skill drift, and distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-296 (phase 1) — Android companion foundation.** Stage 0 of the
+  Android handoff: a sideloadable Kotlin app (`android/`, app id
+  `app.lamasync.companion`, minSdk 26 / compileSdk 35) that scans a
+  desktop-generated QR, exchanges a ten-minute one-time enrollment for a
+  server-created host identity plus **two separate credentials** — a native
+  bearer confined to `/api/v1/mobile/me` + check-in and a web grant that
+  bootstraps a 12-hour cookie session carrying full fleet administration —
+  and opens the existing web UI in a hardened WebView with no second login.
+  Secrets are hashed server-side (no plaintext replay), stored on-device
+  under Android-Keystore-backed AES-GCM, and excluded from backup. Desktop
+  gains an Add-Android-device modal (case-preserving versioned JSON QR,
+  expiry countdown, terminal-state polling, regenerate, revoke); the SPA
+  gains a dual bearer/session auth mode with CSRF + exact-Origin enforced on
+  cookie mutations; revocation atomically kills native token, web grant, all
+  sessions, and live WebSockets. Android-native uploads, background work, and
+  camera/media features remain deferred (handoff stage 1+). The full
+  enrollment → fleet-page path still needs a manual end-to-end run against a
+  real HTTPS server; boot/install/launch and the 7 instrumented tests are
+  verified on an API 35 emulator (see
+  `docs/report-296-phase-1-android-foundation.md`).
 - **LAMA-316 — application templates, protections, and snapshots.** The
   legacy profile/manifest/version model is replaced by an explicit
   `ApplicationTemplate → ApplicationProtection → ApplicationSnapshot` contract.
@@ -73,6 +93,17 @@ tests, strict skill drift, and distributable binary build.
 
 ## Known limitations
 
+- The Android (LAMA-296 phase 1) flow requires an HTTPS front door and
+  `LAMASYNC_ORIGIN` set to that canonical `https://` origin — enrollment
+  exchange and web-session bootstrap 503 without it. Existing HTTP tailnet
+  installations remain served by existing clients but cannot enroll an
+  Android device until an HTTPS front door exists.
+- LAMA-296 phase 1 ships the native shell and QR/session foundation only:
+  Android-native uploads, background transfer, and media/camera features are
+  deferred to handoff stage 1+. The end-to-end scan-real-QR → authenticated
+  fleet page flow is unverified until a manual run against a real HTTPS
+  server; boot/install/launch plus the instrumented suite are verified on an
+  API 35 emulator.
 - App-capture archive rewriting currently relies on GNU tar's `--transform`
   behavior and is verified on Linux. There are no macOS or Windows clients in
   the fleet today; qualify their archive tooling before onboarding either
@@ -87,3 +118,10 @@ After the LAMA-319/321 pass: `bun x tsc --noEmit`, `bun run build:web-ui`,
 `bun test` (1410 pass, 9 renderer-dependent skips), and strict skill drift all
 passed. The LAMA-321 trash/size round trip is covered by hermetic route tests;
 a live S3 empty-trash smoke on a real bucket is still outstanding.
+
+LAMA-296 phase 1 baseline (this worktree): all six repo gates green
+(`bun install`, `bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` —
+1496 pass / 9 skip, `bun run scripts/check-skill-drift.ts --strict`, `bun run
+build`), plus the Android trio (`assembleDebug`, `lintDebug` 0 errors,
+`testDebugUnitTest` 49/49) and the instrumented suite
+(`connectedDebugAndroidTest` 7/7 on the API 35 `lamadb-test` AVD).
