@@ -1,5 +1,13 @@
-import { describe, expect, test } from "bun:test";
-import { fetchLatestRelease, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import {
+  downloadAndReplace,
+  fetchLatestRelease,
+  isNewer,
+  resolveSelfBinaryPath,
+} from "./self-update.ts";
 
 describe("resolveSelfBinaryPath", () => {
   test("prefers a real execPath over the bunfs virtual argv[1]", () => {
@@ -62,4 +70,96 @@ describe("fetchLatestRelease", () => {
     const result = await fetchLatestRelease();
     expect(result === null || typeof result === "object").toBe(true);
   }, { timeout: 10000 });
+});
+
+describe("downloadAndReplace", () => {
+  const STAGED_PREFIX = ".lamasyncd-update-";
+  const URL = "https://example.invalid/lamasyncd";
+
+  let dir: string;
+  let binaryPath: string;
+  let originalFetch: typeof globalThis.fetch;
+  let originalTmpdir: string | undefined;
+  let originalWarn: typeof console.warn;
+
+  /** Failures are best-effort: they log a warning and return false. */
+  async function expectUpdateFailure(run: () => Promise<boolean>): Promise<void> {
+    console.warn = () => {};
+    try {
+      expect(await run()).toBe(false);
+    } finally {
+      console.warn = originalWarn;
+    }
+  }
+
+  /** Stand-in for the network: Bun's fetch type carries a `preconnect`
+   *  static, so stubs need an assertion to satisfy the type. */
+  function fetchStub(body: BodyInit, status = 200): typeof globalThis.fetch {
+    const stub = async (): Promise<Response> => new Response(body, { status });
+    return stub as unknown as typeof globalThis.fetch;
+  }
+
+  function stagedFiles(): string[] {
+    return readdirSync(dir).filter((name) => name.startsWith(STAGED_PREFIX));
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "lamasync-selfupdate-"));
+    binaryPath = join(dir, "lamasyncd");
+    originalFetch = globalThis.fetch;
+    originalTmpdir = process.env.TMPDIR;
+    originalWarn = console.warn;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
+    console.warn = originalWarn;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("stages next to the binary and replaces it atomically (same filesystem — no EXDEV)", async () => {
+    writeFileSync(binaryPath, "old-binary", { mode: 0o755 });
+    // LAMA-319 regression pin: point the OS temp dir at a non-existent
+    // path. A regression back to os.tmpdir() staging would fail with
+    // ENOENT here; the update must stage in dirname(binaryName) so the
+    // rename never crosses filesystems (EXDEV on /tmp vs install dir).
+    process.env.TMPDIR = join(dir, "nonexistent-tmp");
+
+    const payload = new TextEncoder().encode("new-binary-bytes");
+    globalThis.fetch = fetchStub(payload);
+
+    const ok = await downloadAndReplace(URL, binaryPath);
+
+    expect(ok).toBe(true);
+    // Replaced with the downloaded bytes, executable, no staged leftovers.
+    expect(readFileSync(binaryPath).equals(payload)).toBe(true);
+    expect(statSync(binaryPath).mode & 0o777).toBe(0o755);
+    expect(stagedFiles()).toEqual([]);
+  });
+
+  test("a pre-rename download failure leaves the installed binary intact", async () => {
+    writeFileSync(binaryPath, "old-binary", { mode: 0o755 });
+    globalThis.fetch = fetchStub("boom", 500);
+
+    await expectUpdateFailure(() => downloadAndReplace(URL, binaryPath));
+
+    expect(readFileSync(binaryPath, "utf8")).toBe("old-binary");
+    expect(stagedFiles()).toEqual([]);
+  });
+
+  test("a failed rename leaves the installed target intact and removes the staged file", async () => {
+    // The destination is an existing directory, so rename(2) fails with
+    // EISDIR AFTER the staged file was written and chmod'd. The target is
+    // never touched before the rename, and the staged file is cleaned up.
+    mkdirSync(binaryPath);
+    const payload = new TextEncoder().encode("new-binary-bytes");
+    globalThis.fetch = fetchStub(payload);
+
+    await expectUpdateFailure(() => downloadAndReplace(URL, binaryPath));
+
+    expect(statSync(binaryPath).isDirectory()).toBe(true);
+    expect(stagedFiles()).toEqual([]);
+  });
 });

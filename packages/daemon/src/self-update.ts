@@ -3,8 +3,8 @@
 // surface `false` / `null` to the user without try/catch.
 import { chmod, rename, unlink } from "fs/promises";
 import { readlinkSync } from "fs";
-import { basename, join } from "path";
-import { tmpdir } from "os";
+import { basename, dirname, join } from "path";
+import { randomBytes } from "crypto";
 import { VERSION } from "@lamasync/core";
 
 export interface ReleaseAsset {
@@ -160,20 +160,40 @@ export function resolveSelfBinaryPath(
 }
 
 /**
+ * Return the errno `code` (e.g. "ENOENT") of a thrown filesystem error,
+ * or `undefined` when the error carries no code.
+ */
+function errnoCode(err: unknown): string | undefined {
+  return err instanceof Error && "code" in err && typeof err.code === "string"
+    ? err.code
+    : undefined;
+}
+
+/**
  * Download the asset at `downloadUrl` and atomically replace the file at
- * `binaryName` (interpreted as a path). Writes to a temp file alongside
- * the target, chmods 0755, then renames over the destination. Returns
- * false on any failure.
+ * `binaryName` (interpreted as a path). Returns false on any failure.
  *
- * On Linux, `rename(2)` over the running binary is safe — the kernel
- * keeps the old inode alive until the last file descriptor closes, so
- * the running process keeps executing the in-memory image while new
- * spawns pick up the replacement.
+ * LAMA-319: the download is staged under a unique hidden name in the SAME
+ * directory as the target, so the final `rename` never crosses
+ * filesystems (staging in `os.tmpdir()` failed with EXDEV on hosts where
+ * /tmp and the install dir live on different mounts).
+ *
+ * The existing binary is NEVER removed before the rename — `rename(2)`
+ * replaces the directory entry atomically, so a failed rename can never
+ * leave the installed binary absent. On Linux, renaming over the running
+ * binary is safe: the kernel keeps the old inode alive until the last
+ * file descriptor closes, so the running process keeps executing the
+ * in-memory image while new spawns pick up the replacement. Any staged
+ * file that survives a failure is removed before returning.
  */
 export async function downloadAndReplace(
   downloadUrl: string,
   binaryName: string,
 ): Promise<boolean> {
+  const tempPath = join(
+    dirname(binaryName),
+    `.lamasyncd-update-${process.pid}-${randomBytes(6).toString("hex")}`,
+  );
   try {
     const res = await fetch(downloadUrl, {
       headers: { "User-Agent": `lamasyncd/${VERSION}` },
@@ -186,26 +206,8 @@ export async function downloadAndReplace(
     }
     const buf = await res.arrayBuffer();
 
-    const dir = tmpdir();
-    const tempPath = join(
-      dir,
-      `.lamasyncd-update-${process.pid}-${Date.now()}`,
-    );
-
     await Bun.write(tempPath, buf);
     await chmod(tempPath, 0o755);
-
-    try {
-      await unlink(binaryName);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      // ENOENT is fine — there's nothing to remove before rename.
-      if (code !== "ENOENT") {
-        console.warn(
-          `[update] could not remove existing binary ${binaryName}: ${code ?? err}`,
-        );
-      }
-    }
 
     await rename(tempPath, binaryName);
     return true;
@@ -213,5 +215,17 @@ export async function downloadAndReplace(
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[update] downloadAndReplace failed: ${msg}`);
     return false;
+  } finally {
+    // Remove the staged file only if it is still present — after a
+    // successful rename it no longer exists, which surfaces as ENOENT.
+    try {
+      await unlink(tempPath);
+    } catch (err) {
+      if (errnoCode(err) !== "ENOENT") {
+        console.warn(
+          `[update] could not remove staged update ${tempPath}: ${errnoCode(err) ?? err}`,
+        );
+      }
+    }
   }
 }
