@@ -5,8 +5,10 @@ Read this after `AGENTS.md` when entering a coding worktree.
 ## Current work
 
 LAMA-316's app-backup data contract is implemented. The next product work is
-LAMA-315 path classification, LAMA-313 retention, and the separate safe
-application setup/restore executor. LAMA-302 needs only a real-worktree soak.
+LAMA-315 path classification (design handoff ready in
+`docs/handoff-315-path-classification.md`; implement its stage 1), LAMA-313
+retention, the separate safe application setup/restore executor, and the
+LAMA-321 trash-retention follow-up. LAMA-302 needs only a real-worktree soak.
 See [status.md](status.md) and the assigned Multica issue for scope; do not use
 archived handoffs as a current specification.
 

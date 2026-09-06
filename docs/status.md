@@ -1,6 +1,6 @@
 # Status & work queue — LamaSync
 
-Updated 2026-09-03. This is the current state, not an append-only changelog.
+Updated 2026-09-06. This is the current state, not an append-only changelog.
 Older release notes and completed work are in
 [`archive/status-2026-08-through-2026-09-03.md`](archive/status-2026-08-through-2026-09-03.md).
 
@@ -32,14 +32,30 @@ tests, strict skill drift, and distributable binary build.
   `$XDG_RUNTIME_DIR/systemd/user/` runtime dir and are re-created at daemon
   boot and config refresh — nothing persists, and the daemon service unit
   stays in `~/.config/systemd/user`.
+- **LAMA-319 — self-update EXDEV fix.** `lamasyncd --update` stages the
+  download inside the binary's own directory instead of `os.tmpdir()`, renames
+  atomically without ever unlinking the installed binary first, and cleans up
+  only its staged file. Updating no longer fails (or can strand the binary)
+  on hosts where `/tmp` and `~/.local/bin` are different filesystems, as
+  observed on `norheim`.
+- **LAMA-321 (first pass) — trash management in the Data Browser.** Freedesktop
+  trash layouts (`.Trash-<uid>`, `.Trash/<uid>`) are detected on Local and S3
+  folder listings; each trash card supports on-demand recursive size via the
+  new `POST/GET /browse/size` job (paginated S3 aggregation, cached results —
+  also fixes measured prefixes showing 0 B) and an explicit Empty-trash action
+  reusing the audited browse-delete job with an irreversible confirmation.
+  Automatic retention scheduling is intentionally deferred to a follow-up.
 - **LAMA-299/301 — remote daemon update and controlled server deploy.** The
   server has no Docker socket or arbitrary shell endpoint; a narrowly scoped
   LXC deploy agent runs the fixed deployment script.
 
 ## Active follow-ups
 
-1. **LAMA-315 — path classification and recommendation UX.** Classify app
-   paths and use that knowledge for safer capture selection.
+1. **LAMA-315 — path classification and recommendation UX.** The design
+   handoff is written: [`handoff-315-path-classification.md`](
+   handoff-315-path-classification.md) audits the current capture-spec model
+   and proposes taxonomy, data model, and staged delivery. Next step is
+   implementing stage 1 of that proposal.
 2. **LAMA-313 — retention policy.** Define and implement practical snapshot
    retention/pruning before histories grow unchecked.
 3. **Application setup/restore executor.** Build the target-side wizard:
@@ -49,6 +65,10 @@ tests, strict skill drift, and distributable binary build.
 4. **LAMA-302 — event-triggered sync.** Implementation is complete; the
    remaining work is a live soak on a busy Git worktree. See
    [`handoff-302-event-triggered-sync.md`](handoff-302-event-triggered-sync.md).
+5. **LAMA-321 follow-up — trash retention.** Optional per-folder
+   `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
+   from the first pass to keep deletion risk narrow. See the LAMA-321 issue
+   handoff for the retention correctness rules.
 
 ## Known limitations
 
@@ -62,6 +82,7 @@ tests, strict skill drift, and distributable binary build.
 
 ## Recent verification baseline
 
-After the LAMA-316 behavior pass: `bun x tsc --noEmit`, `bun test` (1353 pass,
-9 renderer-dependent skips), strict skill drift, `bun run build`, skill-tarball
-creation, and the local app-snapshot smoke flow all passed.
+After the LAMA-319/321 pass: `bun x tsc --noEmit`, `bun run build:web-ui`,
+`bun test` (1410 pass, 9 renderer-dependent skips), and strict skill drift all
+passed. The LAMA-321 trash/size round trip is covered by hermetic route tests;
+a live S3 empty-trash smoke on a real bucket is still outstanding.
