@@ -268,6 +268,7 @@ fun ConfirmScreen(
     state: UiState,
     onConfirm: (String) -> Unit,
     onBack: () -> Unit,
+    onRetry: () -> Unit = {},
 ) {
     val candidate = state.candidate
     BackHandler { onBack() }
@@ -280,10 +281,20 @@ fun ConfirmScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("Confirm server", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text(
+            if (state.pendingResume) "Resume enrollment" else "Confirm server",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
         Spacer(Modifier.height(16.dp))
         Text(
-            "This QR code will enroll this phone with:",
+            if (state.pendingResume) {
+                "This QR code was already exchanged by an earlier attempt. " +
+                    "Retry continues that enrollment from where it stopped — the " +
+                    "one-time code will not be used again."
+            } else {
+                "This QR code will enroll this phone with:"
+            },
             style = MaterialTheme.typography.bodyLarge,
         )
         Spacer(Modifier.height(8.dp))
@@ -300,28 +311,45 @@ fun ConfirmScreen(
             )
         }
         Spacer(Modifier.height(8.dp))
-        Text(
-            "This grants full fleet administration through the embedded web UI and a " +
-                "separate native identity scoped to this device. The enrollment code " +
-                "expires 10 minutes after it is generated.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(20.dp))
-        OutlinedTextField(
-            value = name,
-            onValueChange = { name = it.take(64) },
-            label = { Text("Device name") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        if (state.pendingResume) {
+            Text(
+                "Continuing keeps the already-enrolled native identity and your chosen " +
+                    "device name; it only retries the missing step.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                "This grants full fleet administration through the embedded web UI and a " +
+                    "separate native identity scoped to this device. The enrollment code " +
+                    "expires 10 minutes after it is generated.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (!state.pendingResume) {
+            Spacer(Modifier.height(20.dp))
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it.take(64) },
+                label = { Text("Device name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = onBack) {
                 Text("Change server")
             }
-            Button(onClick = { onConfirm(name) }, modifier = Modifier.weight(1f)) {
-                Text("Enroll this server")
+            if (state.pendingResume) {
+                Button(onClick = onRetry, modifier = Modifier.weight(1f)) {
+                    Text("Retry")
+                }
+            } else {
+                Button(onClick = { onConfirm(name) }, modifier = Modifier.weight(1f)) {
+                    Text("Enroll this server")
+                }
             }
         }
     }

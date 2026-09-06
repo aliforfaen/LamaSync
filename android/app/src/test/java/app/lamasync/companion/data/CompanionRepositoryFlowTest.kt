@@ -236,7 +236,7 @@ class CompanionRepositoryFlowTest {
                 respond = cookieResponse("__Host-lamasync-mobile=cookie1; Path=/; Secure; HttpOnly"),
             ),
         )
-        val resumed = repo.completeEnrollment("https://fleet.example.com", "Pixel", "0.1.0")
+        val resumed = repo.completeEnrollment("https://fleet.example.com", "0.1.0")
         assertTrue(resumed is CompanionRepository.EnrollOutcome.Success)
         // The resume path must not re-POST the exchange (would 409).
         assertTrue(transport.requests.none { it.url.contains("/exchange") })
@@ -405,7 +405,7 @@ class CompanionRepositoryFlowTest {
         assertTrue((outcome as CompanionRepository.ReconnectOutcome.Failure).cause is ApiFailure.Unauthorized)
     }
 
-    private fun seedRegistrationAndCredential(
+    private suspend fun seedRegistrationAndCredential(
         vault: FakeVault,
         registrationStore: FakeRegistrationStore,
         cookieScope: FakeCookieScope,

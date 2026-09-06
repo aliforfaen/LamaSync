@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
                                 state = uiState,
                                 onConfirm = viewModel::confirmEnrollment,
                                 onBack = viewModel::onConfirmBack,
+                                onRetry = viewModel::retryEnrollment,
                             )
                             Screen.PROGRESS -> {
                                 BackHandler { /* enrollment in progress */ }

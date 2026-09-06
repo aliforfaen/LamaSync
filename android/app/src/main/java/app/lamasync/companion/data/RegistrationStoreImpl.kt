@@ -5,8 +5,11 @@ import androidx.core.content.edit
 import kotlinx.serialization.json.Json
 
 /**
- * Plain (non-secret) registration metadata in private SharedPreferences.
- * Contains no tokens or grants; secrets live in [KeystoreCredentialVault].
+ * Plain (non-secret) registration metadata + the enrollment binding in private
+ * SharedPreferences. Contains no tokens or grants; secrets live in
+ * [KeystoreCredentialVault]. The binding records which origin/enrollment the
+ * vault credentials belong to (findings 1/5) so an interrupted onboarding can
+ * only resume at its own origin.
  */
 class RegistrationStoreImpl(context: Context) : RegistrationStore {
 
@@ -34,6 +37,21 @@ class RegistrationStoreImpl(context: Context) : RegistrationStore {
         save(registration.copy(lastCheckInEpochMillis = epochMillis, lastCheckInAppVersion = appVersion))
     }
 
+    override fun loadBinding(): EnrollmentBinding? {
+        val raw = preferences.getString(KEY_BINDING, null) ?: return null
+        return try {
+            json.decodeFromString(EnrollmentBinding.serializer(), raw)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override fun saveBinding(binding: EnrollmentBinding) {
+        preferences.edit {
+            putString(KEY_BINDING, json.encodeToString(EnrollmentBinding.serializer(), binding))
+        }
+    }
+
     override fun clear() {
         preferences.edit { clear() }
     }
@@ -41,5 +59,6 @@ class RegistrationStoreImpl(context: Context) : RegistrationStore {
     private companion object {
         const val PREFS_NAME = "lamasync_registration"
         const val KEY_REGISTRATION = "registration"
+        const val KEY_BINDING = "enrollment_binding"
     }
 }

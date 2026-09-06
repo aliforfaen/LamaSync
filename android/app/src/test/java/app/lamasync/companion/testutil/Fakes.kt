@@ -4,6 +4,7 @@ import app.lamasync.companion.core.ApiFailure
 import app.lamasync.companion.core.OriginPolicy
 import app.lamasync.companion.core.OriginCheck
 import app.lamasync.companion.core.EnrollmentQrPayload
+import app.lamasync.companion.data.EnrollmentBinding
 import app.lamasync.companion.data.NativeToken
 import app.lamasync.companion.data.Registration
 import app.lamasync.companion.data.RegistrationStore
@@ -12,10 +13,24 @@ import app.lamasync.companion.data.WebGrant
 import app.lamasync.companion.network.HttpRequest
 import app.lamasync.companion.network.HttpResponse
 import app.lamasync.companion.network.HttpTransport
+import app.lamasync.companion.network.WebSessionBroker
 import app.lamasync.companion.web.WebCookieScope
 import java.net.URI
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
-/** Scripted HTTP fake — records requests, returns canned responses or throws. */
+/**
+ * Scripted HTTP fake — records requests, returns canned responses or throws.
+ *
+ * Server-fidelity enforcement (finding 2): a real Elysia deployment accepts a
+ * cookie-authenticated mutation only when the presented cookie AND CSRF token
+ * belong to the SAME live session. The fake mirrors that for `/revoke`: when a
+ * `/web-session` call has issued a cookie, any later `/revoke` whose Cookie
+ * header (or CSRF token) does not match that issuance is rejected with 403 —
+ * so a disconnect implementation that mixes a stale CookieManager cookie with
+ * a fresh bootstrap CSRF fails loudly here instead of passing.
+ */
 class FakeTransport : HttpTransport {
 
     data class Rule(
@@ -28,6 +43,8 @@ class FakeTransport : HttpTransport {
     val requests = mutableListOf<HttpRequest>()
 
     private val rules = mutableListOf<Rule>()
+    private var issuedCookiePair: String? = null
+    private var issuedCsrf: String? = null
 
     fun enqueue(rule: Rule) {
         rules += rule
@@ -37,17 +54,58 @@ class FakeTransport : HttpTransport {
     fun clearAll() {
         requests.clear()
         rules.clear()
+        issuedCookiePair = null
+        issuedCsrf = null
     }
 
     override suspend fun execute(request: HttpRequest): HttpResponse {
         requests += request
-        for (rule in rules) {
-            if (rule.method != null && rule.method != request.method) continue
-            if (rule.urlContains != null && !request.url.contains(rule.urlContains)) continue
-            rule.failWith?.let { throw it }
-            return rule.respond ?: error("rule without response")
+        // Rules are consumed FIFO: each scripted call (including a failing
+        // one) is removed once matched, so a scenario can be expressed as
+        // "bootstrap fails once, then succeeds" by enqueueing in order.
+        val index = rules.indexOfFirst { rule ->
+            (rule.method == null || rule.method == request.method) &&
+                (rule.urlContains == null || request.url.contains(rule.urlContains))
         }
-        error("no fake rule matched ${request.method} ${request.url}")
+        if (index < 0) error("no fake rule matched ${request.method} ${request.url}")
+        val rule = rules.removeAt(index)
+        rule.failWith?.let { throw it }
+        val response = rule.respond ?: error("rule without response")
+
+        val setCookie = response.headers("set-cookie").firstOrNull()
+        if (setCookie != null && request.url.contains("/web-session")) {
+            issuedCookiePair = WebSessionBroker.cookiePair(setCookie)
+            issuedCsrf = csrfFromBody(response.bodyText)
+        }
+
+        if (request.url.contains("/revoke")) {
+            enforceSessionCorrespondence(request)
+        }
+        return response
+    }
+
+    /**
+     * The fake server accepts the revoke only when the request presents the
+     * cookie and CSRF token issued by the most recent bootstrap. A mismatch —
+     * stale cookie from CookieManager, missing cookie, or a foreign CSRF —
+     * yields 403, exactly like the real route.
+     */
+    private fun enforceSessionCorrespondence(request: HttpRequest) {
+        val presentedCookie = request.headers["Cookie"]
+        val presentedCsrf = request.headers[WebSessionBroker.CSRF_HEADER]
+        val expectedCookie = issuedCookiePair
+        val expectedCsrf = issuedCsrf
+        val cookieOk = expectedCookie != null && presentedCookie == expectedCookie
+        val csrfOk = expectedCsrf == null || presentedCsrf == expectedCsrf
+        if (!cookieOk || !csrfOk) {
+            throw ApiFailure.Forbidden()
+        }
+    }
+
+    private fun csrfFromBody(body: String?): String? = try {
+        Json.parseToJsonElement(body.orEmpty()).jsonObject["csrfToken"]?.jsonPrimitive?.content
+    } catch (e: Exception) {
+        null
     }
 
     /** Wire-text helpers for role-separation assertions. */
@@ -71,13 +129,14 @@ fun jsonResponse(status: Int, body: String): HttpResponse {
     )
 }
 
-fun cookieResponse(cookie: String): HttpResponse = HttpResponse(
+/** 200 web-session bootstrap response carrying [cookie] and [csrf]. */
+fun cookieResponse(cookie: String, csrf: String = "fake-csrf-token"): HttpResponse = HttpResponse(
     status = 200,
     headers = mapOf(
         "set-cookie" to listOf(cookie),
         "content-type" to listOf("application/json; charset=utf-8"),
     ),
-    bodyText = """{"csrfToken":"fake-csrf-token"}""",
+    bodyText = """{"csrfToken":"$csrf"}""",
     finalUrl = "",
 )
 
@@ -105,6 +164,7 @@ class FakeVault : SecureCredentialVault {
 
 class FakeRegistrationStore : RegistrationStore {
     var registration: Registration? = null
+    var binding: EnrollmentBinding? = null
 
     override fun load(): Registration? = registration
     override fun save(registration: Registration) {
@@ -115,8 +175,14 @@ class FakeRegistrationStore : RegistrationStore {
         save(registration.copy(lastCheckInEpochMillis = epochMillis, lastCheckInAppVersion = appVersion))
     }
 
+    override fun loadBinding(): EnrollmentBinding? = binding
+    override fun saveBinding(binding: EnrollmentBinding) {
+        this.binding = binding
+    }
+
     override fun clear() {
         registration = null
+        binding = null
     }
 }
 
@@ -125,16 +191,26 @@ class FakeCookieScope : WebCookieScope {
     val cleared = mutableListOf<String>()
     private val cookies = mutableMapOf<String, String>()
 
-    override fun installSessionCookie(origin: String, setCookieHeader: String) {
+    /** When true, installs are rejected (platform refused the cookie). */
+    var rejectInstall = false
+
+    /** When true, expiry reports failure (platform could not remove the cookie). */
+    var failClear = false
+
+    override suspend fun installSessionCookie(origin: String, setCookieHeader: String): Boolean {
+        if (rejectInstall) return false
         installed += origin
-        cookies[origin] = setCookieHeader.substringBefore(';')
+        cookies[origin] = WebSessionBroker.cookiePair(setCookieHeader)
+        return true
     }
 
     override fun readSessionCookie(origin: String): String? = cookies[origin]
 
-    override fun clearSessionCookie(origin: String) {
+    override suspend fun clearSessionCookie(origin: String): Boolean {
         cleared += origin
+        if (failClear) return false
         cookies.remove(origin)
+        return true
     }
 }
 
@@ -150,5 +226,8 @@ fun sampleQr(origin: String = "https://fleet.example.com"): EnrollmentQrPayload 
         enrollmentId = "enr_AbC123",
         secret = "aBcD1234567890aBcD1234567890aBcD1234567890aBcD1234567890",
     )
+
+fun sampleQrWith(origin: String, enrollmentId: String): EnrollmentQrPayload =
+    sampleQr(origin = origin).copy(enrollmentId = enrollmentId)
 
 fun uriHost(url: String): String = URI(url).host ?: error("no host in $url")

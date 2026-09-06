@@ -18,6 +18,43 @@ data class Registration(
     val lastCheckInAppVersion: String? = null,
 )
 
+/**
+ * How far an interrupted enrollment got before it stopped. The stage is the
+ * highest *completed* step of the exchange→identity→bootstrap chain:
+ *
+ *  - [EXCHANGED]: the single-use enrollment was exchanged and both secrets
+ *    were persisted; the identity probe has not completed (registration
+ *    absent). Resume must probe `/mobile/me`, save the registration and then
+ *    bootstrap.
+ *  - [REGISTERED]: identity succeeded and the [Registration] is saved;
+ *    only the web-session cookie bootstrap may still be pending/failed.
+ *    Resume must re-bootstrap from the saved grant without re-exchanging,
+ *    re-probing identity or clearing credentials.
+ */
+enum class EnrollmentStage { EXCHANGED, REGISTERED }
+
+/**
+ * Persisted binding that ties the vault credentials in [SecureCredentialVault]
+ * to exactly one enrollment. This is NOT secret material: it records the
+ * canonical origin, the one-time enrollment id, the server-issued host id,
+ * the user-chosen display name and the completed [EnrollmentStage].
+ *
+ * Invariant (finding 1): credentials may only ever be used against
+ * [EnrollmentBinding.origin]. Resume is permitted only for the exact
+ * (origin, enrollmentId) pair recorded here; a different QR explicitly
+ * replaces/clears this binding (and the credentials it bound) before its own
+ * exchange runs. Repository methods enforce this — the ViewModel never
+ * decides alone where stored credentials may be sent.
+ */
+@Serializable
+data class EnrollmentBinding(
+    val origin: String,
+    val enrollmentId: String,
+    val hostId: String,
+    val displayName: String,
+    val stage: EnrollmentStage,
+)
+
 interface SecureCredentialVault {
     /** Persists both secrets encrypted with Keystore-backed key material. */
     fun saveCredentials(nativeToken: NativeToken, webGrant: WebGrant)
@@ -38,5 +75,13 @@ interface RegistrationStore {
     fun load(): Registration?
     fun save(registration: Registration)
     fun updateCheckIn(registration: Registration, epochMillis: Long, appVersion: String)
+
+    /** Loads the persisted enrollment binding (may be null when none in flight). */
+    fun loadBinding(): EnrollmentBinding?
+
+    /** Persists/updates the enrollment binding that ties credentials to an origin. */
+    fun saveBinding(binding: EnrollmentBinding)
+
+    /** Clears BOTH the registration and any pending enrollment binding. */
     fun clear()
 }
