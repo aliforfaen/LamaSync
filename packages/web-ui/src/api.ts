@@ -47,6 +47,7 @@ import type {
   MobileEnrollmentCreateResponse,
   MobileEnrollmentStatusResponse,
   MobileRegistrationRevokeResponse,
+  MobileRegistrationSummary,
   MobileWebSessionLogoutResponse,
   PauseMode,
   PauseState,
@@ -562,6 +563,12 @@ export const api = {
       `/mobile/registrations/${encodeURIComponent(hostId)}/revoke`,
       { reason: reason ?? undefined },
     ),
+  /** GET /api/v1/mobile/registrations — the admin-only projection of every
+   *  paired device (most recent first, revoked rows included). This is the
+   *  persistent listing behind the Admin "Android devices" panel (review
+   *  finding 6): no secret hashes, grants, or enrollment ids on the wire. */
+  listMobileRegistrations: () =>
+    apiGet<MobileRegistrationSummary[]>("/mobile/registrations"),
   /** POST /web-session/logout (CSRF-protected) — invalidates the current
    *  cookie session only; never touches the native registration. */
   mobileWebSessionLogout: () =>

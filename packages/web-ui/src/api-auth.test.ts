@@ -465,6 +465,47 @@ describe("mobile enrollment api (desktop flow)", () => {
     );
     expect(result.revokedAt).toBe(1_784_000_100_000);
   });
+
+  it("listMobileRegistrations GETs the admin projection as a bare array", async () => {
+    setApiKey("lmsk.admin.123", false);
+    installFetch((call) => {
+      // Persistent paired-device listing (finding 6): a plain admin GET of
+      // the projection route, no CSRF (read), no body, no enrollment id.
+      expect(call.url).toBe("/api/v1/mobile/registrations");
+      expect(call.init.method ?? "GET").toBe("GET");
+      expect(headersOf(call).get("authorization")).toBe("Bearer lmsk.admin.123");
+      expect(headersOf(call).has(CSRF_HEADER)).toBe(false);
+      return json(200, [
+        {
+          hostId: "host-pixel-9",
+          displayName: "Pixel 9",
+          clientType: "android",
+          appVersion: "1.2.0",
+          createdAt: 1_783_999_300_000,
+          lastSeenAt: 1_784_000_000_000,
+          revokedAt: null,
+          revokedReason: null,
+        },
+        {
+          hostId: "host-old-phone",
+          displayName: "Old phone",
+          clientType: "android",
+          appVersion: "1.0.0",
+          createdAt: 1_783_000_000_000,
+          lastSeenAt: 1_783_500_000_000,
+          revokedAt: 1_783_800_000_000,
+          revokedReason: "Lost device",
+        },
+      ]);
+    });
+
+    const rows = await api.listMobileRegistrations();
+    expect(rows).toHaveLength(2);
+    // Most recent first as served; revoked rows included with reason.
+    expect(rows[0]?.hostId).toBe("host-pixel-9");
+    expect(rows[1]?.revokedAt).not.toBeNull();
+    expect(rows[1]?.revokedReason).toBe("Lost device");
+  });
 });
 
 // Small helper asserting storage state (kept at the bottom so the test list
