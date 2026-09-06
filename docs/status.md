@@ -1,6 +1,6 @@
 # Status & work queue — LamaSync
 
-Updated 2026-09-06. This is the current state, not an append-only changelog.
+Updated 2026-09-07. This is the current state, not an append-only changelog.
 Older release notes and completed work are in
 [`archive/status-2026-08-through-2026-09-03.md`](archive/status-2026-08-through-2026-09-03.md).
 
@@ -23,14 +23,22 @@ tests, strict skill drift, and distributable binary build.
   Secrets are hashed server-side (no plaintext replay), stored on-device
   under Android-Keystore-backed AES-GCM, and excluded from backup. Desktop
   gains an Add-Android-device modal (case-preserving versioned JSON QR,
-  expiry countdown, terminal-state polling, regenerate, revoke); the SPA
-  gains a dual bearer/session auth mode with CSRF + exact-Origin enforced on
-  cookie mutations; revocation atomically kills native token, web grant, all
-  sessions, and live WebSockets. Android-native uploads, background work, and
-  camera/media features remain deferred (handoff stage 1+). The full
-  enrollment → fleet-page path still needs a manual end-to-end run against a
-  real HTTPS server; boot/install/launch and the 7 instrumented tests are
-  verified on an API 35 emulator (see
+  expiry countdown, terminal-state polling, regenerate, revoke) plus a
+  persistent Android-devices panel on Admin (`GET /api/v1/mobile/
+  registrations`, revoke by hostId after reload); the SPA gains a dual
+  bearer/session auth mode with CSRF + exact-Origin enforced on cookie
+  mutations; revocation atomically kills native token, web grant, all
+  sessions, and live WebSockets. Android-native uploads, background work,
+  and camera/media features remain deferred (handoff stage 1+). A review
+  round (findings 1–7) shipped origin-bound enrollment resumption,
+  same-bootstrap cookie+CSRF disconnect, `__Host-`-correct cookie expiry
+  with honest local cleanup, fail-closed non-admin sessions, stage-aware
+  bootstrap retry, the persistent revoke panel, and
+  authorization-header-first auth. The full HTTPS vertical (enrollment →
+  authenticated SPA → restart → logout/reconnect → native disconnect with a
+  cookie → desktop revoke after reload → offline cleanup) is verified on the
+  API 35 emulator against a disposable local HTTPS server; boot/install/
+  launch plus 16 instrumented tests are green (see
   `docs/report-296-phase-1-android-foundation.md`).
 - **LAMA-316 — application templates, protections, and snapshots.** The
   legacy profile/manifest/version model is replaced by an explicit
@@ -100,10 +108,13 @@ tests, strict skill drift, and distributable binary build.
   Android device until an HTTPS front door exists.
 - LAMA-296 phase 1 ships the native shell and QR/session foundation only:
   Android-native uploads, background transfer, and media/camera features are
-  deferred to handoff stage 1+. The end-to-end scan-real-QR → authenticated
-  fleet page flow is unverified until a manual run against a real HTTPS
-  server; boot/install/launch plus the instrumented suite are verified on an
-  API 35 emulator.
+  deferred to handoff stage 1+. The HTTPS vertical (scan-seam enrollment →
+  authenticated fleet page → reconnect → disconnect → desktop revoke) was
+  verified on the API 35 emulator against a disposable local HTTPS server in
+  the review correction round; camera/desktop pointer automation and SPA
+  live-event-row DOM rendering remain unverified (blockers recorded in the
+  report). Boot/install/launch plus 16 instrumented tests are green on the
+  emulator.
 - App-capture archive rewriting currently relies on GNU tar's `--transform`
   behavior and is verified on Linux. There are no macOS or Windows clients in
   the fleet today; qualify their archive tooling before onboarding either
@@ -121,7 +132,9 @@ a live S3 empty-trash smoke on a real bucket is still outstanding.
 
 LAMA-296 phase 1 baseline (this worktree): all six repo gates green
 (`bun install`, `bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` —
-1496 pass / 9 skip, `bun run scripts/check-skill-drift.ts --strict`, `bun run
+1523 pass / 9 skip, `bun run scripts/check-skill-drift.ts --strict`, `bun run
 build`), plus the Android trio (`assembleDebug`, `lintDebug` 0 errors,
-`testDebugUnitTest` 49/49) and the instrumented suite
-(`connectedDebugAndroidTest` 7/7 on the API 35 `lamadb-test` AVD).
+`testDebugUnitTest` 57/57) and the instrumented suite
+(`connectedDebugAndroidTest` 16/16 on the API 35 `lamadb-test` AVD when run
+with the disposable HTTPS harness; the four HTTPS-vertical tests skip cleanly
+when no live server is configured).
