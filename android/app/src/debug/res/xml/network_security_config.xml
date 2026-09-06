@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only: trust user-installed CA certificates (for a local TLS
+  front door during development) in addition to the system store, and never
+  allow cleartext traffic. Release builds do not reference this file, so they
+  use normal certificate validation and reject user CAs by default.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>
