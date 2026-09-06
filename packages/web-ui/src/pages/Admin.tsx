@@ -10,6 +10,7 @@ import type {
 import { api } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { PairingModal } from "../components/PairingModal.tsx";
+import { AndroidEnrollmentModal } from "../components/AndroidEnrollmentModal.tsx";
 import { AccessKeysPanel } from "../components/AccessKeysPanel.tsx";
 import { deployCardState, deployStageLabel } from "../server-deploy-ui.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
@@ -91,6 +92,9 @@ export function Admin() {
   // LAMA-262: "Pair a device" modal — short-lived code + QR for adding a
   // device without copy-pasting the API key.
   const [showPairing, setShowPairing] = useState(false);
+  // LAMA-296: "Add Android device" modal — versioned JSON QR granting the
+  // paired phone full web administration + a separate native identity.
+  const [showAndroid, setShowAndroid] = useState(false);
   const [deleteChannel, setDeleteChannel] = useState<NotificationChannel | null>(null);
   const [notifications, setNotifications] = useState<NotificationEvent[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
@@ -621,6 +625,26 @@ export function Admin() {
         </p>
       </section>
 
+      <section className="section">
+        <div className="toolbar">
+          <h2>Android device</h2>
+          <button
+            type="button"
+            className="action primary"
+            onClick={() => setShowAndroid(true)}
+          >
+            Add Android device
+          </button>
+        </div>
+        <p className="muted">
+          LAMA-296: pair the Android app by QR. Scanning grants that phone{" "}
+          <strong>full web administration</strong> of this fleet (no second
+          login) plus a separate native identity — one enrollment serves both
+          surfaces, and revoking the device cuts both. Requires an HTTPS
+          front door; legacy HTTP/tailnet CLI pairing is unchanged.
+        </p>
+      </section>
+
       <AccessKeysPanel />
 
       <section className="section">
@@ -1017,6 +1041,9 @@ export function Admin() {
         />
       )}
       {showPairing && <PairingModal onClose={() => setShowPairing(false)} />}
+      {showAndroid && (
+        <AndroidEnrollmentModal onClose={() => setShowAndroid(false)} />
+      )}
     </div>
   );
 }

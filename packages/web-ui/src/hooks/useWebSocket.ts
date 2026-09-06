@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { WSEvent } from "@lamasync/core";
-import { getApiKey, notifyUnauthorized } from "../api.ts";
+import { getApiKey, getAuthMode, notifyUnauthorized } from "../api.ts";
 
 export type WsState = "connecting" | "open" | "closed";
 
@@ -56,8 +56,8 @@ export function useWebSocket(): UseWebSocketResult {
     attemptsRef.current = 0;
 
     function connect() {
-      const key = getApiKey();
-      if (!key) {
+      const mode = getAuthMode();
+      if (mode === "none") {
         setState("closed");
         return;
       }
@@ -65,7 +65,19 @@ export function useWebSocket(): UseWebSocketResult {
       setState("connecting");
       let ws: WebSocket;
       try {
-        ws = new WebSocket(url, ["lamasync-auth", encodeApiKeyForProtocol(key)]);
+        if (mode === "session") {
+          // LAMA-296: cookie-authenticated upgrade — the browser sends the
+          // __Host-lamasync-mobile cookie and the Origin header itself on a
+          // same-origin WS handshake, so no subprotocol token is needed.
+          ws = new WebSocket(url);
+        } else {
+          const key = getApiKey();
+          if (key === null) {
+            setState("closed");
+            return;
+          }
+          ws = new WebSocket(url, ["lamasync-auth", encodeApiKeyForProtocol(key)]);
+        }
       } catch {
         scheduleReconnect();
         return;

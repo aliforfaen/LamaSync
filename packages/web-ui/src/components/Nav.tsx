@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { clearApiKey } from "../api.ts";
+import { clearApiKey, getAuthMode, sessionLogout } from "../api.ts";
 import {
   applyTheme,
   loadThemeChoice,
@@ -98,6 +98,7 @@ export function Nav() {
   const [theme, setTheme] = useState<ThemeChoice>(loadThemeChoice());
   // Drawer state for small screens (<900px): the rail becomes off-canvas.
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
 
   // Close the drawer whenever the route changes so navigation feels done.
   useEffect(() => {
@@ -113,8 +114,22 @@ export function Nav() {
     setTheme(next);
   }
 
-  function signOut() {
-    clearApiKey();
+  async function signOut() {
+    setSignOutError(null);
+    if (getAuthMode() === "session") {
+      // LAMA-296: cookie sessions can't be cleared client-side (HttpOnly),
+      // so sign-out MUST invalidate the session server-side first — a local
+      // clear alone would log straight back in on reload.
+      const result = await sessionLogout();
+      if (result === "failed") {
+        setSignOutError(
+          "Couldn't sign out — the server didn't confirm. The session is still active; try again when connected.",
+        );
+        return;
+      }
+    } else {
+      clearApiKey();
+    }
     window.location.hash = "#/login";
     window.location.reload();
   }
@@ -169,7 +184,10 @@ export function Nav() {
           >
             Theme: {LABELS[theme]}
           </button>
-          <button type="button" className="action" onClick={signOut}>
+          {signOutError ? (
+            <span className="muted" role="alert">{signOutError}</span>
+          ) : null}
+          <button type="button" className="action" onClick={() => void signOut()}>
             Sign out
           </button>
         </div>
