@@ -5,8 +5,10 @@ import { Link } from "react-router-dom";
 import type {
   BrowseEntry,
   BrowseJob,
+  BrowsePrefixSize,
   BrowseRef,
   BrowseResponse,
+  BrowseTrash,
   Folder,
   FolderSnapshot,
   Host,
@@ -14,6 +16,12 @@ import type {
   ResticSnapshot,
 } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
+import {
+  EMPTY_TRASH_CONFIRM_LABEL,
+  EMPTY_TRASH_PERMANENT_COPY,
+  EMPTY_TRASH_TITLE,
+  trashLocationPath,
+} from "../trash.ts";
 import {
   moveChipFocus,
   snapshotCaptionLabel,
@@ -292,6 +300,7 @@ function RefBrowser({
   onPreview,
   emptyCtaLabel,
   emptyCta,
+  trashPanel = false,
 }: {
   browseRef: BrowseRef;
   onContext: (ctx: TabContext) => void;
@@ -302,6 +311,9 @@ function RefBrowser({
   onPreview?: (entry: BrowseEntry) => void;
   emptyCtaLabel?: string;
   emptyCta?: () => void;
+  // LAMA-321: render the detected-trash cards above the listing. The main
+  // browser surfaces opt in; the destination picker does not.
+  trashPanel?: boolean;
 }) {
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -365,6 +377,9 @@ function RefBrowser({
     <div className="browser-tab">
       <Breadcrumbs path={ref.path} onNavigate={navigate} />
       {error && <InlineError message={error} onRetry={reload} />}
+      {trashPanel && data?.trash && data.trash.length > 0 && (
+        <TrashPanel browseRef={ref} trash={data.trash} reload={reload} />
+      )}
       <EntriesTable
         response={data}
         loading={loading}
@@ -535,6 +550,278 @@ function JobsPanel({ jobs }: { jobs: BrowseJob[] }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LAMA-321: freedesktop trash — one card per detected trash directory, with
+// an on-demand recursive size action and an explicit Empty trash action that
+// reuses the browse-delete job (confirmation names the exact prefix and says
+// the deletion is permanent). Size runs as a browse "size" job; the panel
+// polls the server-side cache until the measurement lands (or the job row
+// reports a scrubbed failure).
+// ---------------------------------------------------------------------------
+
+interface TrashCardState {
+  size: BrowsePrefixSize | null;
+  loaded: boolean;
+  sizing: boolean;
+  sizeError: string | null;
+  emptying: boolean;
+  actionError: string | null;
+  confirmOpen: boolean;
+}
+
+function freshTrashCardState(): TrashCardState {
+  return {
+    size: null,
+    loaded: false,
+    sizing: false,
+    sizeError: null,
+    emptying: false,
+    actionError: null,
+    confirmOpen: false,
+  };
+}
+
+const SIZE_JOB_POLL_MS = 1200;
+const SIZE_JOB_TIMEOUT_MS = 90_000;
+
+function TrashPanel({
+  browseRef,
+  trash,
+  reload,
+}: {
+  browseRef: BrowseRef;
+  trash: BrowseTrash[];
+  reload: () => void;
+}) {
+  const [cards, setCards] = useState<Record<string, TrashCardState>>({});
+  const mountedRef = useRef(true);
+  // API calls use the canonical path (no trailing slash): browse write/size
+  // validation rejects the "dir//name" empty segment a trailing slash would
+  // produce when names/prefixes are joined to the ref path.
+  const apiRef: BrowseRef = {
+    kind: browseRef.kind,
+    folderId: browseRef.folderId,
+    path: browseRef.path.replace(/\/+$/, ""),
+  };
+  const contextKey = `${browseRef.kind}:${browseRef.folderId ?? ""}:${apiRef.path}`;
+  const prefixKey = trash.map((t) => t.prefix).join(",");
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  function setCard(prefix: string, patch: Partial<TrashCardState>): void {
+    if (!mountedRef.current) return;
+    setCards((prev) => {
+      const base = prev[prefix] ?? freshTrashCardState();
+      return { ...prev, [prefix]: { ...base, ...patch } };
+    });
+  }
+
+  // Re-prime card state whenever the detected trash set changes (a refresh
+  // after Empty removes the emptied card).
+  useEffect(() => {
+    setCards((prev) => {
+      const next: Record<string, TrashCardState> = {};
+      for (const t of trash) {
+        next[t.prefix] = prev[t.prefix] ?? freshTrashCardState();
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefixKey]);
+
+  // Read previously cached measurements on mount / context change so the
+  // card shows real bytes without re-running the job.
+  useEffect(() => {
+    let cancelled = false;
+    for (const t of trash) {
+      void api
+        .browseSizeCached(apiRef, t.prefix)
+        .then((res) => {
+          if (cancelled) return;
+          const size = res.cached
+            ? {
+                objectCount: res.objectCount,
+                bytes: res.bytes,
+                calculatedAt: res.calculatedAt,
+              }
+            : null;
+          setCards((prev) => {
+            const base = prev[t.prefix] ?? freshTrashCardState();
+            return { ...prev, [t.prefix]: { ...base, size, loaded: true } };
+          });
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setCards((prev) => {
+            const base = prev[t.prefix] ?? freshTrashCardState();
+            return { ...prev, [t.prefix]: { ...base, loaded: true } };
+          });
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextKey, prefixKey]);
+
+  /** Start the async size job, then poll the cache until it lands. */
+  async function measure(prefix: string): Promise<void> {
+    setCard(prefix, { sizing: true, sizeError: null, actionError: null });
+    const startedAt = Date.now();
+    try {
+      const job = await api.browseSize(apiRef, prefix);
+      for (;;) {
+        if (!mountedRef.current) return;
+        const cached = await api.browseSizeCached(apiRef, prefix);
+        if (cached.cached) {
+          setCard(prefix, {
+            sizing: false,
+            size: {
+              objectCount: cached.objectCount,
+              bytes: cached.bytes,
+              calculatedAt: cached.calculatedAt,
+            },
+          });
+          reload();
+          return;
+        }
+        if (Date.now() - startedAt > SIZE_JOB_TIMEOUT_MS) {
+          setCard(prefix, {
+            sizing: false,
+            sizeError: "Timed out waiting for the size job — see Recent operations.",
+          });
+          return;
+        }
+        const jobs = await api.listBrowseJobs(40).catch(() => null);
+        const row = jobs?.find((j) => j.id === job.id);
+        if (row !== undefined) {
+          if (row.status === "failed") {
+            setCard(prefix, {
+              sizing: false,
+              sizeError: row.error ?? "Size calculation failed.",
+            });
+            return;
+          }
+          if (row.status === "done" || row.status === "cancelled") {
+            const again = await api.browseSizeCached(apiRef, prefix);
+            if (again.cached) {
+              setCard(prefix, {
+                sizing: false,
+                size: {
+                  objectCount: again.objectCount,
+                  bytes: again.bytes,
+                  calculatedAt: again.calculatedAt,
+                },
+              });
+              reload();
+            } else {
+              setCard(prefix, {
+                sizing: false,
+                sizeError:
+                  "The measurement finished but was invalidated by a concurrent change — try again.",
+              });
+            }
+            return;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, SIZE_JOB_POLL_MS));
+      }
+    } catch (err) {
+      setCard(prefix, { sizing: false, sizeError: errorText(err) });
+    }
+  }
+
+  /** Empty one trash directory through the existing browse-delete job. */
+  async function confirmEmpty(prefix: string): Promise<void> {
+    setCard(prefix, { confirmOpen: false, emptying: true, actionError: null });
+    try {
+      await api.browseDelete(apiRef, [prefix]);
+      // The purge runs as a job; refresh hides the card once the listing
+      // stops reporting the trash directory. Failure surfaces in the
+      // Recent operations panel below.
+      reload();
+    } catch (err) {
+      setCard(prefix, { emptying: false, actionError: errorText(err) });
+    }
+  }
+
+  const openConfirm = trash.find((t) => cards[t.prefix]?.confirmOpen) ?? null;
+  const openLocation = openConfirm ? trashLocationPath(browseRef.path, openConfirm.prefix) : "";
+
+  return (
+    <div className="browser-trash">
+      <p className="muted browser-trash-note">
+        Trash directories hold files deleted through desktop apps. Emptying
+        one permanently removes everything inside it.
+      </p>
+      {trash.map((t) => {
+        const card = cards[t.prefix] ?? freshTrashCardState();
+        const location = trashLocationPath(browseRef.path, t.prefix);
+        return (
+          <div className="browser-trash-card" key={t.prefix}>
+            <div className="browser-trash-info">
+              <div className="browser-trash-title">
+                <span className="badge badge-trash">trash</span>
+                <code>{location}</code>
+                <span className="muted">uid {t.uid}</span>
+              </div>
+              <div className="muted browser-trash-meta">
+                {card.size !== null
+                  ? `${formatBytes(card.size.bytes)} · ${card.size.objectCount} object${
+                      card.size.objectCount === 1 ? "" : "s"
+                    } · measured ${formatTimestamp(card.size.calculatedAt)}`
+                  : card.sizing
+                    ? "Calculating size…"
+                    : "Size not calculated yet — directory contents may add up to a lot."}
+              </div>
+              {card.sizeError ? <div className="browser-trash-error">{card.sizeError}</div> : null}
+              {card.actionError ? <div className="browser-trash-error">{card.actionError}</div> : null}
+            </div>
+            <div className="browser-trash-actions">
+              <button
+                type="button"
+                className="action"
+                disabled={card.sizing}
+                onClick={() => void measure(t.prefix)}
+              >
+                {card.size === null ? "Calculate size" : "Recalculate size"}
+              </button>
+              <button
+                type="button"
+                className="action danger"
+                disabled={card.emptying || card.sizing}
+                onClick={() => setCard(t.prefix, { confirmOpen: true })}
+              >
+                {card.emptying ? "Emptying…" : "Empty trash"}
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      {openConfirm && (
+        <ConfirmDialog
+          title={EMPTY_TRASH_TITLE}
+          danger
+          confirmLabel={EMPTY_TRASH_CONFIRM_LABEL}
+          message={
+            <p className="muted">
+              Permanently delete everything inside <code>{openLocation}</code>?{" "}
+              {EMPTY_TRASH_PERMANENT_COPY}
+            </p>
+          }
+          onConfirm={() => void confirmEmpty(openConfirm.prefix)}
+          onCancel={() => setCard(openConfirm.prefix, { confirmOpen: false })}
+        />
+      )}
     </div>
   );
 }
@@ -913,6 +1200,7 @@ export function DataBrowser() {
           onPreview={onPreview}
           emptyCtaLabel="Upload a file"
           emptyCta={openUpload}
+          trashPanel
         />
       )}
       {tab === "s3" && <S3Browser onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} onPreview={onPreview} emptyCtaLabel="Upload a file" emptyCta={openUpload} />}
@@ -1370,6 +1658,7 @@ function S3Browser({
           onPreview={onPreview}
           emptyCtaLabel={emptyCtaLabel}
           emptyCta={emptyCta}
+          trashPanel
         />
       )}
     </div>

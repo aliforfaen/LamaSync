@@ -12,6 +12,12 @@ export interface S3Listing {
   entries: S3Entry[];
 }
 
+/** Recursive size aggregation for one S3 key prefix (LAMA-321). */
+export interface S3PrefixSize {
+  objectCount: number;
+  bytes: number;
+}
+
 export interface S3ListError {
   message: string;
   cause?: unknown;
@@ -27,6 +33,17 @@ export class S3ListObjectsError extends Error {
 /** SHA-256 of an empty request body — the canonical payload hash for GET. */
 const EMPTY_PAYLOAD_SHA256 =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+// Default fetch implementation used when callers don't inject one (tests
+// override it to fake ListObjectsV2 pages without a network).
+let defaultS3Fetch: (url: string | URL | Request, init?: RequestInit) => Promise<Response> =
+  globalThis.fetch;
+
+export function __setDefaultS3Fetch(
+  impl: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): void {
+  defaultS3Fetch = impl;
+}
 
 export interface SignRequestResult {
   signature: string;
@@ -89,12 +106,94 @@ export async function listS3Objects(
   s3: S3FolderConfig,
   prefix: string,
   limit: number,
-  fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = globalThis.fetch,
+  fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = defaultS3Fetch,
 ): Promise<S3Listing> {
   if (prefix.includes("\0") || prefix.includes("..")) {
     throw new S3ListObjectsError("invalid S3 prefix");
   }
+  const page = await runListObjectsPage(s3, prefix, limit, { delimiter: "/" }, fetchImpl);
+  const entries: S3Entry[] = [];
+  for (const content of page.contents) {
+    entries.push({
+      name: relativeName(content.key, prefix),
+      type: "file",
+      size: content.size,
+      lastModified: content.lastModified,
+    });
+  }
+  for (const commonPrefix of page.prefixes) {
+    entries.push({
+      name: relativeName(commonPrefix, prefix),
+      type: "dir",
+      size: 0,
+      lastModified: 0,
+    });
+  }
+  return { entries };
+}
 
+/**
+ * LAMA-321: recursively sum the object count and bytes of every object
+ * under `prefix` (no delimiter, so nested keys are included). ListObjectsV2
+ * caps a page at `max-keys` (1000), so the loop follows the
+ * `continuation-token` until the bucket reports the listing is complete.
+ * Pure apart from the network — `fetchImpl` is injectable for tests.
+ */
+export async function sizeS3Prefix(
+  s3: S3FolderConfig,
+  prefix: string,
+  fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = defaultS3Fetch,
+): Promise<S3PrefixSize> {
+  if (prefix.includes("\0") || prefix.includes("..")) {
+    throw new S3ListObjectsError("invalid S3 prefix");
+  }
+  let objectCount = 0;
+  let bytes = 0;
+  let continuationToken: string | null = null;
+  for (;;) {
+    const page = await runListObjectsPage(
+      s3,
+      prefix,
+      1000,
+      continuationToken === null ? {} : { continuationToken },
+      fetchImpl,
+    );
+    for (const content of page.contents) {
+      objectCount += 1;
+      bytes += content.size;
+    }
+    if (!page.truncated || page.nextContinuationToken === null) break;
+    continuationToken = page.nextContinuationToken;
+  }
+  return { objectCount, bytes };
+}
+
+/** One ListObjectsV2 page parsed into its raw parts. */
+interface ListObjectsPage {
+  contents: Array<{ key: string; size: number; lastModified: number }>;
+  prefixes: string[];
+  truncated: boolean;
+  nextContinuationToken: string | null;
+}
+
+interface ListPageOptions {
+  delimiter?: string;
+  continuationToken?: string;
+}
+
+/**
+ * Issue one signed ListObjectsV2 request and parse the response. The URL
+ * carries only list parameters (list-type/prefix/max-keys/delimiter/
+ * continuation-token); auth rides in the Authorization header (LAMA-320:
+ * Backblaze B2 rejects presigned query parameters).
+ */
+async function runListObjectsPage(
+  s3: S3FolderConfig,
+  prefix: string,
+  limit: number,
+  opts: ListPageOptions,
+  fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): Promise<ListObjectsPage> {
   const endpoint = s3.endpoint.replace(/\/+$/, "");
   const bucket = s3.bucket;
   const accessKeyId = s3.accessKeyId;
@@ -111,8 +210,11 @@ export async function listS3Objects(
   const url = new URL(`${urlBase}/${bucket}`);
   url.searchParams.set("list-type", "2");
   url.searchParams.set("prefix", prefix);
-  url.searchParams.set("delimiter", "/");
   url.searchParams.set("max-keys", String(limit));
+  if (opts.delimiter !== undefined) url.searchParams.set("delimiter", opts.delimiter);
+  if (opts.continuationToken !== null && opts.continuationToken !== undefined) {
+    url.searchParams.set("continuation-token", opts.continuationToken);
+  }
 
   // Preserve deterministic query-string ordering for signing.
   const query: Record<string, string> = {};
@@ -124,11 +226,6 @@ export async function listS3Objects(
   const amzDate = formatAmzDate(now);
   const dateStamp = formatDateStamp(now);
   const credentialScope = `${dateStamp}/${region}/s3/aws4_request`;
-  // LAMA-320 follow-up: Backblaze B2's S3 API rejects presigned query
-  // parameters on ListObjectsV2 with 403 AccessDenied ("Unauthenticated
-  // requests are not allowed for this api"), while header-based SigV4 (what
-  // rclone uses) is accepted. Sign via the Authorization header instead:
-  // date and content hash ride as headers, the URL carries only list params.
   const signed = await signRequest(
     "GET",
     url.host,
@@ -165,12 +262,13 @@ export async function listS3Objects(
     throw new S3ListObjectsError(`S3 request returned ${response.status}: ${bodyText.slice(0, 200)}`);
   }
 
-  return parseListObjectsResponse(bodyText, prefix);
+  return parseListObjectsPage(bodyText, prefix);
 }
 
-function parseListObjectsResponse(xml: string, prefix: string): S3Listing {
+function parseListObjectsPage(xml: string, prefix: string): ListObjectsPage {
   const root = parseXml(xml);
-  const entries: S3Entry[] = [];
+  const contents: ListObjectsPage["contents"] = [];
+  const prefixes: string[] = [];
 
   for (const child of root.children) {
     if (typeof child === "string") continue;
@@ -180,27 +278,26 @@ function parseListObjectsResponse(xml: string, prefix: string): S3Listing {
       const sizeText = firstText(child, "Size");
       if (key) {
         const size = sizeText ? Number.parseInt(sizeText, 10) : 0;
-        entries.push({
-          name: relativeName(key, prefix),
-          type: "file",
+        contents.push({
+          key,
           size: Number.isNaN(size) ? 0 : size,
           lastModified: parseIsoDate(lastModified),
         });
       }
     } else if (child.tag === "CommonPrefixes") {
       const key = firstText(child, "Prefix");
-      if (key) {
-        entries.push({
-          name: relativeName(key, prefix),
-          type: "dir",
-          size: 0,
-          lastModified: 0,
-        });
-      }
+      if (key) prefixes.push(key);
     }
   }
 
-  return { entries };
+  const truncatedText = firstText(root, "IsTruncated");
+  const token = firstText(root, "NextContinuationToken");
+  return {
+    contents,
+    prefixes,
+    truncated: truncatedText === "true",
+    nextContinuationToken: token && token.length > 0 ? token : null,
+  };
 }
 
 function relativeName(key: string, prefix: string): string {

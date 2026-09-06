@@ -791,6 +791,34 @@ export interface BrowseEntry {
   folderId?: string;
 }
 
+// LAMA-321: one detected freedesktop trash directory inside a browse
+// listing. Only two exact layouts are recognized at the listed directory's
+// root: `.Trash-<numeric uid>` and `.Trash/<numeric uid>` (the latter only
+// when the `.Trash` directory actually contains that numeric-uid child).
+// `prefix` is the trash location relative to the listing path — the same
+// value the size/delete browse operations accept as a `prefix`/`name`.
+export interface BrowseTrash {
+  /** Numeric uid that owns the trash (e.g. 1000). */
+  uid: number;
+  /** Folder-relative trash prefix, e.g. ".Trash-1000" or ".Trash/1000". */
+  prefix: string;
+}
+
+// LAMA-321: computed recursive size of one folder-relative prefix, produced
+// by an async browse "size" job and cached server-side. `calculatedAt` is
+// the epoch-ms timestamp of the measurement.
+export interface BrowsePrefixSize {
+  objectCount: number;
+  bytes: number;
+  calculatedAt: number;
+}
+
+/** Response of `GET /browse/size` — a fresh cache hit or a miss (the client
+ *  then POSTs `/browse/size` to start the async measurement job). */
+export type BrowsePrefixSizeResult =
+  | { cached: true; objectCount: number; bytes: number; calculatedAt: number }
+  | { cached: false };
+
 // LAMA-259: the Data Browser's "history" mode renders files from inside a
 // restic snapshot instead of from a live filesystem. `backend` discriminates
 // the source so the UI can render either shape with a single switch.
@@ -800,6 +828,10 @@ export interface BrowseResponse {
   backend: BrowseBackend;
   path: string;
   entries: BrowseEntry[];
+  // LAMA-321: present only when the listing's directory entries contain one
+  // of the exact freedesktop trash layouts (see BrowseTrash). Populated for
+  // live local/s3 listings, never for restic snapshots.
+  trash?: BrowseTrash[];
   // LAMA-259: present only when backend === "restic-snapshot". Tells the
   // slider UI which snapshot (and folder) this listing came from so it can
   // re-fetch on path navigation without an extra round-trip.
@@ -840,13 +872,17 @@ export interface FolderSize {
 // starts, updated as entries complete (progress_bytes/total_bytes count
 // entries when rclone byte-level stats are unavailable), and written to
 // operation_log once terminal for the audit trail.
+// LAMA-321: "size" is a read-only job — it measures the recursive size of
+// one folder-relative prefix (paginated S3 listing / local walk) and seeds
+// the browse size cache instead of mutating anything.
 export type BrowseJobOperation =
   | "copy"
   | "move"
   | "upload"
   | "rename"
   | "mkdir"
-  | "delete";
+  | "delete"
+  | "size";
 export type BrowseJobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
 
 export interface BrowseJob {

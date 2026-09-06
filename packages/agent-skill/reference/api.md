@@ -159,7 +159,9 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/browse/upload`                           | Upload base64 file (≤ 64 MiB) (job)               |
 | POST     | `/browse/download`                         | Download a file to base64 (LAMA-226)              |
 | POST     | `/browse/delete`                           | Delete entries (job)                              |
-| GET      | `/browse/jobs`                             | Recent browse write jobs                         |
+| POST     | `/browse/size`                             | Recursive size of one folder-relative prefix (async job; LAMA-321) |
+| GET      | `/browse/size`                             | Read the cached size of one folder-relative prefix (LAMA-321) |
+| GET      | `/browse/jobs`                             | Recent browse jobs (write ops + size)             |
 | GET      | `/stats/storage`                           | Storage report (5-min cache)                     |
 | GET      | `/stats/storage/history`                   | Per-backend size time series for the growth sparkline (LAMA-269) |
 | GET      | `/restic/snapshots`                        | List restic snapshots                            |
@@ -226,7 +228,9 @@ spec. The high-level shapes (verbose commentary):
 - `FolderSnapshot { id, time, host?, paths? }` (LAMA-259) — `id` is restic's snapshot id; `time` is epoch ms. Slider feed.
 - `FolderSnapshotsResponse { snapshots: FolderSnapshot[] }` (LAMA-259)
 - `FolderFileUploadResponse { ok: true, name, path, size }` (LAMA-260) — `name` is the uploaded file's leaf; `path` is the (optional) `path` form-field value the client passed (empty string for root); `size` is the bytes the server staged to disk before invoking rclone.
-- `BrowseResponse` `backend` is `"local" | "s3" | "restic-snapshot"`; when `backend === "restic-snapshot"` the response also carries `snapshotId` and `folderId` so the UI can re-fetch without a round-trip (LAMA-259)
+- `BrowseResponse` `backend` is `"local" | "s3" | "restic-snapshot"`; when `backend === "restic-snapshot"` the response also carries `snapshotId` and `folderId` so the UI can re-fetch without a round-trip (LAMA-259). Live local/s3 listings may also carry `trash: BrowseTrash[]` (LAMA-321): freedesktop trash directories detected at the listed path, each `{ uid, prefix }` where `prefix` is the trash location relative to that path — only the exact `.Trash-<numeric uid>` and `.Trash/<numeric uid>` layouts qualify, never other dot-directories. Directory rows that a size job measured earlier report the real byte count in `size` instead of the 0 placeholder.
+- `BrowseTrash { uid, prefix }` (LAMA-321) — see `BrowseResponse.trash` above. `prefix` doubles as the delete/size target for that trash.
+- `BrowsePrefixSize { objectCount, bytes, calculatedAt }` and the `GET /browse/size` result union `BrowsePrefixSizeResult` = `{ cached: true, objectCount, bytes, calculatedAt } | { cached: false }` (LAMA-321)
 - `ResticRestoreJob { id, snapshotId, folderId, targetHostId, targetPath, include[]?, status, createdAt, resolvedAt?, error? }`
 - `Conflict { id, hostId, folderId, path, localMtime?, remoteMtime?, status, resolution?, createdAt, resolvedAt? }`
 - `QueuedAction { id, hostId, type, payload?, status, createdAt, takenAt?, completedAt?, result? }` — action types (LAMA-198/LAMA-299): `trigger_sync`, `trigger_backup`, `check_update`, `refresh_config`, `update_daemon`. `update_daemon` takes NO payload (enqueues 400 on any) — the daemon targets the latest release via the release proxy and picks its own asset; it is admin-only and only meaningful for daemons at or above `REMOTE_DAEMON_UPDATE_MIN_VERSION` (0.3.6). The daemon acks `done` (“installed vX; service restart requested”) BEFORE restarting its service, so `done` ≠ confirmed heartbeat — compare the host's next reported version.
@@ -267,6 +271,23 @@ spec. The high-level shapes (verbose commentary):
     next call.
 - The `/api/v1/browse/*` write endpoints (copy/move/rename/mkdir/upload/
   delete) all run as async jobs; track via `/api/v1/browse/jobs`.
+- LAMA-321: `POST /api/v1/browse/size` is a **read-only** async job for
+  ONE folder-relative prefix (`{ ref, prefix }`, where `prefix` is relative
+  to `ref.path` and may be nested, e.g. `.Trash/1000`). S3 prefixes are
+  measured by paginated ListObjectsV2 (1000 keys/page); local trees by a
+  symlink-safe walk. `GET /api/v1/browse/size?kind=s3|local&folderId=…&path=…&prefix=…`
+  returns the cached measurement (`BrowsePrefixSizeResult`, 5-minute TTL) —
+  a miss means the job is still running or was never started. Directory
+  rows of a browse listing show the cached bytes once measured. Failures
+  are scrubbed (job error + operation log never contain upstream S3 bodies
+  or absolute local paths). "Empty trash" in the web UI is NOT a separate
+  endpoint: it deletes the detected trash prefix through the existing
+  `POST /browse/delete` job (`names: [".Trash-1000"]` or
+  `[".Trash/1000"]`), which carries the same busy guard, audit trail, and
+  cache invalidation as any other delete. Every terminal browse job now
+  writes `operation_log.trigger = 'manual'`; s3 folder jobs stamp
+  `folder_id`, and size/delete jobs whose counts are known include
+  `{ prefix, objectCount, bytes }` in `details`.
 - LAMA-260 file uploads into synced folders (`POST /api/v1/folders/:id/files`,
   multipart `file` field, optional `path` subdir under the folder's
   destination root). Synchronous, not async; returns

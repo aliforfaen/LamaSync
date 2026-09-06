@@ -273,3 +273,149 @@ e2e("GET /api/v1/browse/jobs", () => {
     expect(jobs[0]!.destination).toContain("b");
   });
 });
+
+// LAMA-321: trash lifecycle. The busy-conflict test is hermetic (it hits the
+// DB-backed guard before any rclone spawn); the empty-trash tests purge real
+// local directories and are gated on rclone like the rest of this file.
+describe("LAMA-321 empty-trash busy conflicts", () => {
+  test("delete onto an in-flight destination returns 409 and logs a failed job", async () => {
+    mkdirSync(join(root, "vault"));
+    // Simulate an operator's other op currently writing this destination.
+    db.run(
+      `INSERT INTO browse_jobs (id, operation, source, destination, status, error, progress_bytes, total_bytes, created_at, updated_at)
+       VALUES (?, 'move', 'local::vault|a', 'local::vault', 'running', NULL, 0, 1, ?, ?)`,
+      ["in-flight-move", Date.now(), Date.now()],
+    );
+
+    const res = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "vault" },
+      names: [".Trash-1000"],
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("destination busy — another operation is writing there");
+
+    const failed = db
+      .query<{ operation: string; status: string; error: string | null }, []>(
+        "SELECT operation, status, error FROM browse_jobs WHERE operation = 'delete' AND status = 'failed' ORDER BY created_at DESC LIMIT 1",
+      )
+      .get();
+    expect(failed).toBeTruthy();
+    expect(failed?.error).toContain("destination busy");
+  });
+});
+
+e2e("LAMA-321 empty trash (local)", () => {
+  test("size, empty, audit, and cache invalidation round-trip", async () => {
+    mkdirSync(join(root, "vault", ".Trash-1000", "files"), { recursive: true });
+    mkdirSync(join(root, "vault", ".Trash-1000", "info"), { recursive: true });
+    writeFileSync(join(root, "vault", ".Trash-1000", "files", "old.bin"), Buffer.alloc(10, 7));
+    writeFileSync(join(root, "vault", ".Trash-1000", "info", "old.bin.trashinfo"), "hello");
+    writeFileSync(join(root, "vault", "keep.txt"), "precious");
+
+    // 1. The trash is detected with the exact prefix.
+    const listRes = await app.handle(request("/api/v1/browse/local?path=vault"));
+    expect(listRes.status).toBe(200);
+    const listing = (await listRes.json()) as {
+      trash?: Array<{ uid: number; prefix: string }>;
+    };
+    expect(listing.trash).toEqual([{ uid: 1000, prefix: ".Trash-1000" }]);
+
+    // 2. On-demand recursive size measures real bytes.
+    const sizeRes = await postJson("/api/v1/browse/size", {
+      ref: { kind: "local", path: "vault" },
+      prefix: ".Trash-1000",
+    });
+    expect(sizeRes.status).toBe(201);
+    const sizeJob = (await sizeRes.json()) as BrowseJob;
+    expect(await waitForJob(sizeJob.id)).toMatchObject({ status: "done" });
+
+    const cachedRes = await app.handle(
+      request("/api/v1/browse/size?kind=local&path=vault&prefix=.Trash-1000"),
+    );
+    const cached = (await cachedRes.json()) as {
+      cached: true;
+      objectCount: number;
+      bytes: number;
+    };
+    expect(cached).toMatchObject({ cached: true, objectCount: 2, bytes: 15 });
+
+    // 3. Empty trash reuses the browse-delete job.
+    const delRes = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "vault" },
+      names: [".Trash-1000"],
+    });
+    expect(delRes.status).toBe(201);
+    const delJob = (await delRes.json()) as BrowseJob;
+    expect(await waitForJob(delJob.id)).toMatchObject({ status: "done" });
+
+    // Purged, sibling data untouched, no trash left to detect.
+    expect(existsSync(join(root, "vault", ".Trash-1000"))).toBe(false);
+    expect(existsSync(join(root, "vault", "keep.txt"))).toBe(true);
+    const after = (await (await app.handle(request("/api/v1/browse/local?path=vault"))).json()) as {
+      trash?: unknown[];
+    };
+    expect(after.trash).toBeUndefined();
+
+    // 4. Audit row: exact prefix + object count/bytes + manual origin.
+    const log = db
+      .query<
+        { status: string; trigger: string | null; summary: string | null; details: string | null },
+        []
+      >(
+        "SELECT status, trigger, summary, details FROM operation_log WHERE operation = 'browse_delete' ORDER BY id DESC LIMIT 1",
+      )
+      .get();
+    expect(log?.status).toBe("success");
+    expect(log?.trigger).toBe("manual");
+    expect(log?.summary).toContain("vault/.Trash-1000");
+    const details = JSON.parse(log?.details ?? "{}") as {
+      prefix?: string;
+      objectCount?: number;
+      bytes?: number;
+    };
+    expect(details.prefix).toBe("vault/.Trash-1000");
+    expect(details.objectCount).toBe(2);
+    expect(details.bytes).toBe(15);
+
+    // 5. The delete dropped the cached size (no stale listing numbers).
+    const staleRes = await app.handle(
+      request("/api/v1/browse/size?kind=local&path=vault&prefix=.Trash-1000"),
+    );
+    expect(await staleRes.json()).toEqual({ cached: false });
+  });
+
+  test("empties the nested .Trash/<uid> layout via a nested delete name", async () => {
+    mkdirSync(join(root, ".Trash", "1000", "files"), { recursive: true });
+    mkdirSync(join(root, ".Trash", "1000", "info"), { recursive: true });
+    writeFileSync(join(root, ".Trash", "1000", "files", "junk.bin"), "junkjunk");
+    mkdirSync(join(root, ".Trash", "2000"), { recursive: true }); // untouched
+    writeFileSync(join(root, ".Trash", "2000", "note.txt"), "other user");
+
+    const rootRes = await app.handle(request("/api/v1/browse/local"));
+    const listing = (await rootRes.json()) as {
+      trash?: Array<{ uid: number; prefix: string }>;
+    };
+    expect(listing.trash).toEqual([
+      { uid: 1000, prefix: ".Trash/1000" },
+      { uid: 2000, prefix: ".Trash/2000" },
+    ]);
+
+    // `.Trash/1000` is a nested folder-relative name for the delete job.
+    const delRes = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "" },
+      names: [".Trash/1000"],
+    });
+    expect(delRes.status).toBe(201);
+    const job = (await delRes.json()) as BrowseJob;
+    expect(await waitForJob(job.id)).toMatchObject({ status: "done" });
+
+    expect(existsSync(join(root, ".Trash", "1000"))).toBe(false);
+    expect(existsSync(join(root, ".Trash", "2000"))).toBe(true);
+
+    const after = (await (await app.handle(request("/api/v1/browse/local"))).json()) as {
+      trash?: Array<{ uid: number; prefix: string }>;
+    };
+    expect(after.trash).toEqual([{ uid: 2000, prefix: ".Trash/2000" }]);
+  });
+});

@@ -2111,6 +2111,66 @@ button.action:disabled {
   background: var(--surface-elevated);
 }
 
+/* LAMA-321: detected freedesktop trash cards in the Data Browser. */
+.browser-trash {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.browser-trash-note {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.browser-trash-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.browser-trash-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.browser-trash-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-weight: 600;
+}
+
+.browser-trash-meta {
+  font-size: var(--font-size-sm);
+}
+
+.browser-trash-error {
+  font-size: var(--font-size-sm);
+  color: var(--accent-critical);
+}
+
+.browser-trash-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.badge-trash {
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
 /* LAMA-259: time-travel browser — snapshot history scrubber. Instant
    swap only (no transitions) so reduced-motion needs nothing extra. */
 .snapshot-history {

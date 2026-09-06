@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS b2_management_config (
 -- operation_log row is also written for the audit trail.
 CREATE TABLE IF NOT EXISTS browse_jobs (
     id             TEXT PRIMARY KEY,
-    operation      TEXT NOT NULL,   -- copy | move | upload | rename | mkdir
+    operation      TEXT NOT NULL,   -- copy | move | upload | rename | mkdir | delete | size
     source         TEXT NOT NULL,   -- human label, e.g. "local:dotfiles/pi"
     destination    TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed|cancelled

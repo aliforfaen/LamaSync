@@ -21,7 +21,17 @@ import { resolveFolderS3Config, getBackend } from "./backends.ts";
 import { decryptSecret } from "./crypto.ts";
 import { invalidateFolderSize, invalidateStorageReport } from "./stats.ts";
 import { resolveBrowsePath, statEntry, validateBrowseInput } from "./browse-paths.ts";
-import { listS3Objects } from "./s3-list.ts";
+import { listS3Objects, sizeS3Prefix, S3ListObjectsError } from "./s3-list.ts";
+import {
+  bumpFolderWriteGeneration,
+  computeLocalPrefixSize,
+  dropFolderPrefixSizes,
+  folderWriteGeneration,
+  getCachedPrefixSize,
+  seedPrefixSize,
+  __resetBrowseSizesForTests,
+  type PrefixSizeCount,
+} from "./browse-sizes.ts";
 import {
   buildRcloneArgv,
   buildRcloneConfig,
@@ -65,6 +75,7 @@ const activeSources = new Set<string>();
 export function __resetBrowseJobsForTests(): void {
   activeDestinations.clear();
   activeSources.clear();
+  __resetBrowseSizesForTests();
 }
 
 function jobStatus(value: string): BrowseJob["status"] {
@@ -88,6 +99,7 @@ function jobOperation(value: string): BrowseJobOperation | null {
     case "rename":
     case "mkdir":
     case "delete":
+    case "size":
       return value;
     default:
       return null;
@@ -173,25 +185,79 @@ function insertFailedJob(
   return job;
 }
 
+/** LAMA-321: extra audit context for terminal browse jobs. */
+export interface BrowseOpLogMeta {
+  /** Folder the op ran against (s3 folders); local browse ops leave null. */
+  folderId?: string | null;
+  /** Folder-relative prefix the op targeted (e.g. "a/.Trash-1000"). */
+  prefix?: string;
+  /** Object count, when known (size jobs; delete of a sized prefix). */
+  objectCount?: number | null;
+  /** Byte total, when known (size jobs; delete of a sized prefix). */
+  bytes?: number | null;
+  /** Free-form note. */
+  note?: string;
+}
+
+/**
+ * Write the operation_log audit row for a terminal browse job. Browse ops
+ * are always operator-initiated from the web UI, so `trigger` is 'manual'
+ * (LAMA-302). LAMA-321: s3 jobs also stamp folder_id, and jobs that know
+ * the exact prefix / object count / bytes (size jobs, delete of a sized
+ * prefix) carry them in the summary + a structured `details` JSON.
+ */
 function appendOperationLog(
   db: Database,
   job: BrowseJob,
   hostId: string,
+  meta: BrowseOpLogMeta = {},
 ): void {
   try {
     const status = job.status === "done" ? "success" : "failed";
-    const summary =
-      job.status === "done"
-        ? `${job.operation} ${job.source} → ${job.destination}`
-        : `${job.operation} failed: ${job.error ?? "unknown error"}`;
+    let summary: string;
+    if (job.status === "done") {
+      const prefix = meta.prefix ? ` ${meta.prefix}` : "";
+      const counts =
+        meta.objectCount !== null && meta.objectCount !== undefined
+          ? ` (${meta.objectCount} object${meta.objectCount === 1 ? "" : "s"}, ${meta.bytes ?? 0} bytes)`
+          : "";
+      summary = prefix || counts
+        ? `${job.operation}${prefix}${counts}`
+        : `${job.operation} ${job.source} → ${job.destination}`;
+    } else {
+      const prefix = meta.prefix ? ` ${meta.prefix}` : "";
+      summary = `${job.operation}${prefix} failed: ${job.error ?? "unknown error"}`;
+    }
+    const detailsParts: Record<string, string | number> = {};
+    if (meta.prefix !== undefined) detailsParts.prefix = meta.prefix;
+    if (meta.objectCount !== null && meta.objectCount !== undefined) {
+      detailsParts.objectCount = meta.objectCount;
+    }
+    if (meta.bytes !== null && meta.bytes !== undefined) detailsParts.bytes = meta.bytes;
+    if (meta.note !== undefined && meta.note.length > 0) detailsParts.note = meta.note;
+    const details = Object.keys(detailsParts).length > 0 ? JSON.stringify(detailsParts) : null;
     db.run(
-      `INSERT INTO operation_log (timestamp, host_id, folder_id, operation, status, summary)
-       VALUES (?, ?, NULL, ?, ?, ?)`,
-      [Date.now(), hostId, `browse_${job.operation}`, status, summary],
+      `INSERT INTO operation_log (timestamp, host_id, folder_id, operation, status, summary, details, trigger)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')`,
+      [
+        Date.now(),
+        hostId,
+        meta.folderId ?? null,
+        `browse_${job.operation}`,
+        status,
+        summary,
+        details,
+      ],
     );
   } catch (error) {
     console.error(`[browse-jobs] operation_log append failed: ${String(error)}`);
   }
+}
+
+/** Folder-relative join of a browse path + entry name/prefix. */
+function joinRelativePath(base: string, suffix: string): string {
+  const trimmed = base.replace(/^\/+/, "").replace(/\/+$/, "");
+  return trimmed === "" ? suffix : `${trimmed}/${suffix}`;
 }
 
 /** Spawn rclone and wait; returns stdout/stderr/code. Throws only on spawn failure. */
@@ -335,6 +401,20 @@ function resolveS3(db: Database, ref: BrowseRef): ResolvedFolder {
     accessKeyId: s3.accessKeyId,
     secretAccessKey: secret,
     region: s3.region,
+  };
+}
+
+/** Map a fully resolved S3 folder to the S3FolderConfig consumers need. */
+function s3FolderConfigOf(resolved: ResolvedFolder): S3FolderConfig {
+  return {
+    folderId: resolved.folder.id,
+    backendId: resolved.folder.backendId ?? "",
+    provider: resolved.provider,
+    endpoint: resolved.endpoint,
+    bucket: resolved.bucket,
+    accessKeyId: resolved.accessKeyId,
+    secretAccessKey: resolved.secretAccessKey,
+    region: resolved.region,
   };
 }
 
@@ -552,6 +632,12 @@ export async function startBrowseCopyMove(
     return { job, busy: false };
   }
 
+  // LAMA-321: the destination folder's contents change (and a move also
+  // drains its source) — in-flight size snapshots must not seed afterwards,
+  // and cached sizes are dropped once the job is terminal.
+  bumpFolderWriteGeneration(dst);
+  if (operation === "move") bumpFolderWriteGeneration(src);
+
   void (async () => {
     try {
       await runCopy(db, job, src, dst, names, { srcBucket, dstBucket });
@@ -576,6 +662,9 @@ export async function startBrowseCopyMove(
       emit(db, job);
       appendOperationLog(db, job, hostId);
     } finally {
+      // A partially-finished write still changed the destination tree.
+      dropFolderPrefixSizes(dst);
+      if (operation === "move") dropFolderPrefixSizes(src);
       activeDestinations.delete(dKey);
       activeSources.delete(sKey);
     }
@@ -634,6 +723,9 @@ export async function startBrowseRename(
 
   activeDestinations.add(dKey);
   activeSources.add(sKey);
+  // LAMA-321: rename rewrites the folder tree — drop cached prefix sizes
+  // once terminal and block stale size seeds while in flight.
+  bumpFolderWriteGeneration(ref);
   void (async () => {
     try {
       const config = buildJobConfig(db, ref, ref);
@@ -667,6 +759,7 @@ export async function startBrowseRename(
       emit(db, job);
       appendOperationLog(db, job, hostId);
     } finally {
+      dropFolderPrefixSizes(ref);
       activeDestinations.delete(dKey);
       activeSources.delete(sKey);
     }
@@ -717,6 +810,10 @@ export async function startBrowseDelete(
 
   activeDestinations.add(dKey);
   activeSources.add(sKey);
+  // LAMA-321: any accepted write makes in-flight prefix-size snapshots for
+  // this folder stale (and their seeds must be skipped); the folder's
+  // cached sizes are dropped when the job reaches a terminal state.
+  bumpFolderWriteGeneration(ref);
   const now = Date.now();
   const job: BrowseJob = {
     id: crypto.randomUUID(),
@@ -782,7 +879,10 @@ export async function startBrowseDelete(
       job.updatedAt = Date.now();
       writeJob(db, job);
       emit(db, job);
-      appendOperationLog(db, job, hostId);
+      // Stamp the audit row BEFORE dropping sizes: the delete of a prefix
+      // that a size job measured earlier carries those counts/bytes.
+      appendOperationLog(db, job, hostId, deleteOpMeta(ref, names, "done"));
+      dropFolderPrefixSizes(ref);
       invalidateStorageReport();
       if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(ref.folderId);
     } catch (error) {
@@ -791,10 +891,152 @@ export async function startBrowseDelete(
       job.updatedAt = Date.now();
       writeJob(db, job);
       emit(db, job);
-      appendOperationLog(db, job, hostId);
+      appendOperationLog(db, job, hostId, deleteOpMeta(ref, names, "failed"));
+      dropFolderPrefixSizes(ref);
     } finally {
       activeDestinations.delete(dKey);
       activeSources.delete(sKey);
+    }
+  })();
+
+  return { job, busy: false };
+}
+
+/**
+ * LAMA-321: operation-log meta for a delete. `prefix` names the exact
+ * folder-relative targets; when every deleted prefix had a fresh cached
+ * size (a size job measured it earlier), the audit row also carries the
+ * object count and bytes the delete removed.
+ */
+function deleteOpMeta(
+  ref: BrowseRef,
+  names: string[],
+  status: "done" | "failed",
+): BrowseOpLogMeta {
+  const meta: BrowseOpLogMeta = {
+    folderId: ref.kind === "s3" ? (ref.folderId ?? null) : null,
+    prefix: names.map((name) => joinRelativePath(ref.path, name)).join(", "),
+  };
+  if (status !== "done" || names.length === 0) return meta;
+  let objectCount = 0;
+  let bytes = 0;
+  let allKnown = true;
+  for (const name of names) {
+    const cached = getCachedPrefixSize(ref, name);
+    if (cached === null) {
+      allKnown = false;
+      break;
+    }
+    objectCount += cached.objectCount;
+    bytes += cached.bytes;
+  }
+  if (allKnown) {
+    meta.objectCount = objectCount;
+    meta.bytes = bytes;
+  }
+  return meta;
+}
+
+/**
+ * LAMA-321: measure the recursive size of ONE folder-relative prefix as a
+ * browse "size" job. Read-only — no destination/source busy guard (it never
+ * contends with writers) and no rclone: S3 prefixes are summed by paginated
+ * ListObjectsV2 (1000 keys per page), local trees by a symlink-safe walk.
+ * The result seeds the prefix-size cache unless a folder write started
+ * while the measurement was in flight. Failures are scrubbed: upstream S3
+ * bodies and absolute fs paths never reach the job row / operation log.
+ */
+export async function startBrowseSize(
+  db: Database,
+  ref: BrowseRef,
+  prefix: string,
+  hostId: string,
+): Promise<StartBrowseJobResult> {
+  if (prefix.length === 0) throw new Error("prefix is required");
+  assertSafePath(ref.path, prefix);
+
+  const dKey = destKey(ref);
+  const sKey = `${dKey}|${prefix}`;
+  const now = Date.now();
+  const job: BrowseJob = {
+    id: crypto.randomUUID(),
+    operation: "size",
+    source: sKey,
+    destination: dKey,
+    status: "running",
+    error: null,
+    progressBytes: null,
+    totalBytes: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.run(
+    `INSERT INTO browse_jobs (id, operation, source, destination, status, error, progress_bytes, total_bytes, created_at, updated_at)
+     VALUES (?, 'size', ?, ?, 'running', NULL, NULL, NULL, ?, ?)`,
+    [job.id, job.source, job.destination, now, now],
+  );
+  emit(db, job);
+
+  // Fail fast on unresolvable credentials, mirroring the delete path.
+  try {
+    if (ref.kind === "s3") resolveS3(db, ref);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    job.status = "failed";
+    job.error = msg;
+    job.updatedAt = Date.now();
+    writeJob(db, job);
+    emit(db, job);
+    return { job, busy: false };
+  }
+
+  const auditPrefix = joinRelativePath(ref.path, prefix);
+  const folderId = ref.kind === "s3" ? (ref.folderId ?? null) : null;
+  // Snapshot the folder's write generation: if a write lands while we
+  // measure, the seed must be skipped (the write drops the cache anyway).
+  const generationAtStart = folderWriteGeneration(ref);
+  void (async () => {
+    try {
+      let size: PrefixSizeCount;
+      if (ref.kind === "local") {
+        size = computeLocalPrefixSize(auditPrefix);
+      } else {
+        const resolved = resolveS3(db, ref);
+        const config = s3FolderConfigOf(resolved);
+        // Object keys under the directory always start "<prefix>/".
+        const keysPrefix = `${auditPrefix}/`;
+        const measured = await sizeS3Prefix(config, keysPrefix);
+        size = { objectCount: measured.objectCount, bytes: measured.bytes };
+      }
+      const seeded = seedPrefixSize(ref, prefix, size, {
+        unlessGenerationAfter: generationAtStart,
+      });
+      job.status = "done";
+      job.updatedAt = Date.now();
+      writeJob(db, job);
+      emit(db, job);
+      appendOperationLog(db, job, hostId, {
+        folderId,
+        prefix: auditPrefix,
+        objectCount: size.objectCount,
+        bytes: size.bytes,
+        ...(seeded === null
+          ? { note: "not cached: folder changed while measuring" }
+          : {}),
+      });
+    } catch (error) {
+      // Never leak the upstream S3 body or an absolute local fs path.
+      const message =
+        error instanceof S3ListObjectsError ? "S3 listing failed" : "size failed";
+      console.error(
+        `[browse-jobs] size job failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      job.status = "failed";
+      job.error = message;
+      job.updatedAt = Date.now();
+      writeJob(db, job);
+      emit(db, job);
+      appendOperationLog(db, job, hostId, { folderId, prefix: auditPrefix });
     }
   })();
 
@@ -813,19 +1055,18 @@ async function resolveEntryType(
     if (!stat) throw new Error(`entry not found: ${name}`);
     return stat.type;
   }
-  const s3 = resolveS3(db, ref);
-  const config: S3FolderConfig = {
-    folderId: s3.folder.id,
-    backendId: s3.folder.backendId ?? "",
-    provider: s3.provider,
-    endpoint: s3.endpoint,
-    bucket: s3.bucket,
-    accessKeyId: s3.accessKeyId,
-    secretAccessKey: s3.secretAccessKey,
-    region: s3.region,
-  };
-  const listing = await listS3Objects(config, ref.path, 1000);
-  const entry = listing.entries.find((e) => e.name === name);
+  // LAMA-321: names may be nested (".Trash/1000") — resolve the leaf's
+  // type from its parent listing. A single-segment name is the legacy case
+  // (parent = the ref's own path).
+  const resolved = resolveS3(db, ref);
+  const config = s3FolderConfigOf(resolved);
+  const slashIdx = name.lastIndexOf("/");
+  const leaf = slashIdx === -1 ? name : name.slice(slashIdx + 1);
+  const parentRel = slashIdx === -1 ? "" : name.slice(0, slashIdx);
+  const listingPrefix =
+    parentRel === "" ? ref.path : joinRelativePath(ref.path, parentRel);
+  const listing = await listS3Objects(config, listingPrefix, 1000);
+  const entry = listing.entries.find((e) => e.name === leaf);
   if (!entry) throw new Error(`entry not found: ${name}`);
   return entry.type;
 }
@@ -882,6 +1123,8 @@ export async function startBrowseMkdir(
   }
 
   activeDestinations.add(dKey);
+  // LAMA-321: mkdir mutates the folder — guard size snapshots + drop cache.
+  bumpFolderWriteGeneration(ref);
   void (async () => {
     try {
       const config = buildJobConfig(db, ref, ref);
@@ -912,6 +1155,7 @@ export async function startBrowseMkdir(
       emit(db, job);
       appendOperationLog(db, job, hostId);
     } finally {
+      dropFolderPrefixSizes(ref);
       activeDestinations.delete(dKey);
     }
   })();
@@ -991,6 +1235,9 @@ export async function startBrowseUpload(
   }
 
   activeDestinations.add(dKey);
+  // LAMA-321: upload mutates the destination folder — guard size snapshots
+  // + drop cached prefix sizes once terminal.
+  bumpFolderWriteGeneration(dst);
   void (async () => {
     try {
       const config = buildJobConfig(db, dst, dst);
@@ -1034,6 +1281,7 @@ export async function startBrowseUpload(
       emit(db, job);
       appendOperationLog(db, job, hostId);
     } finally {
+      dropFolderPrefixSizes(dst);
       activeDestinations.delete(dKey);
       try {
         await Bun.spawn(["rm", "-f", tmp]).exited;

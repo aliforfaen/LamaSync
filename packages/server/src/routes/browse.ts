@@ -3,9 +3,22 @@ import type { Database } from "bun:sqlite";
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { db as defaultDb } from "../db.ts";
-import type { BrowseEntry, BrowseResponse, BrowseRef, Folder } from "@lamasync/core";
+import type {
+  BrowseEntry,
+  BrowseResponse,
+  BrowseRef,
+  BrowseTrash,
+  Folder,
+} from "@lamasync/core";
 import { resolveBrowsePath, statEntry, validateBrowseInput } from "../browse-paths.ts";
 import { listS3Objects, S3ListObjectsError } from "../s3-list.ts";
+import { getCachedPrefixSize } from "../browse-sizes.ts";
+import {
+  directTrashCandidates,
+  nestedTrashCandidates,
+  sortTrashItems,
+  type TrashLikeEntry,
+} from "../trash.ts";
 import { resolveFolderS3Config } from "../backends.ts";
 import {
   downloadBrowseFile,
@@ -14,6 +27,7 @@ import {
   startBrowseDelete,
   startBrowseMkdir,
   startBrowseRename,
+  startBrowseSize,
   startBrowseUpload,
 } from "../browse-jobs.ts";
 // LAMA-226 P1-9: write-op bodies share a single validated `ref` shape.
@@ -87,6 +101,39 @@ function canonicalRelativePath(input: string): string {
     .join("/");
 }
 
+// LAMA-321 helpers ---------------------------------------------------------
+
+/** Combine the direct `.Trash-<uid>` matches with the (optional) peek
+ *  inside `.Trash` into the response's trash annotation. When `children`
+ *  is null the `.Trash` directory was absent (or its peek failed) and only
+ *  direct candidates count. */
+function trashFromListing(
+  direct: { items: BrowseTrash[]; hasDotTrash: boolean },
+  children: TrashLikeEntry[] | null,
+): BrowseTrash[] {
+  if (!direct.hasDotTrash || children === null) {
+    return sortTrashItems(direct.items);
+  }
+  return sortTrashItems([...direct.items, ...nestedTrashCandidates(children)]);
+}
+
+/** List the entries inside a local `.Trash` dir (missing → empty list). */
+function localTrashChildren(dirPath: string): TrashLikeEntry[] {
+  let dirents;
+  try {
+    dirents = readdirSync(dirPath, { withFileTypes: true });
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+      return [];
+    }
+    throw err;
+  }
+  return dirents.map((dirent) => ({
+    name: dirent.name,
+    type: dirent.isDirectory() ? "dir" : "file",
+  }));
+}
+
 export const browseRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/browse/local",
@@ -151,6 +198,8 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
 
       const namesMap = folderNameMap();
       const rootReal = realpathSync(getBackupRoot());
+      const canonical = canonicalRelativePath(rawPath);
+      const listingRef: BrowseRef = { kind: "local", path: canonical };
       const entries: BrowseEntry[] = names
         .map((name) => {
           const stat = statEntry(join(resolved, name));
@@ -161,6 +210,12 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
             size: stat.size,
             mtime: stat.mtime,
           };
+          if (entry.type === "dir") {
+            // LAMA-321: a prior on-demand size job may have measured this
+            // directory — show the real bytes instead of the 0 placeholder.
+            const cached = getCachedPrefixSize(listingRef, name);
+            if (cached !== null) entry.size = cached.bytes;
+          }
           if (resolved === rootReal) {
             const folderId = namesMap.get(name);
             if (folderId) entry.folderId = folderId;
@@ -170,10 +225,21 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         .filter((entry): entry is BrowseEntry => entry !== null)
         .sort((a, b) => a.name.localeCompare(b.name));
 
+      // LAMA-321: freedesktop trash detection. Only exact `.Trash-<uid>` /
+      // `.Trash/<uid>` layouts count; the `.Trash` child peek happens only
+      // when a `.Trash` directory is actually present in this listing.
+      const direct = directTrashCandidates(entries);
+      let children: TrashLikeEntry[] | null = null;
+      if (direct.hasDotTrash) {
+        children = localTrashChildren(join(resolved, ".Trash"));
+      }
+      const trash = trashFromListing(direct, children);
+
       const response: BrowseResponse = {
         backend: "local",
-        path: canonicalRelativePath(rawPath),
+        path: canonical,
         entries,
+        ...(trash.length > 0 ? { trash } : {}),
       };
       return response;
     },
@@ -223,16 +289,50 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
       }
       try {
         const listing = await listS3(s3, rawPath, 1000);
-        const response: BrowseResponse = {
-          backend: "s3",
-          path: canonicalRelativePath(rawPath),
-          entries: listing.entries.map((entry) => ({
+        const canonical = canonicalRelativePath(rawPath);
+        const listingRef: BrowseRef = { kind: "s3", folderId, path: canonical };
+        const entries = listing.entries.map((entry): BrowseEntry => {
+          const mapped: BrowseEntry = {
             name: entry.name,
             type: entry.type,
             size: entry.size,
             mtime: entry.lastModified,
             folderId: folder.id,
-          })),
+          };
+          if (entry.type === "dir") {
+            // LAMA-321: merge a fresh cached measurement for this prefix so
+            // the row shows real bytes instead of the 0 placeholder.
+            const cached = getCachedPrefixSize(listingRef, entry.name);
+            if (cached !== null) mapped.size = cached.bytes;
+          }
+          return mapped;
+        });
+        // LAMA-321: freedesktop trash detection. The nested `.Trash/<uid>`
+        // layout needs one extra peek listing inside `.Trash`; a peek
+        // failure (bucket hiccup) drops only the trash annotation, never
+        // the listing itself.
+        const direct = directTrashCandidates(listing.entries);
+        let children: TrashLikeEntry[] | null = null;
+        if (direct.hasDotTrash) {
+          try {
+            const peekPrefix =
+              canonical === "" ? ".Trash/" : `${canonical}/.Trash/`;
+            const peek = await listS3(s3, peekPrefix, 1000);
+            children = peek.entries.map((e) => ({ name: e.name, type: e.type }));
+          } catch (err) {
+            if (err instanceof S3ListObjectsError) {
+              console.error(`[browse] .Trash peek failed: ${err.message}`);
+            } else {
+              throw err;
+            }
+          }
+        }
+        const trash = trashFromListing(direct, children);
+        const response: BrowseResponse = {
+          backend: "s3",
+          path: canonical,
+          entries,
+          ...(trash.length > 0 ? { trash } : {}),
         };
         return response;
       } catch (err) {
@@ -442,6 +542,101 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
           201: { description: "Job started" },
           400: { description: "Invalid input" },
           409: { description: "Destination busy" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  // LAMA-321: on-demand recursive size. POST starts an async browse "size"
+  // job for ONE validated folder-relative prefix (paginated S3 listing /
+  // local walk); the result seeds the server-side cache. GET reads that
+  // cache — fresh hits return the measurement, misses report `cached: false`
+  // so the client can start a job instead of blocking on pagination.
+  .post(
+    "/browse/size",
+    async ({ body, set }) => {
+      const { ref, prefix } = body;
+      if (!prefix) {
+        set.status = 400;
+        return { error: "prefix is required" };
+      }
+      try {
+        const result = await startBrowseSize(activeDb, ref, prefix, sourceLabel(ref));
+        set.status = 201;
+        return result.job;
+      } catch (error) {
+        return scrubWriteError(set, error, "size");
+      }
+    },
+    {
+      body: t.Object({
+        ref: browseRefSchema,
+        prefix: t.String(),
+      }),
+      detail: {
+        summary: "Compute the recursive size of one folder-relative prefix (async job)",
+        tags: ["Data Browser"],
+        responses: {
+          201: { description: "Job started" },
+          400: { description: "Invalid input or unsafe prefix" },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+  )
+  .get(
+    "/browse/size",
+    ({ query, set }) => {
+      const kind = query.kind ?? "s3";
+      const folderId = query.folderId ?? "";
+      const rawPath = query.path ?? "";
+      const prefix = query.prefix ?? "";
+      if (kind === "s3" && !folderId) {
+        set.status = 400;
+        return { error: "folderId is required for s3" };
+      }
+      if (!isValidS3Path(rawPath)) {
+        set.status = 400;
+        return { error: "invalid path" };
+      }
+      if (!prefix || !isValidS3Path(prefix)) {
+        set.status = 400;
+        return { error: "invalid prefix" };
+      }
+      if (kind === "s3") {
+        const row = activeDb
+          .query<FolderRow, [string]>(
+            "SELECT id, name, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
+          )
+          .get(folderId);
+        if (!row) {
+          set.status = 404;
+          return { error: "Folder not found" };
+        }
+      }
+      const canonical = canonicalRelativePath(rawPath);
+      const ref: BrowseRef =
+        kind === "s3"
+          ? { kind: "s3", folderId, path: canonical }
+          : { kind: "local", path: canonical };
+      const cached = getCachedPrefixSize(ref, prefix);
+      if (cached === null) return { cached: false } as const;
+      return { cached: true, ...cached } as const;
+    },
+    {
+      query: t.Object({
+        kind: t.Optional(t.Union([t.Literal("s3"), t.Literal("local")])),
+        folderId: t.Optional(t.String()),
+        path: t.Optional(t.String()),
+        prefix: t.Optional(t.String()),
+      }),
+      detail: {
+        summary: "Read a cached recursive size for one folder-relative prefix",
+        tags: ["Data Browser"],
+        responses: {
+          200: { description: "Cached measurement or cached:false" },
+          400: { description: "Invalid input" },
+          404: { description: "Folder not found" },
           401: { description: "Unauthorized" },
         },
       },

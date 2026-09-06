@@ -38,6 +38,7 @@ import type {
   FolderSize,
   BrowseRef,
   BrowseJob,
+  BrowsePrefixSizeResult,
   DemoState,
   DemoSeedSummary,
   FolderSnapshotsResponse,
@@ -616,6 +617,19 @@ export const api = {
   },
   listBrowseJobs: (limit = 50) =>
     apiGet<BrowseJob[]>(`/browse/jobs?limit=${limit}`),
+  // LAMA-321: on-demand recursive size of one folder-relative prefix.
+  // browseSize starts the async job; browseSizeCached reads the server-side
+  // result (fresh hit or { cached: false } when a job still needs to run).
+  browseSize: (ref: BrowseRef, prefix: string) =>
+    apiPost<BrowseJob>("/browse/size", { ref, prefix }),
+  browseSizeCached: (ref: BrowseRef, prefix: string) => {
+    const kind = ref.kind === "s3" ? "s3" : "local";
+    const folderId = ref.kind === "s3" && ref.folderId ? `&folderId=${encodeURIComponent(ref.folderId)}` : "";
+    const path = ref.path ? `&path=${encodeURIComponent(ref.path)}` : "";
+    return apiGet<BrowsePrefixSizeResult>(
+      `/browse/size?kind=${kind}${folderId}${path}&prefix=${encodeURIComponent(prefix)}`,
+    );
+  },
   // LAMA-222: reusable backends. Secrets are write-only (hasSecret flags
   // presence); the test endpoint surfaces rclone's error detail.
   listBackends: () => apiGet<Backend[]>("/backends"),
