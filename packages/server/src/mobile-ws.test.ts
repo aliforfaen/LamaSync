@@ -257,18 +257,17 @@ describe("WebSocket mobile session upgrades", () => {
     await h.closed;
   });
 
-  test("non-admin session (webAdmin=false) is refused the fleet stream", async () => {
-    const created = createMobileEnrollment({ webAdmin: false, clientType: "android" });
-    const outcome = exchangeMobileEnrollment({
-      enrollmentId: created.enrollmentId,
-      secret: created.secret,
-      displayName: "kiosk",
-      appVersion: "1.0.0",
-    });
-    if (outcome.kind !== "ok") throw new Error("exchange failed");
-    const boot = bootstrapMobileWebSession(outcome.response.webGrant);
-    if (boot.kind !== "ok") throw new Error("bootstrap failed");
-    const h = await open({ Origin: TEST_ORIGIN, Cookie: `__Host-lamasync-mobile=${boot.sessionSecret}` });
+  test("non-admin session (admin:0 grant) is refused the fleet stream", async () => {
+    // LAMA-296 review finding 4: bootstrap now REFUSES admin:0 grants
+    // outright (403 — see mobile.test.ts), so no such session can be
+    // issued through the API anymore. This row is hand-seeded directly to
+    // keep exercising the WebSocket gate's own admin check against stored
+    // half-privileged state.
+    const { cookieSecret } = seedPairedSession();
+    db.run("UPDATE web_sessions SET admin = 0 WHERE session_hash = ?", [
+      hashSecret(cookieSecret),
+    ]);
+    const h = await open({ Origin: TEST_ORIGIN, Cookie: `__Host-lamasync-mobile=${cookieSecret}` });
     await waitFor(() => h.messages.some((m) => m.includes("forbidden")));
     await h.closed;
   });

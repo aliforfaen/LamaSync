@@ -19,9 +19,15 @@
 //   3. mobile NATIVE token — looked up via mobile_registrations by its
 //      SHA-256 hash. Confined to /api/v1/mobile/me + check-in.
 //   4. mobile WEB session — the `__Host-lamasync-mobile` cookie. Accepted
-//      ONLY when no Authorization header is present; an invalid bearer
-//      NEVER falls back to the cookie. Cookie mutations additionally
-//      require an exact trusted Origin + the session CSRF token.
+//      ONLY when NO Authorization header is present at all; any explicit
+//      header — even malformed, unsupported-scheme, or empty — is a 401
+//      and NEVER falls back to the cookie. The Bearer scheme itself is
+//      parsed case-insensitively (RFC 7235). A resolved web session whose
+//      grant carried NO admin flag is denied centrally at this boundary:
+//      it may reach only identity discovery (/auth/me) and its own logout
+//      (/mobile/web-session/logout) — there is no partial-access web
+//      surface in phase 1. Cookie mutations additionally require an exact
+//      trusted Origin + the session CSRF token.
 //
 // Pre-auth exemption is exact method+path only (pairing exchange, mobile
 // enrollment exchange, mobile web-session bootstrap) — never a broad
@@ -162,6 +168,20 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
 export const MOBILE_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: string }> = [
   { method: "GET", pattern: "/api/v1/mobile/me" },
   { method: "POST", pattern: "/api/v1/mobile/check-in" },
+];
+
+// LAMA-296 review finding 4: a cookie web session whose grant carried no
+// admin flag is denied EVERYTHING at the boundary except identity discovery
+// and its own logout. Routes that rely on the boundary for authorization
+// (fleet lists, folder operations, enrollments) must never see such a
+// session — there is no partial-access web surface in phase 1. Sessions
+// issued from an admin:1 grant are unaffected.
+export const NON_ADMIN_SESSION_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: string }> = [
+  // SPA auth discovery — lets a non-admin session identify itself (and,
+  // combined with logout below, clear its cookie).
+  { method: "GET", pattern: "/api/v1/auth/me" },
+  // Own logout: revokes exactly this session + clears the cookie.
+  { method: "POST", pattern: "/api/v1/mobile/web-session/logout" },
 ];
 
 /** True when a device principal is allowed to reach this route at all. */
@@ -366,14 +386,24 @@ export function getAuthPlugin() {
     // mobile web-session bootstrap) — see AUTH_EXEMPT_ROUTES.
     if (routeAllowed(AUTH_EXEMPT_ROUTES, url.pathname, request.method)) return;
 
-    // LAMA-296: an Authorization header, when present, is authoritative —
-    // an invalid bearer is a 401 and NEVER falls back to the session
-    // cookie. Web grants are opaque and resolve to null here → 401 on any
-    // normal REST call; only the bootstrap route accepts them (in its
-    // body, not as a bearer).
-    const header = request.headers.get("authorization") ?? "";
-    const bearer = /^Bearer\s+(.+)$/.exec(header)?.[1];
-    if (bearer !== undefined && bearer !== null) {
+    // LAMA-296 review finding 7: an Authorization header, when PRESENT, is
+    // authoritative — the check is on header presence, never on a
+    // successfully parsed case-sensitive Bearer expression. Malformed or
+    // unsupported explicit credentials (empty header, `Basic garbage`, bare
+    // `Bearer`, unknown schemes) are a 401 and NEVER fall back to the
+    // session cookie; only an ABSENT header may attempt cookie auth. The
+    // Bearer scheme is parsed case-insensitively per RFC 7235, so
+    // `bearer <token>` with a VALID token authenticates. Web grants are
+    // opaque and resolve to null here → 401 on any normal REST call; only
+    // the bootstrap route accepts them (in its body, not as a bearer).
+    if (request.headers.has("authorization")) {
+      const header = request.headers.get("authorization") ?? "";
+      const bearer = /^Bearer[ \t]+(.+)$/i.exec(header)?.[1];
+      if (bearer === undefined || bearer.length === 0) {
+        // Explicit but malformed/unsupported credentials — fail closed.
+        set.status = 401;
+        return { error: "Unauthorized" };
+      }
       const principal = resolvePrincipal(bearer);
       if (!principal) {
         set.status = 401;
@@ -401,6 +431,14 @@ export function getAuthPlugin() {
         // Stale/revoked/expired cookie — 401, not anonymous.
         set.status = 401;
         return { error: "Unauthorized" };
+      }
+      // LAMA-296 review finding 4: fail closed for sessions without the
+      // admin grant. Defense-in-depth at the REST boundary — some handlers
+      // call requireAdmin, but fleet listing and folder operations rely on
+      // this boundary, and a half-privileged session must not reach them.
+      if (!principal.admin && !routeAllowed(NON_ADMIN_SESSION_ALLOWED_ROUTES, url.pathname, request.method)) {
+        set.status = 403;
+        return { error: "Forbidden" };
       }
       if (!isSafeMethod(request.method)) {
         // Cookie-authenticated mutations require the exact trusted Origin

@@ -14,12 +14,23 @@
 //     native + grant + sessions and the producing enrollment
 //   - principals are request-local under concurrent requests
 //   - no plaintext secrets leak into status responses
+//   - review finding 4: admin:0 grants cannot bootstrap sessions (403) and a
+//     hand-seeded non-admin session is denied fleet reads + folder mutations
+//     centrally while /auth/me + logout stay reachable; admin sessions are
+//     unaffected
+//   - review finding 7: explicit Authorization (even malformed/unsupported/
+//     empty) always wins over the cookie → 401; only an absent header may
+//     use cookie auth; valid mixed-case Bearer scheme authenticates
+//   - review bounded-maintenance: rate-limit buckets sweep expired untouched
+//     entries and cap cardinality
+//   - review finding 6: GET /mobile/registrations returns the minimal admin
+//     projection (newest first, revoked included, no secrets)
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { Elysia } from "elysia";
 import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
-import type { MobileEnrollmentExchangeResponse, MobileWebSessionBootstrapResponse } from "@lamasync/core";
+import type { MobileEnrollmentExchangeResponse, MobileRegistrationSummary, MobileWebSessionBootstrapResponse } from "@lamasync/core";
 
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "mobile-test-master-key-123456789";
 process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "mobile-test-secret-key-123456";
@@ -33,10 +44,13 @@ const {
   __resetMobileRateLimits,
   __setMobileRateLimitClock,
   createMobileEnrollment,
+  deriveCsrfToken,
+  exchangeMobileEnrollment,
   hashSecret,
 } = await import("../mobile-store.ts");
 const { mobileRoutes } = await import("./mobile.ts");
 const { __setDb: __setHostsDb, hostsRoutes } = await import("./hosts.ts");
+const { __setDb: __setFoldersDb, foldersRoutes } = await import("./folders.ts");
 const { __setDb: __setConfigDb, configRoutes } = await import("./config.ts");
 const { __setDb: __setKeysDb, apiKeysRoutes } = await import("./api-keys.ts");
 const { __setDb: __setAppsDb, appsRoutes } = await import("./apps.ts");
@@ -87,6 +101,7 @@ beforeEach(() => {
   __setApiKeysDb(db);
   __setMobileStoreDb(db);
   __setHostsDb(db);
+  __setFoldersDb(db);
   __setConfigDb(db);
   __setKeysDb(db);
   __setAppsDb(db);
@@ -98,6 +113,7 @@ beforeEach(() => {
   app = new Elysia()
     .use(getAuthPlugin())
     .use(hostsRoutes)
+    .use(foldersRoutes)
     .use(configRoutes)
     .use(apiKeysRoutes)
     .use(appsRoutes)
@@ -195,6 +211,39 @@ async function pairAndroid(webAdmin = true): Promise<{
   const res = await exchange(created.enrollmentId, created.secret);
   expect(res.status).toBe(200);
   return { enrollmentId: created.enrollmentId, exchange: (await res.json()) as MobileEnrollmentExchangeResponse };
+}
+
+/**
+ * Hand-seed an admin:0 web-session row directly (review finding 4
+ * regression): the session pre-dates the bootstrap refusal, so it proves
+ * the central REST boundary denies half-privileged sessions on its own.
+ */
+function seedNonAdminSession(): { cookie: string; csrf: string } {
+  const created = createMobileEnrollment({ webAdmin: false, clientType: "android" });
+  const outcome = exchangeMobileEnrollment({
+    enrollmentId: created.enrollmentId,
+    secret: created.secret,
+    displayName: "Pixel 9",
+    appVersion: "1.2.0",
+  });
+  if (outcome.kind !== "ok") throw new Error("seed exchange failed");
+  const grant = db
+    .query<{ id: string }, [string]>("SELECT id FROM web_grants WHERE registration_id = ?")
+    .get(outcome.hostId);
+  const secret = "hand-seeded-non-admin-session-secret";
+  db.run(
+    `INSERT INTO web_sessions (id, session_hash, registration_id, grant_id, admin, issued_at, expires_at)
+     VALUES (?, ?, ?, ?, 0, ?, ?)`,
+    [
+      "seed-session-1",
+      hashSecret(secret),
+      outcome.hostId,
+      grant?.id ?? "",
+      Date.now(),
+      Date.now() + 12 * 60 * 60 * 1000,
+    ],
+  );
+  return { cookie: secret, csrf: deriveCsrfToken(secret) };
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +478,82 @@ describe("POST /mobile/enrollments/:id/exchange", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Review bounded-maintenance: rate-limit buckets stay bounded
+// ---------------------------------------------------------------------------
+
+describe("rate-limit bucket eviction stays bounded", () => {
+  test("expired untouched buckets are swept on cadence (no same-key reuse)", async () => {
+    const {
+      mobileExchangeAllowed,
+      __mobileRateLimitSize,
+      RATE_LIMIT_PRUNE_EVERY,
+    } = await import("../mobile-store.ts");
+    let now = 1_700_000_000_000;
+    __setMobileRateLimitClock(() => now);
+    // Seed keys that will NEVER be reused — the old code only pruned on
+    // same-key reuse, so these would have lingered forever.
+    const seeded = RATE_LIMIT_PRUNE_EVERY / 2;
+    for (let i = 0; i < seeded; i++) {
+      expect(mobileExchangeAllowed(`sweep-addr-${i}`, `sweep-enr-${i}`)).toBe(true);
+    }
+    expect(__mobileRateLimitSize()).toEqual({ address: seeded, enrollment: seeded });
+    // The whole window elapses while those keys stay untouched.
+    now += 61_000;
+    for (let i = seeded; i < seeded + RATE_LIMIT_PRUNE_EVERY; i++) {
+      expect(mobileExchangeAllowed(`sweep-addr-${i}`, `sweep-enr-${i}`)).toBe(true);
+    }
+    // A sweep fired mid-batch: the seeded expired buckets are gone even
+    // though no key was ever revisited. Without the sweep the maps would
+    // hold seeded + RATE_LIMIT_PRUNE_EVERY (= 96) entries.
+    const { address, enrollment } = __mobileRateLimitSize();
+    expect(address).toBe(RATE_LIMIT_PRUNE_EVERY);
+    expect(enrollment).toBe(RATE_LIMIT_PRUNE_EVERY);
+    __setMobileRateLimitClock(() => Date.now());
+  });
+
+  test("hard cap: an unbounded flood of distinct keys cannot grow the maps", async () => {
+    const {
+      mobileExchangeAllowed,
+      __mobileRateLimitSize,
+      RATE_LIMIT_MAX_ENTRIES,
+    } = await import("../mobile-store.ts");
+    __setMobileRateLimitClock(() => 1_700_000_000_000);
+    const flood = RATE_LIMIT_MAX_ENTRIES + 128;
+    for (let i = 0; i < flood; i++) {
+      // Every attempt uses a fresh address AND a fresh enrollment id, so
+      // each is individually allowed — only the cap can bound the maps.
+      expect(mobileExchangeAllowed(`cap-addr-${i}`, `cap-enr-${i}`)).toBe(true);
+    }
+    const { address, enrollment } = __mobileRateLimitSize();
+    expect(address).toBe(RATE_LIMIT_MAX_ENTRIES);
+    expect(enrollment).toBe(RATE_LIMIT_MAX_ENTRIES);
+    __setMobileRateLimitClock(() => Date.now());
+  });
+
+  test("live buckets are never evicted by the cap (newest windows survive)", async () => {
+    const {
+      mobileExchangeAllowed,
+      __mobileRateLimitSize,
+      RATE_LIMIT_MAX_ENTRIES,
+    } = await import("../mobile-store.ts");
+    __setMobileRateLimitClock(() => 1_700_000_000_000);
+    // Flood past the cap, then re-check an OLD key: it was evicted (its
+    // budget was sacrificed first), so it is allowed again as a fresh key.
+    const flood = RATE_LIMIT_MAX_ENTRIES + 16;
+    for (let i = 0; i < flood; i++) {
+      expect(mobileExchangeAllowed(`cap2-addr-${i}`, `cap2-enr-${i}`)).toBe(true);
+    }
+    expect(__mobileRateLimitSize()).toEqual({
+      address: RATE_LIMIT_MAX_ENTRIES,
+      enrollment: RATE_LIMIT_MAX_ENTRIES,
+    });
+    // A brand-new key is still allowed (the maps did not wedge).
+    expect(mobileExchangeAllowed("cap2-addr-fresh", "cap2-enr-fresh")).toBe(true);
+    __setMobileRateLimitClock(() => Date.now());
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Web-session bootstrap + cookie sessions
 // ---------------------------------------------------------------------------
 
@@ -568,6 +693,43 @@ describe("POST /mobile/web-session + cookie REST", () => {
     expect(res.status).toBe(401);
   });
 
+  test("finding 7: explicit Authorization ALWAYS wins — malformed/unsupported/invalid → 401 even with a valid cookie", async () => {
+    const { exchange } = await pairAndroid(true);
+    const { cookie } = await bootstrapOk(exchange.webGrant);
+    const cookieHeader = `__Host-lamasync-mobile=${cookie}`;
+    // Every explicit header below is authoritative: present-but-not-a-valid
+    // Bearer must 401, never fall through to the (valid) session cookie.
+    const explicit: Array<[string, string]> = [
+      ["empty header", ""],
+      ["unsupported scheme", "Basic garbage"],
+      ["bare Bearer", "Bearer"],
+      ["lowercase scheme + invalid token", "bearer garbage"],
+      ["mixed-case scheme + invalid token", "BeArEr garbage"],
+      ["invalid token", "Bearer totally-bogus"],
+    ];
+    for (const [label, value] of explicit) {
+      const res = await app.handle(
+        req("/api/v1/hosts", { headers: { Authorization: value, Cookie: cookieHeader } }),
+      );
+      expect(res.status, `${label} must 401, got ${res.status}`).toBe(401);
+    }
+    // Only an ABSENT header permits cookie auth (GET needs no CSRF).
+    const session = await app.handle(
+      req("/api/v1/hosts", { headers: { Cookie: cookieHeader } }),
+    );
+    expect(session.status).toBe(200);
+    // RFC 7235: the Bearer scheme is case-insensitive — a VALID token with
+    // a lowercase/mixed-case scheme must authenticate.
+    const lowerScheme = await app.handle(
+      req("/api/v1/hosts", { headers: { Authorization: `bearer ${masterToken}` } }),
+    );
+    expect(lowerScheme.status).toBe(200);
+    const upperScheme = await app.handle(
+      req("/api/v1/hosts", { headers: { Authorization: `BEARER ${masterToken}` } }),
+    );
+    expect(upperScheme.status).toBe(200);
+  });
+
   test("cookie session reaches GETs without CSRF and can log out (clears cookie)", async () => {
     const { exchange } = await pairAndroid(true);
     const { cookie, csrf } = await bootstrapOk(exchange.webGrant);
@@ -630,6 +792,93 @@ describe("POST /mobile/web-session + cookie REST", () => {
       }),
     );
     expect(upload.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review finding 4: non-admin web sessions fail closed
+// ---------------------------------------------------------------------------
+
+describe("finding 4: web sessions without the admin grant fail closed", () => {
+  test("bootstrap refuses a webAdmin:false grant with 403 (exchange stays OK, no session row)", async () => {
+    const { exchange } = await pairAndroid(false);
+    // The native identity of a non-admin pairing still works (native tokens
+    // are non-admin by design — confined to /mobile/me + check-in).
+    const me = await app.handle(
+      req("/api/v1/mobile/me", { headers: bearer(exchange.nativeToken) }),
+    );
+    expect(me.status).toBe(200);
+    // Its web grant must NOT be able to bootstrap a session: 403, not a
+    // half-privileged cookie.
+    const boot = await bootstrapSession(exchange.webGrant);
+    expect(boot.status).toBe(403);
+    // And no session row was created by the refused issuance.
+    const sessions = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions")
+      .get();
+    expect(sessions?.n).toBe(0);
+  });
+
+  test("hand-seeded non-admin session: fleet reads + folder mutations denied centrally; discovery + logout allowed", async () => {
+    const seeded = seedNonAdminSession();
+    const cookie = `__Host-lamasync-mobile=${seeded.cookie}`;
+    // GET /hosts + GET /folders rely on the boundary (no requireAdmin in
+    // their handlers) — a non-admin session must be denied before any
+    // route logic runs.
+    const hosts = await app.handle(req("/api/v1/hosts", { headers: { Cookie: cookie } }));
+    expect(hosts.status).toBe(403);
+    const folders = await app.handle(req("/api/v1/folders", { headers: { Cookie: cookie } }));
+    expect(folders.status).toBe(403);
+    // POST /folders has no requireAdmin either — folder mutations are
+    // boundary-authorized, so the central deny is the only guard.
+    const mutate = await app.handle(
+      req("/api/v1/folders", {
+        method: "POST",
+        headers: sessionHeaders(seeded.cookie, seeded.csrf),
+        body: JSON.stringify({ name: "sneaky", type: "sync", backend: "sftp" }),
+      }),
+    );
+    expect(mutate.status).toBe(403);
+    // Admin-only mobile surface is equally denied.
+    const enroll = await app.handle(
+      req("/api/v1/mobile/enrollments", {
+        method: "POST",
+        headers: sessionHeaders(seeded.cookie, seeded.csrf),
+        body: JSON.stringify({ webAdmin: true }),
+      }),
+    );
+    expect(enroll.status).toBe(403);
+    // Identity discovery stays reachable (the SPA needs to learn + log out).
+    const discovery = await app.handle(req("/api/v1/auth/me", { headers: { Cookie: cookie } }));
+    expect(discovery.status).toBe(200);
+    const me = (await discovery.json()) as { authenticated: boolean; mode: string };
+    expect(me).toMatchObject({ authenticated: true, mode: "session" });
+    // Own logout stays reachable (CSRF-protected at the boundary).
+    const logout = await app.handle(
+      req("/api/v1/mobile/web-session/logout", {
+        method: "POST",
+        headers: sessionHeaders(seeded.cookie, seeded.csrf),
+      }),
+    );
+    expect(logout.status).toBe(200);
+  });
+
+  test("full-admin session unaffected: fleet reads + folder mutations still work", async () => {
+    const { exchange } = await pairAndroid(true);
+    const { cookie, csrf } = await bootstrapOk(exchange.webGrant);
+    const cookieHeader = `__Host-lamasync-mobile=${cookie}`;
+    const hosts = await app.handle(req("/api/v1/hosts", { headers: { Cookie: cookieHeader } }));
+    expect(hosts.status).toBe(200);
+    const folders = await app.handle(req("/api/v1/folders", { headers: { Cookie: cookieHeader } }));
+    expect(folders.status).toBe(200);
+    const create = await app.handle(
+      req("/api/v1/folders", {
+        method: "POST",
+        headers: sessionHeaders(cookie, csrf),
+        body: JSON.stringify({ name: "admin-folder", type: "sync", backend: "sftp" }),
+      }),
+    );
+    expect(create.status).toBe(201);
   });
 });
 
@@ -795,6 +1044,109 @@ describe("POST /mobile/registrations/:hostId/revoke", () => {
       }),
     );
     expect(unknown.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review finding 6: GET /mobile/registrations admin projection
+// ---------------------------------------------------------------------------
+
+describe("GET /mobile/registrations (admin projection)", () => {
+  test("lists registrations newest-first with minimal fields; revoked included; no secrets", async () => {
+    // Pair two devices; backdate the first so ordering is deterministic.
+    const first = await pairAndroid(true);
+    const OLD = 1_600_000_000_000;
+    db.run("UPDATE mobile_registrations SET created_at = ? WHERE host_id = ?", [
+      OLD,
+      first.exchange.hostId,
+    ]);
+    const second = await pairAndroid(true);
+    // Check in from the first device (sets last-seen + bumps app version).
+    const checkin = await app.handle(
+      req("/api/v1/mobile/check-in", {
+        method: "POST",
+        headers: bearer(first.exchange.nativeToken),
+        body: JSON.stringify({ appVersion: "1.3.0" }),
+      }),
+    );
+    expect(checkin.status).toBe(200);
+    // Revoke the FIRST registration with a reason — revoked rows must stay
+    // visible (the UI filters them client-side).
+    const revoke = await app.handle(
+      req(`/api/v1/mobile/registrations/${first.exchange.hostId}/revoke`, {
+        method: "POST",
+        headers: bearer(masterToken),
+        body: JSON.stringify({ reason: "lost phone" }),
+      }),
+    );
+    expect(revoke.status).toBe(200);
+
+    const res = await app.handle(
+      req("/api/v1/mobile/registrations", { headers: bearer(masterToken) }),
+    );
+    expect(res.status).toBe(200);
+    const list = (await res.json()) as MobileRegistrationSummary[];
+    expect(Array.isArray(list)).toBe(true);
+    expect(list).toHaveLength(2);
+    // Most recently paired first.
+    expect(list[0]!.hostId).toBe(second.exchange.hostId);
+    expect(list[1]!.hostId).toBe(first.exchange.hostId);
+    // Revoked (older) row carries its full presence + revocation metadata.
+    const revokedRow = list[1]!;
+    expect(revokedRow).toEqual({
+      hostId: first.exchange.hostId,
+      displayName: "Pixel 9",
+      clientType: "android",
+      appVersion: "1.3.0",
+      createdAt: OLD,
+      lastSeenAt: expect.any(Number),
+      revokedAt: expect.any(Number),
+      revokedReason: "lost phone",
+    });
+    // Live (newer) row has no revocation metadata yet.
+    const liveRow = list[0]!;
+    expect(liveRow.revokedAt).toBeNull();
+    expect(liveRow.revokedReason).toBeNull();
+    expect(liveRow.lastSeenAt).toBeNull();
+    // The projection is minimal: no secret material or internal links.
+    const serialized = JSON.stringify(list);
+    expect(serialized).not.toContain("token");
+    expect(serialized).not.toContain("hash");
+    expect(serialized).not.toContain("grant");
+    expect(serialized).not.toContain("secret");
+    expect(serialized).not.toContain("session");
+    expect(serialized).not.toContain("native");
+  });
+
+  test("admin-only: device keys and native mobile tokens are denied; cookie admin session works", async () => {
+    const { exchange } = await pairAndroid(true);
+    // Managed admin bearer → 200.
+    const asAdmin = await app.handle(
+      req("/api/v1/mobile/registrations", { headers: bearer(adminToken) }),
+    );
+    expect(asAdmin.status).toBe(200);
+    // Admin cookie web session → 200 (the desktop device list surface).
+    const { cookie } = await bootstrapOk(exchange.webGrant);
+    const asSession = await app.handle(
+      req("/api/v1/mobile/registrations", {
+        headers: { Cookie: `__Host-lamasync-mobile=${cookie}` },
+      }),
+    );
+    expect(asSession.status).toBe(200);
+    // Device key → 403 (allowlist has no registrations list).
+    const device = insertManagedApiKey({ name: "d", kind: "device", hostId: "host-x" });
+    const asDevice = await app.handle(
+      req("/api/v1/mobile/registrations", { headers: bearer(device.token) }),
+    );
+    expect(asDevice.status).toBe(403);
+    // Mobile native bearer → 403 at the boundary (confined to me/check-in).
+    const asNative = await app.handle(
+      req("/api/v1/mobile/registrations", { headers: bearer(exchange.nativeToken) }),
+    );
+    expect(asNative.status).toBe(403);
+    // No auth at all → 401.
+    const anon = await app.handle(req("/api/v1/mobile/registrations"));
+    expect(anon.status).toBe(401);
   });
 });
 

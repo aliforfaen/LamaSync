@@ -1,9 +1,10 @@
-// LAMA-296: Android-companion mobile routes (phase 1). All eight routes live
+// LAMA-296: Android-companion mobile routes (phase 1). Nine routes live
 // under /api/v1/mobile and each carries Swagger detail. The mobile native
 // identity (bearer token) is confined at the auth boundary to /mobile/me +
 // /mobile/check-in; cookie web sessions flow through the shared auth plugin
-// (which enforces CSRF + exact Origin on their mutations); the enrollment
-// exchange and the web-session bootstrap are exact pre-auth exemptions.
+// (which enforces CSRF + exact Origin on their mutations and denies
+// non-admin sessions centrally); the enrollment exchange and the web-session
+// bootstrap are exact pre-auth exemptions.
 //
 // Status-code map (pinned in the LAMA-296 spec):
 //   400 invalid shape/origin · 401 absent/invalid/revoked authority ·
@@ -21,6 +22,7 @@ import {
   createMobileEnrollment,
   exchangeMobileEnrollment,
   findRegistrationByHostId,
+  listMobileRegistrations,
   mobileCheckIn,
   mobileEnrollmentStatus,
   mobileMeResponse,
@@ -162,6 +164,30 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
       },
     },
   )
+  .get(
+    "/mobile/registrations",
+    ({ request, set }) => {
+      const admin = requireAdmin({ principal: principalOf(request) });
+      if (!admin) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      noStore(set);
+      return listMobileRegistrations();
+    },
+    {
+      detail: {
+        summary:
+          "List mobile registrations (admin). Minimal projection — host id, display name, client type/version, pairing instant, last check-in, revocation metadata. No secret hashes, grants, or host config. Most recently paired first; revoked registrations are included for the desktop device list to filter.",
+        tags: ["Mobile"],
+        responses: {
+          200: { description: "Array of MobileRegistrationSummary, newest first" },
+          401: { description: "Unauthorized" },
+          403: { description: "Not an admin credential" },
+        },
+      },
+    },
+  )
   // -----------------------------------------------------------------------
   // Exchange: exact pre-auth exemption (see auth.ts AUTH_EXEMPT_ROUTES)
   // -----------------------------------------------------------------------
@@ -268,6 +294,13 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "invalid grant" };
       }
       const outcome = bootstrapMobileWebSession(grant);
+      if (outcome.kind === "non_admin_grant") {
+        // The desktop flow always requests full admin; a grant without the
+        // admin flag must not bootstrap a half-privileged session (LAMA-296
+        // review finding 4 — the REST boundary would deny it anyway).
+        set.status = 403;
+        return { error: "this web grant carries no admin authority" };
+      }
       if (outcome.kind !== "ok") {
         set.status = 401;
         return { error: "invalid or revoked web grant" };
@@ -289,7 +322,7 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
           200: { description: "Session cookie set; csrfToken returned once" },
           400: { description: "Invalid grant shape or cross-origin request" },
           401: { description: "Invalid/revoked web grant" },
-          403: { description: "Bearer presented instead of a body grant" },
+          403: { description: "Bearer presented instead of a body grant, or the web grant carries no admin authority" },
           503: { description: "LAMASYNC_ORIGIN not configured" },
         },
       },

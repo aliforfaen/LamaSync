@@ -1306,6 +1306,28 @@ export interface MobileRegistrationRevokeRequest {
   reason?: string;
 }
 
+/**
+ * One row of the admin paired-device projection
+ * (GET /api/v1/mobile/registrations). Deliberately minimal: host identity
+ * and presence metadata only — never secret hashes, grant/session links,
+ * or host config. Revoked registrations are included so the desktop device
+ * list can show and filter them.
+ */
+export interface MobileRegistrationSummary {
+  hostId: string;
+  displayName: string;
+  clientType: MobileClientType;
+  appVersion: string;
+  /** Epoch-ms instant the device paired (registration created). */
+  createdAt: number;
+  /** Epoch-ms last check-in, or null when the device never checked in. */
+  lastSeenAt: number | null;
+  /** Epoch-ms revocation instant, or null while the device is live. */
+  revokedAt: number | null;
+  /** Revocation reason (operator-supplied at revoke time), or null. */
+  revokedReason: string | null;
+}
+
 export interface MobileRegistrationRevokeResponse {
   hostId: string;
   /** Epoch-ms revocation instant. */

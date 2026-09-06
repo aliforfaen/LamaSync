@@ -25,6 +25,7 @@ import type {
   MobileEnrollmentExchangeResponse,
   MobileEnrollmentStatusResponse,
   MobileMeResponse,
+  MobileRegistrationSummary,
   MobileWebSessionBootstrapResponse,
 } from "@lamasync/core";
 
@@ -113,6 +114,19 @@ export const EXCHANGE_ADDRESS_LIMIT = 10;
 export const EXCHANGE_ENROLLMENT_LIMIT = 5;
 const EXCHANGE_WINDOW_MS = 60_000;
 
+/**
+ * Expired-entry sweep cadence: every N limit checks, untouched buckets
+ * whose window elapsed are dropped from BOTH maps. This bounds memory
+ * without a timer or an O(n) pass per request — and, unlike the old
+ * same-key-reuse reset, prunes arbitrary historical enrollment ids that
+ * are never seen again.
+ */
+export const RATE_LIMIT_PRUNE_EVERY = 64;
+/** Hard cardinality cap per map: oldest-window buckets are evicted past
+ *  this, so even a flood of distinct addresses/enrollment ids can never
+ *  grow the maps without bound. */
+export const RATE_LIMIT_MAX_ENTRIES = 512;
+
 interface RateBucket {
   windowStart: number;
   count: number;
@@ -121,6 +135,7 @@ interface RateBucket {
 let limiterNow: () => number = () => Date.now();
 const addressBuckets = new Map<string, RateBucket>();
 const enrollmentBuckets = new Map<string, RateBucket>();
+let pruneCounter = 0;
 
 /** Test seam: inject a clock so limit expiry is testable without sleeping. */
 export function __setMobileRateLimitClock(fn: () => number): void {
@@ -131,6 +146,27 @@ export function __setMobileRateLimitClock(fn: () => number): void {
 export function __resetMobileRateLimits(): void {
   addressBuckets.clear();
   enrollmentBuckets.clear();
+  pruneCounter = 0;
+}
+
+/** Test seam: current bucket cardinality (bounded-eviction assertions). */
+export function __mobileRateLimitSize(): { address: number; enrollment: number } {
+  return { address: addressBuckets.size, enrollment: enrollmentBuckets.size };
+}
+
+/** Drop buckets whose window has fully elapsed (never reused keys). */
+function dropExpired(buckets: Map<string, RateBucket>, now: number): void {
+  for (const [key, bucket] of buckets) {
+    if (now - bucket.windowStart >= EXCHANGE_WINDOW_MS) buckets.delete(key);
+  }
+}
+
+/** Evict the oldest-window buckets while a map exceeds the hard cap. */
+function enforceBucketCap(buckets: Map<string, RateBucket>): void {
+  if (buckets.size <= RATE_LIMIT_MAX_ENTRIES) return;
+  const byAge = [...buckets.entries()].sort((a, b) => a[1].windowStart - b[1].windowStart);
+  const overflow = buckets.size - RATE_LIMIT_MAX_ENTRIES;
+  for (const [key] of byAge.slice(0, overflow)) buckets.delete(key);
 }
 
 function bump(buckets: Map<string, RateBucket>, key: string, limit: number, now: number): boolean {
@@ -146,17 +182,33 @@ function bump(buckets: Map<string, RateBucket>, key: string, limit: number, now:
 
 /**
  * Enforce both exchange limits for one attempt. Returns true when the
- * attempt is allowed; false → the caller must 429. Entries expire after
- * the window (lazily pruned on the next touch), so no timer is needed.
+ * attempt is allowed; false → the caller must 429. Memory is bounded: on a
+ * cadence, untouched expired buckets are swept from both maps, and after
+ * every check each map is capped at RATE_LIMIT_MAX_ENTRIES (oldest-window
+ * buckets evicted) so arbitrary historical keys can never accumulate
+ * without bound.
  */
 export function mobileExchangeAllowed(clientAddress: string, enrollmentId: string): boolean {
   const now = limiterNow();
-  if (!bump(addressBuckets, `addr:${clientAddress}`, EXCHANGE_ADDRESS_LIMIT, now)) return false;
-  if (bump(enrollmentBuckets, `enr:${enrollmentId}`, EXCHANGE_ENROLLMENT_LIMIT, now)) return true;
-  // The enrollment limit refused; refund the address attempt so a busy
-  // shared enrollment id cannot burn unrelated clients' address budgets.
-  const bucket = addressBuckets.get(`addr:${clientAddress}`);
-  if (bucket) bucket.count = Math.max(0, bucket.count - 1);
+  pruneCounter = (pruneCounter + 1) % RATE_LIMIT_PRUNE_EVERY;
+  if (pruneCounter === 0) {
+    dropExpired(addressBuckets, now);
+    dropExpired(enrollmentBuckets, now);
+  }
+  const allowed = bump(addressBuckets, `addr:${clientAddress}`, EXCHANGE_ADDRESS_LIMIT, now);
+  if (allowed) {
+    const enrollmentAllowed = bump(enrollmentBuckets, `enr:${enrollmentId}`, EXCHANGE_ENROLLMENT_LIMIT, now);
+    if (!enrollmentAllowed) {
+      // The enrollment limit refused; refund the address attempt so a busy
+      // shared enrollment id cannot burn unrelated clients' address budgets.
+      const bucket = addressBuckets.get(`addr:${clientAddress}`);
+      if (bucket) bucket.count = Math.max(0, bucket.count - 1);
+    }
+    enforceBucketCap(addressBuckets);
+    enforceBucketCap(enrollmentBuckets);
+    return enrollmentAllowed;
+  }
+  enforceBucketCap(addressBuckets);
   return false;
 }
 
@@ -510,6 +562,34 @@ export function findRegistrationByHostId(hostId: string): MobileRegistrationRow 
 }
 
 /**
+ * Admin projection of every mobile registration (GET /mobile/registrations).
+ * Minimal + revocation-safe: host identity and presence metadata only —
+ * never secret hashes, grant/session links, or host config. Most recently
+ * paired first (created_at DESC); revoked registrations are INCLUDED — the
+ * desktop device list filters them client-side.
+ */
+export function listMobileRegistrations(): MobileRegistrationSummary[] {
+  return currentDb()
+    .query<MobileRegistrationRow, []>(
+      `SELECT host_id, client_type, display_name, app_version, created_at,
+              last_seen_at, revoked_at, revoked_reason
+         FROM mobile_registrations
+        ORDER BY created_at DESC`,
+    )
+    .all()
+    .map((r) => ({
+      hostId: r.host_id,
+      displayName: r.display_name,
+      clientType: r.client_type,
+      appVersion: r.app_version,
+      createdAt: r.created_at,
+      lastSeenAt: r.last_seen_at,
+      revokedAt: r.revoked_at,
+      revokedReason: r.revoked_reason,
+    }));
+}
+
+/**
  * Resolve a native bearer token to its registration host id, or null when
  * the token is unknown or its registration is revoked (revoked rows
  * collapse to null → 401 exactly like a bad token).
@@ -592,14 +672,20 @@ export function resolveLiveSession(secret: string, nowMs?: number): LiveMobileSe
 
 export type BootstrapOutcome =
   | { kind: "ok"; response: MobileWebSessionBootstrapResponse; sessionSecret: string; hostId: string }
-  | { kind: "invalid_grant" };
+  | { kind: "invalid_grant" }
+  // LAMA-296 review finding 4: a grant WITHOUT the admin flag cannot issue
+  // a web session at all. The desktop flow always requests full admin, and
+  // issuing half-privileged cookie sessions would contradict the stored
+  // grant (the REST boundary denies non-admin sessions centrally anyway).
+  | { kind: "non_admin_grant" };
 
 /**
  * Exchange a web grant (body, never a bearer) for a fresh session cookie
- * secret + CSRF token. Rejects revoked/unknown grants and grants whose
- * registration was revoked. 12-hour absolute lifetime; no refresh
- * rotation. Returns the plaintext session secret exactly once (the caller
- * sets the cookie); only its hash is stored.
+ * secret + CSRF token. Rejects revoked/unknown grants, grants whose
+ * registration was revoked, and grants that carry no admin flag (403 at the
+ * route — no half-privileged session is ever issued). 12-hour absolute
+ * lifetime; no refresh rotation. Returns the plaintext session secret
+ * exactly once (the caller sets the cookie); only its hash is stored.
  */
 export function bootstrapMobileWebSession(
   grant: string,
@@ -613,6 +699,7 @@ export function bootstrapMobileWebSession(
   if (!grantRow || isRowRevoked(grantRow)) return { kind: "invalid_grant" };
   const registration = findRegistrationByHostId(grantRow.registration_id);
   if (!registration || isRowRevoked(registration)) return { kind: "invalid_grant" };
+  if (grantRow.admin !== 1) return { kind: "non_admin_grant" };
 
   const sessionSecret = generateOpaqueSecret();
   const sessionId = generatePublicId();
