@@ -1015,7 +1015,29 @@ export type AuthPrincipal =
   | { kind: "device"; keyId: string; hostId: string }
   // LAMA-301: the deploy agent's dedicated principal. Narrowly scoped —
   // only the server-deploy claim/progress/complete routes admit it.
-  | { kind: "deploy"; keyId: string; hostId: null };
+  | { kind: "deploy"; keyId: string; hostId: null }
+  // LAMA-296: a mobile NATIVE credential (Android app bearer). Bound to one
+  // mobile registration; allowed only on /api/v1/mobile/me + check-in, never
+  // fleet admin, config, keys, or the web-session bootstrap.
+  | { kind: "mobile"; hostId: string }
+  // LAMA-296: a cookie-authenticated mobile WEB session (issued by the
+  // web-session bootstrap). `admin` mirrors the web grant's admin snapshot;
+  // admin sessions map to admin REST permissions. Mutations under this
+  // principal require the session CSRF token + an exact trusted Origin.
+  | {
+      kind: "web-session";
+      sessionId: string;
+      hostId: string;
+      admin: boolean;
+      /** Session-bound CSRF token (derived from the cookie secret). */
+      csrfToken: string;
+      /** Absolute epoch-ms session expiry. */
+      expiresAt: number;
+      /** Registration display name (labels /auth/me and audits). */
+      displayName: string;
+      /** Registration client family (android in phase 1). */
+      clientType: MobileClientType;
+    };
 
 /** Masked managed-key metadata. Deliberately contains no secret material. */
 export interface ApiKeySummary {
@@ -1060,17 +1082,43 @@ export interface ApiKeyRevokeResponse {
 }
 
 /**
- * LAMA-234: credential identity for the Web UI. Lets admin surfaces label
- * the active credential and hide admin-only sections when a `device` key is
- * in use (the browser holds a bearer token in session/localStorage, which
- * could otherwise be a device key that will 401 on every admin route).
+ * LAMA-234 + LAMA-296: credential identity for the Web UI / SPA auth
+ * discovery. One endpoint (GET /api/v1/auth/me) serves both modes:
+ *
+ *   - `mode: "bearer"` — master/admin/device/deploy resolved from the
+ *     Authorization header (LAMA-234 shape, additive `authenticated` +
+ *     `mode` fields).
+ *   - `mode: "session"` — a cookie-authenticated mobile web session issued
+ *     by POST /api/v1/mobile/web-session. `csrfToken` is the session-bound
+ *     CSRF token the SPA must send on cookie-authenticated mutations;
+ *     `name`/`displayName` carry the registration's display name.
+ *
+ * An invalid Bearer never falls back to the session cookie; with no
+ * Authorization header and no (or stale/revoked) session cookie the
+ * endpoint returns 401.
  */
-export interface AuthMeResponse {
-  kind: "master" | "admin" | "device" | "deploy";
-  keyId: string | null;
-  name: string | null;
-  hostId: string | null;
-}
+export type AuthMeResponse =
+  | {
+      authenticated: true;
+      mode: "bearer";
+      kind: "master" | "admin" | "device" | "deploy";
+      keyId: string | null;
+      name: string | null;
+      hostId: string | null;
+    }
+  | {
+      authenticated: true;
+      mode: "session";
+      kind: "mobile-session";
+      keyId: null;
+      name: string;
+      hostId: string;
+      displayName: string;
+      clientType: MobileClientType;
+      /** Absolute epoch-ms session expiry (12 h from bootstrap). */
+      expiresAt: number;
+      csrfToken: string;
+    };
 
 // LAMA-301: manual production server deploy control. The deploy agent (an
 // LXC-resident systemd service with a dedicated `deploy` credential) claims
@@ -1097,4 +1145,175 @@ export interface ServerDeployJob {
 /** Shape of GET /api/v1/server-deploys/config (LAMA-301). */
 export interface ServerDeployConfig {
   enabled: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// LAMA-296 — Android companion enrollment and mobile auth wire contract.
+// Additive: the CLI pairing flow (LAMA-262) above is untouched. Phase 1
+// establishes the enrollment → registration → web-session lifecycle the
+// Android app and the desktop QR flow exchange over the wire. All secrets
+// (QR secret, native token, web grant, session secret) are opaque and
+// one-time: the server persists only their hashes and never replays them,
+// and none of these types ever carries backend host config or fleet data.
+// ---------------------------------------------------------------------------
+
+/** Client family that participates in the mobile flow. Only `android`
+ *  exists in phase 1; future clients add a member here, never a new table. */
+export type MobileClientType = "android";
+
+/**
+ * The versioned QR payload the authenticated desktop web UI renders and the
+ * app scans. Keys and case are preserved verbatim — never uppercased (the
+ * legacy CLI pairing QR normalization does NOT apply to this payload).
+ * `secret` is a one-time 256-bit QR secret; it exists only on the QR the app
+ * scans, never in a stored server response.
+ */
+export interface MobileEnrollmentQrV1 {
+  kind: "lamasync.android.enroll";
+  version: 1;
+  /** Validated canonical HTTPS origin, e.g. `https://fleet.example.com`. */
+  serverOrigin: string;
+  enrollmentId: string;
+  secret: string;
+}
+
+/** Lifecycle of one mobile enrollment (mirrors the record status column). */
+export type MobileEnrollmentStatus = "pending" | "used" | "expired" | "revoked";
+
+/** Admin body creating an Android enrollment (POST /api/v1/mobile/enrollments). */
+export interface MobileEnrollmentCreateRequest {
+  /** Whether the paired app may obtain a web grant carrying admin authority.
+   *  Explicit (not inferred) per the "explicit web-admin grant" record flag;
+   *  the desktop flow always sends true. */
+  webAdmin: boolean;
+  /** Client type this enrollment will register (defaults to android). */
+  clientType?: MobileClientType;
+}
+
+/** Admin create response. `secret` is the one-time QR secret, returned
+ *  exactly once here. */
+export interface MobileEnrollmentCreateResponse {
+  enrollmentId: string;
+  /** One-time QR secret (only place it is ever returned). */
+  secret: string;
+  /** Validated canonical HTTPS origin baked into the QR. */
+  serverOrigin: string;
+  clientType: MobileClientType;
+  /** Whether the resulting registration may bootstrap an admin web session. */
+  webAdmin: boolean;
+  /** Epoch-ms instant the enrollment expires (10 min). */
+  expiresAt: number;
+  /** Seconds until expiry (drives a QR countdown). */
+  expiresInSeconds: number;
+}
+
+/** Minimal, revocation-safe metadata about a paired device. Deliberately
+ *  contains no secrets and no host config; only identity + presence. */
+export interface MobilePairedHostSummary {
+  hostId: string;
+  displayName: string;
+  clientType: MobileClientType;
+  appVersion: string;
+  /** Epoch-ms instant the enrollment was exchanged. */
+  createdAt: number;
+  lastSeenAt: number | null;
+  revokedAt: number | null;
+}
+
+/** Admin status read (GET /api/v1/mobile/enrollments/:id). Never secrets. */
+export interface MobileEnrollmentStatusResponse {
+  enrollmentId: string;
+  status: MobileEnrollmentStatus;
+  /** Epoch-ms expiry instant. */
+  expiresAt: number;
+  /** Present once the enrollment has been used (a registration exists). */
+  host: MobilePairedHostSummary | null;
+}
+
+/** Exchange body (POST /api/v1/mobile/enrollments/:id/exchange). Exactly
+ *  unauthenticated: enrollment id + QR secret prove intent; the client never
+ *  chooses a host id or grant level. */
+export interface MobileEnrollmentExchangeRequest {
+  enrollmentId: string;
+  /** One-time QR secret from the scanned QR. */
+  secret: string;
+  /** Operator-chosen device display name, e.g. "Pixel 9". */
+  displayName: string;
+  /** App version string, e.g. "1.2.0". */
+  appVersion: string;
+}
+
+/** One-time exchange result. Server-chosen host id and freshly minted
+ *  authority (native token + separate web grant). Each secret is returned
+ *  exactly once here. */
+export interface MobileEnrollmentExchangeResponse {
+  /** Server-created host id for the new registration. */
+  hostId: string;
+  /** Opaque native credential; returned exactly once. */
+  nativeToken: string;
+  /** Separate opaque web grant (admin iff enrollment.webAdmin); returned once. */
+  webGrant: string;
+  /** Validated canonical HTTPS origin. */
+  serverOrigin: string;
+  displayName: string;
+  clientType: MobileClientType;
+}
+
+/** Web-session bootstrap (POST /api/v1/mobile/web-session): authenticates
+ *  with the web grant and issues the session cookie + CSRF token to the HTTP
+ *  client. Accepts no cross-origin browser request; native token alone → 403. */
+export interface MobileWebSessionBootstrapRequest {
+  /** The opaque web grant issued by the enrollment exchange. */
+  grant: string;
+}
+
+export interface MobileWebSessionBootstrapResponse {
+  hostId: string;
+  displayName: string;
+  /** Epoch-ms absolute session expiry (12 h). */
+  expiresAt: number;
+  /** Session-bound CSRF token for cookie-authenticated mutations. */
+  csrfToken: string;
+}
+
+/** GET /api/v1/mobile/me — the native principal's own registration,
+ *  revocation-safe and minimal. No backend config, secrets, fleet data, or
+ *  upload capabilities. */
+export interface MobileMeResponse {
+  hostId: string;
+  displayName: string;
+  clientType: MobileClientType;
+  appVersion: string;
+  /** Epoch-ms instant the device paired (registration created). */
+  pairedAt: number;
+  serverOrigin: string;
+}
+
+export interface MobileCheckInRequest {
+  /** App version reported on launch/resume check-in. */
+  appVersion: string;
+}
+
+export interface MobileCheckInResponse {
+  hostId: string;
+  /** Epoch-ms server-recorded last-seen instant after this check-in. */
+  lastSeenAt: number;
+}
+
+/** Admin revoke body (POST /api/v1/mobile/registrations/:hostId/revoke).
+ *  Revokes native access, web grant, and all web sessions atomically. */
+export interface MobileRegistrationRevokeRequest {
+  reason?: string;
+}
+
+export interface MobileRegistrationRevokeResponse {
+  hostId: string;
+  /** Epoch-ms revocation instant. */
+  revokedAt: number;
+}
+
+/** POST /api/v1/mobile/web-session/logout (current session, CSRF-protected).
+ *  Invalidates that session + clears the cookie; does not revoke native. */
+export interface MobileWebSessionLogoutResponse {
+  loggedOut: true;
 }

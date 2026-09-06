@@ -478,6 +478,87 @@ CREATE TABLE IF NOT EXISTS server_deploy_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_server_deploy_jobs_status
     ON server_deploy_jobs(status, requested_at);
+
+-- LAMA-296: Android companion enrollment. One row per QR shown by the
+-- desktop web UI. The QR secret is stored ONLY as secret_hash (SHA-256 hex);
+-- the plaintext secret is returned exactly once at creation and lives only
+-- in the QR the app scans. host_id is a server-SELECTED brand-new host id
+-- (never an existing host); UNIQUE(host_id) + UNIQUE(secret_hash) enforce
+-- one installation per enrollment and per host. Status is the single-use
+-- gate: the exchange handler transactionally flips pending→used (guarded by
+-- status = 'pending' AND expires_at > now) before inserting the
+-- registration, so concurrent exchanges yield at most one registration.
+CREATE TABLE IF NOT EXISTS mobile_enrollments (
+    id            TEXT PRIMARY KEY,              -- random public enrollment id
+    secret_hash   TEXT NOT NULL UNIQUE,          -- SHA-256 hex of 256-bit QR secret
+    host_id       TEXT NOT NULL UNIQUE,          -- server-selected NEW host id
+    client_type   TEXT NOT NULL DEFAULT 'android',
+    web_admin     INTEGER NOT NULL DEFAULT 0,    -- explicit web-admin grant flag
+    status        TEXT NOT NULL DEFAULT 'pending', -- pending|used|expired|revoked
+    expires_at    INTEGER NOT NULL,              -- epoch ms (10 min)
+    created_at    INTEGER NOT NULL,
+    consumed_at   INTEGER,                       -- set when the single-use gate fires
+    revoked_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_enrollments_status_expires
+    ON mobile_enrollments(status, expires_at);
+
+-- LAMA-296: one mobile installation (not a user account). host_id is the PK
+-- and references a hosts row the server creates during the exchange
+-- transaction, so exactly one registration can ever exist per host. The
+-- native credential is stored ONLY as native_token_hash (SHA-256 hex); it is
+-- the "native credential linkage". The "web-grant linkage" is the reverse
+-- FK from web_grants.registration_id (below), keeping the relationship
+-- one-directional and free of circular FKs.
+CREATE TABLE IF NOT EXISTS mobile_registrations (
+    host_id           TEXT PRIMARY KEY REFERENCES hosts(id),
+    client_type       TEXT NOT NULL DEFAULT 'android',
+    display_name      TEXT NOT NULL,
+    app_version       TEXT NOT NULL,
+    native_token_hash TEXT NOT NULL UNIQUE,      -- native credential (hash only)
+    created_at        INTEGER NOT NULL,
+    last_seen_at      INTEGER,
+    revoked_at        INTEGER,
+    revoked_reason    TEXT
+);
+
+-- LAMA-296: separate opaque web-grant credential (accepted only by the
+-- mobile web-session bootstrap route, never as a normal REST bearer or
+-- native identity). Stored as grant_hash only. registration_id UNIQUE ties
+-- the grant 1:1 to its registration (one web grant per installation); admin
+-- snapshots the enrollment.web_admin decision so a grant is admin only when
+-- the desktop explicitly asked for it.
+CREATE TABLE IF NOT EXISTS web_grants (
+    id              TEXT PRIMARY KEY,
+    grant_hash      TEXT NOT NULL UNIQUE,        -- opaque renewal credential (hash only)
+    registration_id TEXT NOT NULL UNIQUE REFERENCES mobile_registrations(host_id),
+    admin           INTEGER NOT NULL DEFAULT 0,  -- web-admin capability (from enrollment.web_admin)
+    created_at      INTEGER NOT NULL,
+    revoked_at      INTEGER,
+    revoked_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_web_grants_registration
+    ON web_grants(registration_id);
+
+-- LAMA-296: hashed session secrets issued by the web-session bootstrap. The
+-- client cookie holds the random session secret; the server stores only its
+-- session_hash (SHA-256 hex) for O(1) lookup. 12-hour absolute expiry;
+-- registration/grant linkage lets revocation and expiry stop delivery to
+-- active connections in-process.
+CREATE TABLE IF NOT EXISTS web_sessions (
+    id              TEXT PRIMARY KEY,            -- public session id (audit)
+    session_hash    TEXT NOT NULL UNIQUE,        -- SHA-256 of random session secret
+    registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id),
+    grant_id        TEXT NOT NULL REFERENCES web_grants(id),
+    admin           INTEGER NOT NULL DEFAULT 0,  -- grant.admin snapshot at bootstrap
+    issued_at       INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL,            -- epoch ms, absolute 12 h
+    revoked_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_web_sessions_registration
+    ON web_sessions(registration_id);
+CREATE INDEX IF NOT EXISTS idx_web_sessions_grant
+    ON web_sessions(grant_id);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -648,6 +729,19 @@ export const MIGRATIONS: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_app_protections_template ON application_protections(template_id)",
   "CREATE INDEX IF NOT EXISTS idx_app_snapshots_protection_ts ON application_snapshots(protection_id, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_app_snapshots_host ON application_snapshots(source_host_id)",
+  // LAMA-296: Android companion enrollment/registration/web-session tables.
+  // Schema lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF
+  // NOT EXISTS entries are the idempotent safety net for existing databases
+  // ("already exists" is swallowed by initDb's try/catch wrapper). All
+  // secret-bearing columns are *_hash (SHA-256 hex); no plaintext secrets.
+  "CREATE TABLE IF NOT EXISTS mobile_enrollments (id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL UNIQUE, host_id TEXT NOT NULL UNIQUE, client_type TEXT NOT NULL DEFAULT 'android', web_admin INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, consumed_at INTEGER, revoked_at INTEGER)",
+  "CREATE INDEX IF NOT EXISTS idx_mobile_enrollments_status_expires ON mobile_enrollments(status, expires_at)",
+  "CREATE TABLE IF NOT EXISTS mobile_registrations (host_id TEXT PRIMARY KEY REFERENCES hosts(id), client_type TEXT NOT NULL DEFAULT 'android', display_name TEXT NOT NULL, app_version TEXT NOT NULL, native_token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER, revoked_at INTEGER, revoked_reason TEXT)",
+  "CREATE TABLE IF NOT EXISTS web_grants (id TEXT PRIMARY KEY, grant_hash TEXT NOT NULL UNIQUE, registration_id TEXT NOT NULL UNIQUE REFERENCES mobile_registrations(host_id), admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, revoked_at INTEGER, revoked_reason TEXT)",
+  "CREATE INDEX IF NOT EXISTS idx_web_grants_registration ON web_grants(registration_id)",
+  "CREATE TABLE IF NOT EXISTS web_sessions (id TEXT PRIMARY KEY, session_hash TEXT NOT NULL UNIQUE, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), grant_id TEXT NOT NULL REFERENCES web_grants(id), admin INTEGER NOT NULL DEFAULT 0, issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER)",
+  "CREATE INDEX IF NOT EXISTS idx_web_sessions_registration ON web_sessions(registration_id)",
+  "CREATE INDEX IF NOT EXISTS idx_web_sessions_grant ON web_sessions(grant_id)",
 ];
 
 /**
