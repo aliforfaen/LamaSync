@@ -92,11 +92,12 @@ describe("downloadAndReplace", () => {
     }
   }
 
-  /** Stand-in for the network: Bun's fetch type carries a `preconnect`
-   *  static, so stubs need an assertion to satisfy the type. */
+  /** Stand-in for the network. Bun's fetch type also carries `preconnect`. */
   function fetchStub(body: BodyInit, status = 200): typeof globalThis.fetch {
-    const stub = async (): Promise<Response> => new Response(body, { status });
-    return stub as unknown as typeof globalThis.fetch;
+    return Object.assign(
+      async (): Promise<Response> => new Response(body, { status }),
+      { preconnect: globalThis.fetch.preconnect },
+    );
   }
 
   function stagedFiles(): string[] {

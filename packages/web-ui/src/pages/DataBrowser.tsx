@@ -587,6 +587,7 @@ function freshTrashCardState(): TrashCardState {
 
 const SIZE_JOB_POLL_MS = 1200;
 const SIZE_JOB_TIMEOUT_MS = 90_000;
+const DELETE_JOB_TIMEOUT_MS = 90_000;
 
 function TrashPanel({
   browseRef,
@@ -744,11 +745,35 @@ function TrashPanel({
   async function confirmEmpty(prefix: string): Promise<void> {
     setCard(prefix, { confirmOpen: false, emptying: true, actionError: null });
     try {
-      await api.browseDelete(apiRef, [prefix]);
-      // The purge runs as a job; refresh hides the card once the listing
-      // stops reporting the trash directory. Failure surfaces in the
-      // Recent operations panel below.
-      reload();
+      const job = await api.browseDelete(apiRef, [prefix]);
+      const startedAt = Date.now();
+      for (;;) {
+        if (!mountedRef.current) return;
+        const jobs = await api.listBrowseJobs(40).catch(() => null);
+        const row = jobs?.find((candidate) => candidate.id === job.id);
+        if (row?.status === "done") {
+          // Reload only after the asynchronous purge is terminal. Reloading
+          // immediately commonly races the job and leaves the card stuck in
+          // its busy state because the trash is still present in that listing.
+          reload();
+          return;
+        }
+        if (row?.status === "failed" || row?.status === "cancelled") {
+          setCard(prefix, {
+            emptying: false,
+            actionError: row.error ?? "Emptying the trash did not complete.",
+          });
+          return;
+        }
+        if (Date.now() - startedAt > DELETE_JOB_TIMEOUT_MS) {
+          setCard(prefix, {
+            emptying: false,
+            actionError: "Timed out waiting for Empty trash — see Recent operations.",
+          });
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, SIZE_JOB_POLL_MS));
+      }
     } catch (err) {
       setCard(prefix, { emptying: false, actionError: errorText(err) });
     }

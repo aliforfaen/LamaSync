@@ -9,7 +9,10 @@ import type {
   BrowseRef,
   BrowseTrash,
   Folder,
+  FolderBackend,
+  FolderType,
 } from "@lamasync/core";
+import { resolveDestination } from "@lamasync/core";
 import { resolveBrowsePath, statEntry, validateBrowseInput } from "../browse-paths.ts";
 import { listS3Objects, S3ListObjectsError } from "../s3-list.ts";
 import { getCachedPrefixSize } from "../browse-sizes.ts";
@@ -53,21 +56,109 @@ export function __setListS3Impl(impl: typeof listS3Objects): void {
 interface FolderRow {
   id: string;
   name: string;
+  type: string;
   backend: string | null;
   backend_id: string | null;
   s3_bucket: string | null;
 }
 
 function rowToFolder(r: FolderRow): Folder {
-  const backend = r.backend === "s3" || r.backend === "local" ? r.backend : "sftp";
+  const backend = folderBackend(r.backend);
   return {
     id: r.id,
     name: r.name,
-    type: "sync" as const,
+    type: folderType(r.type),
     backend,
     backendId: backend === "s3" ? r.backend_id : null,
     s3Bucket: r.s3_bucket,
   };
+}
+
+function folderType(value: string): FolderType {
+  switch (value) {
+    case "mount":
+    case "backup":
+    case "dotfile":
+    case "git":
+    case "sync":
+      return value;
+    default:
+      // The folder API validates this at write time. Failing closed as sync
+      // keeps old malformed rows from deriving host-scoped backup prefixes.
+      return "sync";
+  }
+}
+
+function folderBackend(value: string | null): FolderBackend {
+  switch (value) {
+    case "s3":
+    case "local":
+    case "nfs":
+    case "restic":
+    case "sftp":
+      return value;
+    default:
+      return "sftp";
+  }
+}
+
+interface DestinationAssignmentRow {
+  host_id: string;
+  remote_name: string | null;
+  destination: string | null;
+}
+
+/**
+ * A Freedesktop trash lives at the root of the mounted filesystem. The data
+ * browser can visit arbitrary subdirectories, so matching the name alone is
+ * insufficient: a project may legitimately contain a `.Trash-1000` folder.
+ * Only surface the irreversible trash affordance when this exact browse path
+ * is one of the configured destination roots for the selected folder.
+ */
+function isConfiguredDestinationRoot(folder: Folder, path: string): boolean {
+  const rows = activeDb
+    .query<DestinationAssignmentRow, [string]>(
+      "SELECT host_id, remote_name, destination FROM folder_assignments WHERE folder_id = ?",
+    )
+    .all(folder.id);
+  return rows.some((row) => {
+    try {
+      return resolveDestination(folder, {
+        hostId: row.host_id,
+        remoteName: row.remote_name,
+        destination: row.destination,
+      }) === path;
+    } catch {
+      // A malformed legacy assignment is not a safe place to expose an
+      // irreversible delete affordance.
+      return false;
+    }
+  });
+}
+
+/** Local browse is not folder-selected. Accept a destination root only when
+ * one configured folder assignment resolves to the current local path. */
+function isConfiguredLocalDestinationRoot(path: string): boolean {
+  const rows = activeDb
+    .query<FolderRow & DestinationAssignmentRow, []>(
+      `SELECT f.id, f.name, f.type, f.backend, f.backend_id, f.s3_bucket,
+              a.host_id, a.remote_name, a.destination
+         FROM folders f
+         JOIN folder_assignments a ON a.folder_id = f.id`,
+    )
+    .all();
+  return rows.some((row) => {
+    try {
+      const folder = rowToFolder(row);
+      return resolveDestination(folder, {
+        hostId: row.host_id,
+        remoteName: row.remote_name,
+        destination: row.destination,
+      }) === path;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function getBackupRoot(): string {
@@ -228,12 +319,17 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
       // LAMA-321: freedesktop trash detection. Only exact `.Trash-<uid>` /
       // `.Trash/<uid>` layouts count; the `.Trash` child peek happens only
       // when a `.Trash` directory is actually present in this listing.
-      const direct = directTrashCandidates(entries);
-      let children: TrashLikeEntry[] | null = null;
-      if (direct.hasDotTrash) {
-        children = localTrashChildren(join(resolved, ".Trash"));
-      }
-      const trash = trashFromListing(direct, children);
+      // The browser root may itself be the mounted remote. Otherwise only a
+      // configured assignment destination is a valid filesystem root.
+      const trash = (canonical === "" || isConfiguredLocalDestinationRoot(canonical))
+        ? (() => {
+            const direct = directTrashCandidates(entries);
+            const children = direct.hasDotTrash
+              ? localTrashChildren(join(resolved, ".Trash"))
+              : null;
+            return trashFromListing(direct, children);
+          })()
+        : [];
 
       const response: BrowseResponse = {
         backend: "local",
@@ -272,7 +368,7 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const row = activeDb
         .query<FolderRow, [string]>(
-          "SELECT id, name, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
+          "SELECT id, name, type, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
         )
         .get(folderId);
       if (!row) {
@@ -311,23 +407,29 @@ export const browseRoutes = new Elysia({ prefix: "/api/v1" })
         // layout needs one extra peek listing inside `.Trash`; a peek
         // failure (bucket hiccup) drops only the trash annotation, never
         // the listing itself.
-        const direct = directTrashCandidates(listing.entries);
-        let children: TrashLikeEntry[] | null = null;
-        if (direct.hasDotTrash) {
-          try {
-            const peekPrefix =
-              canonical === "" ? ".Trash/" : `${canonical}/.Trash/`;
-            const peek = await listS3(s3, peekPrefix, 1000);
-            children = peek.entries.map((e) => ({ name: e.name, type: e.type }));
-          } catch (err) {
-            if (err instanceof S3ListObjectsError) {
-              console.error(`[browse] .Trash peek failed: ${err.message}`);
-            } else {
-              throw err;
+        let trash: BrowseTrash[] = [];
+        // A folder may deliberately mount its bucket root. For any nested
+        // browse path, require a configured destination root before exposing
+        // the irreversible affordance.
+        if (canonical === "" || isConfiguredDestinationRoot(folder, canonical)) {
+          const direct = directTrashCandidates(listing.entries);
+          let children: TrashLikeEntry[] | null = null;
+          if (direct.hasDotTrash) {
+            try {
+              const peekPrefix =
+                canonical === "" ? ".Trash/" : `${canonical}/.Trash/`;
+              const peek = await listS3(s3, peekPrefix, 1000);
+              children = peek.entries.map((e) => ({ name: e.name, type: e.type }));
+            } catch (err) {
+              if (err instanceof S3ListObjectsError) {
+                console.error(`[browse] .Trash peek failed: ${err.message}`);
+              } else {
+                throw err;
+              }
             }
           }
+          trash = trashFromListing(direct, children);
         }
-        const trash = trashFromListing(direct, children);
         const response: BrowseResponse = {
           backend: "s3",
           path: canonical,

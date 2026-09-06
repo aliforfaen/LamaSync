@@ -49,6 +49,18 @@ function postJson(path: string, body: unknown): Promise<Response> {
   return Promise.resolve(app.handle(request(path, { method: "POST", body: JSON.stringify(body) })));
 }
 
+function addConfiguredLocalDestination(path: string): void {
+  db.run("INSERT INTO hosts (id, hostname) VALUES ('trash-host', 'trash-host')");
+  db.run(
+    "INSERT INTO folders (id, name, type, backend) VALUES ('trash-folder', 'trash-folder', 'sync', 'sftp')",
+  );
+  db.run(
+    `INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, destination)
+     VALUES ('trash-assignment', 'trash-folder', 'trash-host', 'both', '/tmp/trash', ?)`,
+    [path],
+  );
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "lamasync-browse-ops-"));
   mkdirSync(join(root, "src", "dir"), { recursive: true });
@@ -303,10 +315,26 @@ describe("LAMA-321 empty-trash busy conflicts", () => {
     expect(failed).toBeTruthy();
     expect(failed?.error).toContain("destination busy");
   });
+
+  test("a read-only size job does not occupy the writer destination lock", async () => {
+    mkdirSync(join(root, "vault"));
+    db.run(
+      `INSERT INTO browse_jobs (id, operation, source, destination, status, error, progress_bytes, total_bytes, created_at, updated_at)
+       VALUES (?, 'size', 'size:local::vault|.Trash-1000', 'size:local::vault|.Trash-1000', 'running', NULL, NULL, NULL, ?, ?)`,
+      ["in-flight-size", Date.now(), Date.now()],
+    );
+
+    const res = await postJson("/api/v1/browse/delete", {
+      ref: { kind: "local", path: "vault" },
+      names: [".Trash-1000"],
+    });
+    expect(res.status).toBe(201);
+  });
 });
 
 e2e("LAMA-321 empty trash (local)", () => {
   test("size, empty, audit, and cache invalidation round-trip", async () => {
+    addConfiguredLocalDestination("vault");
     mkdirSync(join(root, "vault", ".Trash-1000", "files"), { recursive: true });
     mkdirSync(join(root, "vault", ".Trash-1000", "info"), { recursive: true });
     writeFileSync(join(root, "vault", ".Trash-1000", "files", "old.bin"), Buffer.alloc(10, 7));

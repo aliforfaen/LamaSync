@@ -39,8 +39,9 @@ tests, strict skill drift, and distributable binary build.
   on hosts where `/tmp` and `~/.local/bin` are different filesystems, as
   observed on `norheim`.
 - **LAMA-321 (first pass) — trash management in the Data Browser.** Freedesktop
-  trash layouts (`.Trash-<uid>`, `.Trash/<uid>`) are detected on Local and S3
-  folder listings; each trash card supports on-demand recursive size via the
+  trash layouts (`.Trash-<uid>`, `.Trash/<uid>`) are detected only at a browse
+  root or configured folder destination on Local and S3 listings; each trash
+  card supports on-demand recursive size via the
   new `POST/GET /browse/size` job (paginated S3 aggregation, cached results —
   also fixes measured prefixes showing 0 B) and an explicit Empty-trash action
   reusing the audited browse-delete job with an irreversible confirmation.

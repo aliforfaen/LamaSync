@@ -956,13 +956,17 @@ export async function startBrowseSize(
   assertSafePath(ref.path, prefix);
 
   const dKey = destKey(ref);
-  const sKey = `${dKey}|${prefix}`;
+  // Size is read-only: give it a distinct job destination so the durable
+  // writer guard does not reject writes while a potentially slow listing is
+  // in flight. The source still identifies the measured prefix for audit.
+  const sKey = `size:${dKey}|${prefix}`;
+  const sizeDestination = `size:${dKey}|${prefix}`;
   const now = Date.now();
   const job: BrowseJob = {
     id: crypto.randomUUID(),
     operation: "size",
     source: sKey,
-    destination: dKey,
+    destination: sizeDestination,
     status: "running",
     error: null,
     progressBytes: null,

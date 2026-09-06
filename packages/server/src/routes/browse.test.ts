@@ -346,6 +346,18 @@ function trashOf(body: unknown): Array<{ uid: number; prefix: string }> {
   return asRecord.trash ?? [];
 }
 
+function addConfiguredLocalDestination(path: string): void {
+  db.run("INSERT INTO hosts (id, hostname) VALUES ('trash-host', 'trash-host')");
+  db.run(
+    "INSERT INTO folders (id, name, type, backend) VALUES ('trash-folder', 'trash-folder', 'sync', 'sftp')",
+  );
+  db.run(
+    `INSERT INTO folder_assignments (id, folder_id, host_id, role, local_path, destination)
+     VALUES ('trash-assignment', 'trash-folder', 'trash-host', 'both', '/tmp/trash', ?)`,
+    [path],
+  );
+}
+
 async function waitTerminalJob(id: string, timeoutMs = 15000): Promise<{
   status: string;
   error: string | null;
@@ -407,6 +419,7 @@ describe("LAMA-321 GET /api/v1/browse/local trash detection", () => {
   });
 
   test("detects trash inside a subdirectory listing", async () => {
+    addConfiguredLocalDestination("mounts/bucket");
     mkdirSync(join(dataDir, "mounts", "bucket", ".Trash-1000", "files"), {
       recursive: true,
     });
@@ -420,6 +433,19 @@ describe("LAMA-321 GET /api/v1/browse/local trash detection", () => {
     const body = (await res.json()) as { path: string; trash?: Array<{ uid: number; prefix: string }> };
     expect(body.path).toBe("mounts/bucket");
     expect(body.trash).toEqual([{ uid: 1000, prefix: ".Trash-1000" }]);
+  });
+
+  test("does not label a matching directory outside a configured destination root", async () => {
+    mkdirSync(join(dataDir, "project", ".Trash-1000", "files"), {
+      recursive: true,
+    });
+
+    const app = new Elysia().use(browseRoutes);
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/browse/local?path=project"),
+    );
+    expect(res.status).toBe(200);
+    expect(trashOf(await res.json())).toEqual([]);
   });
 });
 
@@ -523,6 +549,7 @@ describe("LAMA-321 size jobs over the API", () => {
   }
 
   test("local size job: measures a tree, caches it, merges into the listing", async () => {
+    addConfiguredLocalDestination("work");
     mkdirSync(join(dataDir, "work", ".Trash-1000", "files"), { recursive: true });
     writeFileSync(join(dataDir, "work", ".Trash-1000", "files", "a.txt"), "12345");
     writeFileSync(join(dataDir, "work", ".Trash-1000", "files", "b.bin"), Buffer.alloc(10, 7));
