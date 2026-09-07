@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -63,7 +64,11 @@ fun WelcomeScreen(
     state: UiState,
     onScan: () -> Unit,
     onReset: () -> Unit,
+    onResumePending: () -> Unit,
+    onRetryCleanup: () -> Unit,
 ) {
+    val pending = state.pendingEnrollment
+    val lostCredentials = state.registration != null
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -74,25 +79,94 @@ fun WelcomeScreen(
         Text("LamaSync Companion", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
         Text(
-            if (state.registration != null) {
-                "Paired with ${state.registration.origin}, but the stored credentials could not be " +
-                    "unlocked on this device (key material lost). Reset the pairing below, then " +
-                    "enroll again from the desktop."
-            } else {
-                "Manage your LamaSync fleet from your phone. Scan the Android enrollment " +
-                    "QR code shown in the authenticated desktop web UI — one scan signs in " +
-                    "both the native app and the embedded web UI."
+            when {
+                lostCredentials ->
+                    "Paired with ${state.registration!!.origin}, but the stored credentials could not " +
+                        "be unlocked on this device (key material lost). Reset the pairing below, " +
+                        "then enroll again from the desktop."
+                pending != null ->
+                    "Your enrollment with ${pending.origin} was interrupted before pairing " +
+                        "finished. Resume to finish enrolling this device as “${pending.displayName}” " +
+                        "— the QR code was already exchanged, so no scan is needed."
+                else ->
+                    "Manage your LamaSync fleet from your phone. Scan the Android enrollment " +
+                        "QR code shown in the authenticated desktop web UI — one scan signs in " +
+                        "both the native app and the embedded web UI."
             },
             style = MaterialTheme.typography.bodyLarge,
         )
-        Spacer(Modifier.height(28.dp))
-        Button(onClick = onScan, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-            Text(if (state.registration != null) "Enroll with a new server" else "Scan enrollment QR code", fontSize = MaterialTheme.typography.titleMedium.fontSize)
+        if (state.cleanupUnconfirmed) {
+            Spacer(Modifier.height(16.dp))
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        when {
+                            state.cleanupRemoteSucceeded == true ->
+                                "Disconnected from the server, but local cleanup is incomplete: the " +
+                                    "web session${cleanupOriginsText(state)} could not be removed from this device."
+                            state.cleanupRemoteSucceeded == false ->
+                                "Disconnect is incomplete: remote revocation failed, and the web " +
+                                    "session${cleanupOriginsText(state)} could not be removed locally. Revoke this " +
+                                    "device from the desktop server UI to be safe."
+                            else ->
+                                "A previous disconnect could not fully clean this device: the web " +
+                                    "session${cleanupOriginsText(state)} may still be present."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = onRetryCleanup,
+                        enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Retry cleanup")
+                    }
+                }
+            }
         }
-        if (state.registration != null) {
+        Spacer(Modifier.height(28.dp))
+        if (pending != null) {
+            Button(
+                onClick = onResumePending,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Text("Resume enrollment", fontSize = MaterialTheme.typography.titleMedium.fontSize)
+            }
             Spacer(Modifier.height(12.dp))
-            OutlinedButton(onClick = onReset, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = onScan, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                Text("Scan a different QR code")
+            }
+        } else {
+            Button(
+                onClick = onScan,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Text(
+                    if (lostCredentials) "Enroll with a new server" else "Scan enrollment QR code",
+                    fontSize = MaterialTheme.typography.titleMedium.fontSize,
+                )
+            }
+        }
+        if (lostCredentials) {
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = onReset, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
                 Text("Clear this device and reset")
+            }
+        }
+        if (state.busy && state.progressLabel != null) {
+            Spacer(Modifier.height(20.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(12.dp))
+                Text(state.progressLabel, style = MaterialTheme.typography.bodyMedium)
             }
         }
         Spacer(Modifier.height(16.dp))
@@ -104,6 +178,9 @@ fun WelcomeScreen(
         )
     }
 }
+
+private fun cleanupOriginsText(state: UiState): String =
+    if (state.cleanupOrigins.isEmpty()) "" else " for ${state.cleanupOrigins.joinToString()}"
 
 @Composable
 fun ScannerScreen(onQrScanned: (String) -> Unit, onBack: () -> Unit) {

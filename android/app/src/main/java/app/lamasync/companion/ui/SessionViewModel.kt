@@ -14,6 +14,7 @@ import app.lamasync.companion.core.QrPayloadResult
 import app.lamasync.companion.core.QrRejection
 import app.lamasync.companion.data.CompanionRepository
 import app.lamasync.companion.data.EnrollmentBinding
+import app.lamasync.companion.data.EnrollmentStage
 import app.lamasync.companion.data.KeystoreCredentialVault
 import app.lamasync.companion.data.Registration
 import app.lamasync.companion.data.RegistrationStoreImpl
@@ -33,11 +34,27 @@ enum class Screen { WELCOME, SCANNER, CONFIRM, PROGRESS, MANAGE, CONNECTION }
 /** One-shot user-facing message (shown as a snackbar). */
 data class UiMessage(val text: String, val isError: Boolean = false)
 
+/**
+ * A persisted enrollment whose exchange already succeeded but whose identity
+ * probe/registration never completed (stage EXCHANGED with usable secrets).
+ * The app can finish it WITHOUT the QR — resuming only ever talks to
+ * [origin], and [displayName] is the name the user already chose (R1).
+ */
+data class PendingEnrollment(
+    val origin: String,
+    val displayName: String,
+)
+
 data class UiState(
     val screen: Screen = Screen.WELCOME,
     val registration: Registration? = null,
     /** Enrolled origin whose key material could not be decrypted (re-pair needed). */
     val credentialLost: Boolean = false,
+    /**
+     * Interrupted enrollment recoverable without a QR (see [PendingEnrollment]).
+     * The WELCOME screen shows an explicit resume action while this is set.
+     */
+    val pendingEnrollment: PendingEnrollment? = null,
     /** Validated QR candidate awaiting confirmation; never in nav args. */
     val candidate: EnrollmentQrPayload? = null,
     /**
@@ -54,6 +71,15 @@ data class UiState(
     val lastCheckInLabel: String? = null,
     val checkInOk: Boolean? = null,
     val webSessionConnected: Boolean = false,
+    /**
+     * True while a disconnect's local cleanup is still unconfirmed (R2). The
+     * WELCOME screen shows the failure and a retry action; the origin(s)
+     * below (plus the remote outcome) let the retry finish without secrets.
+     */
+    val cleanupUnconfirmed: Boolean = false,
+    val cleanupOrigins: List<String> = emptyList(),
+    /** Remote outcome of the disconnect whose cleanup is unconfirmed (null = relaunch, unknown). */
+    val cleanupRemoteSucceeded: Boolean? = null,
 )
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
@@ -96,21 +122,82 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         initialized = true
         val snapshot = repository.loadSession()
         val registration = snapshot.registration
+        // R1: an enrollment whose exchange already succeeded (EXCHANGED
+        // binding) but whose identity/registration never completed must be
+        // recoverable after a restart WITHOUT re-scanning the consumed QR.
+        // Completed enrollments (registration present) are untouched — a web
+        // logout that merely cleared the cookie never auto-re-bootstraps.
+        val pending = pendingEnrollmentOf(snapshot)
         _ui.update { state ->
             val screen = when {
                 registration != null && snapshot.hasUsableNativeCredential -> Screen.MANAGE
-                registration != null -> Screen.WELCOME // credentials lost: re-pair required
                 else -> Screen.WELCOME
             }
             state.copy(
                 screen = screen,
                 registration = registration,
+                pendingEnrollment = pending,
                 credentialLost = registration != null && !snapshot.hasUsableNativeCredential,
                 webSessionConnected = snapshot.hasSessionCookie,
+                cleanupUnconfirmed = snapshot.cleanupPendingOrigins.isNotEmpty(),
+                cleanupOrigins = snapshot.cleanupPendingOrigins,
+                cleanupRemoteSucceeded = null, // remote outcome of an earlier launch is not retained
             )
         }
         if (registration != null && snapshot.hasUsableNativeCredential) {
             runCheckIn()
+        }
+    }
+
+    /**
+     * The pending-enrollment recovery candidate from [snapshot], if any: a
+     * registration-less EXCHANGED binding whose secrets are both usable. The
+     * display name is the one the user already chose when the QR was
+     * confirmed — resume preserves it (R1).
+     */
+    private fun pendingEnrollmentOf(
+        snapshot: CompanionRepository.SessionSnapshot,
+    ): PendingEnrollment? {
+        val binding = snapshot.pendingBinding ?: return null
+        if (snapshot.registration != null) return null
+        if (binding.stage != EnrollmentStage.EXCHANGED) return null
+        if (!snapshot.hasUsableNativeCredential || !snapshot.hasWebGrant) return null
+        return PendingEnrollment(origin = binding.origin, displayName = binding.displayName)
+    }
+
+    /**
+     * User tapped "Resume enrollment" on the pending-recovery surface. Finishes
+     * the interrupted enrollment at its BOUND origin with NO QR secret and NO
+     * new exchange; the repository refuses any other origin (R1).
+     */
+    fun resumePendingEnrollment() {
+        val pending = _ui.value.pendingEnrollment ?: return
+        _ui.update {
+            it.copy(busy = true, progressLabel = "Finishing enrollment…", message = null)
+        }
+        viewModelScope.launch {
+            when (val outcome = repository.completeEnrollment(pending.origin, appVersion)) {
+                is CompanionRepository.EnrollOutcome.Success -> onEnrollSuccess(outcome.registration)
+                is CompanionRepository.EnrollOutcome.Failure -> onPendingResumeFailure(outcome, pending)
+            }
+        }
+    }
+
+    private fun onPendingResumeFailure(
+        outcome: CompanionRepository.EnrollOutcome.Failure,
+        pending: PendingEnrollment,
+    ) {
+        val detail = enrollFailureDetail(outcome)
+        _ui.update {
+            it.copy(
+                busy = false,
+                progressLabel = null,
+                screen = Screen.WELCOME,
+                // The recovery surface stays: credentials + EXCHANGED binding
+                // are still persisted, so the user can retry the resume.
+                pendingEnrollment = it.pendingEnrollment ?: pending,
+                message = UiMessage("The interrupted enrollment could not be finished. $detail", isError = true),
+            )
         }
     }
 
@@ -119,8 +206,17 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onScannerBack() {
+        // Re-derive the recovery surface from the CURRENT persisted state:
+        // starting a different-QR flow may have cleared the in-flight binding
+        // (a stale EXCHANGED candidate must not reappear on WELCOME).
         _ui.update {
-            it.copy(screen = Screen.WELCOME, message = null, candidate = null, pendingResume = false)
+            it.copy(
+                screen = Screen.WELCOME,
+                message = null,
+                candidate = null,
+                pendingResume = false,
+                pendingEnrollment = pendingEnrollmentOf(repository.loadSession()),
+            )
         }
     }
 
@@ -225,10 +321,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 registration = registration,
                 candidate = null,
                 pendingResume = false,
+                pendingEnrollment = null,
                 busy = false,
                 progressLabel = null,
                 credentialLost = false,
                 webSessionConnected = true,
+                cleanupUnconfirmed = false,
+                cleanupOrigins = emptyList(),
+                cleanupRemoteSucceeded = null,
                 message = UiMessage("Enrolled with ${registration.origin}."),
             )
         }
@@ -236,24 +336,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun onEnrollFailure(outcome: CompanionRepository.EnrollOutcome.Failure) {
-        val cause = outcome.cause
         val stepText = when (outcome.step) {
             CompanionRepository.EnrollStep.EXCHANGE -> "The enrollment could not be exchanged"
+            CompanionRepository.EnrollStep.CLEANUP -> "The previous pairing could not be cleared"
             CompanionRepository.EnrollStep.STORE -> "Credentials could not be stored securely"
             CompanionRepository.EnrollStep.IDENTITY -> "The device identity could not be verified"
             CompanionRepository.EnrollStep.WEB_SESSION -> "The web session could not be opened"
         }
-        val detail = when (cause) {
-            is ApiFailure.EnrollmentExpired ->
-                "This enrollment expired. Ask the desktop to generate a new QR code."
-            is ApiFailure.EnrollmentConsumed ->
-                "This enrollment was already used. Ask the desktop to generate a new QR code."
-            is ApiFailure.Throttled -> "Too many attempts — wait a minute and try again."
-            is ApiFailure.Unauthorized ->
-                "The server rejected this enrollment. Ask the desktop to generate a new QR code."
-            is ApiFailure.Network -> "Cannot reach the server. Check the connection and retry."
-            else -> "Retry or ask the desktop to generate a new QR code."
-        }
+        val detail = enrollFailureDetail(outcome)
         val pending = _ui.value.candidate?.let { matchingBinding(it) } != null
         _ui.update {
             it.copy(
@@ -263,6 +353,26 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 pendingResume = pending,
                 message = UiMessage("$stepText. $detail", isError = true),
             )
+        }
+    }
+
+    private fun enrollFailureDetail(outcome: CompanionRepository.EnrollOutcome.Failure): String {
+        val cause = outcome.cause
+        if (cause is CompanionRepository.LocalCleanupUnconfirmed) {
+            val origins = cause.unconfirmedOrigins.joinToString()
+            return "The web session for $origins could not be removed, so the new enrollment " +
+                "did not start. Retry, or revoke the old device from the desktop server UI first."
+        }
+        return when (cause) {
+            is ApiFailure.EnrollmentExpired ->
+                "This enrollment expired. Ask the desktop to generate a new QR code."
+            is ApiFailure.EnrollmentConsumed ->
+                "This enrollment was already used. Ask the desktop to generate a new QR code."
+            is ApiFailure.Throttled -> "Too many attempts — wait a minute and try again."
+            is ApiFailure.Unauthorized ->
+                "The server rejected this enrollment. Ask the desktop to generate a new QR code."
+            is ApiFailure.Network -> "Cannot reach the server. Check the connection and retry."
+            else -> "Retry or ask the desktop to generate a new QR code."
         }
     }
 
@@ -341,25 +451,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         _ui.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             val result = repository.disconnect()
-            val message = if (result.remoteSucceeded) {
-                UiMessage("Disconnected. This device was revoked on the server.")
-            } else {
-                val why = when {
-                    result.grantInvalid -> "the web grant is no longer valid"
-                    result.remoteAttempted -> "the server could not be reached"
-                    else -> "no authorized web session was available"
-                }
-                UiMessage(
-                    "Local data cleared, but remote revocation could not be completed " +
-                        "($why). Revoke this device from the desktop server UI to be safe.",
-                    isError = true,
-                )
-            }
+            val localIncomplete = !result.localCleared
+            val message = disconnectMessage(result)
             _ui.update {
                 it.copy(
                     screen = Screen.WELCOME,
                     registration = null,
                     credentialLost = false,
+                    pendingEnrollment = null,
                     busy = false,
                     progressLabel = null,
                     candidate = null,
@@ -367,8 +466,104 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     webSessionConnected = false,
                     checkInOk = null,
                     lastCheckInLabel = null,
+                    cleanupUnconfirmed = localIncomplete,
+                    cleanupOrigins = result.unconfirmedCookieOrigins,
+                    cleanupRemoteSucceeded = if (localIncomplete) result.remoteSucceeded else null,
                     message = message,
                 )
+            }
+        }
+    }
+
+    /**
+     * Renders the remote and local disconnect outcomes INDEPENDENTLY: the
+     * message never claims "Local data cleared" (or implies a successful local
+     * disconnection) when [DisconnectResult.localCleared] is false, and it
+     * always says which remote outcome happened.
+     */
+    private fun disconnectMessage(result: CompanionRepository.DisconnectResult): UiMessage {
+        val localIncomplete = !result.localCleared
+        if (result.remoteSucceeded && !localIncomplete) {
+            return UiMessage("Disconnected. This device was revoked on the server.")
+        }
+        if (!result.remoteSucceeded && !localIncomplete) {
+            val why = when {
+                result.grantInvalid -> "the web grant is no longer valid"
+                result.remoteAttempted -> "the server could not be reached"
+                else -> "no authorized web session was available"
+            }
+            return UiMessage(
+                "Local data cleared, but remote revocation could not be completed " +
+                    "($why). Revoke this device from the desktop server UI to be safe.",
+                isError = true,
+            )
+        }
+        if (result.remoteSucceeded) {
+            return UiMessage(
+                "Disconnected from the server, but this device could not be fully cleaned " +
+                    "locally (its web session could not be removed). Use Retry cleanup below " +
+                    "to finish.",
+                isError = true,
+            )
+        }
+        val why = when {
+            result.grantInvalid -> "the web grant is no longer valid"
+            result.remoteAttempted -> "the server could not be reached"
+            else -> "no authorized web session was available"
+        }
+        return UiMessage(
+            "Disconnect is incomplete: remote revocation could not be completed ($why), and " +
+                "the web session on this device could not be removed locally. Revoke this device " +
+                "from the desktop server UI, then use Retry cleanup below.",
+            isError = true,
+        )
+    }
+
+    /**
+     * User tapped "Retry cleanup" after a disconnect whose local cleanup was
+     * unconfirmed (R2). Re-attempts removal of the retained origin cookie(s) —
+     * no secrets needed — and reports the outcome, including the earlier
+     * remote result so the guidance stays accurate.
+     */
+    fun retryCleanup() {
+        if (!_ui.value.cleanupUnconfirmed) return
+        val origins = _ui.value.cleanupOrigins
+        val remoteSucceeded = _ui.value.cleanupRemoteSucceeded
+        _ui.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            val result = repository.retryLocalCleanup(origins)
+            if (result.cleared) {
+                val message = when (remoteSucceeded) {
+                    true -> UiMessage("Local data removed. This device stays revoked on the server.")
+                    false -> UiMessage(
+                        "Local data removed. Remote revocation was not completed — revoke this " +
+                            "device from the desktop server UI to be safe.",
+                        isError = true,
+                    )
+                    null -> UiMessage("Local data removed.")
+                }
+                _ui.update {
+                    it.copy(
+                        busy = false,
+                        cleanupUnconfirmed = false,
+                        cleanupOrigins = emptyList(),
+                        cleanupRemoteSucceeded = null,
+                        message = message,
+                    )
+                }
+            } else {
+                _ui.update {
+                    it.copy(
+                        busy = false,
+                        cleanupOrigins = result.unconfirmedCookieOrigins,
+                        message = UiMessage(
+                            "Cleanup is still incomplete — the web session could not be removed. " +
+                                "Retry again, or revoke this device from the desktop server UI " +
+                                "to be safe.",
+                            isError = true,
+                        ),
+                    )
+                }
             }
         }
     }

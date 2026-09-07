@@ -2,6 +2,8 @@ package app.lamasync.companion.data
 
 import android.content.Context
 import androidx.core.content.edit
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
 /**
@@ -52,6 +54,25 @@ class RegistrationStoreImpl(context: Context) : RegistrationStore {
         }
     }
 
+    override fun loadCleanupPending(): List<String> {
+        val raw = preferences.getString(KEY_CLEANUP_PENDING, null) ?: return emptyList()
+        return try {
+            json.decodeFromString(ListSerializer(String.serializer()), raw)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    override fun saveCleanupPending(origins: List<String>) {
+        preferences.edit {
+            putString(KEY_CLEANUP_PENDING, json.encodeToString(ListSerializer(String.serializer()), origins))
+        }
+    }
+
+    override fun clearCleanupPending() {
+        preferences.edit { remove(KEY_CLEANUP_PENDING) }
+    }
+
     override fun clear() {
         preferences.edit { clear() }
     }
@@ -60,5 +81,6 @@ class RegistrationStoreImpl(context: Context) : RegistrationStore {
         const val PREFS_NAME = "lamasync_registration"
         const val KEY_REGISTRATION = "registration"
         const val KEY_BINDING = "enrollment_binding"
+        const val KEY_CLEANUP_PENDING = "cleanup_pending_origins"
     }
 }

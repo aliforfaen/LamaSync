@@ -56,6 +56,8 @@ class MainActivity : ComponentActivity() {
                                 state = uiState,
                                 onScan = viewModel::onLaunchFromWelcome,
                                 onReset = viewModel::disconnect,
+                                onResumePending = viewModel::resumePendingEnrollment,
+                                onRetryCleanup = viewModel::retryCleanup,
                             )
                             Screen.SCANNER -> ScannerScreen(
                                 onQrScanned = viewModel::onQrScanned,

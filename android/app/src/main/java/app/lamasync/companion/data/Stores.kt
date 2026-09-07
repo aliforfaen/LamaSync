@@ -82,6 +82,20 @@ interface RegistrationStore {
     /** Persists/updates the enrollment binding that ties credentials to an origin. */
     fun saveBinding(binding: EnrollmentBinding)
 
+    /**
+     * Loads the origins whose web-session cookie removal is still unconfirmed
+     * after a disconnect (R2). Plain non-secret origin strings, kept so a
+     * later launch can offer to retry the cleanup even though the
+     * registration/binding records were already cleared.
+     */
+    fun loadCleanupPending(): List<String>
+
+    /** Persists the origins whose cookie removal is still unconfirmed. */
+    fun saveCleanupPending(origins: List<String>)
+
+    /** Clears the unconfirmed-cleanup marker (cookie removal now confirmed). */
+    fun clearCleanupPending()
+
     /** Clears BOTH the registration and any pending enrollment binding. */
     fun clear()
 }

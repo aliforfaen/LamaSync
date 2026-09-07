@@ -165,6 +165,7 @@ class FakeVault : SecureCredentialVault {
 class FakeRegistrationStore : RegistrationStore {
     var registration: Registration? = null
     var binding: EnrollmentBinding? = null
+    var cleanupPending: List<String> = emptyList()
 
     override fun load(): Registration? = registration
     override fun save(registration: Registration) {
@@ -180,9 +181,19 @@ class FakeRegistrationStore : RegistrationStore {
         this.binding = binding
     }
 
+    override fun loadCleanupPending(): List<String> = cleanupPending
+    override fun saveCleanupPending(origins: List<String>) {
+        cleanupPending = origins
+    }
+
+    override fun clearCleanupPending() {
+        cleanupPending = emptyList()
+    }
+
     override fun clear() {
         registration = null
         binding = null
+        cleanupPending = emptyList()
     }
 }
 
@@ -197,6 +208,9 @@ class FakeCookieScope : WebCookieScope {
     /** When true, expiry reports failure (platform could not remove the cookie). */
     var failClear = false
 
+    /** When set, expiry throws instead of clearing (platform failure injection). */
+    var throwOnClear: Exception? = null
+
     override suspend fun installSessionCookie(origin: String, setCookieHeader: String): Boolean {
         if (rejectInstall) return false
         installed += origin
@@ -208,6 +222,7 @@ class FakeCookieScope : WebCookieScope {
 
     override suspend fun clearSessionCookie(origin: String): Boolean {
         cleared += origin
+        throwOnClear?.let { throw it }
         if (failClear) return false
         cookies.remove(origin)
         return true

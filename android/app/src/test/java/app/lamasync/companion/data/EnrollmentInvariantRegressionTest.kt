@@ -20,10 +20,12 @@ import org.junit.Test
 
 /**
  * Regressions for the enrollment-binding invariant (review finding 1) and the
- * disconnect session pairing / cleanup reporting (findings 2 and 3) at the
- * repository layer. These enforce the rules independent of ViewModel checks:
- * stored credentials are bound to one (origin, enrollmentId) and may never be
- * sent to a different server.
+ * disconnect session pairing / cleanup reporting (findings 2 and 3, plus the
+ * correction-round R2) at the repository layer. These enforce the rules
+ * independent of ViewModel checks: stored credentials are bound to one
+ * (origin, enrollmentId) and may never be sent to a different server, and a
+ * re-pair must not start a new exchange (or drop the previous pairing's
+ * cleanup state) while the old web-session cookie removal is unconfirmed.
  */
 class EnrollmentInvariantRegressionTest {
 
@@ -320,6 +322,145 @@ class EnrollmentInvariantRegressionTest {
         assertNotNull(vault.nativeToken())
         assertNotNull(store.load())
         assertNotNull(store.loadBinding())
+    }
+
+    // ------------------------------------------------------------------
+    // R2 — cleanup failure must gate re-pairing and stay retryable
+    // ------------------------------------------------------------------
+
+    private suspend fun seedPairingWithCookie(
+        vault: FakeVault,
+        store: FakeRegistrationStore,
+        cookieScope: FakeCookieScope,
+    ) {
+        seedRegistrationAndCredential(vault, store, cookieScope)
+        cookieScope.installSessionCookie("https://fleet.example.com", "old=value")
+    }
+
+    private fun assertCleanupGate(outcome: CompanionRepository.EnrollOutcome) {
+        assertTrue("expected CLEANUP failure, got $outcome", outcome is CompanionRepository.EnrollOutcome.Failure)
+        val failure = outcome as CompanionRepository.EnrollOutcome.Failure
+        assertEquals(CompanionRepository.EnrollStep.CLEANUP, failure.step)
+        assertTrue(failure.cause is CompanionRepository.LocalCleanupUnconfirmed)
+        assertEquals(
+            listOf("https://fleet.example.com"),
+            (failure.cause as CompanionRepository.LocalCleanupUnconfirmed).unconfirmedOrigins,
+        )
+    }
+
+    @Test
+    fun `re-pair with unconfirmed cookie removal refuses the new exchange and keeps A intact`() = runTest {
+        val transport = FakeTransport()
+        val vault = FakeVault()
+        val store = FakeRegistrationStore()
+        val cookieScope = FakeCookieScope()
+        seedPairingWithCookie(vault, store, cookieScope)
+        cookieScope.failClear = true
+        val repo = repository(transport, vault, store, cookieScope)
+
+        val outcome = repo.enroll(sampleQrWith("https://new.example.com", "enr_B"), "Pixel", "0.1.0")
+
+        assertCleanupGate(outcome)
+        assertTrue("B's exchange must not start", transport.requests.none { it.url.contains("/exchange") })
+        assertTrue("no request reached the new origin",
+            transport.requests.none { it.url.contains("new.example.com") })
+        // A's pairing records and cookie survive so cleanup can be retried.
+        assertNotNull(store.load())
+        assertEquals("TOKEN_1", vault.nativeToken()?.value)
+        assertNotNull(cookieScope.readSessionCookie("https://fleet.example.com"))
+        assertEquals("removal was attempted and reported", listOf("https://fleet.example.com"), cookieScope.cleared)
+    }
+
+    @Test
+    fun `re-pair with throwing cookie removal refuses the new exchange`() = runTest {
+        val transport = FakeTransport()
+        val vault = FakeVault()
+        val store = FakeRegistrationStore()
+        val cookieScope = FakeCookieScope()
+        seedPairingWithCookie(vault, store, cookieScope)
+        cookieScope.throwOnClear = Exception("platform cookie manager failed")
+        val repo = repository(transport, vault, store, cookieScope)
+
+        val outcome = repo.enroll(sampleQrWith("https://new.example.com", "enr_B"), "Pixel", "0.1.0")
+
+        assertCleanupGate(outcome)
+        assertTrue(transport.requests.none { it.url.contains("/exchange") })
+        assertNotNull("A survives the throwing adapter", store.load())
+        assertEquals("TOKEN_1", vault.nativeToken()?.value)
+    }
+
+    @Test
+    fun `re-pair proceeds only once the previous cookie removal is confirmed`() = runTest {
+        val transport = FakeTransport()
+        val vault = FakeVault()
+        val store = FakeRegistrationStore()
+        val cookieScope = FakeCookieScope()
+        seedPairingWithCookie(vault, store, cookieScope)
+        cookieScope.failClear = true
+        val repo = repository(transport, vault, store, cookieScope)
+
+        val gated = repo.enroll(sampleQrWith("https://new.example.com", "enr_B"), "Pixel", "0.1.0")
+        assertCleanupGate(gated)
+        assertEquals("TOKEN_1", vault.nativeToken()?.value)
+
+        // Cookie removal becomes confirmable; the same confirm proceeds.
+        cookieScope.failClear = false
+        transport.enqueue(
+            FakeTransport.Rule(
+                method = "POST",
+                urlContains = "/exchange",
+                respond = jsonResponse(
+                    200,
+                    """{"hostId":"host-new","displayName":"Pixel","nativeToken":"NEW_TOKEN","webGrant":"NEW_GRANT"}""",
+                ),
+            ),
+        )
+        transport.enqueue(meResponse("host-new", "Pixel"))
+        transport.enqueue(webSessionRule("__Host-lamasync-mobile=cookieNew; Path=/; Secure; HttpOnly"))
+        val outcome = repo.enroll(sampleQrWith("https://new.example.com", "enr_B"), "Pixel", "0.1.0")
+
+        assertTrue("expected success on the retry, got $outcome", outcome is CompanionRepository.EnrollOutcome.Success)
+        assertEquals("host-new", (outcome as CompanionRepository.EnrollOutcome.Success).registration.hostId)
+        assertEquals("https://new.example.com", store.loadBinding()?.origin)
+        assertEquals("NEW_TOKEN", vault.nativeToken()?.value)
+        assertNull("A's cookie was removed before B activated",
+            cookieScope.readSessionCookie("https://fleet.example.com"))
+        assertEquals("exactly one exchange with B after the gate", 1,
+            transport.requests.count { it.url.contains("/exchange") })
+    }
+
+    @Test
+    fun `disconnect persists unconfirmed cookie origins and retryLocalCleanup clears them`() = runTest {
+        val transport = FakeTransport()
+        val vault = FakeVault()
+        val store = FakeRegistrationStore()
+        val cookieScope = FakeCookieScope()
+        seedPairingWithCookie(vault, store, cookieScope)
+        cookieScope.failClear = true
+        transport.enqueue(
+            FakeTransport.Rule(
+                method = "POST",
+                urlContains = "/web-session",
+                failWith = ApiFailure.Network(ApiFailure.Network.CauseKind.CONNECT, Exception("offline")),
+            ),
+        )
+        val repo = repository(transport, vault, store, cookieScope)
+
+        val result = repo.disconnect()
+
+        assertFalse(result.remoteSucceeded)
+        assertFalse("cleanup is honestly reported as unconfirmed", result.localCleared)
+        assertEquals(listOf("https://fleet.example.com"), result.unconfirmedCookieOrigins)
+        // The registration/binding were wiped, but the non-secret origin marker
+        // is retained so a later launch can still offer the cleanup retry.
+        assertNull(store.load())
+        assertEquals(listOf("https://fleet.example.com"), store.loadCleanupPending())
+
+        cookieScope.failClear = false
+        val retry = repo.retryLocalCleanup(listOf("https://fleet.example.com"))
+        assertTrue("cleanup retry clears the cookie", retry.cleared)
+        assertNull(cookieScope.readSessionCookie("https://fleet.example.com"))
+        assertTrue("marker is cleared after a confirmed retry", store.loadCleanupPending().isEmpty())
     }
 
     // ------------------------------------------------------------------
