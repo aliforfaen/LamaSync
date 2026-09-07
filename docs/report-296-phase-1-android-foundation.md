@@ -1,8 +1,9 @@
 # LAMA-296 phase 1 — Android foundation implementation report
 
 Status: review package for the planning agent — initial implementation plus
-the review correction round (findings 1–7) are complete. Dates: 2026-09-06
-(initial), 2026-09-06/07 (correction round). Branch:
+the review correction round (findings 1–7) and the correction-round touch-ups
+(R1/R2) are complete. Dates: 2026-09-06 (initial), 2026-09-06/07 (correction
+round), 2026-09-07 (R1/R2 touch-ups). Branch:
 `aliforfaen/android-client`. Implements only
 [`spec-296-phase-1-android-foundation.md`](spec-296-phase-1-android-foundation.md)
 (stage 0 of [`handoff-296-android.md`](handoff-296-android.md)) plus Android
@@ -277,6 +278,100 @@ retry), D revoked (vertical cleanup); 4 enrollments all `web_admin=1`, each
 used exactly once; web grants + web sessions revoked exactly as the chain
 demands (C's session still live at end). Front door: `socat` TLS terminator
 with a cert SAN for `10.0.2.2`; CA installed into the AVD user store.
+
+## Touch-ups (R1/R2) — 2026-09-07
+
+Addresses the two remaining P2 lifecycle findings in
+[`review-296-phase-1-corrections.md`](review-296-phase-1-corrections.md). Fix
+commits: `5b67ccc` (android fix) and this docs commit on branch
+`aliforfaen/android-client`; the corrections review document is untouched.
+No scope expansion: no uploads, no background work, no new permissions.
+
+### R1 — persisted enrollment recovery after a restart before identity completes
+
+A registration-less `EXCHANGED` binding with usable secrets was invisible to a
+fresh `SessionViewModel.initialize()`: it picked WELCOME with no resume path,
+forcing a re-scan of an already-consumed QR. Now:
+
+- `SessionViewModel.initialize()` derives a visible `pendingEnrollment`
+  (`origin` + the bound `displayName`) whenever the snapshot holds an
+  `EXCHANGED` binding with usable native + web credentials and no
+  registration (`SessionViewModel.kt`, `pendingEnrollmentOf`).
+- The WELCOME screen renders that recovery state with a **Resume enrollment**
+  action (`OnboardingScreens.kt`); `resumePendingEnrollment()` calls
+  `repository.completeEnrollment(boundOrigin, …)` — no QR secret, no new
+  exchange, repository refuses any other origin. Failures keep the recovery
+  surface (retryable) with an explanatory message.
+- Completed enrollments are untouched: only the explicit completed
+  (registration) state can reach MANAGE, and a cookie absent after an
+  explicit web logout **never** auto-re-bootstraps (`webSessionConnected`
+  simply reports false). Missing-credential EXCHANGED state offers no phantom
+  resume.
+- The recovery surface is re-derived from persisted state whenever the user
+  returns to WELCOME, so a different-QR flow that cleared the binding cannot
+  leave a stale resume behind.
+
+Regressions (real ViewModel over fakes on-device, all in
+`SessionViewModelEnrollmentResumeInstrumentedTest`): seed EXCHANGED +
+credentials → fresh ViewModel → `initialize()` shows WELCOME + the resume
+action with the bound origin/display name → trigger it → MANAGE with **zero
+exchange requests**, exactly one identity probe authenticated by the stored
+token, and every request confined to the bound origin; plus a transient
+recovery failure that keeps the surface and succeeds on retry; missing
+credentials ⇒ no phantom resume and no network; completed enrollment after
+explicit web logout ⇒ MANAGE with `webSessionConnected=false`, no
+`/web-session` and no `/exchange` requests.
+
+### R2 — cleanup failure propagated through disconnect and re-pairing
+
+The ViewModel ignored `DisconnectResult.localCleared` (claimed "Local data
+cleared" and dropped to WELCOME regardless), and re-pair's `clearLocalAuth()`
+discarded the cookie-removal Boolean and proceeded with the new exchange.
+Now:
+
+- `disconnect()` renders local and remote outcomes **independently**
+  (`SessionViewModel.disconnect` / `disconnectMessage`): success only when
+  both hold; any unconfirmed local step surfaces the failure, never a "Local
+  data cleared" claim, plus desktop-revocation guidance when remote failed.
+- The repository reports `DisconnectResult.unconfirmedCookieOrigins` and
+  persists those plain origins via `RegistrationStore`'s new cleanup marker,
+  so a later launch can still offer the retry. The WELCOME screen shows a
+  **Retry cleanup** card; `retryCleanup()` re-attempts removal with no
+  secrets and keeps the remote outcome in its messaging
+  (`retryLocalCleanup` in `CompanionRepository.kt`).
+- Re-pair: `clearLocalAuth()` now returns a `LocalCleanupResult`; when a
+  previous-origin cookie removal is unconfirmed (returned false **or**
+  threw), the wipe aborts **before** touching vault/store and `enroll()`
+  returns a new `EnrollStep.CLEANUP` failure — B's exchange never starts, and
+  A's records + cookie survive so cleanup can be retried or A resumed. The
+  marker origins are also part of the wipe set, so re-pairing over a stale
+  failed-disconnect cookie is gated too. `enrollFailureDetail` explains the
+  blocked re-pair and names the origin(s).
+
+Regressions: repository-level (`EnrollmentInvariantRegressionTest`, +4):
+unconfirmed (false) and throwing cookie adapters each gate the A→B re-pair
+(no exchange, A intact); retry after the adapter recovers completes B with A's
+cookie gone and exactly one B exchange; disconnect persists the unconfirmed
+origin marker and `retryLocalCleanup` clears it. ViewModel-level on-device
+(`SessionViewModelEnrollmentResumeInstrumentedTest`, +4): cookie-clear
+returns false with remote success, and cookie-clear throws with remote
+failure — both show honest, outcome-separated error messaging, retain the
+origin, recover via the visible retry action, and never claim local success;
+re-pair A→B with failed cleanup must not silently proceed or drop A's state;
+the fully successful disconnect path still ends clean.
+
+### Updated gate numbers
+
+| Gate | Command | Result |
+|------|---------|--------|
+| Build | `JAVA_HOME=… ANDROID_HOME=… ./android/gradlew -p android assembleDebug` | BUILD SUCCESSFUL |
+| Lint | `… lintDebug` | 0 errors, 44 warnings (version-available notices only; unchanged baseline) |
+| Unit | `… testDebugUnitTest` | **61 tests, 0 failures** (57 prior + 4 new R2 repository regressions) |
+| Instrumented | `… connectedDebugAndroidTest` (API 35 `lamadb-test` AVD, headless) | **24 tests: 20 passed, 0 failures, 4 skipped** (the four `VerticalHttpsEnrollmentTest` cases skip cleanly without the live-HTTPS server); 12 pre-existing base tests + **8 new R1/R2 real-ViewModel regressions** |
+
+APK: `android/app/build/outputs/apk/debug/app-debug.apk`
+sha256 `e9f5f0907f54f9c0ffcceda88c85243af0652f7a4c863a9fd0a4b7efebb7f22e`
+(34 MB debug APK, versionName 0.1.0 / versionCode 1, `app.lamasync.companion`).
 
 ## Known deviations / notes for review
 
