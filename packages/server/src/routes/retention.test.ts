@@ -346,13 +346,13 @@ describe("execute (app scope, confirmed)", () => {
 describe("folder scope (restic)", () => {
   /** Folder + a restic-kind backend it references, so the per-host repo
    *  resolution succeeds during execution (fail-closed otherwise). */
-  function seedResticFolder(): string {
+  function seedResticFolder(password = "restic-pass"): string {
     const folderId = crypto.randomUUID();
     const backendId = crypto.randomUUID();
     db.run(
       `INSERT INTO backends (id, name, kind, restic_repository, restic_password_enc, created_at)
        VALUES (?, 'repo-x', 'restic', '/repo/backups', ?, ?)`,
-      [backendId, encryptSecret("restic-pass"), Date.now()],
+      [backendId, encryptSecret(password), Date.now()],
     );
     db.run(
       `INSERT INTO folders (id, name, type, backend, backend_id, retention_policy, demo)
@@ -442,7 +442,6 @@ describe("folder scope (restic)", () => {
     expect(db.query(`SELECT id FROM restic_snapshots WHERE snapshot_id = 'snap-old'`).get()).toBeNull();
     expect(db.query(`SELECT id FROM restic_snapshots WHERE snapshot_id = 'snap-newest'`).get()).not.toBeUndefined();
   });
-
   test("forget failure keeps rows and reports failed (never pruned)", async () => {
     const folderId = seedResticFolder();
     db.run(
@@ -463,6 +462,100 @@ describe("folder scope (restic)", () => {
     expect(db.query(`SELECT id FROM restic_snapshots WHERE snapshot_id = 'snap-stuck'`).get()).not.toBeUndefined();
     const log = db.query(`SELECT status FROM operation_log WHERE id = ?`).get(body.operationLogId) as { status: string };
     expect(log.status).toBe("failed");
+  });
+
+  test("multi-repo prune failure aggregates monotonically (LAMA-325 review)", async () => {
+    // One folder, TWO repositories: the folder-level default backend (repoA)
+    // for host-a, and a per-host assignment override (repoB-copy, password
+    // pwB) for host-b. keepLast 1 leaves the older snapshot of each repo as
+    // a candidate. The FIRST repo's prune fails; the SECOND succeeds — the
+    // aggregate must stay failed (no last-write-wins).
+    const folderId = seedResticFolder(); // backend '/repo/backups', password 'restic-pass'
+    const backendRow = db
+      .query<{ id: string }, []>("SELECT id FROM backends WHERE name = 'repo-x'")
+      .get() as { id: string };
+    db.run(`UPDATE folders SET backend_id = ? WHERE id = ?`, [backendRow.id, folderId]);
+    db.run(
+      `INSERT INTO folder_assignments
+         (id, folder_id, host_id, role, local_path, restic_repository, restic_password, demo)
+       VALUES ('assign-b', ?, 'host-b', 'backup', '/home/b', 'repoB-copy', 'pwB', 0)`,
+      [folderId],
+    );
+    db.run(
+      `UPDATE folders SET retention_policy = ? WHERE id = ?`,
+      [policyJson({ enabled: true, rules: [{ kind: "keepLast", count: 1 }], keepAtLeastOne: true }), folderId],
+    );
+    // repoA snapshot is older (processed first → its prune attempt runs first).
+    seedResticSnapshot(folderId, 40, { sid: "snap-a-repoA" }); // host-a → default repoA
+    seedResticSnapshot(folderId, 2, { sid: "snap-b-repoB" }); // host-b → repoB-copy
+    db.run(`UPDATE restic_snapshots SET host_id = 'host-b' WHERE snapshot_id = 'snap-b-repoB'`);
+    seedResticSnapshot(folderId, 1, { sid: "snap-c-newest" }); // host-a → newest, kept
+
+    const calls: string[][] = [];
+    __setResticExecForTest(async (args) => {
+      calls.push(args);
+      if (args[1] === "prune") {
+        return args.includes("/repo/backups")
+          ? { code: 1, stderr: "prune failed for repoA\n" }
+          : { code: 0, stderr: "" };
+      }
+      return { code: 0, stderr: "" };
+    });
+
+    const res = await jsonRequest(`/api/v1/folders/${folderId}/retention/execute`, "POST", { confirm: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      prune: { attempted: boolean; ok: boolean; outcomes: Array<{ repository: string; ok: boolean; error?: string | null }> };
+      outcomes: Array<{ id: string; status: string }>;
+      operationLogId: number;
+    };
+    expect(body.outcomes.filter((o) => o.status === "deleted").map((o) => o.id).sort()).toEqual([
+      "snap-a-repoA",
+      "snap-b-repoB",
+    ]);
+    expect(body.prune.attempted).toBe(true);
+    expect(body.prune.ok).toBe(false);
+    expect(body.prune.outcomes).toHaveLength(2);
+    expect(body.prune.outcomes[0]?.ok).toBe(false);
+    expect(body.prune.outcomes[1]?.ok).toBe(true);
+    const repos = body.prune.outcomes.map((o) => o.repository);
+    expect(repos.join(" ")).toContain("/repo/backups");
+    expect(repos.join(" ")).toContain("repoB-copy");
+    expect(JSON.stringify(body)).not.toContain("restic-pass");
+    expect(JSON.stringify(body)).not.toContain("pwB");
+    const log = db
+      .query<{ status: string; details: string }, [number]>("SELECT status, details FROM operation_log WHERE id = ?")
+      .get(body.operationLogId) as { status: string; details: string };
+    expect(log.status).toBe("failed");
+    expect(log.details).toContain("/repo/backups");
+    expect(log.details).not.toContain("restic-pass");
+    expect(log.details).not.toContain("pwB");
+  });
+
+  test("restic password travels ONLY via --password-file, never argv/env (LAMA-325 review)", async () => {
+    const folderId = seedResticFolder("correct-horse-battery-staple");
+    db.run(
+      `UPDATE folders SET retention_policy = ? WHERE id = ?`,
+      [policyJson(keepLast2()), folderId],
+    );
+    seedResticSnapshot(folderId, 40, { sid: "snap-pass" });
+    seedResticSnapshot(folderId, 2, { sid: "snap-keep" });
+    seedResticSnapshot(folderId, 1, { sid: "snap-newest-kept" });
+    const calls: string[][] = [];
+    __setResticExecForTest(async (args) => {
+      calls.push(args);
+      return { code: 0, stderr: "" };
+    });
+    const res = await jsonRequest(`/api/v1/folders/${folderId}/retention/execute`, "POST", { confirm: true });
+    expect(res.status).toBe(200);
+    const forget = calls.find((a) => a[1] === "forget")!;
+    const prune = calls.find((a) => a[1] === "prune")!;
+    for (const call of [forget, prune]) {
+      expect(call.join(" ")).toContain("--password-file");
+      // The secret value must not appear anywhere in the argv (never on
+      // the command line; the 0600 password file is the only channel).
+      expect(call.join(" ")).not.toContain("correct-horse-battery-staple");
+    }
   });
 });
 

@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  calendarBucketKey,
   describePolicy,
   evaluateRetention,
   smartRetentionPolicy,
@@ -242,5 +243,45 @@ describe("edge cases + accounting", () => {
     expect(
       describePolicy({ enabled: true, rules: [{ kind: "keepAge", maxAgeMs: 30 * DAY }] }),
     ).toContain("30 days");
+  });
+});
+
+describe("ISO weekly buckets across year boundaries (LAMA-325 review)", () => {
+  const key = (ts: number): string => calendarBucketKey("weekly", ts, "UTC");
+
+  test("late December days anchor to the correct ISO week of the right year", () => {
+    // Mon 2025-12-29 belongs to ISO week 1 of 2026 (its Thursday is
+    // 2026-01-01) — never 2025-W53/W00.
+    expect(key(Date.UTC(2025, 11, 29))).toBe("2026-W01");
+    // Thu 2026-01-01 is in the same week.
+    expect(key(Date.UTC(2026, 0, 1))).toBe("2026-W01");
+    // Sun 2025-12-28 is still ISO 2025-W52 (its Thursday is 2025-12-25).
+    expect(key(Date.UTC(2025, 11, 28))).toBe("2025-W52");
+    // Sun 2026-01-04 is still 2026-W01; Mon 2026-01-05 starts 2026-W02.
+    expect(key(Date.UTC(2026, 0, 4))).toBe("2026-W01");
+    expect(key(Date.UTC(2026, 0, 5))).toBe("2026-W02");
+  });
+
+  test("weekly retention never splits one ISO week across a year boundary", () => {
+    // now = Fri 2026-01-02 12:00Z → the single weekly bucket is 2026-W01.
+    const now = Date.UTC(2026, 0, 2, 12, 0, 0);
+    const snapshots = [
+      { ...snap("before-boundary", NaN), timestamp: Date.UTC(2025, 11, 28, 12, 0, 0) }, // 2025-W52
+      { ...snap("same-week-mon", NaN), timestamp: Date.UTC(2025, 11, 29, 12, 0, 0) }, // 2026-W01
+      { ...snap("same-week-thu", NaN), timestamp: Date.UTC(2026, 0, 1, 12, 0, 0) }, // 2026-W01
+    ];
+    const res = evaluateRetention({
+      snapshots,
+      policy: { enabled: true, rules: [{ kind: "calendar", unit: "weekly", count: 1 }], keepAtLeastOne: true },
+      now,
+    });
+    // The newest snapshot OF 2026-W01 is kept even though it was created in
+    // 2025; the genuinely older 2025-W52 snapshot is the delete candidate.
+    expect(decisionsOf(res)).toEqual({
+      "before-boundary": "delete",
+      "same-week-mon": "delete",
+      "same-week-thu": "keep",
+    });
+    expect(res.decisions.find((d) => d.id === "same-week-thu")?.reason).toContain("2026-W01");
   });
 });

@@ -263,6 +263,17 @@ function tempPasswordFile(password: string): { file: string; dir: string } {
 
 const RESTIC_TIMEOUT_MS = 600_000;
 
+/** Strip embedded credentials from a repo string before it reaches the wire
+ *  or Activity: scheme://user:pass@host → scheme://<redacted>@host, and any
+ *  accidental occurrence of the password is masked. */
+export function scrubRepository(repo: string, password: string): string {
+  let out = repo.replace(/\/\/[^/@\s]+@/, "//<redacted>@");
+  if (password !== "") {
+    out = out.split(password).join("<redacted>");
+  }
+  return out;
+}
+
 export interface ResticRun {
   code: number;
   stderr: string;
@@ -279,12 +290,17 @@ export function __setResticExecForTest(fn: ResticExec | null): void {
   resticExecForTests = fn;
 }
 
-async function runRestic(args: string[], env: Record<string, string>): Promise<{ code: number; stderr: string }> {
+async function runRestic(args: string[]): Promise<{ code: number; stderr: string }> {
   if (resticExecForTests !== null) return resticExecForTests(args);
+  // The restic password travels ONLY via the 0600 --password-file (never on
+  // the command line, never in the inherited process env). Do not add a
+  // RESTIC_PASSWORD variable here: the secret would be visible in the child
+  // environment and could leak into core dumps / /proc for the child's
+  // lifetime. The inherited environment is preserved as-is.
   const proc = Bun.spawn(args, {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...(process.env as Record<string, string>), ...env },
+    env: process.env as Record<string, string>,
     signal: AbortSignal.timeout(RESTIC_TIMEOUT_MS),
   });
   const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
@@ -702,27 +718,47 @@ export const retentionRoutes = new Elysia({ prefix: "/api/v1" })
 
         const outcomes: ExecOutcome[] = [...unresolvable];
         const prunedIds = new Set<string>();
-        let prune: { attempted: boolean; ok: boolean; error?: string | null } = { attempted: false, ok: true };
+        // PER-REPOSITORY prune outcomes (repo string scrubbed of any
+        // embedded credentials). Failure aggregates MONOTONICALLY: a later
+        // successful repo must never overwrite an earlier failed one.
+        const pruneOutcomes: Array<{ repository: string; ok: boolean; error?: string | null }> = [];
+        let pruneFailed = false;
         for (const plan of plans.values()) {
           let passwordFile: { file: string; dir: string } | null = null;
           try {
             passwordFile = tempPasswordFile(plan.password);
-            const env = { RESTIC_PASSWORD: plan.password };
-            const forget = await runRestic(
-              ["restic", "forget", ...plan.snapshotIds, "--repo", plan.repo, "--password-file", passwordFile.file, "--no-cache"],
-              env,
-            );
+            const forget = await runRestic([
+              "restic",
+              "forget",
+              ...plan.snapshotIds,
+              "--repo",
+              plan.repo,
+              "--password-file",
+              passwordFile.file,
+              "--no-cache",
+            ]);
             if (forget.code === 0) {
               for (const id of plan.snapshotIds) {
                 outcomes.push({ id, status: "deleted" });
                 prunedIds.add(id);
               }
               // Prune once per repo where something was forgotten.
-              const pruneRun = await runRestic(
-                ["restic", "prune", "--repo", plan.repo, "--password-file", passwordFile.file, "--no-cache"],
-                env,
-              );
-              prune = { attempted: true, ok: pruneRun.code === 0, error: pruneRun.code === 0 ? null : pruneRun.stderr.trim().split("\n").pop() ?? "restic prune failed" };
+              const pruneRun = await runRestic([
+                "restic",
+                "prune",
+                "--repo",
+                plan.repo,
+                "--password-file",
+                passwordFile.file,
+                "--no-cache",
+              ]);
+              const ok = pruneRun.code === 0;
+              if (!ok) pruneFailed = true;
+              pruneOutcomes.push({
+                repository: scrubRepository(plan.repo, plan.password),
+                ok,
+                error: ok ? null : (pruneRun.stderr.trim().split("\n").pop() ?? "restic prune failed"),
+              });
             } else {
               for (const id of plan.snapshotIds) {
                 outcomes.push({ id, status: "failed", error: forget.stderr.trim().split("\n").pop() ?? "restic forget failed" });
@@ -738,6 +774,10 @@ export const retentionRoutes = new Elysia({ prefix: "/api/v1" })
             }
           }
         }
+        const prune: { attempted: boolean; ok: boolean; outcomes: typeof pruneOutcomes } =
+          pruneOutcomes.length > 0
+            ? { attempted: true, ok: !pruneFailed, outcomes: pruneOutcomes }
+            : { attempted: false, ok: true, outcomes: [] };
         // Remove DB rows for snapshots actually forgotten (never for
         // failed ones — a retry must still see them).
         if (prunedIds.size > 0) {
@@ -755,17 +795,17 @@ export const retentionRoutes = new Elysia({ prefix: "/api/v1" })
           evaluated: revalidatedPreview.evaluation.deleteCount,
           deleted: deletedCount,
           failed: failed.length,
-          prune,
+          pruneOutcomes,
           outcomes,
         };
         const logId = recordOperationLog({
           operation: "retention_execute",
           folderId: folder.id,
           summary:
-            failed.length > 0 || !prune.ok
-              ? `Folder retention: pruned ${deletedCount}, ${failed.length} failed${prune.attempted && !prune.ok ? ", restic prune failed" : ""}`
+            failed.length > 0 || pruneFailed
+              ? `Folder retention: pruned ${deletedCount}, ${failed.length} failed${pruneFailed ? ", restic prune failed" : ""}`
               : `Folder retention: pruned ${deletedCount}${prune.attempted ? " + repository prune" : ""}`,
-          status: failed.length > 0 || (prune.attempted && !prune.ok) ? "failed" : "success",
+          status: failed.length > 0 || pruneFailed ? "failed" : "success",
           details,
         });
         return { revalidatedPreview, outcomes, prune, operationLogId: logId };

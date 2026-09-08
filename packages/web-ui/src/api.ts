@@ -498,10 +498,16 @@ export type RetentionOutcome = {
   error?: string | null;
 };
 
+export type RetentionPruneOutcome = {
+  repository: string;
+  ok: boolean;
+  error?: string | null;
+};
+
 export type RetentionExecutionResult = {
   revalidatedPreview: RetentionPreview;
   outcomes: RetentionOutcome[];
-  prune: { attempted: boolean; ok: boolean; error?: string | null } | null;
+  prune: { attempted: boolean; ok: boolean; outcomes: RetentionPruneOutcome[] } | null;
   operationLogId: number | null;
 };
 

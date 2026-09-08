@@ -167,6 +167,12 @@ function humanDuration(ms: number): string {
 
 export type CalendarUnit = "daily" | "weekly" | "monthly" | "yearly";
 
+/** Public bucket key for a timestamp (UTC anchored unless `timezone` is
+ *  passed) — used by tests to pin calendar boundaries (e.g. ISO weeks). */
+export function calendarBucketKey(unit: CalendarUnit, ts: number, timezone = "UTC"): string {
+  return bucketKeyOf(unit, ts, timezone).key;
+}
+
 interface BucketKey {
   unit: CalendarUnit;
   key: string;
@@ -195,13 +201,24 @@ function bucketKeyOf(unit: CalendarUnit, ts: number, timezone: string): BucketKe
     case "yearly":
       return { unit, key: `${year}` };
     case "weekly": {
-      // ISO-aligned-enough week number: Monday-first day index 0..6.
-      const dayIdx = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(weekday);
-      const dayOfYear = Math.floor(
-        (Date.UTC(year, month - 1, day) - Date.UTC(year, 0, 1)) / 86_400_000,
-      );
-      const week = Math.ceil((dayOfYear + 1 - dayIdx) / 7);
-      return { unit, key: `${year}-W${pad(week)}` };
+      // Correct ISO 8601 Monday-first week, anchored across year boundaries:
+      // week N of year Y starts on the Monday on/before Jan 4 of Y; a date's
+      // week is the one containing its THURSDAY, so late-December dates can
+      // belong to week 1 of the NEXT year and never to a fake "W00".
+      // (The naive day-of-year/7 split produces 2026-W00 / 2025-W52 splits.)
+      const dow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(weekday); // 0..6 Mon-first
+      const isoDow = dow + 1; // ISO 1..7 (Mon=1)
+      const ms = Date.UTC(year, month - 1, day);
+      const thursdayMs = ms + (4 - isoDow) * 86_400_000; // the week's Thursday
+      const tYear = new Date(thursdayMs).getUTCFullYear();
+      // ISO weekday of Jan 4 of that year, derived mod-7 from the weekday
+      // we already know (exact calendar-day arithmetic).
+      const jan4Ms = Date.UTC(tYear, 0, 4);
+      const delta = Math.round((jan4Ms - ms) / 86_400_000);
+      const jan4Dow = ((isoDow - 1 + ((delta % 7) + 7) % 7) % 7) + 1;
+      const mondayWeek1 = jan4Ms - (jan4Dow - 1) * 86_400_000; // Monday on/before Jan 4
+      const week = 1 + Math.floor((thursdayMs - 3 * 86_400_000 - mondayWeek1) / (7 * 86_400_000));
+      return { unit, key: `${tYear}-W${pad(Math.min(53, Math.max(1, week)))}` };
     }
   }
 }

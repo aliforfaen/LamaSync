@@ -127,7 +127,12 @@ export function RetentionPanel({ scope, resourceId, resourceLabel, open, onClose
       setOutcome(result.outcomes);
       setPreview(result.revalidatedPreview);
       if (result.prune && !result.prune.ok) {
-        setPruneError(result.prune.error ?? "restic prune failed");
+        const failedRepos = result.prune.outcomes.filter((o) => !o.ok);
+        setPruneError(
+          failedRepos.length > 0
+            ? `restic prune failed on ${failedRepos.map((o) => o.repository).join(", ")}${failedRepos[0]?.error ? `: ${failedRepos[0].error}` : ""}`
+            : "restic prune failed",
+        );
       }
       setConfirmChecked(false);
     } catch (err) {
