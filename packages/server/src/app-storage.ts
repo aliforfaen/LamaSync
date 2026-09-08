@@ -24,7 +24,15 @@ import { decryptSecret } from "./crypto.ts";
 import { getBackend, type BackendRow } from "./backends.ts";
 import { withTempRcloneConfig, writeTempRcloneConfig } from "./temp-rclone-config.ts";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, renameSync, rmSync, unlinkSync, existsSync } from "node:fs";
+import {
+  copyFileSync,
+  createWriteStream,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import type { Database } from "bun:sqlite";
@@ -175,6 +183,169 @@ export function locationForSnapshot(row: SnapshotLocationRow): SnapshotLocation 
 }
 
 // ---------------------------------------------------------------------------
+// Staging: stream multipart bytes to disk, bounded mid-stream, with an
+// incremental SHA-256 (single pass). Never buffers the body (the LAMA-324
+// stream-to-staging contract; same pattern as routes/folder-files.ts).
+// ---------------------------------------------------------------------------
+
+/** Hard cap rejected mid-stream (untrusted multipart sizes). */
+export class UploadTooLarge extends Error {
+  readonly bytes: number;
+  readonly max: number;
+  constructor(bytes: number, max: number) {
+    super(`snapshot is ${bytes} bytes; upload limit is ${max} bytes`);
+    this.name = "UploadTooLarge";
+    this.bytes = bytes;
+    this.max = max;
+  }
+}
+
+/**
+ * Drain a Web `ReadableStream<Uint8Array>` straight to disk via
+ * `createWriteStream`, awaiting `drain` after each write so the filesystem
+ * never out-buffers the pipe. Errors from the source (e.g. our cap
+ * rejection) propagate; `finish` is the terminal signal that all bytes are
+ * on disk. (Same contract as the folder-file upload helper.)
+ */
+function pipeStreamToFile(
+  path: string,
+  stream: ReadableStream<Uint8Array>,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const out = createWriteStream(path);
+    let settled = false;
+    out.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+    out.on("finish", () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    });
+    const reader = stream.getReader();
+    const pump = (): void => {
+      reader
+        .read()
+        .then(({ done, value }) => {
+          if (done) {
+            out.end();
+            return;
+          }
+          if (value === undefined) {
+            pump();
+            return;
+          }
+          out.write(
+            Buffer.from(value.buffer, value.byteOffset, value.byteLength),
+            (err) => {
+              if (err) {
+                if (settled) return;
+                settled = true;
+                reader.cancel().catch(() => {});
+                reject(err);
+                return;
+              }
+              pump();
+            },
+          );
+        })
+        .catch((err) => {
+          if (settled) return;
+          settled = true;
+          out.destroy();
+          reject(err);
+        });
+    };
+    pump();
+  });
+}
+
+/**
+ * Stream a multipart file part to the staging path, enforcing `maxBytes`
+ * MID-STREAM (a body that starts fine but exceeds the cap trips the pipe
+ * before the rest is read — the memory profile is bounded by the cap, not
+ * the request body) while computing SHA-256 incrementally in the same pass.
+ * On any failure the partial staging file is NOT removed here — callers own
+ * the staging lifecycle and remove it in `finally` (oversize/error paths
+ * included).
+ */
+export async function streamToStagedFile(opts: {
+  stagedPath: string;
+  stream: ReadableStream<Uint8Array>;
+  maxBytes: number;
+}): Promise<{ sizeBytes: number; checksumSha256: string }> {
+  const hash = createHash("sha256");
+  let bytesWritten = 0;
+  const guarded = opts.stream.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller): void {
+        bytesWritten += chunk.byteLength;
+        if (bytesWritten > opts.maxBytes) {
+          controller.error(new UploadTooLarge(bytesWritten, opts.maxBytes));
+          return;
+        }
+        hash.update(chunk);
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  await pipeStreamToFile(opts.stagedPath, guarded);
+  // Belt-and-braces: a multipart section without a Content-Length could
+  // advertise success while feeding more bytes than we counted. The staged
+  // file cannot lie.
+  const sizeBytes = (await Bun.file(opts.stagedPath).stat()).size;
+  if (sizeBytes > opts.maxBytes) {
+    throw new UploadTooLarge(sizeBytes, opts.maxBytes);
+  }
+  return { sizeBytes, checksumSha256: hash.digest("hex") };
+}
+
+// ---------------------------------------------------------------------------
+// Stored-location + config input hardening (rclone injection defense). An
+// rclone config is line-oriented ini: a CR/LF/control character inside a
+// stored value could splice in directives, and a hostile bucket/object key
+// could alter which remote/path is addressed. Stored input is validated at
+// every boundary where it is consumed.
+// ---------------------------------------------------------------------------
+
+const CONTROL_CHAR = /[\x00-\x1F\x7F]/;
+const BUCKET_NAME = /^[a-z0-9]([a-z0-9.\-]{1,61})[a-z0-9]$/;
+const OBJECT_KEY = /^[a-zA-Z0-9/_.\-]+$/;
+
+/** DNS-style bucket name: 3-63 lower-case alnum/dot/hyphen, alnum at both
+ *  ends, no ".." segments, no adjacent hyphens/dots, no control chars.
+ *  (AWS/Exoscale share this shape; B2 names are a strict subset — the rule
+ *  is permissive-but-safe for every provider.) */
+export function isValidAppBucketName(bucket: string): boolean {
+  if (bucket.length < 3 || bucket.length > 63) return false;
+  if (CONTROL_CHAR.test(bucket) || /\s/.test(bucket)) return false;
+  if (!BUCKET_NAME.test(bucket)) return false;
+  if (bucket.includes("..") || bucket.includes("--")) return false;
+  // A period adjacent to a hyphen isn't DNS-safe; reject both pairings.
+  if (bucket.includes(".-") || bucket.includes("-.")) return false;
+  return true;
+}
+
+/** Backend-relative object key: single-path segments, no control chars, no
+ *  leading/trailing slash, no "..". Server-generated keys always pass; this
+ *  guards tampered stored rows. */
+export function isValidAppObjectKey(key: string): boolean {
+  if (key.length === 0 || key.length > 512) return false;
+  if (CONTROL_CHAR.test(key)) return false;
+  if (key.startsWith("/") || key.endsWith("/")) return false;
+  if (!OBJECT_KEY.test(key)) return false;
+  return !key.split("/").some((seg) => seg === ".." || seg === "." || seg === "");
+}
+
+/** Reject CR/LF/control characters in values that end up inside an rclone
+ *  config body so stored input cannot inject config directives. */
+export function hasConfigControlChar(value: string): boolean {
+  return CONTROL_CHAR.test(value);
+}
+
+// ---------------------------------------------------------------------------
 // Backend resolution + config generation.
 // ---------------------------------------------------------------------------
 
@@ -208,7 +379,17 @@ function buildS3RelayConfig(backend: BackendRow): string | null {
   const accessKeyId = (backend.s3_access_key_id ?? "").trim();
   const secretKey = decryptSecret(backend.s3_secret_key_enc) ?? "";
   if (endpoint === "" || accessKeyId === "" || secretKey === "") return null;
+  // Injection guard: a stored value containing a newline/control character
+  // could splice extra directives into the generated ini — fail closed.
   const region = (backend.s3_region ?? "").trim();
+  if (
+    hasConfigControlChar(endpoint) ||
+    hasConfigControlChar(accessKeyId) ||
+    hasConfigControlChar(secretKey) ||
+    hasConfigControlChar(region)
+  ) {
+    return null;
+  }
   return [
     "[relay]",
     "type = s3",
@@ -231,6 +412,10 @@ export interface PublishInput {
   protectionId: string;
   /** Snapshot id — the fixed object key derives from it. */
   snapshotId: string;
+  /** Size + SHA-256 computed ONCE while streaming to staging (single pass;
+   *  publish never re-reads the file into memory). */
+  sizeBytes: number;
+  checksumSha256: string;
   /** Resolved destination: null = server-local archive, else a resolved
    *  backend plus its bucket (required for s3 kind). */
   destination: { backend: ResolvedAppBackend; s3Bucket: string } | null;
@@ -242,8 +427,6 @@ export interface PublishResult {
   objectKey: string | null;
   /** BACKUP_DIR-relative path for server-local snapshots. */
   localRelPath: string | null;
-  sizeBytes: number;
-  checksumSha256: string;
 }
 
 export class AppStorageError extends Error {
@@ -262,9 +445,8 @@ function containedIn(root: string, candidate: string): boolean {
 /** Publish the verified staged file to the snapshot's destination. Does not
  *  touch the DB. The caller owns snapshot-row insertion + compensation. */
 export async function publishSnapshotArchive(input: PublishInput): Promise<PublishResult> {
-  const sizeBytes = (await Bun.file(input.stagedPath).stat()).size;
-  const buf = Buffer.from(await Bun.file(input.stagedPath).arrayBuffer());
-  const checksumSha256 = createHash("sha256").update(buf).digest("hex");
+  // sizeBytes + checksumSha256 were computed ONCE while streaming to
+  // staging; publish never re-reads the file into a Buffer.
   if (input.destination === null) {
     // Server-local: atomically rename into the historical layout
     // `<BACKUP_DIR>/apps/<protectionId>/<timestamp>-<uuid>.tar.gz`.
@@ -288,15 +470,15 @@ export async function publishSnapshotArchive(input: PublishInput): Promise<Publi
         /* staged cleanup is also handled by the caller's finally */
       }
     }
-    return { objectKey: null, localRelPath: relPath, sizeBytes, checksumSha256 };
+    return { objectKey: null, localRelPath: relPath };
   }
   // Backend destination: fixed key lamasync/apps/<protectionId>/<snapshotId>.tar.gz.
   const objectKey = appObjectKey(input.protectionId, input.snapshotId);
   const { backend } = input.destination;
   if (backend.row.kind === "s3") {
     const bucket = input.destination.s3Bucket.trim();
-    if (bucket === "") {
-      throw new AppStorageError("s3 backend snapshots require a bucket");
+    if (bucket === "" || !isValidAppBucketName(bucket)) {
+      throw new AppStorageError("s3 backend snapshots require a valid bucket");
     }
     const config = backend.s3Config;
     if (config === null) {
@@ -319,7 +501,7 @@ export async function publishSnapshotArchive(input: PublishInput): Promise<Publi
         throw new AppStorageError(`relay to s3 backend failed: ${detail}`);
       }
     });
-    return { objectKey, localRelPath: null, sizeBytes, checksumSha256 };
+    return { objectKey, localRelPath: null };
   }
   // local / nfs: direct server-side copy under the backend's absolute path.
   const localPath = backend.localPath!;
@@ -329,7 +511,7 @@ export async function publishSnapshotArchive(input: PublishInput): Promise<Publi
   }
   mkdirSync(dirname(fullPath), { recursive: true });
   copyFileSync(input.stagedPath, fullPath);
-  return { objectKey, localRelPath: null, sizeBytes, checksumSha256 };
+  return { objectKey, localRelPath: null };
 }
 
 /**
@@ -396,14 +578,19 @@ export async function snapshotDownload(
     const config = resolved.s3Config;
     const key = location.objectKey;
     const bucket = location.s3Bucket ?? "";
-    if (config === null || key === null || bucket === "") {
+    if (
+      config === null ||
+      key === null ||
+      !isValidAppObjectKey(key) ||
+      !isValidAppBucketName(bucket)
+    ) {
       throw new AppStorageError("snapshot s3 location is incomplete");
     }
     return catRemoteS3(config, `${bucket}/${key}`).then((r) => ({ kind: "stream", ...r }));
   }
   // local / nfs
   const key = location.objectKey;
-  if (key === null) {
+  if (key === null || !isValidAppObjectKey(key)) {
     throw new AppStorageError("snapshot has no stored object key");
   }
   const localPath = resolved.localPath!;
@@ -460,8 +647,13 @@ export async function deleteSnapshotArchive(
     const config = resolved.s3Config;
     const key = location.objectKey;
     const bucket = location.s3Bucket ?? "";
-    if (config === null || key === null || bucket === "") {
-      return { status: "failed", error: "snapshot s3 location is incomplete" };
+    if (
+      config === null ||
+      key === null ||
+      !isValidAppObjectKey(key) ||
+      !isValidAppBucketName(bucket)
+    ) {
+      return { status: "failed", error: "snapshot s3 location is invalid or incomplete" };
     }
     try {
       const outcome = await withTempRcloneConfig(config, async (configPath) => {
@@ -487,8 +679,8 @@ export async function deleteSnapshotArchive(
   }
   // local / nfs
   const key = location.objectKey;
-  if (key === null) {
-    return { status: "failed", error: "snapshot has no stored object key" };
+  if (key === null || !isValidAppObjectKey(key)) {
+    return { status: "failed", error: "snapshot has no valid stored object key" };
   }
   const localPath = resolved.localPath!;
   const fullPath = resolve(join(localPath, key));

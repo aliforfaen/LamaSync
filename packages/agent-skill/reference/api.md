@@ -138,12 +138,12 @@ All paths are under `/api/v1/` unless noted.
 | PUT      | `/apps/templates/:id`                      | Update an app template (admin; bumps `revision`; never touches protections) |
 | DELETE   | `/apps/templates/:id`                      | Delete an app template (409 while protections use it) |
 | GET      | `/apps/protections?hostId=...`             | List app protections (admin: all hosts; device: `hostId` required and must be its own) |
-| POST     | `/apps/protections`                        | Enroll a protection from a template (admin; 409 on duplicate host+template). Optional `backendId`+`s3Bucket` select the storage destination for FUTURE captures (LAMA-324) |
+| POST     | `/apps/protections`                        | Enroll a protection from a template (admin; 409 on duplicate host+template). Optional `backendId`+`s3Bucket` select the storage destination for FUTURE captures (LAMA-324). `s3Bucket` must be a DNS-style bucket name (3-63 lowercase alnum/dot/hyphen, no traversal/control chars); stored backend config values containing CR/LF/control characters are rejected (rclone-injection guard) |
 | GET      | `/apps/protections/:id`                    | Read one protection (device: own host only)      |
 | PUT      | `/apps/protections/:id`                    | Update name/enabled/schedule/backendId/s3Bucket (admin; capture spec never editable). Destination changes affect future captures only (LAMA-324) |
 | DELETE   | `/apps/protections/:id`                    | Delete an empty protection (admin; 409 when snapshot history exists — disable it instead) |
 | GET      | `/apps/protections/:id/snapshots`          | List a protection's snapshots                    |
-| POST     | `/apps/protections/:id/snapshots`          | Upload a snapshot (multipart `tarball`; 409 while the protection is disabled). Server relays the archive to the protection's selected backend under `lamasync/apps/<protectionId>/<snapshotId>.tar.gz` (LAMA-324) |
+| POST     | `/apps/protections/:id/snapshots`          | Upload a snapshot (multipart `tarball`; 409 while the protection is disabled). Streamed to server staging with a hard cap enforced MID-STREAM — `LAMASYNC_APPS_MAX_BYTES` (default 512 MiB), 413 on oversize, staging always cleaned. Server relays the archive to the protection's selected backend under `lamasync/apps/<protectionId>/<snapshotId>.tar.gz` (LAMA-324) |
 | GET      | `/apps/snapshots/:id`                      | Read one snapshot row                            |
 | GET      | `/apps/protections/:id/retention`           | Get an app protection's retention policy (admin) |
 | PUT      | `/apps/protections/:id/retention`           | Set the retention policy (admin; `rules` or `applySmartPreset`; nullable/disabled keeps everything — LAMA-325) |

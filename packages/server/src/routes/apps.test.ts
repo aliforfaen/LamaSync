@@ -10,7 +10,7 @@ process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "apps-test-
 process.env.LAMASYNC_APPS_STAGING_DIR = process.env.LAMASYNC_APPS_STAGING_DIR ?? "/tmp/lamasync-apps-test-staging";
 
 const { getAuthPlugin } = await import("../auth.ts");
-const { __setDb, appsRoutes } = (await import("./apps.ts")) as typeof import("./apps.ts");
+const { __setDb, appsRoutes, __setMaxBytesForTests } = (await import("./apps.ts")) as typeof import("./apps.ts");
 const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as typeof import("../config-revision.ts");
 const { __setRcloneExecForTest } = await import("../app-storage.ts");
 const { encryptSecret } = await import("../crypto.ts");
@@ -35,6 +35,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  __setMaxBytesForTests(512 * 1024 * 1024);
   db.close();
   __setRcloneExecForTest(null);
 });
@@ -641,5 +642,95 @@ describe("apps storage destinations (LAMA-324)", () => {
       .query<{ id: string }, [string]>("SELECT id FROM application_snapshots WHERE id = ?")
       .get(snap.id);
     expect(row).not.toBeNull();
+  });
+});
+
+describe("apps upload bounding + destination hardening (LAMA-324 review)", () => {
+  function insertS3Backend(): string {
+    const id = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
+       VALUES (?, 's3-dest', 's3', 'other', 'https://s3.example.test', 'r1', 'AK', ?, ?)`,
+      [id, encryptSecret("route-secret"), Date.now()],
+    );
+    return id;
+  }
+
+  test("oversized snapshot is rejected with 413 and records no row", async () => {
+    templateId = await createTemplate();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    const prot = (await enroll.json()) as { id: string };
+    __setMaxBytesForTests(8);
+    const form = new FormData();
+    form.append("tarball", new File(["way-too-large-body"], "snap.tar.gz", { type: "application/gzip" }));
+    const res = await app.handle(
+      new Request(`http://localhost/api/v1/apps/protections/${prot.id}/snapshots`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: form,
+      }),
+    );
+    expect(res.status).toBe(413);
+    const n = db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM application_snapshots`)
+      .get() as { n: number };
+    expect(n.n).toBe(0);
+  });
+
+  test("bucket validation: hostile names rejected, valid names accepted", async () => {
+    const s3BackendId = insertS3Backend();
+    const tpl = async (name: string): Promise<string> => {
+      const res = await postJson("/api/v1/apps/templates", {
+        name,
+        origin: "custom",
+        paths: spec(["~/.config/nvim"]),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { id: string }).id;
+    };
+    const badBuckets = [
+      "has/forward",
+      "has:colon",
+      "UPPER",
+      "has_underscore",
+      "..traversal",
+      "script\nvalue",
+      "trail-dash-",
+      "",
+    ];
+    for (const bucket of badBuckets) {
+      const res = await postJson("/api/v1/apps/protections", {
+        templateId: await tpl(`tpl-bad-${badBuckets.indexOf(bucket)}`),
+        hostId: "host-a",
+        backendId: s3BackendId,
+        s3Bucket: bucket,
+      });
+      expect(res.status, `bucket=${JSON.stringify(bucket)}`).toBe(400);
+    }
+    const ok = await postJson("/api/v1/apps/protections", {
+      templateId: await tpl("tpl-good-bucket"),
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "lamasync-apps",
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  test("change destination rejects a hostile bucket (future captures stay put)", async () => {
+    templateId = await createTemplate();
+    const s3BackendId = insertS3Backend();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    const prot = (await enroll.json()) as { id: string };
+    const res = await putJson(`/api/v1/apps/protections/${prot.id}`, {
+      backendId: s3BackendId,
+      s3Bucket: "bad..bucket",
+    });
+    expect(res.status).toBe(400);
+    const row = db
+      .query<{ backend_id: string | null }, [string]>(
+        "SELECT backend_id FROM application_protections WHERE id = ?",
+      )
+      .get(prot.id);
+    expect(row?.backend_id).toBeNull();
   });
 });

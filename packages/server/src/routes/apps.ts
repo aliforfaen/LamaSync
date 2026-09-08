@@ -20,14 +20,33 @@ import {
   compensatePublishedObject,
   deleteSnapshotArchiveForRow,
   isAllowedAppBackendKind,
+  isValidAppBucketName,
   locationForSnapshot,
   publishSnapshotArchive,
   resolveAppBackend,
   snapshotDownload,
+  streamToStagedFile,
+  UploadTooLarge,
   type ResolvedAppBackend,
 } from "../app-storage.ts";
 
-const MAX_BYTES = Number(process.env.LAMASYNC_APPS_MAX_BYTES || 512 * 1024 * 1024);
+const DEFAULT_MAX_BYTES = 512 * 1024 * 1024; // 512 MiB
+
+function appUploadMax(): number {
+  const raw = process.env.LAMASYNC_APPS_MAX_BYTES;
+  if (raw === undefined || raw === "") return DEFAULT_MAX_BYTES;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BYTES;
+}
+
+/** Documented server maximum for a daemon snapshot upload (bounded mid-
+ *  stream while copying multipart bytes to staging). Env override:
+ *  LAMASYNC_APPS_MAX_BYTES. Overridable in tests without touching env. */
+let activeMaxBytes = appUploadMax();
+
+export function __setMaxBytesForTests(bytes: number): void {
+  activeMaxBytes = bytes;
+}
 const GLOBAL_HOST_ID = "_global";
 
 let activeDb: Database = defaultDb;
@@ -404,18 +423,30 @@ function validateDestination(body: { backendId?: string | null; s3Bucket?: strin
     body.s3Bucket !== undefined && body.s3Bucket !== null && body.s3Bucket.trim() !== ""
       ? body.s3Bucket.trim()
       : null;
-  if (backend.kind === "s3" && (s3Bucket === null || s3Bucket === "")) {
-    return { backendId: null, s3Bucket: null, destination: "server_archive", error: "s3 backends require a bucket" };
-  }
-  if (backend.kind !== "s3" && s3Bucket !== null) {
-    return {
-      backendId: null,
-      s3Bucket: null,
-      destination: "server_archive",
-      error: `s3Bucket is only valid for s3 backends (selected: ${backend.kind})`,
-    };
+  const bucketError = validateBucketForKind(s3Bucket, backend.kind);
+  if (bucketError) {
+    return { backendId: null, s3Bucket: null, destination: "server_archive", error: bucketError };
   }
   return { backendId: id, s3Bucket, destination: backend.name, error: null };
+}
+
+/** Strict s3 bucket-name validation (LAMA-324 review hardening): DNS-style
+ *  3-63 lowercase alnum/dot/hyphen names with no traversal, no control
+ *  characters, and no adjacent separators — a hostile bucket could change
+ *  which remote/path rclone addresses, and a control character could
+ *  splice into the generated config. Non-s3 kinds must not carry a bucket. */
+function validateBucketForKind(bucket: string | null, kind: string): string | null {
+  if (bucket === null) {
+    if (kind === "s3") return "s3 backends require a bucket";
+    return null;
+  }
+  if (kind !== "s3") {
+    return `s3Bucket is only valid for s3 backends (selected: ${kind})`;
+  }
+  if (!isValidAppBucketName(bucket)) {
+    return "invalid bucket name: use 3-63 lowercase letters, digits, dots and hyphens, starting and ending with a letter or digit, without '..', '--', '-.' or '.-' segments or control characters";
+  }
+  return null;
 }
 
 const templateBody = t.Object({
@@ -924,28 +955,37 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: "Missing 'tarball' field in multipart body" };
       }
-      if (file.size > MAX_BYTES) {
+      if (file.size > activeMaxBytes) {
         set.status = 413;
-        return { error: `Snapshot too large; limit is ${MAX_BYTES} bytes` };
+        return { error: `Snapshot too large; limit is ${activeMaxBytes} bytes` };
       }
       const descriptionRaw = form.get("description");
       const description =
         typeof descriptionRaw === "string" && descriptionRaw.length > 0 ? descriptionRaw : null;
 
-      // LAMA-324 flow: stage outside browse roots → compute size/SHA-256 →
-      // revalidate protection + destination immediately before publication →
-      // publish → insert metadata → compensate best-effort on DB failure.
+      // LAMA-324 flow: stream multipart to staging (hard cap enforced
+      // MID-STREAM, incremental SHA-256 in the same pass) → revalidate
+      // protection + destination immediately before publication → publish →
+      // insert metadata → compensate best-effort on DB failure. The staged
+      // file is always removed (finally), including oversize/error paths.
       const snapshotId = crypto.randomUUID();
       const stagingDir = appStagingRoot();
       mkdirSync(stagingDir, { recursive: true });
       const stagedPath = join(stagingDir, `${snapshotId}.tar.gz`);
+      let staged: { sizeBytes: number; checksumSha256: string } | null = null;
       try {
-        await Bun.write(stagedPath, Buffer.from(await file.arrayBuffer()));
-      } catch {
-        try {
-          rmSync(stagedPath, { force: true });
-        } catch {
-          /* best-effort */
+        // `Blob.stream()` reads lazily, so an oversized body bails out
+        // BEFORE Bun buffers the full multipart part; the cap keeps the
+        // memory profile bounded by the limit, not the request body.
+        staged = await streamToStagedFile({
+          stagedPath,
+          stream: file.stream(),
+          maxBytes: activeMaxBytes,
+        });
+      } catch (err) {
+        if (err instanceof UploadTooLarge) {
+          set.status = 413;
+          return { error: err.message };
         }
         set.status = 500;
         return { error: "Failed to stage snapshot upload" };
@@ -965,6 +1005,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
           stagedPath,
           protectionId: fresh.id,
           snapshotId,
+          sizeBytes: staged!.sizeBytes,
+          checksumSha256: staged!.checksumSha256,
           destination,
         });
 
@@ -985,8 +1027,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
                 hostId,
                 Date.now(),
                 result.objectKey ?? result.localRelPath!,
-                result.sizeBytes,
-                result.checksumSha256,
+                staged!.sizeBytes,
+                staged!.checksumSha256,
                 description,
                 JSON.stringify(capturedSpec), // server-side exact capture record
                 fresh.backend_id,
