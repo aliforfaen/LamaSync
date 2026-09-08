@@ -13,6 +13,7 @@ import { nextRunSentence } from "../next-run.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 import { HintText } from "../components/Hint.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
+import { RetentionPanel } from "../components/RetentionPanel.tsx";
 import { showVerifiedBadge } from "../backup-health.ts";
 import { formatTimeAgo } from "../relative-time.ts";
 import {
@@ -218,6 +219,8 @@ export function Folders() {
   // sibling "Versions" pattern in Dotfiles.tsx. Per-assignment actions live
   // in the expanded sub-row, so the main table row height stays constant.
   const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
+  // LAMA-325: retention panel for one restic-backed folder.
+  const [retentionFolder, setRetentionFolder] = useState<Folder | null>(null);
   // LAMA-235: host filter in the Folders view — mirrors the "Scope"
   // selector on the Dotfiles page. null = all hosts.
   const [hostFilter, setHostFilter] = useState<string | null>(null);
@@ -1084,6 +1087,16 @@ export function Folders() {
                         >
                           Edit folder
                         </button>
+                        {folder.backend === "restic" ? (
+                          <button
+                            type="button"
+                            className="action"
+                            onClick={() => setRetentionFolder(folder)}
+                            disabled={busy}
+                          >
+                            Retention…
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           className="action danger"
@@ -1234,6 +1247,16 @@ export function Folders() {
           )}
         </tbody>
       </table>
+      )}
+
+      {retentionFolder && (
+        <RetentionPanel
+          scope="folder"
+          resourceId={retentionFolder.id}
+          resourceLabel={retentionFolder.name}
+          open
+          onClose={() => setRetentionFolder(null)}
+        />
       )}
 
       {deletingFolderId && (

@@ -19,6 +19,7 @@ import { hostsRoutes } from "./routes/hosts.ts";
 import { configRoutes } from "./routes/config.ts";
 import { foldersRoutes } from "./routes/folders.ts";
 import { appsRoutes } from "./routes/apps.ts";
+import { retentionRoutes } from "./routes/retention.ts";
 import { reportRoutes } from "./routes/report.ts";
 import { sharesRoutes } from "./routes/shares.ts";
 import { adminRoutes } from "./routes/admin.ts";
@@ -139,6 +140,11 @@ export function createServerApp() {
               description: "Restic snapshot and restore jobs",
             },
             {
+              name: "Retention",
+              description:
+                "LAMA-325 snapshot retention policies, read-only previews, and confirmed execution (app protections + restic folders)",
+            },
+            {
               name: "Server Deploys",
               description:
                 "LAMA-301 production server deploy agent jobs (peek/claim/progress/complete)",
@@ -173,6 +179,7 @@ export function createServerApp() {
     .use(configRoutes)
     .use(foldersRoutes)
     .use(appsRoutes)
+    .use(retentionRoutes)
     .use(reportRoutes)
     .use(sharesRoutes)
     .use(adminRoutes)

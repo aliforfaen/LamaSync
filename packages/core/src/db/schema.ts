@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     cache_max_size      TEXT,
     restic_repository   TEXT,
     restic_password     TEXT,
+    -- LAMA-325: normalized retention policy (JSON RetentionPolicy) or NULL.
+    -- Retention for folders applies to restic-backed folders (they have
+    -- snapshot identity); it never prunes ordinary backup/sync/mount trees.
+    retention_policy    TEXT,
     -- LAMA-302: event-triggered sync. Only honored for effective 'sync'
     -- assignments; opt-in, default-off. watch_quiet_sec NULL => 30 s default;
     -- validated 10-300 at the API boundary.
@@ -150,6 +154,9 @@ CREATE TABLE IF NOT EXISTS application_protections (
     -- credentials only; the bucket stays per protected resource like
     -- folders.s3_bucket. NULL for local/nfs kinds and server archive.
     s3_bucket         TEXT,
+    -- LAMA-325: normalized retention policy (JSON RetentionPolicy) or NULL
+    -- when retention is unset (conservative: disabled/null retains all).
+    retention_policy  TEXT,
     capture_spec      TEXT NOT NULL, -- JSON CaptureSpec
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL,
@@ -838,6 +845,9 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE application_snapshots ADD COLUMN backend_id TEXT",
   "ALTER TABLE application_snapshots ADD COLUMN object_key TEXT",
   "ALTER TABLE application_snapshots ADD COLUMN s3_bucket TEXT",
+  // LAMA-325: retention policies owned by the protected resource.
+  "ALTER TABLE application_protections ADD COLUMN retention_policy TEXT",
+  "ALTER TABLE folders ADD COLUMN retention_policy TEXT",
 ];
 
 /**

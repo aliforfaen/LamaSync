@@ -11,6 +11,40 @@ deploy agent build from the same Bun workspace. CI runs type-check, web build,
 tests, strict skill drift, and distributable binary build.
 
 ## Recently shipped
+## Recently shipped
+
+- **LAMA-324 — app backup storage destinations (server-relay).** Each
+  application protection can select an s3/local/nfs backend destination
+  (restic rejected); the server stages every daemon tarball outside browse
+  roots, verifies size + SHA-256, revalidates protection + destination
+  immediately before publication, and relays under the fixed key
+  `lamasync/apps/<protectionId>/<snapshotId>.tar.gz` (or atomically renames
+  into the server archive as before). Every snapshot persists its immutable
+  physical location (`backend_id`/`object_key`/`s3_bucket` frozen at capture
+  time); download/delete dispatch from those stored values with no silent
+  fallback, and a failed archive delete keeps the row (502) for retry.
+  Backend deletion is blocked while protections reference it or snapshots
+  remain stored there. The storage adapter
+  (`packages/server/src/app-storage.ts`) exposes the reusable delete
+  primitive LAMA-325 retention builds on.
+- **LAMA-325 — smart retention + basic strategies (v1).** A pure
+  deterministic retention evaluator (`packages/core/src/retention.ts`):
+  UTC calendar buckets with newest-successful-per-bucket, keepLast /
+  keepAge / daily / weekly / monthly / yearly rules, always-keep-at-least-
+  one-successful, pins/holds + unfinished rollback artifacts overriding
+  every rule, future/bad timestamps kept for safety, unknown sizes surfaced
+  as unavailable accounting. Smart retention is a preset that expands into
+  visible normalized rules. Policies attach to the protected resource
+  (app protection / restic-backed folder) and are disabled/null by default
+  (conservative — existing data is retained). REST surface:
+  GET/PUT policy, read-only preview, and confirmed execution
+  (`confirm: true`) that re-evaluates fresh state, records per-item
+  outcomes in Activity, and never reports a failed deletion as pruned.
+  App-archive deletes reuse the LAMA-324 adapter (exact stored location);
+  restic folders run `restic forget` + `prune` per repository. Folders
+  without snapshot identity (ordinary backup/sync/mount trees) are refused.
+  No automatic destructive scheduling — preview/manual execution only.
+
 
 - **LAMA-323 — TUI removed, CLI extracted to `packages/cli`.** The
   interactive OpenTUI shell is gone (`@opentui/core` dependency dropped);

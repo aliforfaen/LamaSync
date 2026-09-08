@@ -15,6 +15,7 @@ import type {
 import { api, errorText } from "../api.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { ConfirmDialog, Modal } from "../components/Modal.tsx";
+import { RetentionPanel } from "../components/RetentionPanel.tsx";
 import { formatBytes } from "../format-bytes.ts";
 import { nextRunSentence } from "../next-run.ts";
 
@@ -148,6 +149,8 @@ export function AppBackups() {
     backendId: string | null;
     s3Bucket: string;
   } | null>(null);
+  // LAMA-325: retention panel for one protection (open state + topic).
+  const [retentionTarget, setRetentionTarget] = useState<ApplicationProtectionListItem | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -501,6 +504,13 @@ export function AppBackups() {
                           >
                             Change destination…
                           </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => setRetentionTarget(protection)}
+                          >
+                            Retention…
+                          </button>
                           <button type="button" disabled={busy} onClick={() => void onToggle(protection)}>
                             {protection.enabled ? "Disable protection" : "Enable protection"}
                           </button>
@@ -669,6 +679,16 @@ export function AppBackups() {
           message={`Delete snapshot ${deletingSnapshot.id.slice(0, 8)}? This permanently removes the archive.`}
           onConfirm={() => void confirmDeleteSnapshot()}
           onCancel={() => setDeletingSnapshot(null)}
+        />
+      ) : null}
+
+      {retentionTarget ? (
+        <RetentionPanel
+          scope="app"
+          resourceId={retentionTarget.id}
+          resourceLabel={retentionTarget.name}
+          open
+          onClose={() => setRetentionTarget(null)}
         />
       ) : null}
     </div>

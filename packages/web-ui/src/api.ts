@@ -18,6 +18,10 @@ import type {
   Conflict,
   Folder,
   FolderAssignment,
+  RetentionEvaluation,
+  RetentionPolicy,
+  RetentionRule,
+  RetentionDecision,
   HealthResponse,
   Host,
   HostClass,
@@ -462,6 +466,45 @@ export async function apiFetch<T = unknown>(
   return (await res.text()) as unknown as T;
 }
 
+export type RetentionPolicyView = {
+  policy: RetentionPolicy | null;
+  policyDescription: string;
+};
+
+export type RetentionPolicyMutation = {
+  enabled: boolean;
+  rules?: RetentionRule[];
+  applySmartPreset?: { daily?: number; weekly?: number; monthly?: number; yearly?: number };
+};
+
+export type RetentionSnapshotDecision = {
+  id: string;
+  createdAt: number;
+  sizeBytes: number | null;
+  successful: boolean;
+  decision: RetentionDecision;
+};
+
+export type RetentionPreview = {
+  policy: RetentionPolicy;
+  policyDescription: string;
+  evaluation: RetentionEvaluation;
+  snapshots: RetentionSnapshotDecision[];
+};
+
+export type RetentionOutcome = {
+  id: string;
+  status: "deleted" | "absent" | "failed" | "skipped";
+  error?: string | null;
+};
+
+export type RetentionExecutionResult = {
+  revalidatedPreview: RetentionPreview;
+  outcomes: RetentionOutcome[];
+  prune: { attempted: boolean; ok: boolean; error?: string | null } | null;
+  operationLogId: number | null;
+};
+
 export function apiGet<T>(path: string): Promise<T> {
   return apiFetch<T>(path, { method: "GET" });
 }
@@ -774,6 +817,34 @@ export const api = {
     apiGet<ApplicationSnapshot>(`/apps/snapshots/${encodeURIComponent(id)}`),
   deleteAppSnapshot: (id: string) =>
     apiDelete(`/apps/snapshots/${encodeURIComponent(id)}`),
+  // LAMA-325: snapshot retention (app protections + restic folders).
+  getAppRetentionPolicy: (protectionId: string) =>
+    apiGet<RetentionPolicyView>(`/apps/protections/${encodeURIComponent(protectionId)}/retention`),
+  setAppRetentionPolicy: (protectionId: string, body: RetentionPolicyMutation) =>
+    apiPut<RetentionPolicyView>(
+      `/apps/protections/${encodeURIComponent(protectionId)}/retention`,
+      body,
+    ),
+  previewAppRetention: (protectionId: string) =>
+    apiPost<RetentionPreview>(
+      `/apps/protections/${encodeURIComponent(protectionId)}/retention/preview`,
+    ),
+  executeAppRetention: (protectionId: string) =>
+    apiPost<RetentionExecutionResult>(
+      `/apps/protections/${encodeURIComponent(protectionId)}/retention/execute`,
+      { confirm: true },
+    ),
+  getFolderRetentionPolicy: (folderId: string) =>
+    apiGet<RetentionPolicyView>(`/folders/${encodeURIComponent(folderId)}/retention`),
+  setFolderRetentionPolicy: (folderId: string, body: RetentionPolicyMutation) =>
+    apiPut<RetentionPolicyView>(`/folders/${encodeURIComponent(folderId)}/retention`, body),
+  previewFolderRetention: (folderId: string) =>
+    apiPost<RetentionPreview>(`/folders/${encodeURIComponent(folderId)}/retention/preview`),
+  executeFolderRetention: (folderId: string) =>
+    apiPost<RetentionExecutionResult>(
+      `/folders/${encodeURIComponent(folderId)}/retention/execute`,
+      { confirm: true },
+    ),
   downloadAppSnapshot: async (id: string) => {
     const blob = await apiBlob(
       `/apps/snapshots/${encodeURIComponent(id)}/download`,
