@@ -400,6 +400,9 @@ export const pairingRoutes = new Elysia({ prefix: "/api/v1" })
         summary:
           "Exchange a pending+unexpired pairing code for a host-bound device API key (single-use). No bearer required — the code itself is the proof of intent. LAMA-234: the returned key is a managed device key bound to the submitted hostId, never the master LAMASYNC_API_KEY.",
         tags: ["Pairing"],
+        // Deliberately auth-exempt (auth.ts AUTH_EXEMPT_ROUTES) — the global
+        // bearer security must not mark this operation as authenticated.
+        security: [],
         responses: {
           200: { description: "Exchange succeeded; `apiKey` is the device key to write into client.toml" },
           400: { description: "Invalid code shape or missing hostId/hostname" },

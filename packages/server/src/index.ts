@@ -1,37 +1,8 @@
-import { Elysia } from "elysia";
-import swagger from "@elysiajs/swagger";
-import { getAuthPlugin } from "./auth.ts";
-import { healthRoutes } from "./routes/health.ts";
-import { hostsRoutes } from "./routes/hosts.ts";
-import { configRoutes } from "./routes/config.ts";
-import { foldersRoutes } from "./routes/folders.ts";
-import { appsRoutes } from "./routes/apps.ts";
-import { reportRoutes } from "./routes/report.ts";
-import { sharesRoutes } from "./routes/shares.ts";
-import { adminRoutes, pruneOperationLog } from "./routes/admin.ts";
-import { resticRoutes } from "./routes/restic.ts";
-import { conflictsRoutes } from "./routes/conflicts.ts";
-import { operationsRoutes, reapExpiredFolderLocks } from "./routes/operations.ts";
-import { releaseRoutes } from "./routes/release.ts";
-import { actionsRoutes } from "./routes/actions.ts";
-import { notificationsRoutes } from "./routes/notifications.ts";
-import { browseRoutes } from "./routes/browse.ts";
-import { folderSnapshotsRoutes } from "./routes/snapshots.ts";
-import { folderFileRoutes } from "./routes/folder-files.ts";
-import { backendsRoutes } from "./routes/backends.ts";
-import { statsRoutes } from "./routes/stats.ts";
-import { healthDrillRoutes } from "./routes/health-drill.ts";
-import { demoRoutes } from "./routes/demo.ts";
-import { pauseRoutes } from "./routes/pause.ts";
-import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts";
-import { apiKeysRoutes } from "./routes/api-keys.ts";
-import { serverDeployRoutes } from "./routes/server-deploys.ts";
-import { backupLegacyRoutes } from "./routes/backup-legacy.ts";
-import { mobileRoutes } from "./routes/mobile.ts";
-import { mobileUploadRoutes } from "./routes/mobile-uploads.ts";
+import { pruneOperationLog } from "./routes/admin.ts";
+import { reapExpiredFolderLocks } from "./routes/operations.ts";
+import { sweepExpiredPairingSessions } from "./routes/pairing.ts";
 import { setPeerServerForRateLimit } from "./mobile-store.ts";
 import { reconcileAbandonedMobileUploads } from "./mobile-uploads.ts";
-import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
 import {
@@ -40,9 +11,11 @@ import {
   parseDrillIntervalMs,
   runDrillScheduler,
 } from "./health-drill.ts";
-import { VERSION, type ErrorResponse } from "@lamasync/core";
-import { wsRoutes } from "./ws.ts";
+import { VERSION } from "@lamasync/core";
 import { SERVER_KNOWN_FLAGS, serverUsage } from "./usage.ts";
+import { createServerApp } from "./app.ts";
+
+export type { App } from "./app.ts";
 
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
 
@@ -86,124 +59,7 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 // channels are configured at runtime from the Admin UI instead.)
 seedChannelsFromEnv(db);
 
-const app = new Elysia()
-  .use(
-    swagger({
-      documentation: {
-        info: {
-          title: "LamaSync API",
-          version: "0.2.0",
-          description:
-            "LamaSync server: fleet registration, configuration distribution, folder management, dotfile storage, and operation reporting.",
-        },
-        tags: [
-          { name: "Health", description: "Fleet status" },
-          { name: "Hosts", description: "Registration and heartbeat" },
-          { name: "Config", description: "Host configuration distribution" },
-          { name: "Folders", description: "Folder and assignment management" },
-          { name: "Apps", description: "Application templates, protections, and snapshots" },
-          {
-            name: "Operations",
-            description: "Job reporting and log queries",
-          },
-          { name: "Admin", description: "Destructive admin operations" },
-          { name: "Restic", description: "Restic snapshot and restore jobs" },
-          { name: "Conflicts", description: "Manual sync conflict queue" },
-          {
-            name: "Actions",
-            description: "Queued actions (control plane → daemon)",
-          },
-          {
-            name: "Notifications",
-            description: "Durable notification history and delivery tests",
-          },
-          {
-            name: "Data Browser",
-            description: "Read-only browsing of local backups, S3 folders, and restic snapshots",
-          },
-          {
-            name: "Demo",
-            description: "Demo-mode fleet seeding and deletion",
-          },
-          {
-            name: "Pause",
-            description: "LAMA-273 pause/slow mode toggle (global + per-device)",
-          },
-          {
-            name: "Health",
-            description: "LAMA-266 backup prove-it + monthly fire-drill endpoints",
-          },
-          {
-            name: "Pairing",
-            description:
-              "LAMA-262 pairing-session endpoints — admin issues short codes, devices exchange them for the API key.",
-          },
-          {
-            name: "Mobile",
-            description:
-              "LAMA-296 Android-companion endpoints — enrollment, exchange, web-session bootstrap, native identity, check-in, revocation.",
-          },
-        ],
-        components: {
-          securitySchemes: {
-            bearerAuth: {
-              type: "http",
-              scheme: "bearer",
-              description: "Pre-shared API key (env LAMASYNC_API_KEY)",
-            },
-          },
-        },
-        security: [{ bearerAuth: [] }],
-      },
-    }),
-  )
-  .use(webUiRoutes)
-  .use(wsRoutes)
-  .use(getAuthPlugin())
-  .use(healthRoutes)
-  .use(hostsRoutes)
-  .use(configRoutes)
-  .use(foldersRoutes)
-  .use(appsRoutes)
-  .use(reportRoutes)
-  .use(sharesRoutes)
-  .use(adminRoutes)
-  .use(resticRoutes)
-  .use(conflictsRoutes)
-  .use(operationsRoutes)
-  .use(releaseRoutes)
-  .use(actionsRoutes)
-  .use(notificationsRoutes)
-  .use(backendsRoutes)
-  .use(statsRoutes)
-  .use(demoRoutes)
-  .use(browseRoutes)
-  .use(folderSnapshotsRoutes)
-  .use(folderFileRoutes)
-  .use(pauseRoutes)
-  .use(pairingRoutes)
-  .use(apiKeysRoutes)
-  .use(serverDeployRoutes)
-  .use(healthDrillRoutes)
-  .use(backupLegacyRoutes)
-  .use(mobileRoutes)
-  .use(mobileUploadRoutes)
-  .onError(({ code, error, set }): ErrorResponse => {
-    if (code === "VALIDATION") {
-      set.status = 422;
-      return { error: error instanceof Error ? error.message : String(error) };
-    }
-    if (code === "NOT_FOUND") {
-      set.status = 404;
-      return { error: "not_found" };
-    }
-    console.error("[server] unhandled error:", error);
-    set.status = 500;
-    return { error: "internal_server_error" };
-  })
-  .listen({ port, hostname: "0.0.0.0" });
-
-export type App = typeof app;
+const app = createServerApp().listen({ port, hostname: "0.0.0.0" });
 
 console.log(`LamaSync server v${VERSION} listening on http://${app.server!.hostname}:${app.server!.port}`);
 console.log(`Swagger UI: http://${app.server!.hostname}:${app.server!.port}/swagger`);

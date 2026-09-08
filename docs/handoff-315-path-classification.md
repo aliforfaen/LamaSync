@@ -412,11 +412,11 @@ Target is additive and backward-compatible:
 
 ---
 
-## API / CLI / TUI / Web impact per package
+## API / Web impact per package
 
-> Any new route, CLI flag, or config key **must** update
-> `packages/agent-skill/reference/{api,cli}.md` in the same change (the repo's
-> strict drift check enforces this).
+> Any new route or config key **must** update the applicable
+> `packages/agent-skill/reference/` document in the same change (the repo's
+> strict drift check enforces route drift).
 
 - **packages/core** (`types.ts`, `db/schema.ts`, `index.ts`)
   - Extend `CaptureSpecPath` with `classificationSource` / `confidence`.
@@ -441,18 +441,14 @@ Target is additive and backward-compatible:
 - **packages/daemon** — no behavioral change in stage 1: the wire
   (`AppCaptureAssignment`) is unchanged; capture/exclude logic is untouched.
   Only confirm the spec readers ignore the new JSON keys.
-- **packages/cli** (`cli/apps.ts`, `dispatch.ts:405–570`) — extend
-  `apps templates create|update` with per-path classification flags (or a small
-  `--classify` review helper) and show classes in `apps protections get` /
-  `apps templates get` JSON output. Keep output `--json` additive.
 - **packages/web-ui** (`Presets.tsx` = `AppTemplates`, `Dotfiles.tsx` =
   `AppBackups`, `api.ts` LAMA-316 block, `App.tsx` routes `/apps/templates` &
   `/apps/backups`) — add a per-path classification row with suggestion chips,
   confidence + explanation, an Apply/Ignore affordance, a conspicuous
   `secrets` badge, and grouped-by-class snapshot summaries rendered from the
   snapshot's own `captured_spec`.
-- **packages/agent-skill/reference** — document the new classify endpoint and
-  any new CLI flags in `api.md` / `cli.md` in the same change.
+- **packages/agent-skill/reference** — document the new classify endpoint in
+  `api.md` in the same change. Application fleet management has no CLI surface.
 
 ---
 
@@ -477,9 +473,8 @@ Target is additive and backward-compatible:
   suggestion.
 - **Wire compatibility:** `HostConfig.apps` and capture/restic exclude behavior
   unchanged; daemon spec readers tolerate the new JSON keys.
-- **Web/TUI/CLI:** per-path class editor renders and round-trips; snapshot
-  summaries group by class from the snapshot's own spec; CLI `--json` output is
-  additive.
+- **Web/API:** per-path class editor renders and round-trips; snapshot summaries
+  group by class from the snapshot's own spec; API responses remain additive.
 - **Gates (run by orchestrator after all slices land):** `bun x tsc --noEmit`,
   `bun run build:web-ui`, `bun test`,
   `bun scripts/check-skill-drift.ts --strict`.

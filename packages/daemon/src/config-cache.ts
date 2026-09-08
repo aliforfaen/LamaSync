@@ -6,7 +6,7 @@ import { expandConfigPaths } from "./config.ts";
 
 /**
  * Cache of the last host config fetched from the server. Lets the daemon keep
- * scheduling assignments across server restarts and lets the TUI inspect state
+ * scheduling assignments across server restarts and lets the local CLI inspect state
  * without round-tripping to the API.
  */
 export const CACHE_PATH = join(

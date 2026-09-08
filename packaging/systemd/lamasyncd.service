@@ -38,7 +38,7 @@ ProtectHome=read-only
 # here, e.g.:
 #   ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
 ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
-# Standardize socket path so the daemon, TUI, and per-mount units agree.
+# Standardize socket path so the daemon, local CLI, and per-mount units agree.
 # `$XDG_RUNTIME_DIR` expands to /run/user/<uid> at runtime under
 # systemd --user; matches the default in @lamasync/core's socket-path
 # helper. client.toml's `socketPath` overrides this when set.

@@ -34,7 +34,7 @@ export function daemonUsage(): string {
     `lamasyncd ${VERSION}`,
     "",
     "Sync daemon: registers this device with the configured LamaSync server and",
-    "runs the scheduled-sync loop, the Unix-socket control surface for the TUI,",
+    "runs the scheduled-sync loop, the Unix-socket control surface for the local CLI,",
     "and rclone mounts. Configuration lives in client.toml (see the agent skill",
     "for the schema); the daemon refreshes it on every config-revision bump.",
     "",

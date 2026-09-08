@@ -15,7 +15,7 @@ import { api } from "../api.ts";
 import { CONFLICT_STRATEGY_HINTS, ROLE_HINTS } from "../concepts.ts";
 import { validateCronExpression } from "../cron.ts";
 // LAMA-267: presets + the "Next: …" sentence live in shared helpers so every
-// web-ui surface (and the TUI copy) stays in lock-step.
+// web UI stays in lock-step with daemon schedule semantics.
 import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
 import { nextRunSentence } from "../next-run.ts";
 

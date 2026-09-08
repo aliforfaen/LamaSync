@@ -9,7 +9,7 @@
 // The release publishes a single asset named
 //   lamasync-skill-<version>.tar.gz
 // produced by `packaging/build-skill-tarball.sh` and shipped alongside the
-// `lamasyncd` and `lamasync-tui` binaries. We deliberately do not import
+// `lamasyncd`, `lamasync`, and transitional `lamasync-tui` binaries. We do not import
 // the skill's reference source — `~/.agents/skills/lamasync/` is the
 // delivered artifact the agent reads at runtime.
 

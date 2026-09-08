@@ -1,7 +1,7 @@
 # LamaSync agent guide
 
 LamaSync is a personal, tailnet-only sync fleet: one Docker/LXC server, a
-lightweight daemon on each device, and web and terminal management surfaces.
+lightweight daemon on each device, a web management surface, and a local CLI.
 It is a TypeScript/Bun workspace; rclone performs transfers and managed bearer
 keys are the trust boundary.
 
@@ -10,9 +10,9 @@ keys are the trust boundary.
 - `core` — shared types, SQLite schema/migrations, TOML, API client
 - `server` — Elysia REST, WebSocket, Swagger, auth
 - `daemon` — heartbeat, scheduler, rclone, mounts, local socket
-- `cli` — `lamasync` non-interactive CLI (local daemon + fleet surface)
+- `cli` — local-first, non-interactive `lamasync` CLI
 - `web-ui` — embedded React SPA
-- `agent-skill` — installed CLI-first operator guidance
+- `agent-skill` — local-CLI and REST API operator guidance
 - `deploy-agent` — fixed-script LXC production deploy runner
 
 ## Read first

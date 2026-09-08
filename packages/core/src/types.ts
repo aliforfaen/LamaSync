@@ -772,7 +772,7 @@ export interface OperationLogExport {
 }
 
 // Network share definition (NFS / SMB). The server exposes its list via
-// GET /api/v1/shares; the TUI renders an fstab line per share.
+// GET /api/v1/shares; clients can render an fstab line per share.
 export interface Share {
   id: string;
   name: string;

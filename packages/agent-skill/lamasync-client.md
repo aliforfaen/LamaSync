@@ -17,8 +17,8 @@ heartbeats, pulls its config bundle, and executes.
 Use this skill when your task is to **set this host up as a LamaSync
 client** or operate the local daemon. For direct server API operations
 (folders, assignments, app templates/protections/snapshots, operation log),
-see the `lamasync` skill (CLI-first; `reference/api.md` is the REST/WS
-escape hatch).
+see the `lamasync` skill (local CLI for this device; `reference/api.md` for
+fleet operations over REST/WS).
 
 ## Fleet facts (current production)
 
@@ -172,7 +172,7 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
 
 ## See also
 
-- `lamasync` skill (sibling) — CLI-first with `reference/api.md` as the REST
-  escape hatch.
+- `lamasync` skill (sibling) — local CLI for device operations and
+  `reference/api.md` for fleet operations.
 - `README.md` in the repo root — architecture, server deployment, CLI.
 - `ARCHITECTURE.md` — system design and DB schema.

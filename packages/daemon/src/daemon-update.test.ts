@@ -240,13 +240,13 @@ describe("selectDaemonAsset", () => {
       assets: [{ name: "lamasyncd-linux-x64", downloadUrl: "https://x", size: 1 }],
     });
     expect(selectDaemonAsset(prefixed)?.name).toBe("lamasyncd-linux-x64");
-    const tui = release({
+    const legacyCli = release({
       assets: [{ name: "lamasync-tui", downloadUrl: "https://x", size: 1 }],
     });
-    // Strict (remote path): the TUI asset is NOT a daemon asset.
-    expect(selectDaemonAsset(tui)).toBeNull();
+    // Strict remote path: a legacy CLI compatibility asset is not a daemon asset.
+    expect(selectDaemonAsset(legacyCli)).toBeNull();
     // Legacy broad fallback (CLI miss path only).
-    expect(selectDaemonAssetLegacy(tui)?.name).toBe("lamasync-tui");
+    expect(selectDaemonAssetLegacy(legacyCli)?.name).toBe("lamasync-tui");
     expect(selectDaemonAsset(release({ assets: [] }))).toBeNull();
   });
 });

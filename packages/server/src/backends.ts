@@ -48,7 +48,7 @@ export function isS3Provider(value: string | null): value is S3Provider {
 
 /** Map a backends row to the wire shape. Secrets never leave the server:
  *  `hasSecret` reports whether one is stored; the ciphertext stays local.
- *  LAMA-266: pass through the additive last-prove fields so the web/TUI
+ *  LAMA-266: pass through the additive last-prove fields so web/API clients
  *  can render a "Verified 2h ago" badge without an extra endpoint. */
 export function rowToBackend(row: BackendRow): Backend {
   return {

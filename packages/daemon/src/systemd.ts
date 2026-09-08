@@ -251,7 +251,7 @@ export function daemonServiceTemplate(opts: {
     "# EROFS (errno 30, syscall=listen). The %U specifier expands to the",
     "# invoking UID, matching where systemd places $XDG_RUNTIME_DIR.",
     `ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/projects /run/user/%U`,
-    "# Standardize socket path so the daemon, TUI, and per-mount units agree.",
+    "# Standardize socket path so the daemon, local CLI, and per-mount units agree.",
     `Environment=LAMASYNC_SOCKET_PATH=${socketPath}`,
     "# Resource limits",
     "MemoryMax=512M",

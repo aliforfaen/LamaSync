@@ -1,7 +1,8 @@
 # Cozy dashboard & Lama visual identity
 
 > **Status:** approved design direction, implementation handoff
-> **Related:** LAMA-275 — design system + web/TUI shell overhaul (completed)
+> **Historical context:** LAMA-275 covered the web and former TUI shell;
+> the interactive TUI was removed in LAMA-323.
 > **Companion issue:** LAMA-295 — Cozy dashboard and Lama visual identity
 
 ![Cozy dashboard concept](cozy-dashboard-artifacts/cozy-dashboard-concept.png)

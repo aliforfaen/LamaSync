@@ -1,6 +1,6 @@
 // Network share registry (NFS / SMB). The list is purely a server-side
 // declaration read from `LAMASYNC_SHARES` (JSON string) or
-// `${LAMASYNC_DATA_DIR}/shares.json`. The TUI renders this list to help
+// `${LAMASYNC_DATA_DIR}/shares.json`. Management clients render this list to help
 // users pick a share and generate an `/etc/fstab` line — but it never
 // writes `/etc/fstab` itself; root operations are out of scope here.
 

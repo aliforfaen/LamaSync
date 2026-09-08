@@ -1,5 +1,5 @@
 // LAMA-218: the shared default-socket-path helper is the single source of
-// truth for both the daemon and the TUI. Cover every branch here so a
+// truth for both the daemon and the local CLI. Cover every branch here so a
 // regression in either consumer is caught centrally.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";

@@ -251,6 +251,9 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
         summary:
           "Exchange a pending+unexpired mobile enrollment for one installation (no auth — the id + one-time QR secret prove intent). Server-created host id, native token and separate web grant are returned exactly once; the client can never choose a host id or grant level.",
         tags: ["Mobile"],
+        // Deliberately auth-exempt (auth.ts AUTH_EXEMPT_ROUTES) — the id +
+        // one-time QR secret prove intent, so no bearer security applies.
+        security: [],
         responses: {
           200: { description: "Exchange succeeded; nativeToken + webGrant are returned once" },
           400: { description: "Invalid/malformed payload" },
@@ -319,6 +322,9 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
         summary:
           "Bootstrap a cookie web session from the web grant (body-only, no auth header). Sets the host-only __Host-lamasync-mobile cookie (Secure, HttpOnly, SameSite=Strict, 12 h) and returns the session CSRF token. Native token alone → 403.",
         tags: ["Mobile"],
+        // Deliberately auth-exempt (auth.ts AUTH_EXEMPT_ROUTES) — the body
+        // web grant proves intent; no bearer security applies.
+        security: [],
         responses: {
           200: { description: "Session cookie set; csrfToken returned once" },
           400: { description: "Invalid grant shape or cross-origin request" },

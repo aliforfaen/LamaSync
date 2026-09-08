@@ -181,11 +181,12 @@ function parseCliDocs(md: string): CliCommand[] {
   return out;
 }
 
-/** Drive the binary to dump every command's --help. We use a thin shim
- *  rather than the real one because the real binary needs a TTY in some
- *  renderers — the dispatcher returns plain text for `--help`, but inside
- *  the compiled Bun binary the print path is the same `process.stdout.write`
- *  branch we exercise here.
+/** Drive the binary to dump every command's --help. We prefer the compiled
+ *  binary when it exists (that's the exact artifact users install), and
+ *  fall back to running the CLI entrypoint from source when the binary
+ *  isn't built (e.g. the CI check job). `--help` is plain text on stdout
+ *  in both cases — the removed interactive TUI renderer no longer exists,
+ *  so there is no TTY requirement to shim around.
  *
  *  The invocation set is seeded from the dispatch walker (source of truth,
  *  covers every leaf AND every nested-group path), then enriched with

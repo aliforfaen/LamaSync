@@ -1014,7 +1014,7 @@ export class LamaSyncApiClient {
   }
 
   // LAMA-234: managed API-key endpoints. Any authenticated principal may
-  // call getAuthMe (the TUI labels the active credential with it); the
+  // call getAuthMe (clients can label the active credential with it); the
   // key-management calls are admin-only on the server (master/admin keys;
   // device keys get 403). The server marks every secret-bearing response
   // `Cache-Control: no-store` — the client adds no cache or logging layer

@@ -42,7 +42,7 @@ backupDir = "/backups"
 # Set via LAMASYNC_LOG_RETENTION_DAYS.
 # logRetentionDays = 90
 
-# Optional: tailnet IP printed into the agent-skill copy and TUI defaults.
+# Optional: tailnet IP printed into agent-skill and client guidance.
 # Pure documentation; the server does not bind to it. Set via
 # LAMASYNC_TAILNET_IP.
 # tailnetIp = "100.64.0.1"

@@ -495,7 +495,7 @@ async function systemdAwareStopMount(folderId: string): Promise<void> {
  *     in-process mount when systemd isn't available, matching the existing
  *     switch path.
  *   - effective `mount`, role != `source`, mount unit already active →
- *     adopt it into the in-process registry so the scheduler and TUI see
+ *     adopt it into the in-process registry so the scheduler and local CLI see
  *     it as live (this is the old `adoptExistingMountUnits` behavior).
  *   - effective anything-else, mount unit active → stop it so a host
  *     flipped back to sync doesn't keep a stale mount running. The cron
@@ -520,7 +520,7 @@ async function reconcileMountsOnRefresh(
     if (effective === "mount") {
       if (active) {
         // Already up under systemd — adopt it into the in-process registry
-        // so the scheduler and TUI see it as live.
+        // so the scheduler and local CLI see it as live.
         if (listMounts().some((m) => m.folderId === assignment.folderId)) continue;
         const adopted = adoptMount(assignment.folderId, {
           mountPath: assignment.localPath,

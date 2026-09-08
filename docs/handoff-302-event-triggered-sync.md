@@ -5,15 +5,16 @@
 Landed the core/server contract, the platform-neutral debounce/single-flight
 controller, the Linux inotify adapter + daemon lifecycle reconciliation, the
 Git-ignore filter snapshot (with safe `--resync` on change), the operation
-`trigger` origin, and the CLI/web/TUI surface. Gates green:
+`trigger` origin and the web surface. The former fleet CLI and interactive TUI
+surfaces were subsequently removed in LAMA-326 and LAMA-323. Gates green:
 `bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` (1239 pass / 0 fail),
 `bun scripts/check-skill-drift.ts --strict`.
 
 **Outstanding / next:**
 - Step 5 — real Linux daemon smoke/soak against a busy Git fixture (observe
   the bounded-run behavior and record it here).
-- TUI full watch-editing editor — deferred (the TUI has no complete
-  sync-assignment editor; edit via CLI `folders assign-update` or the web UI).
+- Assignment watch settings are managed through the web UI or REST API; the
+  removed TUI/fleet CLI need no follow-up editor.
 
 The watch config is **default-off**, so existing assignments keep their exact
 schedule-only behavior after upgrade. See `docs/features.md` (LAMA-302) and
@@ -182,18 +183,14 @@ user write—prefer a bounded extra no-op bisync over losing a change.
    update validation/mapping, host config revision bump.
 2. Web UI: expose the toggle and quiet-period control only when the assignment
    has effective `sync` mode; show the periodic-schedule recommendation.
-3. TUI: expose the same setting wherever assignments are edited, or clearly
-   defer it only if the current assignment editor lacks those controls. Do not
-   create a hidden server-only setting.
-4. CLI: add assignment create/update flags and show the settings in assignment
-   listings/JSON. Update `packages/agent-skill/reference/cli.md` and
-   `reference/api.md` in the same change.
-5. Observability: include trigger origin (`watch`, `schedule`, or `manual`)
+3. API: expose assignment create/update fields and document them in
+   `packages/agent-skill/reference/api.md`.
+4. Observability: include trigger origin (`watch`, `schedule`, or `manual`)
    in operation details/status where additive and practical. Record every
    watch-triggered reconciliation, including successful no-op ones, in normal
-   operation history. The local/TUI status should make “watching / waiting for
-   changes / syncing” intelligible without flooding history with individual
-   filesystem events.
+   operation history. The local CLI and web status should make “watching /
+   waiting for changes / syncing” intelligible without flooding history with
+   individual filesystem events.
 
 ## Test plan
 
@@ -233,7 +230,7 @@ user write—prefer a bounded extra no-op bisync over losing a change.
 2. Implement and unit-test the platform-neutral debounce/single-flight
    controller.
 3. Add Linux inotify adapter and daemon lifecycle reconciliation.
-4. Wire web/TUI/CLI controls and operation-origin visibility.
+4. Wire web/API controls and operation-origin visibility.
 5. Run a real Linux daemon smoke/soak against a busy Git fixture and capture
    the observed bounded-run behavior in the issue handoff.
 

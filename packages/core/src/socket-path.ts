@@ -1,10 +1,10 @@
-// LAMA-218: shared daemon/TUI Unix-socket path resolution. Lives in
+// LAMA-218: shared daemon/CLI Unix-socket path resolution. Lives in
 // `@lamasync/core` so neither side can drift.
 //
 // Resolution order (highest priority first):
 //   1. `override` argument (caller already consulted env / client.toml)
 //   2. `LAMASYNC_SOCKET_PATH` environment variable (set by the systemd
-//      unit for the daemon and by users for the TUI)
+//      unit for the daemon and by local CLI users)
 //   3. `$XDG_RUNTIME_DIR/lamasync.sock` — the systemd-friendly default
 //      (always writable under systemd --user, no ReadWritePaths exception
 //      required)

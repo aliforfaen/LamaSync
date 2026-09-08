@@ -66,7 +66,8 @@ export interface DaemonUpdateDeps {
  * Fixed daemon-asset selection for remotely initiated updates. Never
  * consults the environment; picks only the daemon's own assets — the
  * canonical `lamasyncd` binary or a `lamasyncd-*` per-platform variant.
- * Anything else (TUI, server, skill tarballs, `update.sh`) is rejected.
+ * Anything else (CLI compatibility assets, server, skill tarballs, `update.sh`)
+ * is rejected.
  */
 export function selectDaemonAsset(
   release: ReleaseInfo,

@@ -466,7 +466,7 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
  * folder is never re-acquired at all.
  *
  * Broadcasts one `lock` event with action `"reaped"` per deleted row so
- * connected TUI/web clients can drop the stale lock from their view.
+ * connected web clients can drop the stale lock from their view.
  *
  * Idempotent; safe to call from a startup hook and a periodic timer.
  *

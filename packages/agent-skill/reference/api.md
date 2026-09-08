@@ -1,13 +1,15 @@
-# REST + WebSocket API reference (escape hatch)
+# REST + WebSocket API reference
 
-The CLI in `reference/cli.md` is the primary agent surface. This file is
-the escape hatch when (a) the CLI doesn't express a one-off operation
-that is allowed by the API, or (b) you are debugging the CLI itself.
+The `lamasync` CLI (see `reference/cli.md`) is local-first: it drives the
+local daemon, reports host health, and registers the device. Fleet
+management — folders, backends, app protections, mobile devices, shares,
+operations — is the **web UI + this REST API**; there is no fleet CLI
+surface. Use this reference when you operate or debug the API directly.
 
 **Always prefer fetching the live OpenAPI 3 spec** at
 `GET /swagger/json` for exact request/response field names when writing
-write calls. The CLI / web UI / Swagger UI all consume the same source of
-truth, so what `/swagger/json` says is what the server actually enforces.
+write calls. The web UI and Swagger UI consume the server contract, so what
+`/swagger/json` says is what the server actually enforces.
 
 > "Don't trust this document for schema details — trust /swagger/json."
 > If this file disagrees with the live spec, the live spec wins, and the
@@ -15,13 +17,13 @@ truth, so what `/swagger/json` says is what the server actually enforces.
 
 ## Auth
 
-Single header on every request:
+Auth is a single `Authorization: Bearer <key>` header on every request —
+**except** three deliberate pre-auth routes (see below) and the mobile
+web-session cookie path (see below). The header, when present, is
+authoritative: a malformed or unknown credential is a 401 and never falls
+back to the cookie.
 
-```
-Authorization: Bearer <key>
-```
-
-Three credential kinds (LAMA-234):
+Four bearer credential kinds (LAMA-234):
 
 | Kind      | What it is | Scope |
 |-----------|------------|-------|
@@ -32,8 +34,32 @@ Three credential kinds (LAMA-234):
 
 - `401 Unauthorized`: missing, wrong, or revoked key — a device that was revoked gets 401 exactly like a bad key.
 - `403 Forbidden`: the key is valid but lacks authority for the route (device key hitting an admin route, or a device key touching another host's rows).
-- Identify the active credential with `GET /auth/me` (works for all three kinds).
+- Identify the active credential with `GET /auth/me` (bearer mode for all four kinds above, session mode for cookie web sessions). Mobile NATIVE tokens are confined to `/mobile/*` and never reach `/auth/me` (403) — see the Mobile table rows.
 - Managed key secrets are encrypted at rest (AES-256-GCM); lists and normal reads return masked metadata only.
+
+### Pre-auth routes (no bearer/cookie required)
+
+Three operations are deliberately **auth-exempt** (exact method+path in
+`server/src/auth.ts` `AUTH_EXEMPT_ROUTES`): the caller cannot yet hold a
+credential, and the route re-checks state itself:
+
+- `POST /pairing/:code/exchange` — the single-use pairing code is the proof of intent.
+- `POST /mobile/enrollments/:id/exchange` — the enrollment id + one-time QR secret are the proof of intent.
+- `POST /mobile/web-session` — the web grant in the body is the proof of intent (a bearer is a valid-but-wrong authority → 403).
+
+They are marked `security: []` in `/swagger/json`, and the OpenAPI spec's
+global bearer security does not apply to them.
+
+### Mobile web-session cookies (LAMA-296)
+
+The Android companion may bootstrap a **cookie web session** from its web
+grant and open the SPA in a WebView without a second login. The
+`__Host-lamasync-mobile` cookie (Secure; HttpOnly; SameSite=Strict; 12 h)
+is accepted **only when no `Authorization` header is present at all** — any
+explicit header, even malformed or empty, is a 401 and never falls back to
+the cookie. Cookie-authenticated mutations additionally require the exact
+trusted Origin and the session CSRF token (`X-CSRF-Token`), so the web
+grant path is never a bearer bypass.
 
 ## Base URL
 
@@ -351,7 +377,7 @@ spec. The high-level shapes (verbose commentary):
     caller observes a current view without waiting for the periodic
     sweep.
   - **Exchange** (`POST /api/v1/pairing/:code/exchange`) — **deliberately
-    auth-exempt** (see `auth.ts`'s `AUTH_EXEMPT_PATHS`): the device has
+    auth-exempt** (see `auth.ts`'s `AUTH_EXEMPT_ROUTES`): the device has
     no API key yet, so requiring the bearer would be a chicken/egg. The
     code itself is the proof of intent; the body carries the device's
     `{ hostId, hostname }`. Single-use: 200 → `{ apiKey }` on the first

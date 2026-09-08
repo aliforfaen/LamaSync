@@ -853,7 +853,7 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   // LAMA-122 / LAMA-162: conflict handling. If bisync reported conflicts,
   // either queue them for manual resolution or apply the folder's automatic
   // strategy (newer_wins, source_wins, keep_both). Unresolvable automatic
-  // cases are still queued so the TUI can handle them.
+  // cases are still queued so management clients can handle them.
   if (folder.type === "sync" && !dry) {
     const conflicts = parseBisyncConflicts(runResult.stdoutTail, runResult.stderrTail);
     if (conflicts.length > 0) {

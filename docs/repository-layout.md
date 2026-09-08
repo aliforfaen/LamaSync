@@ -124,7 +124,7 @@ lamasync/                     # Bun workspace root
           doctor.ts           #   `lamasync doctor`
           local.ts            #   `lamasync local status|folders|ops|sync|sync-all|mount|unmount`
           register.ts         #   `lamasync register` (LAMA-262 pairing)
-    agent-skill/              # CLI-first agent skill (LAMA-230); two-tier bundle
+    agent-skill/              # Local-CLI + REST agent skill (LAMA-230); two-tier bundle
       SKILL.md                # frontmatter trigger + decision tree + safety summary
       lamasync-client.md      # separate client-install onboarding skill
       README.md               # bundle overview + install instructions

@@ -1,12 +1,12 @@
-// Daemon-side Unix socket used by the TUI's "Local view" and any other
-// in-process control clients.
+// Daemon-side Unix socket used by the local CLI and other local control
+// clients.
 //
 // Protocol: line-JSON. Each connection sends one line of JSON
 // (`{"cmd": "..."}`) and receives one line of JSON (`{"ok": true, "data": ...}`
 // or `{"ok": false, "error": "..."}`) before the server closes the connection.
 //
-// Implemented on `node:net.Server` so the framing matches the TUI's
-// `node:net` client and the protocol is genuinely raw (no HTTP, no WebSocket).
+// Implemented on `node:net.Server` so the framing matches the CLI's `node:net`
+// client and the protocol is genuinely raw (no HTTP, no WebSocket).
 
 import { existsSync, mkdirSync, unlinkSync } from "fs";
 import { dirname } from "node:path";

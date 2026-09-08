@@ -751,7 +751,7 @@ lamasync/
 │   ├── cli/                  # @lamasync/cli — local-first non-interactive CLI (LAMA-227, trimmed LAMA-326)
 │   │   ├── src/index.ts
 │   │   └── src/cli/          # dispatch tree, command modules, output helpers
-│   └── agent-skill/          # CLI-first agent skill (LAMA-230)
+│   └── agent-skill/          # Local-CLI + REST agent skill (LAMA-230)
 │       ├── SKILL.md          #   trigger + decision tree + safety summary
 │       ├── reference/        #   cli.md, api.md, recipes.md, troubleshooting.md, safety.md
 │       └── lamasync-client.md  # separate client-install onboarding skill

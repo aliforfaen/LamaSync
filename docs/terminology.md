@@ -1,6 +1,6 @@
 # LamaSync terminology
 
-Use this guide for user-facing web, TUI, CLI-help, README, and operator copy.
+Use this guide for user-facing web, CLI help, README, and operator copy.
 It is a language guide, not a request to rename identifiers.
 
 ## Rule

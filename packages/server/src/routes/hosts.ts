@@ -206,7 +206,7 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
     "/hosts/:hostId",
     async ({params, body, set, request}) => {
       // LAMA-234: device keys may only rename their own host (and the
-      // daemon never renames itself — admin/TUI paths do).
+      // daemon never renames itself — administrative clients do).
       if (!deviceMayAccessHost(principalOf(request), params.hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
