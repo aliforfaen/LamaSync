@@ -28,15 +28,16 @@ keys are the trust boundary. The tailnet provides transport encryption.
    ops, rotate key, stop mounts)?** That is safety rule 5 below: confirm
    intent with the operator first, then pass `--yes` if the command asks.
 5. **Need to set up or operate an app backup?** The model is templates →
-   protections → snapshots: `lamasync apps templates create` defines what
-   to capture, `lamasync apps protections enroll` binds a template to one
-   host, and `lamasync apps snapshots upload/list/download` move archives
+   protections → snapshots, managed over the REST API (see
+   `reference/api.md`; the CLI no longer exposes app commands, LAMA-326):
+   `POST /apps/templates` defines what to capture, `POST /apps/protections`
+   binds a template to one host, and the snapshots endpoints move archives
    (templates, enrollment, and destructive ops are admin-only; a device
    key reaches only its own host's protections + snapshots).
 
 All commands take `--json` for machine output and obey a stable exit code
 contract (see `reference/cli.md`): `0` ok, `1` runtime, `2` usage error,
-`3` auth failure (401/403) or missing server config, `4` server unreachable.
+`3` auth failure (401/403), `4` server unreachable.
 
 ## Auth discovery order
 

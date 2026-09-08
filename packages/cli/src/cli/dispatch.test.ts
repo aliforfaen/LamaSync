@@ -3,6 +3,10 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
 import { runCli } from "./dispatch.ts";
 
 describe("runCli dispatch (LAMA-229)", () => {
@@ -26,10 +30,14 @@ describe("runCli dispatch (LAMA-229)", () => {
       written += typeof data === "string" ? data : new TextDecoder().decode(data);
       return true;
     }) as typeof process.stderr.write;
+    // Throw a plain object sentinel (no `message` property) so runCli's
+    // top-level catch rethrows it untouched instead of re-mapping the
+    // exit code through exitCodeForError — fail()-style exits inside
+    // runCliInner keep their original code.
     process.exit = ((code?: number): never => {
       exitCode = code ?? 0;
-      throw new Error(`__exit:${code ?? 0}`);
-    }) as typeof process.exit;
+      throw { __testExit: true };
+    }) as unknown as typeof process.exit;
   });
 
   afterEach(() => {
@@ -41,7 +49,7 @@ describe("runCli dispatch (LAMA-229)", () => {
   test("bare 'lamasync' prints top-level help and exits", async () => {
     await runCli([]);
     expect(written).toContain("Usage: lamasync <command>");
-    expect(written).toContain("backends list");
+    expect(written).toContain("local status");
     expect(written).toContain("Exit codes");
     expect(exitCode).toBeUndefined();
   });
@@ -52,9 +60,9 @@ describe("runCli dispatch (LAMA-229)", () => {
     expect(exitCode).toBeUndefined();
   });
 
-  test("'folders list --help' prints command-specific help", async () => {
-    await runCli(["folders", "list", "--help"]);
-    expect(written).toContain("List folders");
+  test("'local status --help' prints command-specific help", async () => {
+    await runCli(["local", "status", "--help"]);
+    expect(written).toContain("Show local daemon status");
     expect(exitCode).toBeUndefined();
   });
 
@@ -67,25 +75,43 @@ describe("runCli dispatch (LAMA-229)", () => {
     }
     // The dispatcher maps unknown-command CliUsageError via process.exit(2);
     // we intercept exit so the marker is what surfaces to the test.
-    expect((caught as Error).message).toContain("__exit:2");
+    expect(caught).toEqual(expect.objectContaining({ __testExit: true }));
+    expect(exitCode).toBe(2);
+  });
+
+  test("removed server-facing commands are unknown (LAMA-326)", async () => {
+    let caught: unknown;
+    try {
+      await runCli(["folders", "list", "--help"]);
+    } catch (err) {
+      caught = err;
+    }
+    // The whole server-facing management surface is gone; even --help
+    // must not resurrect it.
+    expect(caught).toEqual(expect.objectContaining({ __testExit: true }));
+    expect(exitCode).toBe(2);
+    expect(written).not.toContain("List folders.");
   });
 
   test("usage error inside a subcommand → exit 2", async () => {
     let caught: unknown;
+    const originalHome = process.env.HOME;
+    const fakeHome = mkdtempSync(join(tmpdir(), "lamasync-dispatch-test-"));
     try {
-      // `lamasync folders create` without --name triggers CliUsageError;
-      // the dispatcher catches it inside run() and routes to exit(2).
-      // --server/--api-key bypass the no-config refusal so the test is
-      // deterministic regardless of whether the dev machine has a
-      // ~/.config/lamasync/client.toml (CI does not).
-      await runCli([
-        "folders", "create", "--type", "sync",
-        "--server", "http://lamasync.test",
-        "--api-key", "good-key-1234567890",
-      ]);
+      // Point HOME at a temp dir so a real ~/.config/lamasync/client.toml
+      // on the dev machine can't turn `register` into the exit-1
+      // config-exists refusal instead of the usage error under test.
+      process.env.HOME = fakeHome;
+      // `register` in a non-TTY context without --code / --server throws
+      // CliUsageError; the dispatcher routes it to exit(2).
+      await runCli(["register"]);
     } catch (err) {
       caught = err;
+    } finally {
+      process.env.HOME = originalHome;
+      rmSync(fakeHome, { recursive: true, force: true });
     }
-    expect((caught as Error).message).toContain("__exit:2");
+    expect(caught).toEqual(expect.objectContaining({ __testExit: true }));
+    expect(exitCode).toBe(2);
   });
 });

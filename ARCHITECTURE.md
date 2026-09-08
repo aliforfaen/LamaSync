@@ -472,16 +472,19 @@ script is a standalone `curl | bash` updater for clients.
 
 ### `lamasync` (CLI, LAMA-229/276)
 
-The `lamasync` binary is a purely non-interactive CLI: any positional
-subcommand (`lamasync status`, `lamasync folders list …`) routes to the
-dispatch tree (exit codes 0/1/2/3/4 = ok/runtime/usage/auth-failure/
-unreachable; `--json` everywhere); bare invocation prints top-level help and
-exits 0. The legacy interactive OpenTUI shell was removed in LAMA-323; fleet
-management lives in the web UI, and the `packages/agent-skill/` bundle is the
-agent surface.
+The `lamasync` binary is a purely non-interactive, **local-first** CLI
+(LAMA-326): `local *` talks to the daemon's Unix socket (status, folder
+assignments, operation log, sync triggers, mount/sync mode switches),
+`doctor` reports host health, and `register` (LAMA-262) pairs the device via
+a web UI code. Dispatch contract: exit codes 0/1/2/3/4 = ok/runtime/usage/
+auth-failure/unreachable; `--json` everywhere; bare invocation prints
+top-level help and exits 0.
 
-**Local mode** (default, connects to Unix socket); **Fleet mode** connects
-to server REST + WS and subscribes to `/api/v1/ws` host events.
+Fleet management lives in the web UI and the REST API
+(`packages/agent-skill/reference/api.md` is the documented agent surface).
+The server-facing CLI command surface was removed in LAMA-326; the former
+LAMA-248 no-config refusal went with it (its only triggers were removed
+commands). The legacy interactive OpenTUI shell was removed in LAMA-323.
 
 ---
 
@@ -747,7 +750,7 @@ lamasync/
 │   │   ├── src/mounts.ts     # mount registry, restart, health-check
 │   │   ├── src/socket.ts     # Unix socket control protocol
 │   │   └── src/lock.ts       # server-side lock coordination
-│   ├── cli/                  # @lamasync/cli — non-interactive CLI (LAMA-227)
+│   ├── cli/                  # @lamasync/cli — local-first non-interactive CLI (LAMA-227, trimmed LAMA-326)
 │   │   ├── src/index.ts
 │   │   └── src/cli/          # dispatch tree, command modules, output helpers
 │   └── agent-skill/          # CLI-first agent skill (LAMA-230)

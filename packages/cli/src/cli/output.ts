@@ -152,7 +152,20 @@ function formatCell(value: unknown): string {
  *    3  auth failure (HTTP 401/403)
  *    4  server unreachable / network error
  */
+/** Typed error thrown by `fail()`. The top-level dispatcher catches it,
+ *  writes the stderr line, and exits with the decided code. (Throwing
+ *  instead of exiting directly keeps `fail()` testable: an intercepted
+ *  process.exit inside the dispatcher's catch propagates out with the
+ *  original code instead of being re-mapped by exitCodeForError.) */
+export class CliFailError extends Error {
+  readonly exitCode: number;
+  constructor(message: string, exitCode: number) {
+    super(message);
+    this.name = "CliFailError";
+    this.exitCode = exitCode;
+  }
+}
+
 export function fail(message: string, code = 1): never {
-  process.stderr.write(`lamasync: ${message}\n`);
-  process.exit(code);
+  throw new CliFailError(message, code);
 }

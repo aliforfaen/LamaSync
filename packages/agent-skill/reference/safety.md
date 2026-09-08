@@ -28,8 +28,10 @@ the operation report. Agents must not:
 - hand-write an rclone config file
 - bypass the daemon by talking to the destination backend directly
 
-When in doubt, use `lamasync sync <folderId> --host <hostId>` (and follow
-`lamasync ops list --host <hostId>` to verify).
+When in doubt, trigger syncs via the REST API
+(`POST /hosts/<hostId>/actions` with `{"type":"trigger_sync"}`) and verify
+via `GET /operations?hostId=<hostId>` — or, locally, `lamasync local sync`
+followed by `lamasync local ops`.
 
 ## 3. Prefer the WebSocket for live state; don't poll `GET /api/v1/operations` in a tight loop
 

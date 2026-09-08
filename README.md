@@ -59,10 +59,9 @@ CLI (`lamasync`) handles local-daemon control and headless operations.
   snapshot history, inspection, and download.
 - **Live WebSocket** for operation events (the Activity view updates as runs
   finish).
-- **Terminal UI + CLI in one binary** — task-oriented tabs (This device, All
-  devices, Backups & apps, Conflicts, Activity, More) and a non-interactive
-  `lamasync <command>` CLI for scripting and agents, with stable exit codes
-  and `--json` everywhere.
+- **Non-interactive `lamasync` CLI** — local-daemon control and host
+  diagnostics for scripting and agents, with stable exit codes and `--json`
+  everywhere.
 - **Web management UI** — grouped navigation, responsive down to phones.
 - **Hardened systemd user service** on clients and a **one-line install**.
 - **Self-update** from GitHub Releases (`lamasyncd --update`, or the install
@@ -137,18 +136,13 @@ journalctl --user -u lamasyncd -f
 
 - **Web UI** — log in with the API key, open **Synced folders** → new folder,
   pick the type, choose a storage destination, and set it up on a device.
-- **CLI** — scriptable, same thing:
+- **REST API** — the same operations for agents/scripts
+  (`packages/agent-skill/reference/api.md` has curl recipes).
 
-```bash
-lamasync folders create --name LamaFiles --type sync
-lamasync folders assign LamaFiles --host <device-id> --path /home/you/LamaFiles
-```
-
-(`lamasync` is fully non-interactive; every command has `--help` and a
-`--json` mode.)
-
-Within one daemon config refresh (≤5 min), the device picks up the folder and
-starts syncing on schedule. Watch it happen in the **Activity** view.
+The `lamasync` CLI is local-first (daemon control + diagnostics); it does not
+manage the fleet. Within one daemon config refresh (≤5 min), the device picks
+up the folder and starts syncing on schedule. Watch it happen in the
+**Activity** view.
 
 ## Architecture
 

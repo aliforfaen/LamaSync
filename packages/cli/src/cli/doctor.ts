@@ -69,13 +69,11 @@ export async function run(ctx: CliContext): Promise<void> {
           ? "env (LAMASYNC_*)"
           : client.source === "config"
             ? `config (${client.hostname})`
-            // LAMA-248 / endgame: the localhost/dev-key default is now ONLY
-            // used by the bare-TTY interactive surface — every explicit
-            // subcommand refuses (exit 3, no-config) without a real
-            // client.toml. Doctor is the lone server-facing command that's
-            // still allowed to run with the fake default, precisely so it
-            // can diagnose this state. The advice above mirrors that.
-            : "default (localhost/dev-key) — only used for bare-TTY (subcommands refuse exit 3 without client.toml)",
+            // LAMA-326: with the server-facing command surface gone,
+            // doctor is the only command that still runs against the
+            // fake localhost/dev-key default — precisely so it can
+            // diagnose this state and advise on remediation.
+            : "default (localhost/dev-key) — no client.toml found; run `lamasync register --code <code> --server <url>` or re-run install.sh",
   });
   checks.push({
     name: "auth: masked key",

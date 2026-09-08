@@ -122,8 +122,8 @@ done
 ONLINE=$(curl -s -H "Authorization: Bearer $LAMASYNC_API_KEY" "http://127.0.0.1:${PORT}/api/v1/health" | python3 -c 'import sys, json; print(json.load(sys.stdin)["onlineCount"])')
 echo "[daemon] Online hosts: $ONLINE"
 
-echo "[cli] Running lamasync status..."
-HOME="$TMP_HOME" LAMASYNC_SERVER_URL="http://127.0.0.1:${PORT}" LAMASYNC_API_KEY="$LAMASYNC_API_KEY" ./packages/cli/dist/lamasync status
+echo "[cli] Running lamasync doctor..."
+HOME="$TMP_HOME" LAMASYNC_SERVER_URL="http://127.0.0.1:${PORT}" LAMASYNC_API_KEY="$LAMASYNC_API_KEY" ./packages/cli/dist/lamasync doctor
 
 echo ""
 echo "=== Harness is running ==="
@@ -138,8 +138,8 @@ echo "Usage examples:"
 echo "  # CLI (local daemon mode via Unix socket)"
 echo "  HOME=$TMP_HOME LAMASYNC_SOCKET_PATH=$SOCKET_PATH ./packages/cli/dist/lamasync local status"
 echo ""
-echo "  # CLI against the server (fleet status)"
-echo "  HOME=$TMP_HOME LAMASYNC_SERVER_URL=http://127.0.0.1:${PORT} LAMASYNC_API_KEY=$LAMASYNC_API_KEY ./packages/cli/dist/lamasync status"
+echo "  # CLI against the server (health report)"
+echo "  HOME=$TMP_HOME LAMASYNC_SERVER_URL=http://127.0.0.1:${PORT} LAMASYNC_API_KEY=$LAMASYNC_API_KEY ./packages/cli/dist/lamasync doctor"
 echo ""
 echo "  # API sanity check"
 echo "  curl -H 'Authorization: Bearer $LAMASYNC_API_KEY' http://127.0.0.1:${PORT}/api/v1/health"

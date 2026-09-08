@@ -111,32 +111,19 @@ lamasync/                     # Bun workspace root
         index.ts              # binary entry: --version, deprecation notice, runCli()
         api.ts                # client builder (env → config file → defaults)
         socket-client.ts      # Unix socket client for local mode
-        cli/                  # LAMA-229 + LAMA-231: non-interactive subcommand CLI
+        cli/                  # LAMA-229: non-interactive subcommand CLI (local-first, LAMA-326)
           index.ts            #   dispatch entry
           dispatch.ts         #   greedy walker over the command tree
-          args.ts             #   flag parsing + --json / --server / --api-key / --yes
+          args.ts             #   flag parsing + --json / --server / --api-key
           args.test.ts
-          output.ts           #   table/JSON output, key masking
+          output.ts           #   table/JSON output, key masking, fail() → CliFailError
           output.test.ts
           client.ts           #   per-command API client builder
           client.test.ts
-          commands.test.ts
-          safety.ts           #   confirmDestructive() — TTY prompt or --yes
-          status.ts           #   `lamasync status`
-          folders.ts          #   `lamasync folders list|create|assign`
-          folders-ext.ts      #   `lamasync folders update|delete|unassign|assignments`
-          backends.ts         #   `lamasync backends list|create|test`
-          sync.ts             #   `lamasync sync [folderId]`
-          ops.ts              #   `lamasync ops list`
+          commands.test.ts    #   register/doctor command-path tests
           doctor.ts           #   `lamasync doctor`
           local.ts            #   `lamasync local status|folders|ops|sync|sync-all|mount|unmount`
-          hosts.ts            #   `lamasync hosts list|rename`
-          apps.ts             #   `lamasync apps templates|protections|snapshots` (LAMA-316; replaces `dotfiles`)
-          conflicts.ts        #   `lamasync conflicts list|resolve`
-          snapshots.ts        #   `lamasync snapshots list`
-          browse.ts           #   `lamasync browse local|s3|restic|jobs`
-          notifications.ts    #   `lamasync notifications list|channels`
-          admin.ts            #   `lamasync admin prune`
+          register.ts         #   `lamasync register` (LAMA-262 pairing)
     agent-skill/              # CLI-first agent skill (LAMA-230); two-tier bundle
       SKILL.md                # frontmatter trigger + decision tree + safety summary
       lamasync-client.md      # separate client-install onboarding skill

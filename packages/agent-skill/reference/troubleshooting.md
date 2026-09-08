@@ -29,36 +29,6 @@ curl -sS -H "Authorization: Bearer <api-key>" \
 # ECONNREFUSED → wrong port / server down.
 ```
 
-## Symptom: `lamasync <subcommand>` exits 3 with `No client.toml found at …`
-
-**Cause.** No `~/.config/lamasync/client.toml` AND no `--server/--api-key`
-flag AND no `LAMASYNC_SERVER_URL/LAMASYNC_API_KEY` env pair. Since
-LAMA-248 / endgame (split-by-surface), every explicit subcommand refuses
-fast with exit 3 before any network attempt — running against the
-fake `localhost/dev-key` default is no longer the silent failure mode.
-
-**Fix.** Either pass inline credentials for this one invocation:
-
-```bash
-lamasync folders list --server "$LAMASYNC_SERVER_URL" --api-key "$LAMASYNC_API_KEY"
-```
-
-…or persist them via the installer / hand-written `client.toml`. On a
-daemon host the installer already populated the file — you should never
-see this.
-
-With `--json`, the envelope distinguishes this from an auth failure at
-the same exit code:
-
-```bash
-lamasync folders list --json
-# exit 3, stdout: {"ok":false,"reason":"no-config",...}
-```
-
-Exemptions (still run without `client.toml`):
-- `lamasync doctor` — diagnosing this state is its job
-- `lamasync local *` — talks to the daemon Unix socket, not the server
-
 ## Symptom: `lamasync doctor` reports `FAIL` on `auth: source`
 
 **Cause.** No `--server`/`--api-key` flag, no `LAMASYNC_SERVER_URL`/
@@ -70,13 +40,12 @@ anything real.
 `lamasync-client.md`. On a daemon host, the installer already populated
 the file — you should never see this.
 
-> LAMA-248, updated for LAMA-323: there is no interactive shell anymore —
-> bare `lamasync` prints top-level help and exits 0. Explicit subcommands
-> refuse fast (exit 3) when `client.toml` is missing. Exemptions:
-> `lamasync doctor` (diagnosing the missing-config state is its job), the
-> `lamasync local *` subtree (talks to the daemon Unix socket, not the
-> server), and `lamasync register` (writes `client.toml` as its first
-> side-effect).
+> LAMA-326: the CLI surface is local-first — `doctor`, `local *`, and
+> `register` are the only commands. Doctor runs without `client.toml`
+> (diagnosing that state is its job); `local *` talks to the daemon Unix
+> socket and never needs server credentials; `register` writes
+> `client.toml` as its first side-effect. Fleet management is REST API +
+> web UI.
 
 ## Symptom: `lamasync doctor` reports `FAIL` on `socket: daemon`
 
@@ -115,7 +84,7 @@ ls -l "${XDG_RUNTIME_DIR:-~/.lamasync}/lamasync.sock" 2>/dev/null \
 journalctl --user -u lamasyncd -n 50
 ```
 
-## Symptom: sync triggered, but no row appears in `lamasync ops list`
+## Symptom: sync triggered, but no row appears in the operations log
 
 **Cause.** The action was enqueued, but the daemon hasn't polled it yet
 (5s default); or the daemon is offline and the action sits in the queue.
@@ -127,11 +96,10 @@ curl -H "Authorization: Bearer <api-key>" \
   "<server-url>/api/v1/actions/pending?hostId=<host-id>&limit=5"
 # An undelivered `trigger_sync` is here when the daemon is offline.
 
-# Force the daemon to refresh immediately.
-lamasync sync --all --host <host-id>     # CLI re-enqueues, daemon
-                                          # will pick it up on the next
-                                          # poll regardless of the
-                                          # queue age.
+# Check operations (fleet-wide via the API; locally via the CLI):
+curl -H "Authorization: Bearer <api-key>" \
+  "<server-url>/api/v1/operations?hostId=<host-id>&limit=5"
+lamasync local ops
 ```
 
 ## Symptom: a sync run reports `status: "failed"` with details about `rclone`
@@ -148,12 +116,17 @@ lamasync sync --all --host <host-id>     # CLI re-enqueues, daemon
 
 **Fix.** Always start with the raw error:
 ```bash
-lamasync ops list --host <host-id> --status failed --limit 1 --json
+curl -H "Authorization: Bearer <api-key>" \
+  "<server-url>/api/v1/operations?hostId=<host-id>&status=failed&limit=1"
+lamasync local ops
 ```
 The `details` column carries the rclone exit code + last lines. Match the
 fix to the error. After applying, trigger a fresh run:
 ```bash
-lamasync sync <folderId> --host <host-id>
+curl -X POST -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"trigger_sync","payload":{"folderId":"<folderId>"}}' \
+  "<server-url>/api/v1/hosts/<host-id>/actions"
 ```
 
 ## Symptom: a mount is stuck or never becomes `mounted` (status `mounting`/`dead`)
@@ -241,17 +214,17 @@ curl -sSL https://api.github.com/repos/aliforfaen/LamaSync/releases/latest \
 Expect an asset named `lamasync-skill-<version>.tar.gz` (added by
 `.github/workflows/ci.yml`'s `release` job).
 
-## Symptom: `lamasync folders create --backend s3` returns 400
+## Symptom: `POST /folders` (or `POST /backends`) for an S3 folder returns 400
 
 The server validates `s3Endpoint`, `s3Bucket`, `s3AccessKeyId`,
 `s3SecretAccessKey`. Common causes:
-- Missing `--s3-bucket` (required when `--backend=s3`).
-- Missing `--s3-access-key-id` or `--s3-secret-access-key`.
-- Wrong `--s3-region` for `--s3-provider=aws` (region required for AWS;
+- Missing `s3Bucket` (required for S3 folders without a shared backend).
+- Missing `s3AccessKeyId` or `s3SecretAccessKey`.
+- Wrong `s3Region` for `s3Provider=aws` (region required for AWS;
   Exoscale auto-sets `other-v2-signature`).
 
-**Fix.** Re-run with `--s3-region us-east-1` (or the right region) for AWS,
-or omit `--s3-region` for Exoscale.
+**Fix.** Re-run with `s3Region: "us-east-1"` (or the right region) for AWS,
+or omit `s3Region` for Exoscale.
 
 ## Symptom: 404 when posting to a path that exists in this reference
 
