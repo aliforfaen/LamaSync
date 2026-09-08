@@ -161,13 +161,22 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
 ];
 
 // LAMA-296: a mobile NATIVE principal may only reach its own identity +
-// check-in routes. Fleet admin, config, keys, other hosts, the web-session
-// bootstrap — everything else is 403 at the boundary. (Cookie web sessions
-// are NOT confined here: an admin web session is the SPA's full management
-// surface.)
+// check-in routes plus the stage-1 scoped upload surface (own destinations,
+// own uploads/chunks/finalize/cancel). Fleet admin, config, keys, other
+// hosts, the web-session bootstrap — everything else is 403 at the boundary.
+// (Cookie web sessions are NOT confined here: an admin web session is the
+// SPA's full management surface.)
 export const MOBILE_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: string }> = [
   { method: "GET", pattern: "/api/v1/mobile/me" },
   { method: "POST", pattern: "/api/v1/mobile/check-in" },
+  // Stage 1: scoped upload destinations + resumable uploads (own rows only).
+  { method: "GET", pattern: "/api/v1/mobile/destinations" },
+  { method: "POST", pattern: "/api/v1/mobile/uploads" },
+  { method: "GET", pattern: "/api/v1/mobile/uploads" },
+  { method: "GET", pattern: "/api/v1/mobile/uploads/*" },
+  { method: "PUT", pattern: "/api/v1/mobile/uploads/*/chunks" },
+  { method: "POST", pattern: "/api/v1/mobile/uploads/*/finalize" },
+  { method: "POST", pattern: "/api/v1/mobile/uploads/*/cancel" },
 ];
 
 // LAMA-296 review finding 4: a cookie web session whose grant carried no

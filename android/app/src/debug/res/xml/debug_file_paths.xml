@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug-only FileProvider paths (instrumented tests only). -->
+<paths>
+    <files-path name="debug_test_files" path="." />
+    <external-files-path name="debug_test_external" path="." />
+</paths>

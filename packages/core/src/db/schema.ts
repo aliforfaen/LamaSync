@@ -238,7 +238,12 @@ CREATE TABLE IF NOT EXISTS operation_log (
     duration_ms INTEGER,
     -- LAMA-302: trigger origin (watch | schedule | manual). NULL for legacy rows.
     trigger     TEXT,
-    demo        INTEGER NOT NULL DEFAULT 0
+    demo        INTEGER NOT NULL DEFAULT 0,
+    -- LAMA-296 stage-1 correction (R4): idempotency key so operations that
+    -- must appear exactly once per source event (e.g. one mobile_upload
+    -- history row per upload intent) cannot be duplicated by retries or
+    -- reconcile passes. NULL for operations without a dedupe identity.
+    dedupe_key  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS notification_events (
@@ -337,6 +342,8 @@ CREATE TABLE IF NOT EXISTS schedule_state (
 );
 CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
     ON operation_log(host_id, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_log_dedupe_key
+    ON operation_log(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_dotfile_versions_manifest_ts
     ON dotfile_versions(manifest_id, timestamp);
 
@@ -559,6 +566,52 @@ CREATE INDEX IF NOT EXISTS idx_web_sessions_registration
     ON web_sessions(registration_id);
 CREATE INDEX IF NOT EXISTS idx_web_sessions_grant
     ON web_sessions(grant_id);
+
+-- LAMA-296 stage 1: one authorized landing path per mobile registration.
+-- No row for a registration means NO upload access, even when the
+-- registration is live (existing devices default to none until an
+-- administrator assigns an inbox through the desktop web UI). rel_path is
+-- server-computed ('Mobile/<hostId>/<slug>') and validated at write time;
+-- request bodies carry only the destination id, never a path/backend/root.
+CREATE TABLE IF NOT EXISTS mobile_upload_destinations (
+    id              TEXT PRIMARY KEY,            -- server-issued destination id
+    registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id),
+    label           TEXT NOT NULL,               -- admin-chosen label, e.g. "Inbox"
+    rel_path        TEXT NOT NULL,               -- validated Mobile/<hostId>/<slug>
+    created_at      INTEGER NOT NULL,
+    revoked_at      INTEGER,                     -- non-null => uploads fail at finalize
+    UNIQUE(registration_id, rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_upload_destinations_registration
+    ON mobile_upload_destinations(registration_id);
+
+-- LAMA-296 stage 1: one upload intent, host-bound + idempotency-keyed. The
+-- final file name is RESERVED at creation so retries of the same intent
+-- reuse it and a lost create response can never mint a second upload.
+-- bytes_received is the durable queryable offset; sha256 is set AFTER
+-- verification and BEFORE publication so a crash between the filesystem
+-- rename and the DB completion record is recovered by a finalize retry.
+-- final_rel_path is validated as relative to the mobile landing root and is
+-- the reserve/reuse identity of this upload intent.
+CREATE TABLE IF NOT EXISTS mobile_uploads (
+    id               TEXT PRIMARY KEY,           -- server-issued upload id
+    registration_id  TEXT NOT NULL REFERENCES mobile_registrations(host_id),
+    destination_id   TEXT NOT NULL REFERENCES mobile_upload_destinations(id),
+    idempotency_key  TEXT NOT NULL,              -- client-generated, unique per registration
+    file_name        TEXT NOT NULL,              -- validated single segment
+    final_rel_path   TEXT NOT NULL,              -- destination rel_path + file_name
+    size_bytes       INTEGER,                    -- client-declared expected size (nullable)
+    bytes_received   INTEGER NOT NULL DEFAULT 0, -- durable offset
+    sha256           TEXT,                       -- verified digest (pre-publication)
+    status           TEXT NOT NULL DEFAULT 'created', -- see spec state machine
+    error            TEXT,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    finalized_at     INTEGER,
+    UNIQUE(registration_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_uploads_registration_status
+    ON mobile_uploads(registration_id, status);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -742,6 +795,21 @@ export const MIGRATIONS: string[] = [
   "CREATE TABLE IF NOT EXISTS web_sessions (id TEXT PRIMARY KEY, session_hash TEXT NOT NULL UNIQUE, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), grant_id TEXT NOT NULL REFERENCES web_grants(id), admin INTEGER NOT NULL DEFAULT 0, issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER)",
   "CREATE INDEX IF NOT EXISTS idx_web_sessions_registration ON web_sessions(registration_id)",
   "CREATE INDEX IF NOT EXISTS idx_web_sessions_grant ON web_sessions(grant_id)",
+  // LAMA-296 stage 1: scoped mobile upload destinations + resumable uploads.
+  // Schema lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF
+  // NOT EXISTS entries are the idempotent safety net for existing databases
+  // ("already exists" is swallowed by initDb's try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS mobile_upload_destinations (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), label TEXT NOT NULL, rel_path TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER, UNIQUE(registration_id, rel_path))",
+  "CREATE INDEX IF NOT EXISTS idx_mobile_upload_destinations_registration ON mobile_upload_destinations(registration_id)",
+  "CREATE TABLE IF NOT EXISTS mobile_uploads (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), destination_id TEXT NOT NULL REFERENCES mobile_upload_destinations(id), idempotency_key TEXT NOT NULL, file_name TEXT NOT NULL, final_rel_path TEXT NOT NULL, size_bytes INTEGER, bytes_received INTEGER NOT NULL DEFAULT 0, sha256 TEXT, status TEXT NOT NULL DEFAULT 'created', error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finalized_at INTEGER, UNIQUE(registration_id, idempotency_key))",
+  "CREATE INDEX IF NOT EXISTS idx_mobile_uploads_registration_status ON mobile_uploads(registration_id, status)",
+  // LAMA-296 stage-1 correction (R4): exactly-once mobile_upload operation
+  // history. The column is nullable for every other operation; the partial
+  // unique index guarantees one dedupe_key can never appear twice. Added via
+  // ALTER TABLE + a separate CREATE UNIQUE INDEX because SQLite refuses to
+  // add a UNIQUE column with ALTER TABLE ADD COLUMN.
+  "ALTER TABLE operation_log ADD COLUMN dedupe_key TEXT",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_log_dedupe_key ON operation_log(dedupe_key) WHERE dedupe_key IS NOT NULL",
 ];
 
 /**

@@ -14,6 +14,18 @@
             android:name="android.app.Activity"
             android:exported="true"
             android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+        <!-- Debug-only FileProvider so instrumented tests can exercise the
+             content-URI intake path with a REAL content:// URI backed by
+             the app's own private files. Absent from release builds. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.debug.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/debug_file_paths" />
+        </provider>
     </application>
 
 </manifest>

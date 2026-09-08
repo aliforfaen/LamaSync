@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import type {
   BrowseEntry,
   BrowseJob,
@@ -41,6 +41,24 @@ import {
   type PreviewKind,
 } from "../file-preview.ts";
 import { isValidUploadPath, normalizeUploadPath } from "../upload-path.ts";
+
+// LAMA-296 stage 1: normalize a `?path=` deep-link into a browse-able
+// relative path (or "" = root). The mobile completion receipt opens
+// `#/data?kind=local&path=<encoded>`. Pure + exported for tests.
+export function initialBrowsePathFromParam(raw: string | null): string {
+  if (raw === null) return "";
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    // Undecodable input is never a path.
+    return "";
+  }
+  const normalized = decoded.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (normalized.length === 0 || normalized.length > 600) return "";
+  if (normalized.split("/").some((s) => s === ".." || s === "." || s === "")) return "";
+  return normalized;
+}
 
 type Tab = "local" | "s3" | "restic";
 
@@ -902,12 +920,26 @@ export function DataBrowser() {
     }
   }, []);
 
-  // Phase 1 (WS6): stable identity for the inline literal + callbacks that
-  // were re-created on every parent render, which fed an effect-identity
-  // loop in <RefBrowser> (cancelled every fetch → skeleton stuck).
-  const localBrowseRef = useMemo<BrowseRef>(() => ({ kind: "local", path: "" }), []);
+  // LAMA-296 stage 1: deep-link support. `#/data?kind=local&path=…` opens
+  // the local browser at the given folder (the completion receipt's
+  // browse/open path). The server validates the path anyway.
+  const [searchParams] = useSearchParams();
+  const initialLocalPath = useMemo(() => initialBrowsePathFromParam(searchParams.get("path")), [searchParams]);
+  // The local tab is CONTROLLED by this component: breadcrumb/entry
+  // navigation calls onContext with the next ref, which updates [localPath]
+  // and thereby [localBrowseRef], so the listing actually re-fetches (the
+  // WS6 refactor left this wire unconnected — LAMA-296 stage 1 restores it
+  // and uses it for the mobile-upload receipts' open path).
+  const [localPath, setLocalPath] = useState(initialLocalPath);
+  const localBrowseRef = useMemo<BrowseRef>(
+    () => ({ kind: "local", path: localPath }),
+    [localPath],
+  );
   const reportLocalContext = useCallback(
-    (ctx: TabContext) => setContext((prev) => ({ ...prev, local: ctx })),
+    (ctx: TabContext) => {
+      setContext((prev) => ({ ...prev, local: ctx }));
+      if (ctx.ref.kind === "local") setLocalPath(ctx.ref.path);
+    },
     [],
   );
   const reportS3Context = useCallback(

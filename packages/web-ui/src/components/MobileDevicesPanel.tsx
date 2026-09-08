@@ -20,16 +20,19 @@
 // convention — see pages/apps.test.ts and access-keys.ts).
 
 import { useEffect, useState } from "react";
-import type { MobileRegistrationSummary } from "@lamasync/core";
+import type { MobileRegistrationSummary, MobileUploadDestination } from "@lamasync/core";
 import { api, type AuthMeInfo } from "../api.ts";
 import { ConfirmDialog } from "./Modal.tsx";
 import { AndroidEnrollmentModal } from "./AndroidEnrollmentModal.tsx";
 import {
+  createDestinationAndReload,
   DEVICE_REVOKE_REASON,
+  loadDestinationsForDevice,
   loadMobileRegistrations,
   mobileRegistrationBadgeClass,
   mobileRegistrationLabel,
   mobileRegistrationStatus,
+  revokeDestinationAndReload,
   revokeDeviceAndReload,
   type MobileDevicesServices,
 } from "../mobile-registrations.ts";
@@ -38,6 +41,12 @@ import {
 const mobileDevicesServices: MobileDevicesServices = {
   list: () => api.listMobileRegistrations(),
   revoke: (hostId, reason) => api.revokeMobileRegistration(hostId, reason),
+  listDestinations: (hostId) =>
+    api.listMobileRegistrationDestinations(hostId).then((r) => r.destinations),
+  createDestination: (hostId, label, slug) =>
+    api.createMobileRegistrationDestination(hostId, { label, slug }).then((r) => r.destination),
+  revokeDestination: (hostId, id) =>
+    api.revokeMobileRegistrationDestination(hostId, id),
 };
 
 export function MobileDevicesPanel() {
@@ -149,6 +158,14 @@ export function MobileDevicesPanel() {
         time, without the original QR or its enrollment id. Requires an HTTPS
         front door; legacy HTTP/tailnet CLI pairing is unchanged.
       </p>
+      <p className="muted">
+        <strong>Upload inboxes (stage 1):</strong> a phone can only send
+        files to an inbox you assign here — most devices start with no
+        upload access. Each inbox maps to a server-resolved path{" "}
+        <code>Mobile/&lt;device-id&gt;/&lt;slug&gt;</code>; the phone can
+        never choose a path, a backend, or another device's inbox. Completed
+        files appear under the Data Browser's local root.
+      </p>
 
       <MobileDevicesTable
         rows={rows}
@@ -211,6 +228,7 @@ export function MobileDevicesTable({
   revokeBusy: boolean;
   onRevoke: (reg: MobileRegistrationSummary) => void;
 }) {
+  const [inboxFor, setInboxFor] = useState<string | null>(null);
   return (
     <>
       {listError ? <div className="error">{listError}</div> : null}
@@ -250,46 +268,28 @@ export function MobileDevicesTable({
           ) : (
             rows.map((reg) => {
               const status = mobileRegistrationStatus(reg);
+              const expanded = inboxFor === reg.hostId;
+              if (!expanded) {
+                return (
+                  <DeviceRow
+                    key={reg.hostId}
+                    reg={reg}
+                    expanded={false}
+                    revokeBusy={revokeBusy}
+                    onRevoke={() => onRevoke(reg)}
+                    onToggleInboxes={() => setInboxFor(reg.hostId)}
+                  />
+                );
+              }
               return (
-                <tr key={reg.hostId}>
-                  <td>
-                    <strong>{reg.displayName}</strong>{" "}
-                    <code>{reg.hostId}</code>
-                  </td>
-                  <td>
-                    {reg.clientType} · version {reg.appVersion}
-                  </td>
-                  <td>{new Date(reg.createdAt).toLocaleString()}</td>
-                  <td>
-                    {reg.lastSeenAt === null ? (
-                      <span className="muted">never checked in</span>
-                    ) : (
-                      new Date(reg.lastSeenAt).toLocaleString()
-                    )}
-                  </td>
-                  <td>
-                    <span
-                      className={`badge ${mobileRegistrationBadgeClass(status)}`}
-                    >
-                      {mobileRegistrationLabel(status)}
-                    </span>
-                    {status === "revoked" && reg.revokedReason ? (
-                      <div className="muted">{reg.revokedReason}</div>
-                    ) : null}
-                  </td>
-                  <td>
-                    {status === "active" ? (
-                      <button
-                        type="button"
-                        className="action"
-                        disabled={revokeBusy}
-                        onClick={() => onRevoke(reg)}
-                      >
-                        {revokeBusy ? "Revoking…" : "Revoke"}
-                      </button>
-                    ) : null}
-                  </td>
-                </tr>
+                <DeviceRow
+                  key={reg.hostId}
+                  reg={reg}
+                  expanded
+                  revokeBusy={revokeBusy}
+                  onRevoke={() => onRevoke(reg)}
+                  onToggleInboxes={() => setInboxFor(null)}
+                />
               );
             })
           )}
@@ -297,5 +297,219 @@ export function MobileDevicesTable({
       </table>
       {actionError ? <div className="error">{actionError}</div> : null}
     </>
+  );
+}
+
+/** One device row + its (collapsible) upload-inbox management region. */
+function DeviceRow({
+  reg,
+  expanded,
+  revokeBusy,
+  onRevoke,
+  onToggleInboxes,
+}: {
+  reg: MobileRegistrationSummary;
+  expanded: boolean;
+  revokeBusy: boolean;
+  onRevoke: () => void;
+  onToggleInboxes: () => void;
+}) {
+  const status = mobileRegistrationStatus(reg);
+  const active = status === "active";
+  return (
+    <>
+      <tr>
+        <td>
+          <strong>{reg.displayName}</strong> <code>{reg.hostId}</code>
+        </td>
+        <td>
+          {reg.clientType} · version {reg.appVersion}
+        </td>
+        <td>{new Date(reg.createdAt).toLocaleString()}</td>
+        <td>
+          {reg.lastSeenAt === null ? (
+            <span className="muted">never checked in</span>
+          ) : (
+            new Date(reg.lastSeenAt).toLocaleString()
+          )}
+        </td>
+        <td>
+          <span className={`badge ${mobileRegistrationBadgeClass(status)}`}>
+            {mobileRegistrationLabel(status)}
+          </span>
+          {!active && reg.revokedReason ? (
+            <div className="muted">{reg.revokedReason}</div>
+          ) : null}
+        </td>
+        <td>
+          <button
+            type="button"
+            className="action"
+            onClick={onToggleInboxes}
+            aria-expanded={expanded}
+          >
+            {expanded ? "Hide inboxes" : "Inboxes"}
+          </button>{" "}
+          {active ? (
+            <button
+              type="button"
+              className="action"
+              disabled={revokeBusy}
+              onClick={onRevoke}
+            >
+              {revokeBusy ? "Revoking…" : "Revoke"}
+            </button>
+          ) : null}
+        </td>
+      </tr>
+      {expanded ? (
+        <tr>
+          <td colSpan={6}>
+            <MobileDestinationsSection
+              hostId={reg.hostId}
+              revoked={!active}
+            />
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * Per-device upload-inbox management (stage 1): lists the registration's
+ * destinations (active + revoked), revokes active ones, and assigns a new
+ * labeled inbox. Self-loading; the flow logic lives in the DOM-free helpers
+ * (mobile-registrations.ts) so bun:test drives the exact production calls.
+ */
+export function MobileDestinationsSection({
+  hostId,
+  revoked,
+}: {
+  hostId: string;
+  revoked: boolean;
+}) {
+  const [destinations, setDestinations] = useState<MobileUploadDestination[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [label, setLabel] = useState("Inbox");
+
+  async function refresh(): Promise<void> {
+    const result = await loadDestinationsForDevice(mobileDevicesServices, hostId);
+    if (result.error !== null) {
+      setError(result.error);
+    } else {
+      setDestinations(result.destinations);
+      setError(null);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostId]);
+
+  if (revoked) {
+    return (
+      <div className="muted" style={{ padding: "0.5rem 1rem" }}>
+        Revoked devices cannot receive files. Re-pair this device before
+        assigning upload inboxes.
+      </div>
+    );
+  }
+
+  async function assignInbox(): Promise<void> {
+    const trimmed = label.trim();
+    if (trimmed.length === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await createDestinationAndReload(mobileDevicesServices, hostId, trimmed);
+      if (result.error !== null) {
+        setError(result.error);
+      } else {
+        setDestinations(result.destinations);
+        setLabel("Inbox");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeDestination(id: string): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await revokeDestinationAndReload(mobileDevicesServices, hostId, id);
+      if (result.error !== null) {
+        setError(result.error);
+      } else {
+        setDestinations(result.destinations);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="nested-panel">
+      <div className="toolbar">
+        <span className="muted">Upload inboxes for <code>{hostId}</code></span>
+        {destinations === null ? (
+          <span className="muted">loading…</span>
+        ) : null}
+      </div>
+      {error ? <div className="error">{error}</div> : null}
+      {destinations === null ? null : destinations.length === 0 ? (
+        <p className="muted">
+          No upload inboxes yet — this phone cannot send files until you
+          assign one below.
+        </p>
+      ) : (
+        <ul className="plain-list">
+          {destinations.map((d) => {
+            const active = d.revokedAt === null || d.revokedAt === 0;
+            return (
+              <li key={d.id}>
+                <strong>{d.label}</strong> <code>{d.relPath}</code>{" "}
+                <span
+                  className={`badge ${active ? "badge-success" : "badge-failed"}`}
+                >
+                  {active ? "active" : "revoked"}
+                </span>{" "}
+                {active ? (
+                  <button
+                    type="button"
+                    className="action"
+                    disabled={busy}
+                    onClick={() => void revokeDestination(d.id)}
+                  >
+                    {busy ? "Revoking…" : "Revoke"}
+                  </button>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void assignInbox();
+        }}
+        className="inline-form"
+      >
+        <input
+          type="text"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          aria-label="Inbox label"
+          maxLength={64}
+        />{" "}
+        <button type="submit" className="action primary" disabled={busy}>
+          {busy ? "Assigning…" : "Assign inbox"}
+        </button>
+      </form>
+    </div>
   );
 }

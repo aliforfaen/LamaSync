@@ -87,6 +87,11 @@ class CompanionRepository(
     data class LocalCleanupResult(
         val cleared: Boolean,
         val unconfirmedCookieOrigins: List<String>,
+        /**
+         * True when a retry removed an old cookie but found a newer pairing
+         * that must keep its vault and registration records intact.
+         */
+        val preservedNewerEnrollment: Boolean = false,
     )
 
     /**
@@ -465,7 +470,23 @@ class CompanionRepository(
             }
             return LocalCleanupResult(cleared = false, unconfirmedCookieOrigins = unconfirmed)
         }
-        // Cookie removal confirmed: re-attempt the remaining local teardown.
+        // Cookie removal confirmed. A re-pair may have completed since this
+        // retry was first offered: its binding and vault belong to a different
+        // origin, so an old cleanup must never erase that newer enrollment.
+        val currentAuthOrigins = buildList {
+            registrationStore.load()?.origin?.let { add(it) }
+            registrationStore.loadBinding()?.origin?.let { add(it) }
+        }.distinct()
+        if (currentAuthOrigins.any { it !in origins }) {
+            registrationStore.clearCleanupPending()
+            return LocalCleanupResult(
+                cleared = true,
+                unconfirmedCookieOrigins = emptyList(),
+                preservedNewerEnrollment = true,
+            )
+        }
+
+        // No newer pairing owns the vault/store, so re-attempt their teardown.
         val vaultCleared = try {
             vault.clear()
             true

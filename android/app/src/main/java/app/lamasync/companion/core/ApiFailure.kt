@@ -27,6 +27,30 @@ sealed class ApiFailure(message: String) : Exception(message) {
     /** 429 — exchange rate limit exceeded. */
     class Throttled : ApiFailure("throttled")
 
+    // LAMA-296 stage 1 upload flow failures (409/410/413/422/507 semantics
+    // differ from enrollment 409/410, so uploads map their own payloads).
+
+    /** 409 — upload protocol conflict (wrong offset, busy, stale state). */
+    class UploadConflict(message: String = "upload conflict") : ApiFailure(message)
+
+    /** 409 — finalize refused: expected size not fully received. */
+    class UploadIncomplete : ApiFailure("upload is not complete")
+
+    /** 409 — final-name collision; a rename is required. */
+    class UploadCollision : ApiFailure("a file with this name already exists at the destination")
+
+    /** 410 — the destination grant was revoked. */
+    class DestinationRevoked : ApiFailure("destination revoked")
+
+    /** 413 — chunk or declared size over the server cap. */
+    class UploadTooLarge : ApiFailure("file or chunk exceeds the server limit")
+
+    /** 422 — declared checksum mismatch at finalize. */
+    class ChecksumMismatch : ApiFailure("checksum mismatch")
+
+    /** 507 — server staging space exhausted. */
+    class StagingFull : ApiFailure("server upload staging is full")
+
     /** 5xx or unexpected status. */
     class Server(status: Int) : ApiFailure("server error $status")
 

@@ -29,7 +29,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /** Top-level destinations. The QR payload travels only through the ViewModel. */
-enum class Screen { WELCOME, SCANNER, CONFIRM, PROGRESS, MANAGE, CONNECTION }
+enum class Screen { WELCOME, SCANNER, CONFIRM, PROGRESS, MANAGE, CONNECTION, UPLOADS }
 
 /** One-shot user-facing message (shown as a snackbar). */
 data class UiMessage(val text: String, val isError: Boolean = false)
@@ -71,6 +71,8 @@ data class UiState(
     val lastCheckInLabel: String? = null,
     val checkInOk: Boolean? = null,
     val webSessionConnected: Boolean = false,
+    /** Target URL for the embedded web UI (stage 1: upload receipt browse). */
+    val webNavUrl: String? = null,
     /**
      * True while a disconnect's local cleanup is still unconfirmed (R2). The
      * WELCOME screen shows the failure and a retry action; the origin(s)
@@ -209,13 +211,17 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         // Re-derive the recovery surface from the CURRENT persisted state:
         // starting a different-QR flow may have cleared the in-flight binding
         // (a stale EXCHANGED candidate must not reappear on WELCOME).
+        val snapshot = repository.loadSession()
         _ui.update {
             it.copy(
                 screen = Screen.WELCOME,
                 message = null,
                 candidate = null,
                 pendingResume = false,
-                pendingEnrollment = pendingEnrollmentOf(repository.loadSession()),
+                pendingEnrollment = pendingEnrollmentOf(snapshot),
+                cleanupUnconfirmed = snapshot.cleanupPendingOrigins.isNotEmpty(),
+                cleanupOrigins = snapshot.cleanupPendingOrigins,
+                cleanupRemoteSucceeded = if (snapshot.cleanupPendingOrigins.isEmpty()) null else it.cleanupRemoteSucceeded,
             )
         }
     }
@@ -345,12 +351,16 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         }
         val detail = enrollFailureDetail(outcome)
         val pending = _ui.value.candidate?.let { matchingBinding(it) } != null
+        val snapshot = repository.loadSession()
         _ui.update {
             it.copy(
                 busy = false,
                 progressLabel = null,
                 screen = Screen.CONFIRM,
                 pendingResume = pending,
+                cleanupUnconfirmed = snapshot.cleanupPendingOrigins.isNotEmpty(),
+                cleanupOrigins = snapshot.cleanupPendingOrigins,
+                cleanupRemoteSucceeded = if (snapshot.cleanupPendingOrigins.isEmpty()) null else it.cleanupRemoteSucceeded,
                 message = UiMessage("$stepText. $detail", isError = true),
             )
         }
@@ -382,6 +392,32 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     fun closeConnectionPanel() {
         _ui.update { it.copy(screen = Screen.MANAGE, message = null) }
+    }
+
+    /** Stage 1: the upload queue screen (native surface for manual uploads). */
+    fun openUploads() {
+        _ui.update { it.copy(screen = Screen.UPLOADS, message = null) }
+    }
+
+    fun closeUploads() {
+        _ui.update { it.copy(screen = Screen.MANAGE, message = null) }
+    }
+
+    /** Back/home target for surfaces reachable while UNPAIRED (share-intent
+     *  landing): the MANAGE screen renders nothing without a registration,
+     *  so an unpaired uploads surface must return to the renderable
+     *  WELCOME screen instead (R5). */
+    fun showWelcome() {
+        _ui.update { it.copy(screen = Screen.WELCOME, message = null) }
+    }
+
+    /** Navigate the embedded web UI (receipts' open-in-web path). */
+    fun navigateWebTo(url: String) {
+        _ui.update { it.copy(webNavUrl = url) }
+    }
+
+    fun consumeNavUrl() {
+        _ui.update { it.copy(webNavUrl = null) }
     }
 
     fun reloadWebSession() = reconnectWebSession()
@@ -534,6 +570,15 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             val result = repository.retryLocalCleanup(origins)
             if (result.cleared) {
                 val message = when (remoteSucceeded) {
+                    true if result.preservedNewerEnrollment ->
+                        UiMessage("Old web-session data removed. The current enrollment is preserved.")
+                    false if result.preservedNewerEnrollment -> UiMessage(
+                        "Old web-session data removed and the current enrollment is preserved. " +
+                            "Remote revocation was not completed — revoke the old device from the desktop server UI to be safe.",
+                        isError = true,
+                    )
+                    null if result.preservedNewerEnrollment ->
+                        UiMessage("Old web-session data removed. The current enrollment is preserved.")
                     true -> UiMessage("Local data removed. This device stays revoked on the server.")
                     false -> UiMessage(
                         "Local data removed. Remote revocation was not completed — revoke this " +

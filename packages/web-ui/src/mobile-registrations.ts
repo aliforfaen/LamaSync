@@ -10,7 +10,7 @@
 // carries no secret hashes, grants, or enrollment ids — this module never
 // deals with any of those either.
 
-import type { MobileRegistrationSummary } from "@lamasync/core";
+import type { MobileRegistrationSummary, MobileUploadDestination } from "@lamasync/core";
 
 /**
  * Audit reason recorded server-side on every revoke initiated from this
@@ -47,6 +47,12 @@ export interface MobileDevicesServices {
   list(): Promise<MobileRegistrationSummary[]>;
   /** POST /api/v1/mobile/registrations/:hostId/revoke. */
   revoke(hostId: string, reason: string): Promise<unknown>;
+  /** GET /api/v1/mobile/registrations/:hostId/destinations (admin, stage 1). */
+  listDestinations(hostId: string): Promise<MobileUploadDestination[]>;
+  /** POST /api/v1/mobile/registrations/:hostId/destinations (admin, stage 1). */
+  createDestination(hostId: string, label: string, slug?: string): Promise<MobileUploadDestination>;
+  /** POST /api/v1/mobile/registrations/:hostId/destinations/:id/revoke (admin, stage 1). */
+  revokeDestination(hostId: string, id: string): Promise<unknown>;
 }
 
 /** Result of one flow step: fresh rows on success, human error text on
@@ -92,4 +98,68 @@ export async function revokeDeviceAndReload(
     };
   }
   return loadMobileRegistrations(services);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 — per-device upload destinations (the authenticated desktop setup
+// surface for the permitted mobile inbox). A registration has NO upload
+// access until an operator creates a destination here; the phone's picker
+// reads only its own active destinations. All paths are server-computed
+// (Mobile/<hostId>/<slug>), so the label is the only free-form input.
+// ---------------------------------------------------------------------------
+
+/** Result of a destination step: fresh rows or human error text. */
+export interface MobileDestinationsResult {
+  destinations: MobileUploadDestination[] | null;
+  error: string | null;
+}
+
+/** Load one registration's destinations (active + revoked for the admin UI). */
+export async function loadDestinationsForDevice(
+  services: Pick<MobileDevicesServices, "listDestinations">,
+  hostId: string,
+): Promise<MobileDestinationsResult> {
+  try {
+    return { destinations: await services.listDestinations(hostId), error: null };
+  } catch (err) {
+    return {
+      destinations: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** Create a labeled inbox for a device, then fetch the fresh destination list. */
+export async function createDestinationAndReload(
+  services: MobileDevicesServices,
+  hostId: string,
+  label: string,
+  slug?: string,
+): Promise<MobileDestinationsResult> {
+  try {
+    await services.createDestination(hostId, label, slug);
+  } catch (err) {
+    return {
+      destinations: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  return loadDestinationsForDevice(services, hostId);
+}
+
+/** Revoke one destination (idempotent), then fetch the fresh list. */
+export async function revokeDestinationAndReload(
+  services: MobileDevicesServices,
+  hostId: string,
+  id: string,
+): Promise<MobileDestinationsResult> {
+  try {
+    await services.revokeDestination(hostId, id);
+  } catch (err) {
+    return {
+      destinations: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  return loadDestinationsForDevice(services, hostId);
 }

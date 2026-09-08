@@ -463,6 +463,38 @@ class EnrollmentInvariantRegressionTest {
         assertTrue("marker is cleared after a confirmed retry", store.loadCleanupPending().isEmpty())
     }
 
+    @Test
+    fun `cleanup retry for A cannot erase a newer pending enrollment for B`() = runTest {
+        val transport = FakeTransport()
+        val vault = FakeVault()
+        val store = FakeRegistrationStore()
+        val cookieScope = FakeCookieScope()
+        seedPairingWithCookie(vault, store, cookieScope)
+        cookieScope.failClear = true
+        val repo = repository(transport, vault, store, cookieScope)
+
+        val disconnect = repo.disconnect()
+        assertFalse(disconnect.localCleared)
+        assertEquals(listOf("https://fleet.example.com"), store.loadCleanupPending())
+
+        // A's cookie can now be cleared, and B's exchange succeeds before its
+        // identity probe fails. This leaves B recoverable at EXCHANGED.
+        cookieScope.failClear = false
+        transport.enqueue(exchangeResponse("host-b", "TOKEN_B", "GRANT_B"))
+        transport.enqueue(meResponse("host-b", "Pixel", status = 503))
+        val enrollment = repo.enroll(sampleQrWith("https://fleet-b.example.com", "enr_B"), "Pixel", "0.1.0")
+        assertEquals(CompanionRepository.EnrollStep.IDENTITY, (enrollment as CompanionRepository.EnrollOutcome.Failure).step)
+        assertEquals("TOKEN_B", vault.nativeToken()?.value)
+        assertEquals("https://fleet-b.example.com", store.loadBinding()?.origin)
+
+        val retry = repo.retryLocalCleanup(listOf("https://fleet.example.com"))
+        assertTrue(retry.cleared)
+        assertTrue(retry.preservedNewerEnrollment)
+        assertEquals("TOKEN_B", vault.nativeToken()?.value)
+        assertEquals("https://fleet-b.example.com", store.loadBinding()?.origin)
+        assertTrue(store.loadCleanupPending().isEmpty())
+    }
+
     // ------------------------------------------------------------------
     // Finding 5 (repository half) — bootstrap failure resumes from REGISTERED
     // ------------------------------------------------------------------

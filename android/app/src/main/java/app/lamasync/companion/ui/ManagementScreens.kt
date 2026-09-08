@@ -42,8 +42,11 @@ import app.lamasync.companion.web.HardenedWebView
 fun ManagementScreen(
     registration: Registration,
     webSessionConnected: Boolean,
+    navUrl: String?,
+    onNavUrlConsumed: () -> Unit,
     onOpenConnection: () -> Unit,
     onReconnect: () -> Unit,
+    onOpenUploads: () -> Unit,
 ) {
     val context = LocalContext.current
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -92,6 +95,9 @@ fun ManagementScreen(
                 TextButton(onClick = onOpenConnection) {
                     Text("Connection")
                 }
+                TextButton(onClick = onOpenUploads) {
+                    Text("Uploads")
+                }
             }
         }
         Box(Modifier.fillMaxSize()) {
@@ -131,6 +137,14 @@ fun ManagementScreen(
     // After a reconnect the same WebView is kept and only reloaded.
     LaunchedEffect(webSessionConnected) {
         if (webSessionConnected) webView?.reload()
+    }
+    // LAMA-296 stage 1: an uploaded-file receipt's open-in-web path (the
+    // Data Browser deep link). The WebView stays on the enrolled origin.
+    LaunchedEffect(navUrl) {
+        if (navUrl != null) {
+            webView?.loadUrl(navUrl)
+            onNavUrlConsumed()
+        }
     }
 }
 

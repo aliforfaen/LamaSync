@@ -718,6 +718,39 @@ class SessionViewModelEnrollmentResumeInstrumentedTest {
     }
 
     @Test
+    fun staleCleanupForADisappearsWhenBBecomesThePendingEnrollment() {
+        harness()
+        seedCompletedPairing("https://fleet-a.example.com", "host-a", "TOKEN_A", "GRANT_A", "enr_A")
+        harnessCookieScope.failClear = true
+        harnessTransport.enqueue(webSessionRule())
+        harnessTransport.enqueue(Rule(method = "POST", urlContains = "/revoke", respond = json(200, "{}")))
+
+        val vm = newViewModel()
+        vm.disconnect()
+        vm.awaitState { !it.busy }
+        assertTrue(vm.ui.value.cleanupUnconfirmed)
+
+        // B starts only after A's old cookie is confirmed removed. B then
+        // stops at identity, leaving a recoverable EXCHANGED enrollment.
+        harnessCookieScope.failClear = false
+        harnessTransport.enqueue(exchangeRule("host-b", "TOKEN_B", "GRANT_B"))
+        harnessTransport.enqueue(meRule("host-b", status = 503))
+        vm.onLaunchFromWelcome()
+        vm.onQrScanned(qrJson("https://fleet-b.example.com", "enr_B"))
+        vm.confirmEnrollment("Pixel B")
+        vm.awaitState { it.screen == Screen.CONFIRM && !it.busy }
+        assertEquals("TOKEN_B", harnessVault.native?.value)
+        assertTrue(harnessStore.cleanupPending.isEmpty())
+
+        vm.onConfirmBack()
+        vm.onScannerBack()
+        assertNotNull("B remains resumable", vm.ui.value.pendingEnrollment)
+        assertFalse("A's obsolete retry action must be removed", vm.ui.value.cleanupUnconfirmed)
+        assertEquals("TOKEN_B", harnessVault.native?.value)
+        assertEquals("https://fleet-b.example.com", harnessStore.binding?.origin)
+    }
+
+    @Test
     fun disconnectSuccessClearsEverythingAndReportsRemoteSuccess() {
         harness()
         seedCompletedPairing("https://fleet.example.com", "host-7", "TOKEN_1", "GRANT_1")

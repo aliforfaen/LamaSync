@@ -62,6 +62,12 @@ LAMASYNC_NO_TUI=1 \
 | `PORT` | server | `8080` |
 | `LAMASYNC_SERVER_URL` | TUI | `http://localhost:8080` (env fallback) |
 | `LAMASYNC_ORIGIN` | server (mobile flow) | unset — mobile enrollment exchange/bootstrap return 503 until set to a canonical `https://` origin |
+| `LAMASYNC_MOBILE_LANDING_DIR` | server (LAMA-296 stage 1) | `<LAMASYNC_BACKUP_DIR>/Mobile` — server-local root for verified uploads (inside the browse root) |
+| `LAMASYNC_MOBILE_STAGING_DIR` | server (LAMA-296 stage 1) | `<tmp>/lamasync-mobile-staging` — upload staging OUTSIDE the browse tree |
+| `LAMASYNC_MOBILE_CHUNK_BYTES` | server (LAMA-296 stage 1) | `4194304` — negotiated max bytes per chunk request |
+| `LAMASYNC_MOBILE_MAX_UPLOAD_BYTES` | server (LAMA-296 stage 1) | `2147483648` (2 GiB) — per-upload cap |
+| `LAMASYNC_MOBILE_STAGING_QUOTA_BYTES` | server (LAMA-296 stage 1) | `8589934592` (8 GiB) — rough total staging bound |
+| `LAMASYNC_MOBILE_ABANDON_TTL_MS` / `LAMASYNC_MOBILE_SWEEP_MS` | server (LAMA-296 stage 1) | `7d` / `24h` — abandoned-staging reconcile TTL / sweep interval (`0` disables the timer) |
 | `LAMASYNC_NO_TUI` | TUI | — (set to `"1"` for CLI fallback) |
 | `LAMASYNC_SOCKET_PATH` | daemon, TUI local mode | `$XDG_RUNTIME_DIR/lamasync.sock` (falls back to `~/.lamasync/lamasync.sock` when XDG is unset) |
 
@@ -121,14 +127,15 @@ passing and 9 skipped on 2026-08-30). Worth knowing by name:
 4. Add a hotkey dispatch path: only if your view owns internal keys, set `ViewSpec.handleKey = view.handleKey.bind(view)`; otherwise global hotkeys via `view.hotkeys()`.
 5. Add a unit test in `packages/tui/src/views/x.test.ts` if the view has pure logic; gate any renderer-bound test behind `process.env.LAMASYNC_TUI_TEST_VIEWS === "1"`.
 
-## Android companion (LAMA-296 phase 1)
+## Android companion (LAMA-296 phase 1 + stage 1)
 
 The Android app is a **standalone Gradle project** (`android/`) that is
 deliberately outside the Bun workspace: `bun` never discovers it, and its
 build needs neither the Bun toolchain nor the repo's `node_modules`.
 
-Toolchain (recorded in `android/gradle/libs.versions.toml`, verified
-2026-09-06):
+Toolchain (recorded in `android/gradle/libs.versions.toml`; stage 1 adds
+WorkManager 2.10.0 — the compileSdk-35-compatible stable release per the
+official data-transfer guidance):
 
 | Component | Version |
 |-----------|---------|
@@ -138,7 +145,7 @@ Toolchain (recorded in `android/gradle/libs.versions.toml`, verified
 | Android Gradle Plugin | 8.9.3 |
 | Kotlin | 2.2.21 (android + compose + serialization plugins) |
 | compileSdk / targetSdk / minSdk | 35 / 35 / 26 |
-| Jetpack Compose BOM | 2025.07.00 (material3), CameraX 1.4.2, ML Kit barcode 17.3.0 |
+| Jetpack Compose BOM | 2025.07.00 (material3), CameraX 1.4.2, ML Kit barcode 17.3.0, WorkManager 2.10.0 |
 
 The SDK is pinned to compileSdk 35 on purpose: SDK 36 components require a
 provisioning step this project does not perform, and the whole chosen matrix
@@ -146,7 +153,7 @@ runs against the platforms already installed — `gradlew` provisions **no**
 new SDK components. `applicationId` is `app.lamasync.companion` (stable once
 chosen) with `versionName 0.1.0`.
 
-Build, lint, and unit-test (49 JVM tests; instrumented tests need a device/AVD):
+Build, lint, and unit-test (77 JVM tests; instrumented tests need a device/AVD):
 
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
@@ -154,8 +161,61 @@ export ANDROID_HOME=/opt/android-sdk
 
 ./android/gradlew -p android assembleDebug          # → android/app/build/outputs/apk/debug/app-debug.apk
 ./android/gradlew -p android lintDebug              # 0 errors expected (warnings are version-available notices)
-./android/gradlew -p android testDebugUnitTest      # 49 unit tests, no device required
-./android/gradlew -p android connectedDebugAndroidTest  # 7 instrumented tests (booted AVD / device)
+./android/gradlew -p android testDebugUnitTest      # 86 unit tests, no device required
+./android/gradlew -p android connectedDebugAndroidTest  # 42 tests (6 vertical tests skip without a live server)
+```
+
+### Stage-1 HTTPS vertical (manual uploads, disposable server)
+
+The phase-1 vertical pattern extends to uploads: a disposable server from
+source behind an socat TLS front door with `LAMASYNC_ORIGIN=https://10.0.2.2:<port>`
+and a self-signed CA (SAN `IP:10.0.2.2`) installed in the AVD user store
+(`adb push` to `/data/misc/user/0/cacerts-added/<subject-hash-old>.0`, reboot;
+debug builds trust user CAs). The repo-local helper used for this milestone:
+
+```bash
+# /tmp/lamasync-vertical/run-vertical.sh — wipes disposable data, (re)starts
+# the server + socat front door, installs the APK, runs the connected suite
+# with verticalOrigin/verticalAdminKey instrumentation args.
+/tmp/lamasync-vertical/run-vertical.sh
+```
+
+It runs the phase-1 enrollment verticals plus `VerticalUploadFlowTest` (a
+65 MiB+ chunked upload through the real HTTPS stack with ≤ 1 MiB payloads
+and server-side verification, and a declared-checksum-mismatch negative).
+
+The stage-1 correction pass rebuilt this disposable harness from scratch
+(it is host-local by design and was absent):
+
+```bash
+# 1. TLS material
+export V=/tmp/lamasync-vertical
+mkdir -p $V/certs $V/data $V/backups && cd $V/certs
+openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.crt -days 365 -nodes \
+  -subj "/CN=LamaSync Vertical CA"
+openssl req -newkey rsa:2048 -keyout leaf.key -out leaf.csr -nodes -subj "/CN=10.0.2.2"
+printf 'subjectAltName=IP:10.0.2.2,DNS:localhost\n' > leaf.ext
+openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out leaf.crt -days 365 -extfile leaf.ext
+# 2. Install the CA into the AVD user store, then reboot the emulator
+HASH=$(openssl x509 -in ca.crt -subject_hash_old -noout)
+adb root && adb push ca.crt /data/misc/user/0/cacerts-added/$HASH.0 \
+  && adb shell chmod 644 /data/misc/user/0/cacerts-added/$HASH.0 && adb reboot
+# 3. Fresh server behind the TLS front door
+rm -rf $V/data/*
+env LAMASYNC_DATA_DIR=$V/data LAMASYNC_BACKUP_DIR=$V/backups \
+  LAMASYNC_API_KEY=lamasync-vertical-master-key-1234567890 \
+  LAMASYNC_SECRET_KEY=lamasync-vertical-secret-key-9876543210 \
+  LAMASYNC_ORIGIN=https://10.0.2.2:8444 PORT=8081 \
+  bun run packages/server/src/index.ts &
+socat OPENSSL-LISTEN:8444,reuseaddr,fork,cert=$V/certs/leaf.crt,key=$V/certs/leaf.key,verify=0 \
+  TCP:127.0.0.1:8081 &
+# 4. Run the whole instrumented suite with the vertical args
+cd /path/to/repo
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk ANDROID_HOME=/opt/android-sdk \
+./android/gradlew -p android connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.verticalOrigin=https://10.0.2.2:8444 \
+  -Pandroid.testInstrumentationRunnerArguments.verticalAdminKey=lamasync-vertical-master-key-1234567890
 ```
 
 ### HTTPS prerequisite for the Android flow

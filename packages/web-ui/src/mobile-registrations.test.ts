@@ -9,13 +9,16 @@
 // secrets are involved anywhere on this path.
 
 import { describe, expect, it } from "bun:test";
-import type { MobileRegistrationSummary } from "@lamasync/core";
+import type { MobileRegistrationSummary, MobileUploadDestination } from "@lamasync/core";
 import {
+  createDestinationAndReload,
   DEVICE_REVOKE_REASON,
+  loadDestinationsForDevice,
   loadMobileRegistrations,
   mobileRegistrationBadgeClass,
   mobileRegistrationLabel,
   mobileRegistrationStatus,
+  revokeDestinationAndReload,
   revokeDeviceAndReload,
   type MobileDevicesServices,
 } from "./mobile-registrations.ts";
@@ -56,6 +59,17 @@ function scriptedServices(initial: MobileRegistrationSummary[]) {
           ? { ...row, revokedAt: 1_784_000_100_000, revokedReason: reason }
           : row,
       );
+    },
+    // Stage 1 destination methods are unused by the registration-flow tests;
+    // wire trivial stubs so the interface stays honest.
+    async listDestinations() {
+      return [];
+    },
+    async createDestination() {
+      throw new Error("not used in this test");
+    },
+    async revokeDestination() {
+      throw new Error("not used in this test");
     },
   };
   return {
@@ -219,5 +233,122 @@ describe("revokeDeviceAndReload — revoke then refresh the projection", () => {
     expect(script.revokeCalls[0]?.hostId).toBe("host-pixel-9");
     expect(after.rows?.[0]?.revokedAt).not.toBeNull();
     expect(after.error).toBeNull();
+  });
+});
+
+describe("stage 1 destination flows", () => {
+  /** Scripted services with an in-memory destination list per host. */
+  function destinationServices(initial: MobileUploadDestination[] = []) {
+    const createCalls: Array<{ hostId: string; label: string; slug?: string }> = [];
+    const revokeCalls: Array<{ hostId: string; id: string }> = [];
+    let store = [...initial];
+    let error: Error | null = null;
+    const services: MobileDevicesServices = {
+      async list() {
+        return [];
+      },
+      async revoke() {
+        return {};
+      },
+      async listDestinations(hostId) {
+        if (error) throw error;
+        return store.filter((d) => d.registrationId === hostId);
+      },
+      async createDestination(hostId, label, slug) {
+        createCalls.push({ hostId, label, slug });
+        if (error) throw error;
+        const d: MobileUploadDestination = {
+          id: `mdst-${store.length + 1}`,
+          registrationId: hostId,
+          label,
+          relPath: `Mobile/${hostId}/${slug ?? label}`,
+          createdAt: Date.now(),
+          revokedAt: null,
+        };
+        store = [...store, d];
+        return d;
+      },
+      async revokeDestination(hostId, id) {
+        revokeCalls.push({ hostId, id });
+        if (error) throw error;
+        store = store.map((d) =>
+          d.id === id ? { ...d, revokedAt: Date.now() } : d,
+        );
+        return {};
+      },
+    };
+    return {
+      services,
+      calls: { createCalls, revokeCalls },
+      fail(next: Error | null) {
+        error = next;
+      },
+      get: () => [...store],
+    };
+  }
+
+  function dest(
+    over: Partial<MobileUploadDestination> = {},
+  ): MobileUploadDestination {
+    return {
+      id: "mdst-1",
+      registrationId: "host-pixel-9",
+      label: "Inbox",
+      relPath: "Mobile/host-pixel-9/Inbox",
+      createdAt: 1_783_999_300_000,
+      revokedAt: null,
+      ...over,
+    };
+  }
+
+  it("loads a device's destinations (active + revoked)", async () => {
+    const script = destinationServices([
+      dest(),
+      dest({ id: "mdst-2", label: "Camera", relPath: "Mobile/host-pixel-9/Camera" }),
+    ]);
+    const result = await loadDestinationsForDevice(script.services, "host-pixel-9");
+    expect(result.error).toBeNull();
+    expect(result.destinations).toHaveLength(2);
+  });
+
+  it("assigns a labeled inbox and reloads the fresh list", async () => {
+    const script = destinationServices();
+    const result = await createDestinationAndReload(
+      script.services,
+      "host-pixel-9",
+      "Shared Files",
+    );
+    expect(script.calls.createCalls).toEqual([
+      { hostId: "host-pixel-9", label: "Shared Files", slug: undefined },
+    ]);
+    expect(result.error).toBeNull();
+    expect(result.destinations?.[0]?.relPath).toBe(
+      "Mobile/host-pixel-9/Shared Files",
+    );
+  });
+
+  it("propagates an assignment failure without reloading the list", async () => {
+    const script = destinationServices();
+    script.fail(new Error("destination already exists"));
+    const result = await createDestinationAndReload(
+      script.services,
+      "host-pixel-9",
+      "Inbox",
+    );
+    expect(result.destinations).toBeNull();
+    expect(result.error).toBe("destination already exists");
+  });
+
+  it("revokes a destination idempotently and reloads", async () => {
+    const script = destinationServices([dest()]);
+    const result = await revokeDestinationAndReload(
+      script.services,
+      "host-pixel-9",
+      "mdst-1",
+    );
+    expect(script.calls.revokeCalls).toEqual([
+      { hostId: "host-pixel-9", id: "mdst-1" },
+    ]);
+    expect(result.destinations?.[0]?.revokedAt).not.toBeNull();
   });
 });

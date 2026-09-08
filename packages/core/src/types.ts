@@ -1339,3 +1339,146 @@ export interface MobileRegistrationRevokeResponse {
 export interface MobileWebSessionLogoutResponse {
   loggedOut: true;
 }
+
+// ---------------------------------------------------------------------------
+// LAMA-296 stage 1 — scoped mobile upload destinations and the resumable
+// transfer contract. A destination grants ONE registration the right to
+// publish files under a server-computed landing path such as
+// `Mobile/<hostId>/Inbox` (see spec-296-stage-1-manual-uploads.md). No
+// destination row => no upload access, even for a live registration.
+// Request bodies carry only destination ids + validated file names — never
+// arbitrary roots, backend credentials, or another host's inbox. Uploads
+// are host-bound, idempotency-keyed, chunk-resumable, SHA-256 verified and
+// atomically published; a final file is the durability point.
+// ---------------------------------------------------------------------------
+
+/** One authorized landing path owned by exactly one mobile registration. */
+export interface MobileUploadDestination {
+  /** Server-issued destination id (the only thing clients may reference). */
+  id: string;
+  /** Owning registration host id (server-derived, never client-chosen). */
+  registrationId: string;
+  /** Admin-chosen label, e.g. "Inbox". */
+  label: string;
+  /** Validated server-computed path relative to the mobile landing root,
+   *  e.g. `Mobile/mob-abc123/Inbox`. */
+  relPath: string;
+  /** Epoch-ms creation instant. */
+  createdAt: number;
+  /** Epoch-ms revocation instant, or null while active. */
+  revokedAt: number | null;
+}
+
+/** Admin body creating a destination for one registration. The path is
+ *  always `Mobile/<hostId>/<slug>`; the client can never pick a root or
+ *  another host's inbox. */
+export interface MobileUploadDestinationCreateRequest {
+  /** Human label, e.g. "Inbox" (also the default slug source). */
+  label: string;
+  /** Optional path segment; defaults to the sanitized label. */
+  slug?: string;
+}
+
+export interface MobileUploadDestinationCreateResponse {
+  destination: MobileUploadDestination;
+}
+
+export interface MobileUploadDestinationRevokeResponse {
+  id: string;
+  /** Epoch-ms revocation instant. */
+  revokedAt: number;
+}
+
+/** Lifecycle of one upload intent (see spec state machine). */
+export type MobileUploadStatus =
+  | "created"
+  | "uploading"
+  | "ready"
+  | "verifying"
+  | "publishing"
+  | "finalized"
+  | "failed"
+  | "cancelled";
+
+/** Browse-ref the completed file is visible under (existing local browser). */
+export interface MobileUploadBrowseRef {
+  kind: "local";
+  /** Path relative to the browse/backup root, e.g. `Mobile/<hostId>/Inbox/f.pdf`. */
+  path: string;
+}
+
+/** Persisted, retry-safe completion receipt (returned again by finalize). */
+export interface MobileUploadReceipt {
+  uploadId: string;
+  fileName: string;
+  /** Final published path relative to the landing root. */
+  finalRelPath: string;
+  /** Where the existing Data Browser lists the published file. */
+  browseRef: MobileUploadBrowseRef;
+  /** Verified size in bytes. */
+  sizeBytes: number;
+  /** Verified SHA-256 hex digest. */
+  sha256: string;
+  /** Epoch-ms publication instant. */
+  finalizedAt: number;
+}
+
+/** Full wire state of one upload. `idempotencyKey` is deliberately not
+ *  echoed (it is a client claim); the client correlates by id. */
+export interface MobileUpload {
+  id: string;
+  destinationId: string;
+  destinationLabel: string;
+  fileName: string;
+  /** Reserved final path relative to the landing root. */
+  finalRelPath: string;
+  /** Client-declared expected size, or null when unknown. */
+  sizeBytes: number | null;
+  /** Durable resumable offset (bytes durably accepted). */
+  bytesReceived: number;
+  /** Verified SHA-256 hex digest once verification passed (else null). */
+  sha256: string | null;
+  status: MobileUploadStatus;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  finalizedAt: number | null;
+  receipt: MobileUploadReceipt | null;
+  /** Server-negotiated maximum bytes per chunk request. */
+  chunkSizeBytes: number;
+  /** Server-enforced maximum total upload size. */
+  maxSizeBytes: number;
+}
+
+/** Native body creating an upload (POST /api/v1/mobile/uploads). */
+export interface MobileUploadCreateRequest {
+  /** Authorized destination id (own registration only). */
+  destinationId: string;
+  /** Final file name — single segment, validated server-side. */
+  fileName: string;
+  /** Expected total size (optional but recommended; enables early caps). */
+  sizeBytes?: number | null;
+  /** Client-computed SHA-256 hex of the whole file (optional; verified at
+   *  finalize when present). */
+  sha256?: string | null;
+}
+
+export interface MobileUploadCreateResponse {
+  upload: MobileUpload;
+}
+
+export interface MobileUploadStateResponse {
+  upload: MobileUpload;
+}
+
+export interface MobileUploadListResponse {
+  uploads: MobileUpload[];
+}
+
+export interface MobileUploadFinalizeResponse {
+  receipt: MobileUploadReceipt;
+}
+
+export interface MobileUploadCancelResponse {
+  upload: MobileUpload;
+}

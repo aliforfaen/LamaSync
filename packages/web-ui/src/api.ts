@@ -48,6 +48,10 @@ import type {
   MobileEnrollmentStatusResponse,
   MobileRegistrationRevokeResponse,
   MobileRegistrationSummary,
+  MobileUploadDestination,
+  MobileUploadDestinationCreateRequest,
+  MobileUploadDestinationCreateResponse,
+  MobileUploadDestinationRevokeResponse,
   MobileWebSessionLogoutResponse,
   PauseMode,
   PauseState,
@@ -569,6 +573,22 @@ export const api = {
    *  finding 6): no secret hashes, grants, or enrollment ids on the wire. */
   listMobileRegistrations: () =>
     apiGet<MobileRegistrationSummary[]>("/mobile/registrations"),
+  /** Stage 1: per-registration upload destinations (admin). There is no
+   *  implicit upload access — an operator assigns an inbox explicitly. */
+  listMobileRegistrationDestinations: (hostId: string) =>
+    apiGet<{ destinations: MobileUploadDestination[] }>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/destinations`,
+    ),
+  createMobileRegistrationDestination: (hostId: string, req: MobileUploadDestinationCreateRequest) =>
+    apiPost<MobileUploadDestinationCreateResponse>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/destinations`,
+      req,
+    ),
+  revokeMobileRegistrationDestination: (hostId: string, id: string) =>
+    apiPost<MobileUploadDestinationRevokeResponse>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/destinations/${encodeURIComponent(id)}/revoke`,
+      {},
+    ),
   /** POST /web-session/logout (CSRF-protected) — invalidates the current
    *  cookie session only; never touches the native registration. */
   mobileWebSessionLogout: () =>

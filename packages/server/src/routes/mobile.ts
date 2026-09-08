@@ -34,6 +34,7 @@ import {
   mobileExchangeAllowed,
 } from "../mobile-store.ts";
 import { disconnectMobileRegistration, disconnectWebSession } from "../ws.ts";
+import { revokeRegistrationUploads } from "../mobile-uploads.ts";
 import type { AuthPrincipal } from "@lamasync/core";
 
 // ---- payload bounds ------------------------------------------------------
@@ -422,6 +423,9 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "mobile registration not found" };
       }
+      // Stage 1: kill in-flight uploads + revoke destinations so a transfer
+      // cannot publish after central revocation (finalize re-checks anyway).
+      revokeRegistrationUploads(params.hostId, reason);
       // Close live WebSockets of that registration in-process (its session
       // rows are already revoked, so reconnects are refused too).
       disconnectMobileRegistration(params.hostId);
