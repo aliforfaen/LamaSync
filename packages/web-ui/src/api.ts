@@ -42,6 +42,17 @@ import type {
   DemoState,
   DemoSeedSummary,
   FolderSnapshotsResponse,
+  MobileClientType,
+  MobileEnrollmentCreateRequest,
+  MobileEnrollmentCreateResponse,
+  MobileEnrollmentStatusResponse,
+  MobileRegistrationRevokeResponse,
+  MobileRegistrationSummary,
+  MobileUploadDestination,
+  MobileUploadDestinationCreateRequest,
+  MobileUploadDestinationCreateResponse,
+  MobileUploadDestinationRevokeResponse,
+  MobileWebSessionLogoutResponse,
   PauseMode,
   PauseState,
   PairingSessionCreateResponse,
@@ -136,16 +147,186 @@ export function clearApiKey(): void {
   localStorage.removeItem(API_KEY_PERSIST_STORAGE);
 }
 
-/** Fired on `window` when the server rejects the stored API key. */
+// ---------------------------------------------------------------------------
+// LAMA-296 — SPA auth modes.
+//
+// The SPA authenticates in exactly one of two modes:
+//   bearer — the classic browser flow: an API key in session/localStorage is
+//     sent as `Authorization: Bearer …` on every request, including the
+//     WebSocket upgrade (subprotocol token). Unchanged behavior.
+//   session — the Android WebView flow: the NATIVE bootstrap route set the
+//     host-only `__Host-lamasync-mobile` cookie (Secure/HttpOnly/SameSite,
+//     never set by the SPA and never a dummy key in sessionStorage). The SPA
+//     discovers the live session through GET /api/v1/auth/me (the dual-mode
+//     session-discovery endpoint owned by ServerMobile; wave-2 contract):
+//       200 { authenticated:true, mode:"session", kind:"mobile-session",
+//             keyId:null, name:<displayName>, hostId, displayName,
+//             clientType:"android", expiresAt:<epoch ms>, csrfToken }
+//       or for a bearer: { authenticated:true, mode:"bearer", kind, keyId,
+//             name, hostId }
+//       else 401 { error:"Unauthorized" } — an invalid Authorization header
+//       NEVER falls back to the cookie (the server enforces this too).
+//   Session-mode requests authenticate via the cookie; cookie-authenticated
+//   mutations (POST/PUT/PATCH/DELETE) additionally carry the session-bound
+//   CSRF token (X-CSRF-Token), delivered by the authenticated auth metadata.
+//   The token lives only in memory — never sessionStorage — and is refreshed
+//   on every /auth/me response. Exact trusted-Origin is enforced server-side;
+//   the browser sends Origin itself on same-origin mutations and WS upgrades.
+// ---------------------------------------------------------------------------
+
+/** Session-mode identity, delivered by the dual-mode /auth/me discovery. */
+export interface MobileWebSessionInfo {
+  hostId: string;
+  displayName: string;
+  clientType: MobileClientType;
+  /** Epoch-ms absolute session expiry (12 h). */
+  expiresAt: number;
+  /** Session-bound CSRF token for cookie-authenticated mutations. */
+  csrfToken: string;
+}
+
+/** /auth/me when the request authenticated as a live mobile session. */
+export interface AuthMeSessionResponse extends MobileWebSessionInfo {
+  authenticated: true;
+  mode: "session";
+  kind: "mobile-session";
+  keyId: null;
+  name: string;
+}
+
+/** /auth/me when the request authenticated as a classic bearer principal. */
+export type AuthMeBearerResponse = AuthMeResponse & {
+  authenticated: true;
+  mode: "bearer";
+};
+
+/** Full dual-mode /auth/me payload. */
+export type AuthMeInfo = AuthMeSessionResponse | AuthMeBearerResponse;
+
+/** In-memory session metadata; never persisted (CSRF lives here only). */
+let sessionAuth: MobileWebSessionInfo | null = null;
+
+/** The active session-mode identity, or null in bearer / logged-out states. */
+export function getSessionAuth(): MobileWebSessionInfo | null {
+  return sessionAuth;
+}
+
+export function clearSessionAuth(): void {
+  sessionAuth = null;
+}
+
+/** Which credential the SPA currently holds. */
+export type AuthMode = "bearer" | "session" | "none";
+
+/** Resolve the current auth mode without network I/O. A stored key always
+ *  wins over a cookie session: when an Authorization header is present but
+ *  invalid the request fails (401) rather than silently falling back to the
+ *  cookie — matching the server's dual-mode rule. */
+export function getAuthMode(): AuthMode {
+  if (getApiKey() !== null) return "bearer";
+  return sessionAuth !== null ? "session" : "none";
+}
+
+/** Result of the boot-time session probe. */
+export type SessionProbeResult =
+  | { mode: "session" }
+  | { mode: "none"; reachable: boolean };
+
+/** True when `value` is a live-session /auth/me payload with the fields the
+ *  SPA needs (hostId, displayName, CSRF token, expiry, android client). */
+function isSessionAuthInfo(value: unknown): value is AuthMeSessionResponse {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const rec = value as Record<string, unknown>;
+  if (rec.authenticated !== true || rec.mode !== "session") return false;
+  if (rec.kind !== "mobile-session") return false;
+  if (typeof rec.hostId !== "string" || rec.hostId.length === 0) return false;
+  if (typeof rec.displayName !== "string" || rec.displayName.length === 0) {
+    return false;
+  }
+  if (typeof rec.name !== "string") return false;
+  if (rec.clientType !== "android") return false;
+  if (typeof rec.expiresAt !== "number") return false;
+  if (typeof rec.csrfToken !== "string" || rec.csrfToken.length === 0) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Boot-time session discovery (no API key in storage): probe
+ * GET /api/v1/auth/me with the cookie only and, on a live session response,
+ * install the in-memory session identity. Never sends an Authorization
+ * header, so a bearer credential cannot mask an invalid session and an
+ * invalid session can never be "refreshed" from a cookie silently.
+ */
+export async function probeSession(): Promise<SessionProbeResult> {
+  clearSessionAuth();
+  try {
+    const res = await fetch(apiUrl("/auth/me"), {
+      method: "GET",
+      headers: {},
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!res.ok) return { mode: "none", reachable: true };
+    const parsed: unknown = await res.json().catch(() => null);
+    if (!isSessionAuthInfo(parsed)) return { mode: "none", reachable: true };
+    sessionAuth = {
+      hostId: parsed.hostId,
+      displayName: parsed.displayName,
+      clientType: parsed.clientType,
+      expiresAt: parsed.expiresAt,
+      csrfToken: parsed.csrfToken,
+    };
+    return { mode: "session" };
+  } catch {
+    return { mode: "none", reachable: false };
+  }
+}
+
+/**
+ * Sign out of a cookie-authenticated web session: POST /web-session/logout
+ * (CSRF-protected), which invalidates the session and clears the cookie
+ * server-side — the SPA cannot delete an HttpOnly cookie itself, so a local
+ * clear alone would log straight back in on reload. Never touches the
+ * native registration. Returns "logged-out" once the server confirmed (or
+ * the session was already invalid, 401), and "failed" when the session is
+ * still live server-side and the caller should stay signed in.
+ */
+export type SessionLogoutResult = "logged-out" | "already-invalid" | "failed";
+
+export async function sessionLogout(): Promise<SessionLogoutResult> {
+  if (getAuthMode() !== "session") {
+    clearSessionAuth();
+    return "logged-out";
+  }
+  try {
+    await apiPost<MobileWebSessionLogoutResponse>("/mobile/web-session/logout", {});
+    clearSessionAuth();
+    return "logged-out";
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      clearSessionAuth();
+      return "already-invalid";
+    }
+    return "failed";
+  }
+}
+
+/** Fired on `window` when the server rejects the stored credential. */
 export const UNAUTHORIZED_EVENT = "lamasync:unauthorized";
 
 /**
- * Clear the stored key and notify the app that the session is no longer
- * valid. Called on HTTP 401 responses and on WS auth failures so the UI
- * drops back to the login screen instead of showing dead errors.
+ * Clear the stored key and any in-memory session and notify the app that
+ * the credential is no longer valid. Called on HTTP 401 responses and on WS
+ * auth failures so the UI drops back to the login screen instead of showing
+ * dead errors.
  */
 export function notifyUnauthorized(): void {
   clearApiKey();
+  clearSessionAuth();
   window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
 }
 
@@ -186,24 +367,84 @@ export function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// ---------------------------------------------------------------------------
+// Request credential plumbing (LAMA-296). Every request path — normal JSON
+// fetches, binary downloads, multipart uploads, and the WebSocket — resolves
+// its credential through `requestCredential` so bearer and session modes can
+// never drift apart. Session mode authenticates via the cookie (the browser
+// sends it automatically on same-origin requests) and adds the CSRF header
+// to non-safe methods only; bearer mode adds Authorization to everything.
+// ---------------------------------------------------------------------------
+
+/** HTTP methods that mutate server state — the only ones CSRF applies to. */
+const CSRF_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/** Header the session CSRF token travels in (ServerMobile wave-2 contract). */
+export const CSRF_HEADER = "X-CSRF-Token";
+
+type RequestCredential =
+  | { kind: "bearer"; key: string }
+  | { kind: "session"; csrfToken: string };
+
+/**
+ * Resolve the credential the current request should carry. A stored bearer
+ * key ALWAYS wins — when that Authorization header turns out invalid the
+ * request fails with 401; the code never silently drops the header to try
+ * the cookie instead (server enforces the same rule). Null when logged out.
+ */
+function requestCredential(): RequestCredential | null {
+  const key = getApiKey();
+  if (key !== null) return { kind: "bearer", key };
+  const session = getSessionAuth();
+  if (session !== null) return { kind: "session", csrfToken: session.csrfToken };
+  return null;
+}
+
+/** Apply the resolved credential to a header set for one request. */
+function applyCredential(
+  headers: Headers,
+  credential: RequestCredential,
+  method: string,
+): void {
+  if (credential.kind === "bearer") {
+    headers.set("Authorization", `Bearer ${credential.key}`);
+    return;
+  }
+  if (CSRF_METHODS.has(method)) {
+    headers.set(CSRF_HEADER, credential.csrfToken);
+  }
+}
+
+/** Absolute API path for `path` (which may or may not carry /api/v1). */
+function apiUrl(path: string): string {
+  return path.startsWith("/api/v1/")
+    ? path
+    : `/api/v1${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+/** 401 guard for callers that found no credential at all. */
+function missingCredentialError(): ApiError {
+  notifyUnauthorized();
+  return new ApiError(401, "no active credential");
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const key = getApiKey();
-  if (!key) {
-    notifyUnauthorized();
-    throw new ApiError(401, "missing api key");
-  }
+  const method = (init.method ?? "GET").toUpperCase();
+  const credential = requestCredential();
+  if (credential === null) throw missingCredentialError();
   const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${key}`);
+  applyCredential(headers, credential, method);
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const url = path.startsWith("/api/v1/")
-    ? path
-    : `/api/v1${path.startsWith("/") ? path : `/${path}`}`;
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(apiUrl(path), {
+    ...init,
+    headers,
+    credentials: "same-origin",
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 401) {
@@ -251,23 +492,19 @@ export function apiDelete<T = void>(path: string): Promise<T> {
 }
 
 /**
- * Fetch a binary response (e.g. an app-snapshot tarball) with the auth header.
- * A plain `<a href>` would not send `Authorization`, so callers that want
- * to offer a download must fetch the bytes and trigger a save via an
- * object URL.
+ * Fetch a binary response (e.g. an app-snapshot tarball) with the current
+ * credential. A plain `<a href>` would not send `Authorization` (or carry
+ * the CSRF rules), so callers that want to offer a download must fetch the
+ * bytes and trigger a save via an object URL.
  */
 async function apiBlob(path: string): Promise<Blob> {
-  const key = getApiKey();
-  if (!key) {
-    notifyUnauthorized();
-    throw new ApiError(401, "missing api key");
-  }
+  const credential = requestCredential();
+  if (credential === null) throw missingCredentialError();
   const headers = new Headers();
-  headers.set("Authorization", `Bearer ${key}`);
-  const url = path.startsWith("/api/v1/")
-    ? path
-    : `/api/v1${path.startsWith("/") ? path : `/${path}`}`;
-  const res = await fetch(url, { headers });
+  // Downloads are GETs: session mode authenticates via the cookie and needs
+  // no CSRF header (cookie + CSRF only apply to non-safe mutations).
+  applyCredential(headers, credential, "GET");
+  const res = await fetch(apiUrl(path), { headers, credentials: "same-origin" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 401) {
@@ -297,7 +534,65 @@ async function browseDownloadBlob(ref: BrowseRef, name: string): Promise<Blob> {
 // Typed domain helpers.
 
 export const api = {
-  authMe: () => apiGet<AuthMeResponse>("/auth/me"),
+  /**
+   * GET /api/v1/auth/me — dual-mode identity (bearer principal or live
+   * mobile session; see the LAMA-296 auth block above). Session responses
+   * refresh the in-memory CSRF token from the authenticated auth metadata.
+   */
+  authMe: async () => {
+    const info = await apiGet<AuthMeInfo>("/auth/me");
+    if (info.mode === "session") {
+      sessionAuth = {
+        hostId: info.hostId,
+        displayName: info.displayName,
+        clientType: info.clientType,
+        expiresAt: info.expiresAt,
+        csrfToken: info.csrfToken,
+      };
+    }
+    return info;
+  },
+  // LAMA-296: Android enrollment lifecycle (desktop "Add Android device"
+  // flow). Creating an enrollment transactionally revokes any other still-
+  // pending enrollment; the returned secret appears exactly once and only
+  // inside the QR the phone scans.
+  createMobileEnrollment: (opts: MobileEnrollmentCreateRequest = { webAdmin: true }) =>
+    apiPost<MobileEnrollmentCreateResponse>("/mobile/enrollments", opts),
+  getMobileEnrollment: (enrollmentId: string) =>
+    apiGet<MobileEnrollmentStatusResponse>(
+      `/mobile/enrollments/${encodeURIComponent(enrollmentId)}`,
+    ),
+  revokeMobileRegistration: (hostId: string, reason?: string) =>
+    apiPost<MobileRegistrationRevokeResponse>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/revoke`,
+      { reason: reason ?? undefined },
+    ),
+  /** GET /api/v1/mobile/registrations — the admin-only projection of every
+   *  paired device (most recent first, revoked rows included). This is the
+   *  persistent listing behind the Admin "Android devices" panel (review
+   *  finding 6): no secret hashes, grants, or enrollment ids on the wire. */
+  listMobileRegistrations: () =>
+    apiGet<MobileRegistrationSummary[]>("/mobile/registrations"),
+  /** Stage 1: per-registration upload destinations (admin). There is no
+   *  implicit upload access — an operator assigns an inbox explicitly. */
+  listMobileRegistrationDestinations: (hostId: string) =>
+    apiGet<{ destinations: MobileUploadDestination[] }>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/destinations`,
+    ),
+  createMobileRegistrationDestination: (hostId: string, req: MobileUploadDestinationCreateRequest) =>
+    apiPost<MobileUploadDestinationCreateResponse>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/destinations`,
+      req,
+    ),
+  revokeMobileRegistrationDestination: (hostId: string, id: string) =>
+    apiPost<MobileUploadDestinationRevokeResponse>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/destinations/${encodeURIComponent(id)}/revoke`,
+      {},
+    ),
+  /** POST /web-session/logout (CSRF-protected) — invalidates the current
+   *  cookie session only; never touches the native registration. */
+  mobileWebSessionLogout: () =>
+    apiPost<MobileWebSessionLogoutResponse>("/mobile/web-session/logout", {}),
   listApiKeys: () => apiGet<ApiKeySummary[]>("/api-keys"),
   createApiKey: (name: string) =>
     apiPost<ApiKeyCreateResponse>("/api-keys", { name }),
@@ -444,11 +739,8 @@ export const api = {
     file: Blob,
     opts: { description?: string } = {},
   ) => {
-    const key = getApiKey();
-    if (!key) {
-      notifyUnauthorized();
-      throw new ApiError(401, "missing api key");
-    }
+    const credential = requestCredential();
+    if (credential === null) throw missingCredentialError();
     const form = new FormData();
     // The file may come from another realm (drag-drop), so `instanceof` is
     // unreliable — a checked property probe keeps the label without an
@@ -459,9 +751,12 @@ export const api = {
         : "snapshot.tar.gz";
     form.append("tarball", file, filename);
     if (opts.description) form.append("description", opts.description);
+    const headers = new Headers();
+    // Multipart: no Content-Type here — the browser sets the boundary.
+    applyCredential(headers, credential, "POST");
     const res = await fetch(
       `/api/v1/apps/protections/${encodeURIComponent(protectionId)}/snapshots`,
-      { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: form },
+      { method: "POST", headers, body: form, credentials: "same-origin" },
     );
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -591,11 +886,8 @@ export const api = {
     file: Blob,
     opts: { path?: string } = {},
   ) => {
-    const key = getApiKey();
-    if (!key) {
-      notifyUnauthorized();
-      throw new ApiError(401, "missing api key");
-    }
+    const credential = requestCredential();
+    if (credential === null) throw missingCredentialError();
     const form = new FormData();
     const filename = (file as { name?: unknown }).name;
     form.append(
@@ -604,9 +896,12 @@ export const api = {
       typeof filename === "string" && filename.length > 0 ? filename : "upload.bin",
     );
     if (opts.path) form.append("path", opts.path);
+    const headers = new Headers();
+    // Multipart: no Content-Type here — the browser sets the boundary.
+    applyCredential(headers, credential, "POST");
     const res = await fetch(
       `/api/v1/folders/${encodeURIComponent(folderId)}/files`,
-      { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: form },
+      { method: "POST", headers, body: form, credentials: "same-origin" },
     );
     if (!res.ok) {
       const text = await res.text().catch(() => "");

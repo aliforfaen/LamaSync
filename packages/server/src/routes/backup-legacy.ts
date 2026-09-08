@@ -13,8 +13,8 @@ export function __setDb(next: Database): void {
 export const backupLegacyRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/backups/legacy-root",
-    ({ set, store, query }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({set, query, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -40,12 +40,12 @@ export const backupLegacyRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/backups/legacy-root/prune",
-    ({ body: { confirm }, set, store }) => {
+    ({ body: { confirm }, set, request }) => {
       // Deleting backup data is destructive. Only master/admin may do it and
       // the caller must explicitly affirm (confirm === true). The handler
       // itself recomputes the orphan set fresh and never touches host-scoped
       // prefixes.
-      if (!requireAdmin({ principal: principalOf(store) })) {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }

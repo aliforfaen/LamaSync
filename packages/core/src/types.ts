@@ -1015,7 +1015,29 @@ export type AuthPrincipal =
   | { kind: "device"; keyId: string; hostId: string }
   // LAMA-301: the deploy agent's dedicated principal. Narrowly scoped —
   // only the server-deploy claim/progress/complete routes admit it.
-  | { kind: "deploy"; keyId: string; hostId: null };
+  | { kind: "deploy"; keyId: string; hostId: null }
+  // LAMA-296: a mobile NATIVE credential (Android app bearer). Bound to one
+  // mobile registration; allowed only on /api/v1/mobile/me + check-in, never
+  // fleet admin, config, keys, or the web-session bootstrap.
+  | { kind: "mobile"; hostId: string }
+  // LAMA-296: a cookie-authenticated mobile WEB session (issued by the
+  // web-session bootstrap). `admin` mirrors the web grant's admin snapshot;
+  // admin sessions map to admin REST permissions. Mutations under this
+  // principal require the session CSRF token + an exact trusted Origin.
+  | {
+      kind: "web-session";
+      sessionId: string;
+      hostId: string;
+      admin: boolean;
+      /** Session-bound CSRF token (derived from the cookie secret). */
+      csrfToken: string;
+      /** Absolute epoch-ms session expiry. */
+      expiresAt: number;
+      /** Registration display name (labels /auth/me and audits). */
+      displayName: string;
+      /** Registration client family (android in phase 1). */
+      clientType: MobileClientType;
+    };
 
 /** Masked managed-key metadata. Deliberately contains no secret material. */
 export interface ApiKeySummary {
@@ -1060,17 +1082,43 @@ export interface ApiKeyRevokeResponse {
 }
 
 /**
- * LAMA-234: credential identity for the Web UI. Lets admin surfaces label
- * the active credential and hide admin-only sections when a `device` key is
- * in use (the browser holds a bearer token in session/localStorage, which
- * could otherwise be a device key that will 401 on every admin route).
+ * LAMA-234 + LAMA-296: credential identity for the Web UI / SPA auth
+ * discovery. One endpoint (GET /api/v1/auth/me) serves both modes:
+ *
+ *   - `mode: "bearer"` — master/admin/device/deploy resolved from the
+ *     Authorization header (LAMA-234 shape, additive `authenticated` +
+ *     `mode` fields).
+ *   - `mode: "session"` — a cookie-authenticated mobile web session issued
+ *     by POST /api/v1/mobile/web-session. `csrfToken` is the session-bound
+ *     CSRF token the SPA must send on cookie-authenticated mutations;
+ *     `name`/`displayName` carry the registration's display name.
+ *
+ * An invalid Bearer never falls back to the session cookie; with no
+ * Authorization header and no (or stale/revoked) session cookie the
+ * endpoint returns 401.
  */
-export interface AuthMeResponse {
-  kind: "master" | "admin" | "device" | "deploy";
-  keyId: string | null;
-  name: string | null;
-  hostId: string | null;
-}
+export type AuthMeResponse =
+  | {
+      authenticated: true;
+      mode: "bearer";
+      kind: "master" | "admin" | "device" | "deploy";
+      keyId: string | null;
+      name: string | null;
+      hostId: string | null;
+    }
+  | {
+      authenticated: true;
+      mode: "session";
+      kind: "mobile-session";
+      keyId: null;
+      name: string;
+      hostId: string;
+      displayName: string;
+      clientType: MobileClientType;
+      /** Absolute epoch-ms session expiry (12 h from bootstrap). */
+      expiresAt: number;
+      csrfToken: string;
+    };
 
 // LAMA-301: manual production server deploy control. The deploy agent (an
 // LXC-resident systemd service with a dedicated `deploy` credential) claims
@@ -1097,4 +1145,340 @@ export interface ServerDeployJob {
 /** Shape of GET /api/v1/server-deploys/config (LAMA-301). */
 export interface ServerDeployConfig {
   enabled: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// LAMA-296 — Android companion enrollment and mobile auth wire contract.
+// Additive: the CLI pairing flow (LAMA-262) above is untouched. Phase 1
+// establishes the enrollment → registration → web-session lifecycle the
+// Android app and the desktop QR flow exchange over the wire. All secrets
+// (QR secret, native token, web grant, session secret) are opaque and
+// one-time: the server persists only their hashes and never replays them,
+// and none of these types ever carries backend host config or fleet data.
+// ---------------------------------------------------------------------------
+
+/** Client family that participates in the mobile flow. Only `android`
+ *  exists in phase 1; future clients add a member here, never a new table. */
+export type MobileClientType = "android";
+
+/**
+ * The versioned QR payload the authenticated desktop web UI renders and the
+ * app scans. Keys and case are preserved verbatim — never uppercased (the
+ * legacy CLI pairing QR normalization does NOT apply to this payload).
+ * `secret` is a one-time 256-bit QR secret; it exists only on the QR the app
+ * scans, never in a stored server response.
+ */
+export interface MobileEnrollmentQrV1 {
+  kind: "lamasync.android.enroll";
+  version: 1;
+  /** Validated canonical HTTPS origin, e.g. `https://fleet.example.com`. */
+  serverOrigin: string;
+  enrollmentId: string;
+  secret: string;
+}
+
+/** Lifecycle of one mobile enrollment (mirrors the record status column). */
+export type MobileEnrollmentStatus = "pending" | "used" | "expired" | "revoked";
+
+/** Admin body creating an Android enrollment (POST /api/v1/mobile/enrollments). */
+export interface MobileEnrollmentCreateRequest {
+  /** Whether the paired app may obtain a web grant carrying admin authority.
+   *  Explicit (not inferred) per the "explicit web-admin grant" record flag;
+   *  the desktop flow always sends true. */
+  webAdmin: boolean;
+  /** Client type this enrollment will register (defaults to android). */
+  clientType?: MobileClientType;
+}
+
+/** Admin create response. `secret` is the one-time QR secret, returned
+ *  exactly once here. */
+export interface MobileEnrollmentCreateResponse {
+  enrollmentId: string;
+  /** One-time QR secret (only place it is ever returned). */
+  secret: string;
+  /** Validated canonical HTTPS origin baked into the QR. */
+  serverOrigin: string;
+  clientType: MobileClientType;
+  /** Whether the resulting registration may bootstrap an admin web session. */
+  webAdmin: boolean;
+  /** Epoch-ms instant the enrollment expires (10 min). */
+  expiresAt: number;
+  /** Seconds until expiry (drives a QR countdown). */
+  expiresInSeconds: number;
+}
+
+/** Minimal, revocation-safe metadata about a paired device. Deliberately
+ *  contains no secrets and no host config; only identity + presence. */
+export interface MobilePairedHostSummary {
+  hostId: string;
+  displayName: string;
+  clientType: MobileClientType;
+  appVersion: string;
+  /** Epoch-ms instant the enrollment was exchanged. */
+  createdAt: number;
+  lastSeenAt: number | null;
+  revokedAt: number | null;
+}
+
+/** Admin status read (GET /api/v1/mobile/enrollments/:id). Never secrets. */
+export interface MobileEnrollmentStatusResponse {
+  enrollmentId: string;
+  status: MobileEnrollmentStatus;
+  /** Epoch-ms expiry instant. */
+  expiresAt: number;
+  /** Present once the enrollment has been used (a registration exists). */
+  host: MobilePairedHostSummary | null;
+}
+
+/** Exchange body (POST /api/v1/mobile/enrollments/:id/exchange). Exactly
+ *  unauthenticated: enrollment id + QR secret prove intent; the client never
+ *  chooses a host id or grant level. */
+export interface MobileEnrollmentExchangeRequest {
+  enrollmentId: string;
+  /** One-time QR secret from the scanned QR. */
+  secret: string;
+  /** Operator-chosen device display name, e.g. "Pixel 9". */
+  displayName: string;
+  /** App version string, e.g. "1.2.0". */
+  appVersion: string;
+}
+
+/** One-time exchange result. Server-chosen host id and freshly minted
+ *  authority (native token + separate web grant). Each secret is returned
+ *  exactly once here. */
+export interface MobileEnrollmentExchangeResponse {
+  /** Server-created host id for the new registration. */
+  hostId: string;
+  /** Opaque native credential; returned exactly once. */
+  nativeToken: string;
+  /** Separate opaque web grant (admin iff enrollment.webAdmin); returned once. */
+  webGrant: string;
+  /** Validated canonical HTTPS origin. */
+  serverOrigin: string;
+  displayName: string;
+  clientType: MobileClientType;
+}
+
+/** Web-session bootstrap (POST /api/v1/mobile/web-session): authenticates
+ *  with the web grant and issues the session cookie + CSRF token to the HTTP
+ *  client. Accepts no cross-origin browser request; native token alone → 403. */
+export interface MobileWebSessionBootstrapRequest {
+  /** The opaque web grant issued by the enrollment exchange. */
+  grant: string;
+}
+
+export interface MobileWebSessionBootstrapResponse {
+  hostId: string;
+  displayName: string;
+  /** Epoch-ms absolute session expiry (12 h). */
+  expiresAt: number;
+  /** Session-bound CSRF token for cookie-authenticated mutations. */
+  csrfToken: string;
+}
+
+/** GET /api/v1/mobile/me — the native principal's own registration,
+ *  revocation-safe and minimal. No backend config, secrets, fleet data, or
+ *  upload capabilities. */
+export interface MobileMeResponse {
+  hostId: string;
+  displayName: string;
+  clientType: MobileClientType;
+  appVersion: string;
+  /** Epoch-ms instant the device paired (registration created). */
+  pairedAt: number;
+  serverOrigin: string;
+}
+
+export interface MobileCheckInRequest {
+  /** App version reported on launch/resume check-in. */
+  appVersion: string;
+}
+
+export interface MobileCheckInResponse {
+  hostId: string;
+  /** Epoch-ms server-recorded last-seen instant after this check-in. */
+  lastSeenAt: number;
+}
+
+/** Admin revoke body (POST /api/v1/mobile/registrations/:hostId/revoke).
+ *  Revokes native access, web grant, and all web sessions atomically. */
+export interface MobileRegistrationRevokeRequest {
+  reason?: string;
+}
+
+/**
+ * One row of the admin paired-device projection
+ * (GET /api/v1/mobile/registrations). Deliberately minimal: host identity
+ * and presence metadata only — never secret hashes, grant/session links,
+ * or host config. Revoked registrations are included so the desktop device
+ * list can show and filter them.
+ */
+export interface MobileRegistrationSummary {
+  hostId: string;
+  displayName: string;
+  clientType: MobileClientType;
+  appVersion: string;
+  /** Epoch-ms instant the device paired (registration created). */
+  createdAt: number;
+  /** Epoch-ms last check-in, or null when the device never checked in. */
+  lastSeenAt: number | null;
+  /** Epoch-ms revocation instant, or null while the device is live. */
+  revokedAt: number | null;
+  /** Revocation reason (operator-supplied at revoke time), or null. */
+  revokedReason: string | null;
+}
+
+export interface MobileRegistrationRevokeResponse {
+  hostId: string;
+  /** Epoch-ms revocation instant. */
+  revokedAt: number;
+}
+
+/** POST /api/v1/mobile/web-session/logout (current session, CSRF-protected).
+ *  Invalidates that session + clears the cookie; does not revoke native. */
+export interface MobileWebSessionLogoutResponse {
+  loggedOut: true;
+}
+
+// ---------------------------------------------------------------------------
+// LAMA-296 stage 1 — scoped mobile upload destinations and the resumable
+// transfer contract. A destination grants ONE registration the right to
+// publish files under a server-computed landing path such as
+// `Mobile/<hostId>/Inbox` (see spec-296-stage-1-manual-uploads.md). No
+// destination row => no upload access, even for a live registration.
+// Request bodies carry only destination ids + validated file names — never
+// arbitrary roots, backend credentials, or another host's inbox. Uploads
+// are host-bound, idempotency-keyed, chunk-resumable, SHA-256 verified and
+// atomically published; a final file is the durability point.
+// ---------------------------------------------------------------------------
+
+/** One authorized landing path owned by exactly one mobile registration. */
+export interface MobileUploadDestination {
+  /** Server-issued destination id (the only thing clients may reference). */
+  id: string;
+  /** Owning registration host id (server-derived, never client-chosen). */
+  registrationId: string;
+  /** Admin-chosen label, e.g. "Inbox". */
+  label: string;
+  /** Validated server-computed path relative to the mobile landing root,
+   *  e.g. `Mobile/mob-abc123/Inbox`. */
+  relPath: string;
+  /** Epoch-ms creation instant. */
+  createdAt: number;
+  /** Epoch-ms revocation instant, or null while active. */
+  revokedAt: number | null;
+}
+
+/** Admin body creating a destination for one registration. The path is
+ *  always `Mobile/<hostId>/<slug>`; the client can never pick a root or
+ *  another host's inbox. */
+export interface MobileUploadDestinationCreateRequest {
+  /** Human label, e.g. "Inbox" (also the default slug source). */
+  label: string;
+  /** Optional path segment; defaults to the sanitized label. */
+  slug?: string;
+}
+
+export interface MobileUploadDestinationCreateResponse {
+  destination: MobileUploadDestination;
+}
+
+export interface MobileUploadDestinationRevokeResponse {
+  id: string;
+  /** Epoch-ms revocation instant. */
+  revokedAt: number;
+}
+
+/** Lifecycle of one upload intent (see spec state machine). */
+export type MobileUploadStatus =
+  | "created"
+  | "uploading"
+  | "ready"
+  | "verifying"
+  | "publishing"
+  | "finalized"
+  | "failed"
+  | "cancelled";
+
+/** Browse-ref the completed file is visible under (existing local browser). */
+export interface MobileUploadBrowseRef {
+  kind: "local";
+  /** Path relative to the browse/backup root, e.g. `Mobile/<hostId>/Inbox/f.pdf`. */
+  path: string;
+}
+
+/** Persisted, retry-safe completion receipt (returned again by finalize). */
+export interface MobileUploadReceipt {
+  uploadId: string;
+  fileName: string;
+  /** Final published path relative to the landing root. */
+  finalRelPath: string;
+  /** Where the existing Data Browser lists the published file. */
+  browseRef: MobileUploadBrowseRef;
+  /** Verified size in bytes. */
+  sizeBytes: number;
+  /** Verified SHA-256 hex digest. */
+  sha256: string;
+  /** Epoch-ms publication instant. */
+  finalizedAt: number;
+}
+
+/** Full wire state of one upload. `idempotencyKey` is deliberately not
+ *  echoed (it is a client claim); the client correlates by id. */
+export interface MobileUpload {
+  id: string;
+  destinationId: string;
+  destinationLabel: string;
+  fileName: string;
+  /** Reserved final path relative to the landing root. */
+  finalRelPath: string;
+  /** Client-declared expected size, or null when unknown. */
+  sizeBytes: number | null;
+  /** Durable resumable offset (bytes durably accepted). */
+  bytesReceived: number;
+  /** Verified SHA-256 hex digest once verification passed (else null). */
+  sha256: string | null;
+  status: MobileUploadStatus;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  finalizedAt: number | null;
+  receipt: MobileUploadReceipt | null;
+  /** Server-negotiated maximum bytes per chunk request. */
+  chunkSizeBytes: number;
+  /** Server-enforced maximum total upload size. */
+  maxSizeBytes: number;
+}
+
+/** Native body creating an upload (POST /api/v1/mobile/uploads). */
+export interface MobileUploadCreateRequest {
+  /** Authorized destination id (own registration only). */
+  destinationId: string;
+  /** Final file name — single segment, validated server-side. */
+  fileName: string;
+  /** Expected total size (optional but recommended; enables early caps). */
+  sizeBytes?: number | null;
+  /** Client-computed SHA-256 hex of the whole file (optional; verified at
+   *  finalize when present). */
+  sha256?: string | null;
+}
+
+export interface MobileUploadCreateResponse {
+  upload: MobileUpload;
+}
+
+export interface MobileUploadStateResponse {
+  upload: MobileUpload;
+}
+
+export interface MobileUploadListResponse {
+  uploads: MobileUpload[];
+}
+
+export interface MobileUploadFinalizeResponse {
+  receipt: MobileUploadReceipt;
+}
+
+export interface MobileUploadCancelResponse {
+  upload: MobileUpload;
 }

@@ -25,6 +25,7 @@ const {
   resolvePrincipal,
   requireAdmin,
   deviceMayAccessHost,
+  principalOf,
 } = await import("./auth.ts");
 const { insertManagedApiKey, __setApiKeysDb, __resetApiKeysDb } = await import(
   "./api-keys.ts"
@@ -49,20 +50,26 @@ beforeEach(() => {
   __setApiKeysDb(db);
   app = new Elysia()
     .use(getAuthPlugin())
-    .get("/api/v1/probe", ({ store }) => ({
-      kind: store.principal?.kind ?? null,
-      keyId: store.principal?.keyId ?? null,
-      hostId: store.principal?.hostId ?? null,
-    }))
+    .get("/api/v1/probe", ({ request }) => {
+      const p = principalOf(request);
+      return {
+        kind: p?.kind ?? null,
+        keyId: p && "keyId" in p ? p.keyId : null,
+        hostId: p && "hostId" in p ? p.hostId : null,
+      };
+    })
     // Device-allowlisted echo route (mirrors GET /api/v1/health) so device
     // principals can prove the principal attached to their allowed calls.
-    .get("/api/v1/health", ({ store }) => ({
-      kind: store.principal?.kind ?? null,
-      keyId: store.principal?.keyId ?? null,
-      hostId: store.principal?.hostId ?? null,
-    }))
+    .get("/api/v1/health", ({ request }) => {
+      const p = principalOf(request);
+      return {
+        kind: p?.kind ?? null,
+        keyId: p && "keyId" in p ? p.keyId : null,
+        hostId: p && "hostId" in p ? p.hostId : null,
+      };
+    })
     .get("/api/v1/backends", () => ({ ok: true }))
-    .get("/api/v1/pairing/exempt/exchange", () => ({ ok: true }));
+    .post("/api/v1/pairing/exempt/exchange", () => ({ ok: true }));
 });
 
 afterEach(() => {
@@ -192,7 +199,9 @@ describe("route middleware", () => {
   });
 
   test("pairing exchange endpoint stays auth-exempt", async () => {
-    const res = await app.handle(req("/api/v1/pairing/exempt/exchange"));
+    const res = await app.handle(
+      req("/api/v1/pairing/exempt/exchange", { method: "POST" }),
+    );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
   });

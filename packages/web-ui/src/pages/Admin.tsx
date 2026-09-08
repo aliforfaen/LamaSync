@@ -10,6 +10,7 @@ import type {
 import { api } from "../api.ts";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { PairingModal } from "../components/PairingModal.tsx";
+import { MobileDevicesPanel } from "../components/MobileDevicesPanel.tsx";
 import { AccessKeysPanel } from "../components/AccessKeysPanel.tsx";
 import { deployCardState, deployStageLabel } from "../server-deploy-ui.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
@@ -91,6 +92,8 @@ export function Admin() {
   // LAMA-262: "Pair a device" modal — short-lived code + QR for adding a
   // device without copy-pasting the API key.
   const [showPairing, setShowPairing] = useState(false);
+  // LAMA-296 Android enrollment modal + persistent paired-device listing
+  // moved into <MobileDevicesPanel /> (finding 6) — see the Admin JSX.
   const [deleteChannel, setDeleteChannel] = useState<NotificationChannel | null>(null);
   const [notifications, setNotifications] = useState<NotificationEvent[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
@@ -620,6 +623,12 @@ export function Admin() {
           bound to that host (never the master key).
         </p>
       </section>
+
+      {/* LAMA-296 finding 6: the persistent paired-device surface. Lives
+          directly on the Admin page (independent of the enrollment modal) so
+          existing Android registrations stay revocable across modal close /
+          page reload, from the admin-only /mobile/registrations projection. */}
+      <MobileDevicesPanel />
 
       <AccessKeysPanel />
 

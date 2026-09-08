@@ -211,7 +211,8 @@ CREATE TABLE operation_log (
     summary     TEXT,                   -- "42 files up, 3 conflicts"
     details     TEXT,                    -- JSON: file list, error messages
     duration_ms INTEGER,
-    trigger     TEXT                    -- LAMA-302: watch | schedule | manual (who started the run)
+    trigger     TEXT,                    -- LAMA-302: watch | schedule | manual (who started the run)
+    dedupe_key  TEXT                     -- LAMA-296 R4: idempotency key for exactly-once records (mobile_upload history); NULL otherwise
 );
 
 -- Per-assignment schedule + lock coordination
@@ -246,6 +247,40 @@ Indexes: `idx_app_protections_host`, `idx_app_protections_template`,
 Retention: a daily prune deletes `operation_log` rows older than
 `LAMASYNC_LOG_RETENTION_DAYS` (default `90`), preserving the most recent
 entry per host so offline hosts keep their last-known status.
+
+**LAMA-296 stage 1 mobile uploads.** A partner Android device can only
+publish files to inboxes an administrator assigns on the desktop (Admin →
+Android devices → Inboxes); registrations default to **no upload access**.
+Each inbox grants ONE registration a server-computed landing path
+`Mobile/<hostId>/<slug>` under the mobile landing root (default
+`<LAMASYNC_BACKUP_DIR>/Mobile`, env `LAMASYNC_MOBILE_LANDING_DIR`), which is
+inside the existing local browse root — so verified files appear in the Data
+Browser immediately. Transfers use a dedicated resumable protocol (`mobile_uploads`
+rows): client idempotency keys, durable `bytes_received` offsets, bounded raw
+chunks (negotiated `chunkSizeBytes`), SHA-256 verification, container + path
+containment at the write boundary, atomic rename publication with a persisted
+receipt, and retry-safe finalization across the crash between filesystem
+publication and the DB completion record. Staging is server-issued-id keyed
+under `<tmp>/lamasync-mobile-staging` (env `LAMASYNC_MOBILE_STAGING_DIR`) and
+reconciled by an inactivity TTL; completed/failed uploads append exactly one
+`operation_log` row (`operation = 'mobile_upload'`, host = the real mobile
+registration) per intent. Authorization (native principal → live registration
+→ destination grant + ownership) is re-checked on every request and again at
+publication, so central or destination revocation stops an in-flight transfer
+from publishing.
+
+Stage-1 corrections (review R1–R8): queue mutations on Android are
+process-wide serialized (one lock + one `snapshots` flow shared by the
+ViewModel and the worker), cancellation is a durable requested state the
+worker consumes cooperatively (stale writes are refused by the store;
+offline cancels re-sync on the next worker pass and apply the authoritative
+server result); the staging-quota guard charges only the incoming delta (an
+exact multi-chunk cap fits); finalization and its exactly-one `operation_log`
+row commit in ONE transaction keyed by `operation_log.dedupe_key` and are
+reconciled on retry/startup; unpaired/credential-lost share intents render an
+onboarding surface; policy changes REPLACE the WorkManager constraint
+(`REPLACE`, verified both directions); NO_SPACE staging deletes its partial
+file; destination revoke enforces its hostId parent.
 
 ---
 
@@ -286,6 +321,18 @@ POST   /api/v1/operations/heartbeat            → renew lock
 POST   /api/v1/operations/release              → release lock
 GET    /api/v1/operations/locks                → list active destination locks
 GET    /api/v1/operations                      → list operation_log entries
+
+
+
+GET    /api/v1/mobile/registrations/:hostId/destinations            → (admin) list a registration's upload inboxes (LAMA-296 stage 1)
+POST   /api/v1/mobile/registrations/:hostId/destinations            → (admin) assign an inbox — server-computed `Mobile/<hostId>/<slug>`
+POST   /api/v1/mobile/registrations/:hostId/destinations/:id/revoke → (admin) revoke an inbox (in-flight uploads fail at finalize)
+GET    /api/v1/mobile/destinations             → (mobile native) own active inboxes
+POST   /api/v1/mobile/uploads                  → (mobile native; Idempotency-Key) create a resumable upload — final name reserved
+PUT    /api/v1/mobile/uploads/:id/chunks       → (mobile native; X-Upload-Offset) write one bounded raw chunk at the durable offset
+GET    /api/v1/mobile/uploads[:/:id]           → (mobile native) own upload history / durable state (lost-response recovery)
+POST   /api/v1/mobile/uploads/:id/finalize     → (mobile native) verify SHA-256 → re-authorize → atomic publish → receipt
+POST   /api/v1/mobile/uploads/:id/cancel       → (mobile native) cancel before publication; never touches a published file
 
 
 
@@ -739,7 +786,12 @@ lamasync/
 3. **Encryption at rest** — implemented (LAMA-124) as an rclone `crypt`
    remote on top of SFTP. The crypt password is distributed inside the
    generated rclone config (which is itself 0o600 on disk).
-4. **Mobile** — out of scope. This is a Linux-to-Linux tool.
+4. **Mobile** — manual uploads shipped (LAMA-296 stage 1): a desktop-assigned
+   inbox per Android registration accepts checksum-verified files under
+   `Mobile/<hostId>/<slug>` via the resumable mobile upload protocol (see the
+   Mobile uploads section above). Automatic camera/media discovery,
+   background transfer forensics on real devices, and onward cloud
+   replication remain future work.
 5. **Windows/WSL** — paths are hardcoded to Unix conventions. rclone works
    on Windows but the daemon does not.
 6. **v0.2.0 completionist verification** — the suite now stands at 118 unit

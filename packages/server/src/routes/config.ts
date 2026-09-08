@@ -557,11 +557,11 @@ export function generateRcloneConfig(
 
 export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
   "/config/:hostId",
-  ({ params, set, store }) => {
+  ({params, set, request}) => {
     const { hostId } = params;
     // LAMA-234: a device key may only pull its own host's config (which
     // embeds assignment details, peers, and dotfile manifests).
-    if (!deviceMayAccessHost(principalOf(store), hostId)) {
+    if (!deviceMayAccessHost(principalOf(request), hostId)) {
       set.status = 403;
       return { error: "Forbidden" };
     }

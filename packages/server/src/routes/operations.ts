@@ -228,10 +228,10 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
 )
   .post(
     "/operations/acquire",
-    ({ body: { folderId, hostId, destinationKey }, set, store }) => {
+    ({ body: { folderId, hostId, destinationKey }, set, request }) => {
       // LAMA-234: locks are host-bound; a device key may only lock as its
       // own host.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -295,9 +295,9 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .post(
     "/operations/heartbeat",
-    ({ body: { folderId, hostId, lockId, destinationKey }, set, store }) => {
+    ({ body: { folderId, hostId, lockId, destinationKey }, set, request }) => {
       // LAMA-234: host-bound like acquire.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -356,9 +356,9 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .post(
     "/operations/release",
-    ({ body: { folderId, hostId, status, lockId, destinationKey }, set, store }) => {
+    ({ body: { folderId, hostId, status, lockId, destinationKey }, set, request }) => {
       // LAMA-234: host-bound like acquire/heartbeat.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -421,11 +421,11 @@ export const operationsRoutes = new Elysia({ prefix: "/api/v1" }).get(
   )
   .get(
     "/operations/locks",
-    ({ store }) => {
+    ({request}) => {
       // LAMA-234: device keys see only their own host's locks (the daemon's
       // stale-lock recovery filters client-side by lockedBy); master/admin
       // see every lock.
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       const where =
         principal?.kind === "device"
           ? "WHERE locked_by = ?"

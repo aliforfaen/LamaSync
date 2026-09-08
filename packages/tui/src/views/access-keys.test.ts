@@ -89,7 +89,10 @@ function makeFakeApi(): {
   me: AuthMeResponse;
   keys: ApiKeySummary[];
 } {
+
   const me: AuthMeResponse = {
+    authenticated: true,
+    mode: "bearer",
     kind: "admin",
     keyId: "key_1",
     name: "ops",
@@ -531,8 +534,9 @@ beforeEach(() => {
 });
 
 describe("AccessKeysView — principal-aware behavior", () => {
+
   test("device principal shows the read-only screen and never calls /api-keys", async () => {
-    const me: AuthMeResponse = { kind: "device", keyId: "key_2", name: "cachy", hostId: "host-a" };
+    const me: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "device", keyId: "key_2", name: "cachy", hostId: "host-a" };
     const calls = {
       getAuthMe: 0,
       listApiKeys: 0,
@@ -562,7 +566,7 @@ describe("AccessKeysView — principal-aware behavior", () => {
   test("master principal loads the masked table", async () => {
     const { api, calls, me, keys } = makeFakeApi();
     const { ctx } = makeViewCtx(api, []);
-    const masterMe: AuthMeResponse = { kind: "master", keyId: null, name: null, hostId: null };
+    const masterMe: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "master", keyId: null, name: null, hostId: null };
     calls.getAuthMe = [masterMe];
     const view = new AccessKeysView({ ctx });
     view.onShow(ctx);
@@ -609,7 +613,7 @@ describe("AccessKeysView — principal-aware behavior", () => {
   });
 
   test("revoked rows expose no reveal/revoke actions", async () => {
-    const me: AuthMeResponse = { kind: "admin", keyId: "key_1", name: "ops", hostId: null };
+    const me: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "admin", keyId: "key_1", name: "ops", hostId: null };
     const revoked: ApiKeySummary = summary({
       id: "key_9",
       name: "old laptop",
@@ -637,7 +641,7 @@ describe("AccessKeysView — principal-aware behavior", () => {
   });
 
   test("active rows open reveal/revoke wizards on r/x", async () => {
-    const me: AuthMeResponse = { kind: "admin", keyId: "key_1", name: "ops", hostId: null };
+    const me: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "admin", keyId: "key_1", name: "ops", hostId: null };
     const active: ApiKeySummary = summary({
       id: "key_1",
       name: "ops",
@@ -759,6 +763,7 @@ async function renderAndSettle(
 }
 
 realSuite("Access keys navigation (real renderer)", () => {
+
   test("More → Access keys → Esc back to More, with Tab/arrow focus", async () => {
     const { createTestRenderer } = await import("@opentui/core/testing");
     const { Box } = await import("@opentui/core");
@@ -768,7 +773,7 @@ realSuite("Access keys navigation (real renderer)", () => {
     const { MoreView } = await import("./more.ts");
     const { AccessKeysView } = await import("./access-keys.ts");
 
-    const me: AuthMeResponse = { kind: "admin", keyId: "key_1", name: "ops", hostId: null };
+    const me: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "admin", keyId: "key_1", name: "ops", hostId: null };
     const keys: ApiKeySummary[] = [
       summary({ id: "key_1", name: "ops", kind: "admin", hostId: null }),
       summary({ id: "key_2", name: "cachy daemon", kind: "device", hostId: "host-a" }),
@@ -841,13 +846,14 @@ realSuite("Access keys navigation (real renderer)", () => {
 });
 
 realSuite("Access keys device frame (real renderer)", () => {
+
   test("device principal renders identity only", async () => {
     const { createTestRenderer } = await import("@opentui/core/testing");
     const { renderer, renderOnce, captureCharFrame } =
       await createTestRenderer({ width: 60, height: 20 });
 
     const { AccessKeysView } = await import("./access-keys.ts");
-    const me: AuthMeResponse = { kind: "device", keyId: "key_2", name: "cachy", hostId: "host-a" };
+    const me: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "device", keyId: "key_2", name: "cachy", hostId: "host-a" };
     const api = {
       baseUrl: "http://localhost:8080",
       getAuthMe: async () => me,

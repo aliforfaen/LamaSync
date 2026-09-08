@@ -14,21 +14,62 @@ import { Conflicts } from "./pages/Conflicts.tsx";
 import { Operations } from "./pages/Operations.tsx";
 import { Admin } from "./pages/Admin.tsx";
 import { DataBrowser } from "./pages/DataBrowser.tsx";
-import { getApiKey, UNAUTHORIZED_EVENT } from "./api.ts";
+import { getApiKey, probeSession, UNAUTHORIZED_EVENT } from "./api.ts";
+
+type BootState = "loading" | "authed" | "anon";
 
 export function App() {
-  const [authenticated, setAuthenticated] = useState(() => getApiKey() !== null);
+  // LAMA-296 dual-mode boot:
+  //   bearer — a stored API key is trusted instantly (classic flow; the
+  //     first failing request bounces back to login via UNAUTHORIZED_EVENT).
+  //   session — no stored key: probe GET /api/v1/auth/me with the cookie.
+  //     There is NO dummy key in sessionStorage; session discovery is real
+  //     auth metadata, and an absent/invalid session lands on the login
+  //     screen (an invalid bearer never silently falls back to the cookie).
+  const [boot, setBoot] = useState<BootState>(() =>
+    getApiKey() !== null ? "authed" : "loading",
+  );
+  const [bootReachable, setBootReachable] = useState(true);
+  // Bumped by the login screen's retry affordance to re-run the probe.
+  const [probeTick, setProbeTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (getApiKey() !== null) {
+      setBoot("authed");
+      return;
+    }
+    setBoot("loading");
+    void probeSession().then((result) => {
+      if (cancelled) return;
+      setBoot(result.mode === "session" ? "authed" : "anon");
+      setBootReachable(result.mode === "session" ? true : result.reachable);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [probeTick]);
 
   // Drop back to the login screen whenever any API call or the WebSocket
-  // reports the stored key is no longer accepted (e.g. after a server
-  // restart with a rotated key).
+  // reports the stored credential is no longer accepted (e.g. after a
+  // server restart with a rotated key, or an expired/revoked web session).
   useEffect(() => {
-    const onUnauthorized = () => setAuthenticated(false);
+    const onUnauthorized = () => setBoot("anon");
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, []);
 
-  const authed = authenticated;
+  if (boot === "loading") {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          <p className="muted">Checking session…</p>
+        </div>
+      </div>
+    );
+  }
+
+  const authed = boot === "authed";
   return (
     <HashRouter>
       <Routes>
@@ -37,7 +78,17 @@ export function App() {
           element={
             // LAMA-208: a stale #/login URL (bookmark, previous visit) must
             // not trap an already-authenticated session on the login form.
-            authed ? <Navigate to="/" replace /> : <Login onAuthenticated={() => setAuthenticated(true)} />
+            // bootReachable=false means the probe found no server: offer a
+            // retry affordance instead of a dead key form.
+            authed ? (
+              <Navigate to="/" replace />
+            ) : (
+              <Login
+                onAuthenticated={() => setBoot("authed")}
+                unreachable={!bootReachable}
+                onRetryProbe={() => setProbeTick((t) => t + 1)}
+              />
+            )
           }
         />
         <Route

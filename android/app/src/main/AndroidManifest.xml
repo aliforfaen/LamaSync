@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network for enrollment exchange / API calls / management SPA. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Camera is used exclusively for QR scanning (spec: no media/storage). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.LamaSync">
+
+        <!--
+            Secrets (native token + web grant) are encrypted with
+            Android-Keystore-backed key material and never persisted in
+            plaintext; android:allowBackup="false" additionally excludes the
+            app from cloud/device-transfer backups so encrypted key material
+            cannot be exfiltrated or restored onto another device.
+        -->
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- LAMA-296 stage 1: Android share intake. Content URIs are
+                 staged into bounded private storage; the app never treats
+                 them as filesystem paths. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

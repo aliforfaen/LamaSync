@@ -6,3 +6,12 @@ docker/.env.api-key
 
 # Local agent memory (memsearch index sources)
 .memsearch/
+
+# Android companion build outputs (standalone android/ Gradle project)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/
+android/captures/
+

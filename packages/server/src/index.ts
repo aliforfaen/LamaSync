@@ -27,6 +27,10 @@ import { pairingRoutes, sweepExpiredPairingSessions } from "./routes/pairing.ts"
 import { apiKeysRoutes } from "./routes/api-keys.ts";
 import { serverDeployRoutes } from "./routes/server-deploys.ts";
 import { backupLegacyRoutes } from "./routes/backup-legacy.ts";
+import { mobileRoutes } from "./routes/mobile.ts";
+import { mobileUploadRoutes } from "./routes/mobile-uploads.ts";
+import { setPeerServerForRateLimit } from "./mobile-store.ts";
+import { reconcileAbandonedMobileUploads } from "./mobile-uploads.ts";
 import { webUiRoutes } from "./routes/web-ui.ts";
 import { startNotificationSweep, seedChannelsFromEnv } from "./notifications.ts";
 import { db } from "./db.ts";
@@ -134,6 +138,11 @@ const app = new Elysia()
             description:
               "LAMA-262 pairing-session endpoints — admin issues short codes, devices exchange them for the API key.",
           },
+          {
+            name: "Mobile",
+            description:
+              "LAMA-296 Android-companion endpoints — enrollment, exchange, web-session bootstrap, native identity, check-in, revocation.",
+          },
         ],
         components: {
           securitySchemes: {
@@ -177,6 +186,8 @@ const app = new Elysia()
   .use(serverDeployRoutes)
   .use(healthDrillRoutes)
   .use(backupLegacyRoutes)
+  .use(mobileRoutes)
+  .use(mobileUploadRoutes)
   .onError(({ code, error, set }): ErrorResponse => {
     if (code === "VALIDATION") {
       set.status = 422;
@@ -197,6 +208,9 @@ export type App = typeof app;
 console.log(`LamaSync server v${VERSION} listening on http://${app.server!.hostname}:${app.server!.port}`);
 console.log(`Swagger UI: http://${app.server!.hostname}:${app.server!.port}/swagger`);
 console.log(`WebSocket:  ws://${app.server!.hostname}:${app.server!.port}/api/v1/ws (subprotocol: lamasync-auth, <base64(apiKey)>)`);
+// The mobile exchange throttler keys on the TCP peer address; point it at
+// the live server once listening.
+setPeerServerForRateLimit(app.server);
 
 // Unit tests compose route plugins directly rather than importing this entry
 // point. The explicit env gates also keep the background timer out of any
@@ -372,4 +386,42 @@ if (
     }
   }, pairingSweepMs);
   pairingSweepTimer.unref?.();
+}
+
+// LAMA-296 stage 1: reconcile abandoned upload staging on boot + daily
+// (mirrors the pairing-sweep opt-out convention: LAMASYNC_MOBILE_SWEEP_MS=0
+// disables the timer; the reconcile also re-seeds the staging usage counter).
+const MOBILE_SWEEP_DEFAULT_MS = 24 * 60 * 60 * 1000;
+const mobileSweepMs = (() => {
+  const raw = process.env.LAMASYNC_MOBILE_SWEEP_MS;
+  if (raw === undefined) return MOBILE_SWEEP_DEFAULT_MS;
+  if (raw === "0") return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : MOBILE_SWEEP_DEFAULT_MS;
+})();
+
+if (
+  process.env.LAMASYNC_TEST !== "1" &&
+  process.env.NODE_ENV !== "test" &&
+  mobileSweepMs > 0
+) {
+  try {
+    const reconciled = reconcileAbandonedMobileUploads();
+    if (reconciled > 0) {
+      console.log(`[mobile-uploads] reconciled ${reconciled} abandoned upload(s) at startup`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[mobile-uploads] startup reconcile failed: ${msg}`);
+  }
+
+  const mobileSweepTimer = setInterval(() => {
+    try {
+      reconcileAbandonedMobileUploads();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[mobile-uploads] sweep failed: ${msg}`);
+    }
+  }, mobileSweepMs);
+  mobileSweepTimer.unref?.();
 }

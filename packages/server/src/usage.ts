@@ -42,6 +42,7 @@ export function serverUsage(): string {
     "  LAMASYNC_LOG_RETENTION_DAYS     operation_log retention (default 90)",
     "  LAMASYNC_GITHUB_TOKEN           GitHub token for the release proxy (avoids the 60 req/h unauthenticated limit)",
     "  LAMASYNC_LAMADB_WEBHOOK_URL     seed a LamaDB webhook channel on first boot",
+    "  LAMASYNC_ORIGIN                 canonical https origin for the LAMA-296 Android/mobile flow, e.g. https://fleet.example.com (enrollment create/exchange, web-session bootstrap, CSRF Origin checks, WebSocket cookie upgrades)",
     "",
     "Flags:",
     "  -h, --help        print this help and exit 0",

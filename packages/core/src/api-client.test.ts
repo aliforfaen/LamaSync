@@ -147,7 +147,14 @@ describe("LamaSyncApiClient LAMA-234 API-key + identity methods", () => {
         [
           () =>
             Response.json(
-              { kind: "device", keyId: "key_1", name: "cachy", hostId: "host-a" },
+              {
+                authenticated: true,
+                mode: "bearer",
+                kind: "device",
+                keyId: "key_1",
+                name: "cachy",
+                hostId: "host-a",
+              },
               { status: 200 },
             ),
         ],
@@ -159,6 +166,8 @@ describe("LamaSyncApiClient LAMA-234 API-key + identity methods", () => {
 
     const me = await client.getAuthMe();
     expect(me).toEqual({
+      authenticated: true,
+      mode: "bearer",
       kind: "device",
       keyId: "key_1",
       name: "cachy",

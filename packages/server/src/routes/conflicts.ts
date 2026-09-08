@@ -51,7 +51,7 @@ function rowToConflict(r: ConflictRow): Conflict {
 export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/conflicts",
-    ({ query, set, store }) => {
+    ({query, set, request}) => {
       const { hostId, folderId, status } = query as {
         hostId?: string;
         folderId?: string;
@@ -59,7 +59,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
       };
       // LAMA-234: a device key must scope its conflict list to its own
       // host (a missing hostId fails for device keys — never a fleet leak).
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -103,7 +103,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/conflicts",
-    ({ body, set, store }) => {
+    ({body, set, request}) => {
       const { conflicts } = body as {
         conflicts: Array<{
           hostId: string;
@@ -116,7 +116,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
         }>;
       };
       // LAMA-234: a device key may only report conflicts for its own host.
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       if (
         principal?.kind === "device" &&
         conflicts.some((c) => !deviceMayAccessHost(principal, c.hostId))
@@ -212,7 +212,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/conflicts/:id/resolve",
-    ({ params, body, set, store }) => {
+    ({params, body, set, request}) => {
       const { resolution } = body as { resolution: ConflictResolution };
       const existing = activeDb
         .query<ConflictRow, [string]>(
@@ -224,7 +224,7 @@ export const conflictsRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Conflict not found" };
       }
       // LAMA-234: only the conflict's owning host may resolve it.
-      if (!deviceMayAccessHost(principalOf(store), existing.host_id)) {
+      if (!deviceMayAccessHost(principalOf(request), existing.host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
       }

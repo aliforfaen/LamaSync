@@ -37,26 +37,26 @@ function summary(overrides: Partial<ApiKeySummary> = {}): ApiKeySummary {
 
 describe("principal classification", () => {
   test("master and admin may manage access keys", () => {
-    const master: AuthMeResponse = { kind: "master", keyId: null, name: null, hostId: null };
-    const admin: AuthMeResponse = { kind: "admin", keyId: "key_2", name: "ops", hostId: null };
+    const master: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "master", keyId: null, name: null, hostId: null };
+    const admin: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "admin", keyId: "key_2", name: "ops", hostId: null };
     expect(canManageAccessKeys(master)).toBe(true);
     expect(canManageAccessKeys(admin)).toBe(true);
   });
 
   test("device credentials cannot manage access keys", () => {
-    const device: AuthMeResponse = { kind: "device", keyId: "key_3", name: "cachy", hostId: "host-a" };
+    const device: AuthMeResponse = { authenticated: true, mode: "bearer", kind: "device", keyId: "key_3", name: "cachy", hostId: "host-a" };
     expect(canManageAccessKeys(device)).toBe(false);
   });
 
   test("principalLabel names each kind", () => {
     expect(
-      principalLabel({ kind: "master", keyId: null, name: null, hostId: null }),
+      principalLabel({ authenticated: true, mode: "bearer", kind: "master", keyId: null, name: null, hostId: null }),
     ).toContain("master");
     expect(
-      principalLabel({ kind: "admin", keyId: "key_2", name: "ops", hostId: null }),
+      principalLabel({ authenticated: true, mode: "bearer", kind: "admin", keyId: "key_2", name: "ops", hostId: null }),
     ).toBe('admin key "ops"');
     expect(
-      principalLabel({ kind: "device", keyId: "key_3", name: "cachy", hostId: "host-a" }),
+      principalLabel({ authenticated: true, mode: "bearer", kind: "device", keyId: "key_3", name: "cachy", hostId: "host-a" }),
     ).toBe('device key "cachy"');
   });
 

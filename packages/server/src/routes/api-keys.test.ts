@@ -176,10 +176,17 @@ describe("POST /api-keys/:id/revoke", () => {
 });
 
 describe("GET /auth/me", () => {
-  test("master resolves to master with no name", async () => {
+  test("master resolves to master with no name (bearer mode)", async () => {
     const res = await send(MASTER, "GET", "/api/v1/auth/me");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ kind: "master", keyId: null, hostId: null, name: null });
+    expect(await res.json()).toEqual({
+      authenticated: true,
+      mode: "bearer",
+      kind: "master",
+      keyId: null,
+      hostId: null,
+      name: null,
+    });
   });
 
   test("admin resolves with its label; device resolves with its host", async () => {

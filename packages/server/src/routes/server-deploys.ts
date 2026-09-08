@@ -23,6 +23,7 @@ import {
 } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
 import { principalOf, requireAdmin, requireDeployAgent } from "../auth.ts";
+import type { AuthPrincipal } from "@lamasync/core";
 import {
   DEPLOY_OUTPUT_TAIL_CAP,
   capDeployOutputTail,
@@ -124,11 +125,21 @@ function requesterLabel(keyId: string): string {
   return row ? `${row.name} (${keyId})` : keyId;
 }
 
+/** Label any admin-capable principal for the requested_by audit column. */
+function requesterLabelOf(principal: AuthPrincipal): string | null {
+  if (principal.kind === "master") return "master";
+  if (principal.kind === "web-session") return `${principal.displayName} (web-session)`;
+  if (principal.kind === "admin" || principal.kind === "deploy" || principal.kind === "device") {
+    return requesterLabel(principal.keyId);
+  }
+  return null;
+}
+
 function requireAdminPrincipal(
-  store: unknown,
+  request: Request,
   set: { status?: unknown },
 ): ReturnType<typeof requireAdmin> {
-  const principal = requireAdmin({ principal: principalOf(store) });
+  const principal = requireAdmin({ principal: principalOf(request) });
   if (!principal) set.status = 403;
   return principal;
 }
@@ -136,8 +147,8 @@ function requireAdminPrincipal(
 export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/server-deploys/config",
-    ({ store, set }) => {
-      if (!requireAdminPrincipal(store, set)) return;
+    ({set, request}) => {
+      if (!requireAdminPrincipal(request, set)) return;
       return { enabled: deployAgentEnabled() };
     },
     {
@@ -153,8 +164,8 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/server-deploys/pending",
-    ({ store, set }) => {
-      if (!requireDeployAgent({ principal: principalOf(store) })) {
+    ({set, request}) => {
+      if (!requireDeployAgent({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -176,8 +187,8 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/server-deploys",
-    ({ store, set }) => {
-      if (!requireAdminPrincipal(store, set)) return;
+    ({set, request}) => {
+      if (!requireAdminPrincipal(request, set)) return;
       if (!deployAgentEnabled()) {
         set.status = 409;
         return {
@@ -191,14 +202,14 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 200;
         return existing;
       }
-      const principal = requireAdminPrincipal(store, set);
+      const principal = requireAdminPrincipal(request, set);
       const id = crypto.randomUUID();
       const now = Date.now();
       activeDb.run(
         `INSERT INTO server_deploy_jobs
            (id, requested_at, requested_by, status, target)
          VALUES (?, ?, ?, 'pending', 'production')`,
-        [id, now, principal ? requesterLabel(principal.keyId ?? "master") : null],
+        [id, now, principal ? requesterLabelOf(principal) : null],
       );
       trimHistory();
       const job = jobById(id)!;
@@ -223,8 +234,8 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/server-deploys",
-    ({ store, set, query }) => {
-      if (!requireAdminPrincipal(store, set)) return;
+    ({set, query, request}) => {
+      if (!requireAdminPrincipal(request, set)) return;
       reapStaleRunningDeploys();
       const requestedRaw = (query as { limit?: number | string }).limit;
       const requested =
@@ -257,8 +268,8 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/server-deploys/:id",
-    ({ store, set, params }) => {
-      if (!requireAdminPrincipal(store, set)) return;
+    ({set, params, request}) => {
+      if (!requireAdminPrincipal(request, set)) return;
       const job = jobById(params.id);
       if (!job) {
         set.status = 404;
@@ -281,8 +292,8 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/server-deploys/:id/claim",
-    ({ store, set, params }) => {
-      if (!requireDeployAgent({ principal: principalOf(store) })) {
+    ({set, params, request}) => {
+      if (!requireDeployAgent({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -319,8 +330,8 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/server-deploys/:id/progress",
-    ({ store, set, params, body }) => {
-      if (!requireDeployAgent({ principal: principalOf(store) })) {
+    ({set, params, body, request}) => {
+      if (!requireDeployAgent({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -370,8 +381,8 @@ export const serverDeployRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/server-deploys/:id/complete",
-    ({ store, set, params, body }) => {
-      if (!requireDeployAgent({ principal: principalOf(store) })) {
+    ({set, params, body, request}) => {
+      if (!requireDeployAgent({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }

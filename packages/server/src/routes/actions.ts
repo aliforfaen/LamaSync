@@ -114,14 +114,14 @@ export function reapStaleTakenActions(database: Database): number {
 export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/hosts/:hostId/actions",
-    ({ params, body, set, store }) => {
+    ({params, body, set, request}) => {
       const { type, payload } = body as {
         type: QueuedActionType;
         payload?: Record<string, unknown> | null;
       };
       // Enqueueing is a control-plane action. Daemons only claim and ack
       // queued work, so a stolen device credential must never create work.
-      if (!requireAdmin({ principal: principalOf(store) })) {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -195,14 +195,14 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/actions/pending",
-    ({ query, set, store }) => {
+    ({query, set, request}) => {
       const { hostId, limit } = query as {
         hostId?: string;
         limit?: number | string;
       };
       // LAMA-234: an action queue belongs to one host; a device key may
       // only claim its own host's pending actions.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -276,7 +276,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/actions/taken",
-    ({ query, set, store }) => {
+    ({query, set, request}) => {
       // LAMA-232: boot-time reclaim. A freshly booted daemon has no
       // in-flight work, so every 'taken' action for the host was orphaned
       // by the previous incarnation — return them all and let the daemon
@@ -284,7 +284,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
       // covers the "daemon alive but execution silently died" case.
       const { hostId } = query as { hostId?: string };
       // LAMA-234: same host scoping as /actions/pending.
-      if (!deviceMayAccessHost(principalOf(store), hostId)) {
+      if (!deviceMayAccessHost(principalOf(request), hostId)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -316,7 +316,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/actions/:id/complete",
-    ({ params, body, set, store }) => {
+    ({params, body, set, request}) => {
       const { status, result } = body as {
         status: "done" | "failed";
         result?: string | null;
@@ -335,7 +335,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Action not found" };
       }
       // LAMA-234: only the action's owning host may ack it.
-      if (!deviceMayAccessHost(principalOf(store), existing.host_id)) {
+      if (!deviceMayAccessHost(principalOf(request), existing.host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -389,10 +389,10 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/hosts/:hostId/actions",
-    ({ params, query, store, set }) => {
+    ({params, query, set, request}) => {
       // Action history is a control-plane view. Daemons use /actions/pending
       // and /actions/taken instead, so device credentials do not receive it.
-      if (!requireAdmin({ principal: principalOf(store) })) {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }

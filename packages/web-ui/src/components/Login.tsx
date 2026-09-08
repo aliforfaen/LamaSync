@@ -4,9 +4,13 @@ import { apiGet, ApiError, setApiKey } from "../api.ts";
 
 interface LoginProps {
   onAuthenticated: () => void;
+  /** Boot session discovery found no reachable server (vs. a clean 401). */
+  unreachable?: boolean;
+  /** Re-run the boot session probe (e.g. after the server came back). */
+  onRetryProbe?: () => void;
 }
 
-export function Login({ onAuthenticated }: LoginProps) {
+export function Login({ onAuthenticated, unreachable = false, onRetryProbe }: LoginProps) {
   const [key, setKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -40,33 +44,55 @@ export function Login({ onAuthenticated }: LoginProps) {
     <div className="login-page">
       <form className="login-card" onSubmit={onSubmit}>
         <h1>LamaSync</h1>
-        <label className="muted" htmlFor="api-key">API key</label>
-        <input
-          id="api-key"
-          type="password"
-          autoComplete="off"
-          autoFocus
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          required
-        />
+        {unreachable ? (
+          <div className="error">
+            <span>
+              The server is unreachable right now. Check the connection and
+              retry — a stored web session resumes automatically.
+            </span>
+            {onRetryProbe ? (
+              <div className="actions">
+                <button type="button" className="action" onClick={onRetryProbe}>
+                  Retry
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <label className="muted" htmlFor="api-key">API key</label>
+            <input
+              id="api-key"
+              type="password"
+              autoComplete="off"
+              autoFocus
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              required
+            />
+          </>
+        )}
         {error && <div className="error">{error}</div>}
-        <label className="login-remember">
-          <input
-            type="checkbox"
-            checked={remember}
-            onChange={(e) => setRemember(e.target.checked)}
-          />{" "}
-          Remember this device (keep me signed in)
-        </label>
-        <p className="muted">
-          Set on the server via <code>LAMASYNC_API_KEY</code> (docker <code>.env</code> or
-          the server config). One key for the whole fleet — the same key works on
-          every client.
-        </p>
-        <button type="submit" disabled={loading || key.trim().length === 0}>
-          {loading ? "Verifying…" : "Sign in"}
-        </button>
+        {!unreachable ? (
+          <>
+            <label className="login-remember">
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(e) => setRemember(e.target.checked)}
+              />{" "}
+              Remember this device (keep me signed in)
+            </label>
+            <p className="muted">
+              Set on the server via <code>LAMASYNC_API_KEY</code> (docker{" "}
+              <code>.env</code> or the server config). One key for the whole
+              fleet — the same key works on every client.
+            </p>
+            <button type="submit" disabled={loading || key.trim().length === 0}>
+              {loading ? "Verifying…" : "Sign in"}
+            </button>
+          </>
+        ) : null}
       </form>
     </div>
   );

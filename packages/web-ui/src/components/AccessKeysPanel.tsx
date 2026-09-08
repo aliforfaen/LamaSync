@@ -15,8 +15,8 @@
 //   hidden with an explanatory banner instead of a wall of 401s.
 
 import { useEffect, useState } from "react";
-import type { ApiKeySummary, AuthMeResponse } from "@lamasync/core";
-import { api, errorText } from "../api.ts";
+import type { ApiKeySummary } from "@lamasync/core";
+import { api, errorText, type AuthMeInfo } from "../api.ts";
 import { ConfirmDialog, Modal } from "./Modal.tsx";
 import {
   apiKeyKindLabel,
@@ -27,7 +27,7 @@ import {
 } from "../access-keys.ts";
 
 export function AccessKeysPanel() {
-  const [credential, setCredential] = useState<AuthMeResponse | null>(null);
+  const [credential, setCredential] = useState<AuthMeInfo | null>(null);
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [keys, setKeys] = useState<ApiKeySummary[]>([]);
   const [keysLoading, setKeysLoading] = useState(true);
@@ -205,6 +205,15 @@ export function AccessKeysPanel() {
             Active credential: <strong>admin key</strong>{" "}
             {credential.name ? `“${credential.name}”` : ""}. The master key is
             deliberately never listed here or revealable.
+          </p>
+        ) : credential?.kind === "mobile-session" ? (
+          <p className="muted">
+            Active credential: <strong>paired mobile session</strong>{" "}
+            {credential.name ? `“${credential.name}”` : ""} (host{" "}
+            <code>{credential.hostId}</code>). LAMA-296: this browser is the
+            embedded UI inside the Android app — full web administration for
+            that paired device. Revoke it from the desktop “Android device”
+            panel or the app’s Disconnect action.
           </p>
         ) : null}
         {keysError && <div className="error">{keysError}</div>}

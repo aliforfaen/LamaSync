@@ -238,7 +238,12 @@ CREATE TABLE IF NOT EXISTS operation_log (
     duration_ms INTEGER,
     -- LAMA-302: trigger origin (watch | schedule | manual). NULL for legacy rows.
     trigger     TEXT,
-    demo        INTEGER NOT NULL DEFAULT 0
+    demo        INTEGER NOT NULL DEFAULT 0,
+    -- LAMA-296 stage-1 correction (R4): idempotency key so operations that
+    -- must appear exactly once per source event (e.g. one mobile_upload
+    -- history row per upload intent) cannot be duplicated by retries or
+    -- reconcile passes. NULL for operations without a dedupe identity.
+    dedupe_key  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS notification_events (
@@ -337,6 +342,8 @@ CREATE TABLE IF NOT EXISTS schedule_state (
 );
 CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
     ON operation_log(host_id, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_log_dedupe_key
+    ON operation_log(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_dotfile_versions_manifest_ts
     ON dotfile_versions(manifest_id, timestamp);
 
@@ -478,6 +485,133 @@ CREATE TABLE IF NOT EXISTS server_deploy_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_server_deploy_jobs_status
     ON server_deploy_jobs(status, requested_at);
+
+-- LAMA-296: Android companion enrollment. One row per QR shown by the
+-- desktop web UI. The QR secret is stored ONLY as secret_hash (SHA-256 hex);
+-- the plaintext secret is returned exactly once at creation and lives only
+-- in the QR the app scans. host_id is a server-SELECTED brand-new host id
+-- (never an existing host); UNIQUE(host_id) + UNIQUE(secret_hash) enforce
+-- one installation per enrollment and per host. Status is the single-use
+-- gate: the exchange handler transactionally flips pending→used (guarded by
+-- status = 'pending' AND expires_at > now) before inserting the
+-- registration, so concurrent exchanges yield at most one registration.
+CREATE TABLE IF NOT EXISTS mobile_enrollments (
+    id            TEXT PRIMARY KEY,              -- random public enrollment id
+    secret_hash   TEXT NOT NULL UNIQUE,          -- SHA-256 hex of 256-bit QR secret
+    host_id       TEXT NOT NULL UNIQUE,          -- server-selected NEW host id
+    client_type   TEXT NOT NULL DEFAULT 'android',
+    web_admin     INTEGER NOT NULL DEFAULT 0,    -- explicit web-admin grant flag
+    status        TEXT NOT NULL DEFAULT 'pending', -- pending|used|expired|revoked
+    expires_at    INTEGER NOT NULL,              -- epoch ms (10 min)
+    created_at    INTEGER NOT NULL,
+    consumed_at   INTEGER,                       -- set when the single-use gate fires
+    revoked_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_enrollments_status_expires
+    ON mobile_enrollments(status, expires_at);
+
+-- LAMA-296: one mobile installation (not a user account). host_id is the PK
+-- and references a hosts row the server creates during the exchange
+-- transaction, so exactly one registration can ever exist per host. The
+-- native credential is stored ONLY as native_token_hash (SHA-256 hex); it is
+-- the "native credential linkage". The "web-grant linkage" is the reverse
+-- FK from web_grants.registration_id (below), keeping the relationship
+-- one-directional and free of circular FKs.
+CREATE TABLE IF NOT EXISTS mobile_registrations (
+    host_id           TEXT PRIMARY KEY REFERENCES hosts(id),
+    client_type       TEXT NOT NULL DEFAULT 'android',
+    display_name      TEXT NOT NULL,
+    app_version       TEXT NOT NULL,
+    native_token_hash TEXT NOT NULL UNIQUE,      -- native credential (hash only)
+    created_at        INTEGER NOT NULL,
+    last_seen_at      INTEGER,
+    revoked_at        INTEGER,
+    revoked_reason    TEXT
+);
+
+-- LAMA-296: separate opaque web-grant credential (accepted only by the
+-- mobile web-session bootstrap route, never as a normal REST bearer or
+-- native identity). Stored as grant_hash only. registration_id UNIQUE ties
+-- the grant 1:1 to its registration (one web grant per installation); admin
+-- snapshots the enrollment.web_admin decision so a grant is admin only when
+-- the desktop explicitly asked for it.
+CREATE TABLE IF NOT EXISTS web_grants (
+    id              TEXT PRIMARY KEY,
+    grant_hash      TEXT NOT NULL UNIQUE,        -- opaque renewal credential (hash only)
+    registration_id TEXT NOT NULL UNIQUE REFERENCES mobile_registrations(host_id),
+    admin           INTEGER NOT NULL DEFAULT 0,  -- web-admin capability (from enrollment.web_admin)
+    created_at      INTEGER NOT NULL,
+    revoked_at      INTEGER,
+    revoked_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_web_grants_registration
+    ON web_grants(registration_id);
+
+-- LAMA-296: hashed session secrets issued by the web-session bootstrap. The
+-- client cookie holds the random session secret; the server stores only its
+-- session_hash (SHA-256 hex) for O(1) lookup. 12-hour absolute expiry;
+-- registration/grant linkage lets revocation and expiry stop delivery to
+-- active connections in-process.
+CREATE TABLE IF NOT EXISTS web_sessions (
+    id              TEXT PRIMARY KEY,            -- public session id (audit)
+    session_hash    TEXT NOT NULL UNIQUE,        -- SHA-256 of random session secret
+    registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id),
+    grant_id        TEXT NOT NULL REFERENCES web_grants(id),
+    admin           INTEGER NOT NULL DEFAULT 0,  -- grant.admin snapshot at bootstrap
+    issued_at       INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL,            -- epoch ms, absolute 12 h
+    revoked_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_web_sessions_registration
+    ON web_sessions(registration_id);
+CREATE INDEX IF NOT EXISTS idx_web_sessions_grant
+    ON web_sessions(grant_id);
+
+-- LAMA-296 stage 1: one authorized landing path per mobile registration.
+-- No row for a registration means NO upload access, even when the
+-- registration is live (existing devices default to none until an
+-- administrator assigns an inbox through the desktop web UI). rel_path is
+-- server-computed ('Mobile/<hostId>/<slug>') and validated at write time;
+-- request bodies carry only the destination id, never a path/backend/root.
+CREATE TABLE IF NOT EXISTS mobile_upload_destinations (
+    id              TEXT PRIMARY KEY,            -- server-issued destination id
+    registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id),
+    label           TEXT NOT NULL,               -- admin-chosen label, e.g. "Inbox"
+    rel_path        TEXT NOT NULL,               -- validated Mobile/<hostId>/<slug>
+    created_at      INTEGER NOT NULL,
+    revoked_at      INTEGER,                     -- non-null => uploads fail at finalize
+    UNIQUE(registration_id, rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_upload_destinations_registration
+    ON mobile_upload_destinations(registration_id);
+
+-- LAMA-296 stage 1: one upload intent, host-bound + idempotency-keyed. The
+-- final file name is RESERVED at creation so retries of the same intent
+-- reuse it and a lost create response can never mint a second upload.
+-- bytes_received is the durable queryable offset; sha256 is set AFTER
+-- verification and BEFORE publication so a crash between the filesystem
+-- rename and the DB completion record is recovered by a finalize retry.
+-- final_rel_path is validated as relative to the mobile landing root and is
+-- the reserve/reuse identity of this upload intent.
+CREATE TABLE IF NOT EXISTS mobile_uploads (
+    id               TEXT PRIMARY KEY,           -- server-issued upload id
+    registration_id  TEXT NOT NULL REFERENCES mobile_registrations(host_id),
+    destination_id   TEXT NOT NULL REFERENCES mobile_upload_destinations(id),
+    idempotency_key  TEXT NOT NULL,              -- client-generated, unique per registration
+    file_name        TEXT NOT NULL,              -- validated single segment
+    final_rel_path   TEXT NOT NULL,              -- destination rel_path + file_name
+    size_bytes       INTEGER,                    -- client-declared expected size (nullable)
+    bytes_received   INTEGER NOT NULL DEFAULT 0, -- durable offset
+    sha256           TEXT,                       -- verified digest (pre-publication)
+    status           TEXT NOT NULL DEFAULT 'created', -- see spec state machine
+    error            TEXT,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    finalized_at     INTEGER,
+    UNIQUE(registration_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_uploads_registration_status
+    ON mobile_uploads(registration_id, status);
 `;
 
 // Columns to attempt adding for existing databases that predate the schema update.
@@ -648,6 +782,34 @@ export const MIGRATIONS: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_app_protections_template ON application_protections(template_id)",
   "CREATE INDEX IF NOT EXISTS idx_app_snapshots_protection_ts ON application_snapshots(protection_id, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_app_snapshots_host ON application_snapshots(source_host_id)",
+  // LAMA-296: Android companion enrollment/registration/web-session tables.
+  // Schema lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF
+  // NOT EXISTS entries are the idempotent safety net for existing databases
+  // ("already exists" is swallowed by initDb's try/catch wrapper). All
+  // secret-bearing columns are *_hash (SHA-256 hex); no plaintext secrets.
+  "CREATE TABLE IF NOT EXISTS mobile_enrollments (id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL UNIQUE, host_id TEXT NOT NULL UNIQUE, client_type TEXT NOT NULL DEFAULT 'android', web_admin INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, consumed_at INTEGER, revoked_at INTEGER)",
+  "CREATE INDEX IF NOT EXISTS idx_mobile_enrollments_status_expires ON mobile_enrollments(status, expires_at)",
+  "CREATE TABLE IF NOT EXISTS mobile_registrations (host_id TEXT PRIMARY KEY REFERENCES hosts(id), client_type TEXT NOT NULL DEFAULT 'android', display_name TEXT NOT NULL, app_version TEXT NOT NULL, native_token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER, revoked_at INTEGER, revoked_reason TEXT)",
+  "CREATE TABLE IF NOT EXISTS web_grants (id TEXT PRIMARY KEY, grant_hash TEXT NOT NULL UNIQUE, registration_id TEXT NOT NULL UNIQUE REFERENCES mobile_registrations(host_id), admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, revoked_at INTEGER, revoked_reason TEXT)",
+  "CREATE INDEX IF NOT EXISTS idx_web_grants_registration ON web_grants(registration_id)",
+  "CREATE TABLE IF NOT EXISTS web_sessions (id TEXT PRIMARY KEY, session_hash TEXT NOT NULL UNIQUE, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), grant_id TEXT NOT NULL REFERENCES web_grants(id), admin INTEGER NOT NULL DEFAULT 0, issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER)",
+  "CREATE INDEX IF NOT EXISTS idx_web_sessions_registration ON web_sessions(registration_id)",
+  "CREATE INDEX IF NOT EXISTS idx_web_sessions_grant ON web_sessions(grant_id)",
+  // LAMA-296 stage 1: scoped mobile upload destinations + resumable uploads.
+  // Schema lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF
+  // NOT EXISTS entries are the idempotent safety net for existing databases
+  // ("already exists" is swallowed by initDb's try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS mobile_upload_destinations (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), label TEXT NOT NULL, rel_path TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER, UNIQUE(registration_id, rel_path))",
+  "CREATE INDEX IF NOT EXISTS idx_mobile_upload_destinations_registration ON mobile_upload_destinations(registration_id)",
+  "CREATE TABLE IF NOT EXISTS mobile_uploads (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), destination_id TEXT NOT NULL REFERENCES mobile_upload_destinations(id), idempotency_key TEXT NOT NULL, file_name TEXT NOT NULL, final_rel_path TEXT NOT NULL, size_bytes INTEGER, bytes_received INTEGER NOT NULL DEFAULT 0, sha256 TEXT, status TEXT NOT NULL DEFAULT 'created', error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finalized_at INTEGER, UNIQUE(registration_id, idempotency_key))",
+  "CREATE INDEX IF NOT EXISTS idx_mobile_uploads_registration_status ON mobile_uploads(registration_id, status)",
+  // LAMA-296 stage-1 correction (R4): exactly-once mobile_upload operation
+  // history. The column is nullable for every other operation; the partial
+  // unique index guarantees one dedupe_key can never appear twice. Added via
+  // ALTER TABLE + a separate CREATE UNIQUE INDEX because SQLite refuses to
+  // add a UNIQUE column with ALTER TABLE ADD COLUMN.
+  "ALTER TABLE operation_log ADD COLUMN dedupe_key TEXT",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_log_dedupe_key ON operation_log(dedupe_key) WHERE dedupe_key IS NOT NULL",
 ];
 
 /**

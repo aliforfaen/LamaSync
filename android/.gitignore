@@ -1,0 +1,11 @@
+# Gradle + Android build outputs (standalone project; see also repo root
+# .gitignore, which mirrors these entries).
+.gradle/
+build/
+local.properties
+.kotlin/
+captures/
+*.apk
+*.aab
+.idea/
+*.iml

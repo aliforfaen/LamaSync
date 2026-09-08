@@ -28,6 +28,10 @@ export function principalLabel(me: AuthMeResponse): string {
       return me.name ? `device key "${me.name}"` : "device key";
     case "deploy":
       return me.name ? `deploy key "${me.name}"` : "deploy key";
+    // LAMA-296: cookie web session from the Android companion. Never a
+    // managed key; label the owning registration for audits.
+    case "mobile-session":
+      return me.name ? `mobile web session "${me.name}"` : "mobile web session";
   }
 }
 

@@ -61,6 +61,8 @@ const VERB_PAST: Record<string, string> = {
   browse_cat: "Read",
   browse_purge: "Purged",
   browse_size: "Measured",
+  // LAMA-296 stage 1: mobile manual uploads in operation history.
+  mobile_upload: "Verified upload",
   copyto: "Copied",
   moveto: "Moved",
   delete: "Deleted",
@@ -94,6 +96,7 @@ const VERB_NOUN: Record<string, string> = {
   browse_cat: "Read",
   browse_purge: "Purge",
   browse_size: "Measure",
+  mobile_upload: "Upload",
   copyto: "Copy",
   moveto: "Move",
   delete: "Delete",

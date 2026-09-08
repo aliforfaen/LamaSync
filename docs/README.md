@@ -24,6 +24,10 @@ path-classification implementation it proposes has not started. The dashboard
 design reference and image artifacts remain here because the web UI assets
 link to them directly.
 
+[Android implementation handoff](handoff-296-android.md) defines LAMA-296’s QR-first Android companion scope, owner decisions, and acceptance checks.
+
+[Android phase 1 spec](spec-296-phase-1-android-foundation.md) is the bounded next coding assignment: native scaffolding and QR/session authentication, before uploads.
+
 ## Archive
 
 Completed August plans, audits, owner briefs, and historical status entries

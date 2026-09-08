@@ -344,8 +344,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   // ---------------------------------------------------------------------------
   .get(
     "/apps/templates",
-    ({ set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -362,8 +362,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/apps/templates",
-    ({ body, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({body, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -414,8 +414,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/apps/templates/:id",
-    ({ params, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({params, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -436,8 +436,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .put(
     "/apps/templates/:id",
-    ({ body, params, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({body, params, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -495,8 +495,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .delete(
     "/apps/templates/:id",
-    ({ params, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({params, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -528,8 +528,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   // ---------------------------------------------------------------------------
   .get(
     "/apps/protections",
-    ({ query, set, store }) => {
-      const principal = requireHostAccess(store, query.hostId);
+    ({query, set, request}) => {
+      const principal = requireHostAccess(request, query.hostId);
       if (!principal) {
         set.status = 403;
         return { error: "Forbidden" };
@@ -557,8 +557,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/apps/protections",
-    ({ body, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({body, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -634,7 +634,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/apps/protections/:id",
-    ({ params, set, store }) => {
+    ({params, set, request}) => {
       const row = activeDb
         .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
         .get(params.id);
@@ -642,7 +642,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Protection not found" };
       }
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       if (!deviceMayAccessHost(principal, row.host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
@@ -653,8 +653,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .put(
     "/apps/protections/:id",
-    ({ body, params, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({body, params, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -699,8 +699,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .delete(
     "/apps/protections/:id",
-    ({ params, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({params, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -738,7 +738,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   // ---------------------------------------------------------------------------
   .get(
     "/apps/protections/:id/snapshots",
-    ({ params, set, store }) => {
+    ({params, set, request}) => {
       const protection = activeDb
         .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
         .get(params.id);
@@ -746,7 +746,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Protection not found" };
       }
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       if (!deviceMayAccessHost(principal, protection.host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
@@ -762,7 +762,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .post(
     "/apps/protections/:id/snapshots",
-    async ({ params, request, set, store }) => {
+    async ({params, request, set}) => {
       const protection = activeDb
         .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
         .get(params.id);
@@ -770,7 +770,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Protection not found" };
       }
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       if (!deviceMayAccessHost(principal, protection.host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
@@ -856,7 +856,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/apps/snapshots/:id",
-    ({ params, set, store }) => {
+    ({params, set, request}) => {
       const row = activeDb
         .query<SnapshotRow, [string]>(`SELECT * FROM application_snapshots WHERE id = ?`)
         .get(params.id);
@@ -864,7 +864,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Snapshot not found" };
       }
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       if (!deviceMayAccessHost(principal, row.source_host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
@@ -875,7 +875,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/apps/snapshots/:id/download",
-    async ({ params, set, store }) => {
+    async ({params, set, request}) => {
       const row = activeDb
         .query<SnapshotRow, [string]>(`SELECT * FROM application_snapshots WHERE id = ?`)
         .get(params.id);
@@ -883,7 +883,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Snapshot not found" };
       }
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       if (!deviceMayAccessHost(principal, row.source_host_id)) {
         set.status = 403;
         return { error: "Forbidden" };
@@ -901,8 +901,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .delete(
     "/apps/snapshots/:id",
-    ({ params, set, store }) => {
-      if (!requireAdmin({ principal: principalOf(store) })) {
+    ({params, set, request}) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
       }

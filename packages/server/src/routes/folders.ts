@@ -967,11 +967,11 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .patch(
     "/folders/:id/assign/:hostId",
-    ({ params, body, set, store }) => {
+    ({params, body, set, request}) => {
       // A daemon may toggle only its own mount⇄sync mode. This endpoint is
       // otherwise a broad control-plane PATCH (including executable hooks),
       // so device bodies must contain exactly `mode` and nothing else.
-      const principal = principalOf(store);
+      const principal = principalOf(request);
       if (!deviceMayAccessHost(principal, params.hostId)) {
         set.status = 403;
         return { error: "Forbidden" };

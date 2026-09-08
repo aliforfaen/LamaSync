@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Debug-only manifest additions. Declares a bare framework Activity host in
+    the APP process so instrumented WebView tests can
+    ActivityScenario.launch(Activity::class.java) — androidx.test refuses
+    components that resolve to the test APK's separate process. The activity
+    carries no app logic and is exported solely for the test runner; it is
+    absent from release builds.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name="android.app.Activity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+        <!-- Debug-only FileProvider so instrumented tests can exercise the
+             content-URI intake path with a REAL content:// URI backed by
+             the app's own private files. Absent from release builds. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.debug.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/debug_file_paths" />
+        </provider>
+    </application>
+
+</manifest>

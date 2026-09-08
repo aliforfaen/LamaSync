@@ -18,7 +18,7 @@ export function __setDb(next: Database): void {
 
 export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
   "/report",
-  ({ body, set, store }) => {
+  ({body, set, request}) => {
     const {
       hostId,
       folderId,
@@ -44,7 +44,7 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
     };
     // LAMA-234: operation reports are host-bound; a device key may only
     // report operations for its own host.
-    if (!deviceMayAccessHost(principalOf(store), hostId)) {
+    if (!deviceMayAccessHost(principalOf(request), hostId)) {
       set.status = 403;
       return { error: "Forbidden" };
     }
