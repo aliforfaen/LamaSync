@@ -17,14 +17,8 @@
 // timers) and queries /swagger/json through app.handle, so it exercises the
 // exact swagger generation path the live server uses.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import { VERSION } from "@lamasync/core";
-
-// getAuthPlugin() refuses to boot without a key — set before createServerApp.
-process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "openapi-test-master-key-1234567890";
-process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "openapi-test-secret-key-1234567890";
-
-const { createServerApp } = await import("./app.ts");
 
 interface OpenApiSpec {
   info: { title: string; version: string; description: string };
@@ -63,17 +57,50 @@ function collectOperations(spec: OpenApiSpec): Array<{
 let spec: OpenApiSpec;
 let operations: ReturnType<typeof collectOperations>;
 
-beforeAll(async () => {
-  const app = createServerApp();
-  const response = await app.handle(new Request("http://127.0.0.1/swagger/json"));
-  expect(response.status).toBe(200);
-  spec = (await response.json()) as OpenApiSpec;
-  operations = collectOperations(spec);
-});
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
-afterAll(() => {
-  delete process.env.LAMASYNC_API_KEY;
-  delete process.env.LAMASYNC_SECRET_KEY;
+function isOpenApiSpec(value: unknown): value is OpenApiSpec {
+  if (!isRecord(value) || !isRecord(value.info) || !isRecord(value.paths)) return false;
+  return (
+    typeof value.info.title === "string" &&
+    typeof value.info.version === "string" &&
+    typeof value.info.description === "string"
+  );
+}
+
+beforeAll(async () => {
+  // Compose the full route graph in a child process. Importing app.ts in this
+  // test process would share route modules' injectable `activeDb` state with
+  // concurrently running route tests, making the suite order-dependent.
+  const child = Bun.spawn({
+    cmd: [
+      process.execPath,
+      "-e",
+      'const { createServerApp } = await import("./app.ts"); const response = await createServerApp().handle(new Request("http://127.0.0.1/swagger/json")); if (!response.ok) process.exit(1); process.stdout.write(await response.text());',
+    ],
+    cwd: import.meta.dir,
+    env: {
+      ...process.env,
+      LAMASYNC_API_KEY: "openapi-test-master-key-1234567890",
+      LAMASYNC_SECRET_KEY: "openapi-test-secret-key-1234567890",
+      LAMASYNC_TEST: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exitCode, stderr).toBe(0);
+  const parsed: unknown = JSON.parse(stdout);
+  expect(isOpenApiSpec(parsed)).toBe(true);
+  if (!isOpenApiSpec(parsed)) throw new Error("generated OpenAPI document has an invalid shape");
+  spec = parsed;
+  operations = collectOperations(spec);
 });
 
 test("info.version tracks the core VERSION constant", () => {
