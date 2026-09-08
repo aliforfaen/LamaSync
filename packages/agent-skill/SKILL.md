@@ -1,6 +1,6 @@
 ---
 name: lamasync
-description: Operate a LamaSync fleet — manage folders, hosts, backends, sync triggers, app templates/protections/snapshots, and operation history. Use when the task touches `lamasync`, `lamasyncd`, `lamasync apps`, sync fleet, rclone fleet, backup host, `register host`, `add folder`, `set up backup`, `check for update`, `snapshot`, `app template`, `app protection`, `enroll app`, `app backup`, `lamasync 401`, or `lamasync auth failed`. CLI-first; the REST/WS API is the documented escape hatch.
+description: Operate a LamaSync fleet — manage folders, hosts, backends, sync triggers, app templates/protections/snapshots, and operation history. Use when the task touches `lamasync`, `lamasyncd`, sync fleet, rclone fleet, backup host, `register host`, `add folder`, `set up backup`, `check for update`, `snapshot`, `app template`, `app protection`, `enroll app`, `app backup`, `lamasync 401`, or `lamasync auth failed`. The local `lamasync` CLI is the agent surface for daemon control, diagnostics, and registration; fleet management is the REST API + web UI (see `reference/api.md`).
 ---
 
 # lamasync
@@ -15,13 +15,22 @@ keys are the trust boundary. The tailnet provides transport encryption.
 
 ## Decision tree
 
-1. **Need to talk to the fleet from any agent (including yourself)?** Use
-   the CLI. Run `lamasync <command> --help` first; the full reference lives
-   in `reference/cli.md`. **Always run `lamasync doctor` first on a fresh
-   host** to check auth discovery, server reachability, and version drift.
-2. **Need an operation the CLI doesn't express?** Read
-   `reference/api.md`; if it isn't there either, do *not* hand-roll curl or
-   the Unix-socket protocol. Stop and ask a human — that gap is a bug.
+The `lamasync` CLI (LAMA-326) is **local-first**: it drives the local daemon
+(`local *`), reports host health (`doctor`), and pairs the device
+(`register`). Fleet management — folders, hosts, backends, schedules, app
+backups, conflicts, notifications, browsing, and admin — is **not** a CLI
+surface; use the web UI (human) or the REST API (agent).
+
+1. **Need daemon control / host diagnostics / registration on this host?**
+   Use the CLI. **Always run `lamasync doctor` first** on a fresh host to
+   check auth discovery, server reachability, and version drift; the full
+   local-command reference lives in `reference/cli.md`.
+2. **Need a fleet-management operation (folders, hosts, backends, schedules,
+   app backups, conflicts, notifications, browsing, admin)?** Use the REST
+   API (`reference/api.md`) or the web UI — the CLI no longer expresses
+   these (LAMA-326). If the API doesn't express it either, do *not*
+   hand-roll curl against undocumented endpoints or the Unix-socket
+   protocol; stop and ask a human — that gap is a bug.
 3. **Need to install this host as a client?** The skill `lamasync-client.md`
    covers prereqs, the install script, and day-2 daemon usage.
 4. **Need to do something destructive (delete folder, force restore, prune
@@ -29,11 +38,11 @@ keys are the trust boundary. The tailnet provides transport encryption.
    intent with the operator first, then pass `--yes` if the command asks.
 5. **Need to set up or operate an app backup?** The model is templates →
    protections → snapshots, managed over the REST API (see
-   `reference/api.md`; the CLI no longer exposes app commands, LAMA-326):
-   `POST /apps/templates` defines what to capture, `POST /apps/protections`
-   binds a template to one host, and the snapshots endpoints move archives
-   (templates, enrollment, and destructive ops are admin-only; a device
-   key reaches only its own host's protections + snapshots).
+   `reference/api.md`): `POST /apps/templates` defines what to capture,
+   `POST /apps/protections` binds a template to one host, and the snapshots
+   endpoints move archives (templates, enrollment, and destructive ops are
+   admin-only; a device key reaches only its own host's protections +
+   snapshots).
 
 All commands take `--json` for machine output and obey a stable exit code
 contract (see `reference/cli.md`): `0` ok, `1` runtime, `2` usage error,
@@ -115,8 +124,8 @@ working with the fleet:
 - `sync fleet`, `rclone fleet`, `backup host`
 - `register host`, `add folder`, `set up backup`
 - `check for update`, `snapshot`, `app template`, `app protection`,
-  `enroll app`, `app backup`, `app snapshot`, `lamasync apps`,
-  `lamasync 401`, `lamasync auth failed`
+  `enroll app`, `app backup`, `app snapshot`
+- `lamasync 401`, `lamasync auth failed`
 
 If the user is asking something about the Web UI / Management pages rather
 than the CLI / API, the doc URLs in the Web UI itself are usually enough —

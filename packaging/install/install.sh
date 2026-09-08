@@ -111,7 +111,9 @@ Required:
 Options:
   --hostname NAME     Override hostname (default: $(hostname))
   --with-cli          Also install the lamasync CLI binary to BINARY_DIR
-  --with-tui          (Deprecated alias for --with-cli; removed in an upcoming release)
+  --with-tui          (Deprecated alias for --with-cli; also installs a lamasync-tui
+                      compat shim for the one-release LAMA-323 transition. Removed in
+                      an upcoming release)
   --binary-dir DIR    Install binaries into DIR (default: ~/.local/bin)
   --check             Only check for updates; never write to disk
   --yes, -y           Skip prompts (default skill install when --with-cli)
@@ -242,6 +244,15 @@ if [[ "${WITH_CLI}" -eq 1 ]]; then
     fi
   fi
   chmod +x "${BINARY_DIR}/lamasync"
+
+  # LAMA-323 one-release compatibility: a fresh --with-tui install also leaves
+  # an executable lamasync-tui companion (a copy of lamasync) so scripts written
+  # against the old binary name keep working through the rename. --with-cli (the
+  # canonical path) installs only lamasync.
+  if [[ "${WITH_TUI_ALIAS}" -eq 1 ]]; then
+    cp -f "${BINARY_DIR}/lamasync" "${BINARY_DIR}/lamasync-tui"
+    chmod +x "${BINARY_DIR}/lamasync-tui"
+  fi
 fi
 
 # Write client config
@@ -368,6 +379,9 @@ echo "    Config: ${CONFIG_DIR}/client.toml"
 echo "    Binary: ${BINARY_DIR}/lamasyncd"
 if [[ "${WITH_CLI}" -eq 1 ]]; then
   echo "    CLI:    ${BINARY_DIR}/lamasync"
+  if [[ "${WITH_TUI_ALIAS}" -eq 1 ]]; then
+    echo "    Legacy: ${BINARY_DIR}/lamasync-tui (deprecated one-release compat; remove once unused)"
+  fi
 fi
 echo "    Socket: ${SOCKET_PATH}"
 if [[ "${INSTALL_SKILL:-n}" == "y" ]]; then

@@ -150,7 +150,7 @@ up the folder and starts syncing on schedule. Watch it happen in the
 |-----------|---------|
 | `lamasync-server` | REST + WebSocket + SQLite + embedded React web UI. Owns folder definitions, schedules, per-device generated rclone configs, and the operation log. |
 | `lamasyncd` | One per device (systemd user service). Runs the scheduled rclone operations, mounts, hooks, and ignore patterns; exposes a Unix socket for local CLI control. |
-| `lamasync` | Non-interactive CLI. Local mode talks to the daemon over its socket; fleet mode talks to the server. Stable exit codes, `--json` everywhere. The legacy `lamasync-tui` name is published as a deprecated alias for one transition release. |
+| `lamasync` | Non-interactive, local-first CLI. Talks to the daemon over its Unix socket (`local *`), reports host health (`doctor`), and pairs the device (`register`); it does not manage the fleet — that is the web UI + REST API. Stable exit codes, `--json` everywhere. The legacy `lamasync-tui` name is published as a deprecated alias for one transition release. |
 
 ### How a sync happens
 

@@ -4,6 +4,22 @@ import { getApiKey } from "../api.ts";
 const INSTALL_URL =
   "https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh";
 
+/**
+ * Build the curl-to-bash install command for the onboarding copy. Always
+ * ends in `--with-cli`: the interactive TUI was removed (LAMA-323) and
+ * `lamasync` is the local-first control CLI. `--with-tui` is a deprecated
+ * alias only kept for the one-release transition. Extracted so the copy is
+ * unit-testable without a DOM.
+ */
+export function buildInstallCommand(serverUrl: string, apiKey: string): string {
+  return [
+    `curl -sSL ${INSTALL_URL} | bash -s -- \\`,
+    `  --server-url ${serverUrl} \\`,
+    `  --api-key ${apiKey} \\`,
+    `  --with-cli`,
+  ].join("\n");
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -51,12 +67,7 @@ export function AddHostGuide() {
   const key = getApiKey();
   const shownKey = showKey && key ? key : "<API_KEY>";
 
-  const installCmd = [
-    `curl -sSL ${INSTALL_URL} | bash -s -- \\`,
-    `  --server-url ${serverUrl} \\`,
-    `  --api-key ${shownKey} \\`,
-    `  --with-tui`,
-  ].join("\n");
+  const installCmd = buildInstallCommand(serverUrl, shownKey);
 
   const statusCmd = "systemctl --user status lamasyncd";
 
@@ -79,7 +90,8 @@ export function AddHostGuide() {
       <h3>1. Install &amp; register (on the new machine)</h3>
       <CommandBlock command={installCmd} />
       <p className="muted">
-        Drop <code>--with-tui</code> if you don't want the terminal UI.{" "}
+        Installs the <code>lamasync</code> local control CLI alongside the
+        daemon — there is no terminal UI (removed in LAMA-323).{" "}
         {key && (
           <button
             type="button"

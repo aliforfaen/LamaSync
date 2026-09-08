@@ -99,6 +99,15 @@ docker run --rm \
       --with-tui 2> /tmp/install-tui-alias.stderr
     grep -q 'deprecated' /tmp/install-tui-alias.stderr
     test -x ~/.local/bin/lamasync
+    # LAMA-323 one-release compatibility: a fresh --with-tui install must also
+    # leave an executable lamasync-tui companion.
+    test -x ~/.local/bin/lamasync-tui
+    # Invoking the legacy name works and keeps stdout clean (so --json stays
+    # parseable): the deprecation notice is written to stderr only.
+    ~/.local/bin/lamasync-tui --version > /tmp/tui-version.stdout 2> /tmp/tui-version.stderr
+    grep -Eq '^lamasync-tui ' /tmp/tui-version.stdout
+    ! grep -qi 'deprecat' /tmp/tui-version.stdout
+    grep -qi 'deprecat' /tmp/tui-version.stderr
     echo '[client] All install checks passed.'
   "
 

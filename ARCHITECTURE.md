@@ -33,18 +33,19 @@ Three binaries per machine:
 - **`lamasyncd`** — background daemon (`systemd --user`), spawns and supervises
   rclone processes, runs cron-driven sync schedules, reports status to the
   server, exposes a Unix socket for local CLI control.
-- **`lamasync`** — non-interactive CLI; talks to the local daemon over a
-  Unix socket for local operations and to the server REST/WS for fleet
-  operations.
+- **`lamasync`** — non-interactive, **local-first** CLI; drives the local
+  daemon over a Unix socket (`local *`), reports host health (`doctor`), and
+  pairs the device (`register`). Fleet management is the web UI + REST API,
+  not a CLI surface.
 - **Management Web UI** — React SPA embedded in `lamasync-server` at `GET /`.
   Built with Vite and inlined into a single `dist/index.html` by
   `scripts/inline-web-ui.ts`; auth uses the same pre-shared API key via
   `sessionStorage` and REST/WebSocket calls.
 
-The agent skill at `packages/agent-skill/SKILL.md` (CLI-first, two-tier
-bundle: `SKILL.md` + `reference/{cli,api,recipes,troubleshooting,safety}.md`)
-lets external agents register, manage folders, and report on operations
-against the same API.
+The agent skill at `packages/agent-skill/SKILL.md` (local-CLI-first for
+daemon control/diagnostics/register, REST-API-first for fleet management;
+two-tier bundle: `SKILL.md` + `reference/{cli,api,recipes,troubleshooting,safety}.md`)
+lets external agents drive a device and manage folders against the same API.
 
 ---
 
@@ -528,13 +529,10 @@ Cleanup temp tarball
 ### Restore (server → client)
 
 ```
-`lamasync apps snapshots download`
+GET /api/v1/apps/protections/<protectionId>/snapshots    # list; pick one
        │
        ▼
-Pick protection → pick snapshot → inspect archive contents
-       │
-       ▼
-GET /api/v1/apps/snapshots/<snapshotId>/download
+GET /api/v1/apps/snapshots/<snapshotId>/download        # inspect/download
        │
        ▼
 Download or inspect only. Target-side application setup, preflight, conflict

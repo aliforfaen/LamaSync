@@ -6,9 +6,11 @@ README and the operational docs (`docs/`) cover the rest.
 ## What this project is
 
 A personal sync-fleet controller: one server (Docker/LXC, tailnet-only), a
-daemon per device, and a terminal UI + web UI over a small REST/WS API.
-Everything is TypeScript on [Bun](https://bun.sh). The full picture lives in
-`ARCHITECTURE.md` and `docs/repository-layout.md`.
+daemon per device, a non-interactive local-first CLI (`lamasync`), and a web
+UI over a small REST/WS API. Fleet management is the web UI + REST API; the
+CLI drives the local daemon and diagnostics. Everything is TypeScript on
+[Bun](https://bun.sh). The full picture lives in `ARCHITECTURE.md` and
+`docs/repository-layout.md`.
 
 ## Setting up
 
