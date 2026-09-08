@@ -18,8 +18,8 @@ do not treat old handoffs as current requirements.
 - [Terminology](terminology.md) — user-facing naming rules.
 - [Production deploy](prod-deploy.md) — private LXC operations.
 
-`handoff-302-event-triggered-sync.md` remains here because its live soak work
-is still open. `handoff-315-path-classification.md` remains here because the
+`handoff-302-event-triggered-sync.md` is retained as completed implementation
+and soak evidence. `handoff-315-path-classification.md` remains here because the
 path-classification implementation it proposes has not started. The dashboard
 design reference and image artifacts remain here because the web UI assets
 link to them directly.

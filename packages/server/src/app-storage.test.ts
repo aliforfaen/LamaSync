@@ -330,6 +330,7 @@ describe("config/location input hardening (LAMA-324 review)", () => {
   test("isValidAppBucketName accepts good names and rejects hostile ones", async () => {
     const { isValidAppBucketName } = await import("./app-storage.ts");
     expect(isValidAppBucketName("lamasync-apps")).toBe(true);
+    expect(isValidAppBucketName("lamasync--apps")).toBe(true);
     expect(isValidAppBucketName("my.bucket-42")).toBe(true);
     expect(isValidAppBucketName("A-uppercase")).toBe(false);
     expect(isValidAppBucketName("has_underscore")).toBe(false);

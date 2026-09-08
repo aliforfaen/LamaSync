@@ -315,14 +315,14 @@ const BUCKET_NAME = /^[a-z0-9]([a-z0-9.\-]{1,61})[a-z0-9]$/;
 const OBJECT_KEY = /^[a-zA-Z0-9/_.\-]+$/;
 
 /** DNS-style bucket name: 3-63 lower-case alnum/dot/hyphen, alnum at both
- *  ends, no ".." segments, no adjacent hyphens/dots, no control chars.
+ *  ends, no adjacent periods, no period/hyphen pairing, no control chars.
  *  (AWS/Exoscale share this shape; B2 names are a strict subset — the rule
  *  is permissive-but-safe for every provider.) */
 export function isValidAppBucketName(bucket: string): boolean {
   if (bucket.length < 3 || bucket.length > 63) return false;
   if (CONTROL_CHAR.test(bucket) || /\s/.test(bucket)) return false;
   if (!BUCKET_NAME.test(bucket)) return false;
-  if (bucket.includes("..") || bucket.includes("--")) return false;
+  if (bucket.includes("..")) return false;
   // A period adjacent to a hyphen isn't DNS-safe; reject both pairings.
   if (bucket.includes(".-") || bucket.includes("-.")) return false;
   return true;

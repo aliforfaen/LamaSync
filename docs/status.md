@@ -1,16 +1,16 @@
 # Status & work queue — LamaSync
 
-Updated 2026-09-07. This is the current state, not an append-only changelog.
+Updated 2026-09-08. This is the current state, not an append-only changelog.
 Older release notes and completed work are in
 [`archive/status-2026-08-through-2026-09-03.md`](archive/status-2026-08-through-2026-09-03.md).
 
 ## Current release
 
-v0.3.7 is deployed. The server, daemon, CLI, web UI, agent skill, and
-deploy agent build from the same Bun workspace. CI runs type-check, web build,
-tests, strict skill drift, and distributable binary build.
+v0.3.7 is deployed; the source tree is at v0.3.9 pending release. The server,
+daemon, CLI, web UI, agent skill, and deploy agent build from the same Bun
+workspace. CI runs type-check, web build, tests, strict skill drift, and
+distributable binary build.
 
-## Recently shipped
 ## Recently shipped
 
 - **LAMA-324 — app backup storage destinations (server-relay).** Each
@@ -155,16 +155,14 @@ tests, strict skill drift, and distributable binary build.
    handoff-315-path-classification.md) audits the current capture-spec model
    and proposes taxonomy, data model, and staged delivery. Next step is
    implementing stage 1 of that proposal.
-2. **LAMA-313 — retention policy.** Define and implement practical snapshot
-   retention/pruning before histories grow unchecked.
-3. **Application setup/restore executor.** Build the target-side wizard:
+2. **Application setup/restore executor.** Build the target-side wizard:
    preflight, dry-run/change plan, populated-target decisions, revalidation
    before writes, rollback artifact, and execution journal. Direct app restore
    remains intentionally unavailable until this exists.
-4. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
+3. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
   validation are complete; production-client rollout/acceptance on `cachy`
   remains pending because it requires an explicit restart/update authority.
-5. **LAMA-321 follow-up — trash retention.** Optional per-folder
+4. **LAMA-321 follow-up — trash retention.** Optional per-folder
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
@@ -192,10 +190,10 @@ tests, strict skill drift, and distributable binary build.
 
 ## Recent verification baseline
 
-After the LAMA-319/321 pass: `bun x tsc --noEmit`, `bun run build:web-ui`,
-`bun test` (1410 pass, 9 renderer-dependent skips), and strict skill drift all
-passed. The LAMA-321 trash/size round trip is covered by hermetic route tests;
-a live S3 empty-trash smoke on a real bucket is still outstanding.
+After the LAMA-324/325 review pass: `bun x tsc --noEmit`,
+`bun run build:web-ui`, `bun test` (1447 pass), strict skill drift, and the
+full distributable build passed. App archive relay/retention is covered by
+hermetic route and adapter tests; no production deployment was performed.
 
 LAMA-296 phase 1 baseline (this worktree): all six repo gates green
 (`bun install`, `bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` —

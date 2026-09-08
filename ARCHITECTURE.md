@@ -179,6 +179,9 @@ CREATE TABLE application_protections (
     enabled           INTEGER NOT NULL DEFAULT 1,
     schedule          TEXT,                  -- cron expression
     destination       TEXT NOT NULL DEFAULT 'server_archive',
+    backend_id        TEXT REFERENCES backends(id), -- NULL = server archive
+    s3_bucket         TEXT,                  -- captured destination bucket for s3
+    retention_policy  TEXT,                  -- JSON RetentionPolicy; NULL = disabled
     capture_spec      TEXT NOT NULL,         -- JSON CaptureSpec copied at enroll; never mutated by template edits
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL,
@@ -199,7 +202,10 @@ CREATE TABLE application_snapshots (
     checksum_sha256   TEXT,                  -- sha256
     description       TEXT,
     captured_spec     TEXT NOT NULL,         -- JSON CaptureSpec recorded server-side at upload
-    integrity_status  TEXT NOT NULL DEFAULT 'unverified'  -- verified | unverified | failed
+    integrity_status  TEXT NOT NULL DEFAULT 'unverified', -- verified | unverified | failed
+    backend_id        TEXT REFERENCES backends(id), -- immutable location; NULL = server archive
+    object_key        TEXT,                  -- backend-relative immutable archive key
+    s3_bucket         TEXT                   -- immutable bucket at capture time
 );
 
 -- Operation log (sync runs, backups, errors)
