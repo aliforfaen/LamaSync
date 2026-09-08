@@ -25,7 +25,7 @@ bun test
 bun run build
 # → packages/server/dist/lamasync-server
 # → packages/daemon/dist/lamasyncd
-# → packages/tui/dist/lamasync-tui
+# → packages/cli/dist/lamasync (+ dist/lamasync-tui compat copy)
 
 # Or, just build the web UI so server tests pass:
 # bun run build:web-ui
@@ -39,28 +39,23 @@ LAMASYNC_BACKUP_DIR=/tmp/lamasync-test-backups \
 # Run the daemon (needs a running server + ~/.config/lamasync/client.toml)
 bun run dev:daemon
 
-# Run the TUI
+# Run the CLI against a local server
 LAMASYNC_SERVER_URL=http://localhost:8080 LAMASYNC_API_KEY=dev-key \
-  bun run dev:tui
-
-# Run the TUI in CLI fallback mode (no OpenTUI native renderer required)
-LAMASYNC_SERVER_URL=http://localhost:8080 LAMASYNC_API_KEY=dev-key \
-LAMASYNC_NO_TUI=1 \
-  bun run dev:tui
+  bun run dev:cli status
 ```
 
 ## Environment variables
 
 | Variable | Used by | Default |
 |----------|---------|---------|
-| `LAMASYNC_API_KEY` | server, TUI, daemon | — (required for server) |
+| `LAMASYNC_API_KEY` | server, CLI, daemon | — (required for server) |
 | `LAMASYNC_DATA_DIR` | server, daemon cache, shares.json | `/data` |
 | `LAMASYNC_BACKUP_DIR` | server, config generator | `/backups` |
 | `LAMASYNC_LOG_RETENTION_DAYS` | server | `90` |
 | `LAMASYNC_TAILNET_IP` | server config generator | `null` |
 | `LAMASYNC_SHARES` | server shares route | `null` (falls back to `shares.json`) |
 | `PORT` | server | `8080` |
-| `LAMASYNC_SERVER_URL` | TUI | `http://localhost:8080` (env fallback) |
+| `LAMASYNC_SERVER_URL` | CLI | `http://localhost:8080` (env fallback) |
 | `LAMASYNC_ORIGIN` | server (mobile flow) | unset — mobile enrollment exchange/bootstrap return 503 until set to a canonical `https://` origin |
 | `LAMASYNC_MOBILE_LANDING_DIR` | server (LAMA-296 stage 1) | `<LAMASYNC_BACKUP_DIR>/Mobile` — server-local root for verified uploads (inside the browse root) |
 | `LAMASYNC_MOBILE_STAGING_DIR` | server (LAMA-296 stage 1) | `<tmp>/lamasync-mobile-staging` — upload staging OUTSIDE the browse tree |
@@ -68,14 +63,13 @@ LAMASYNC_NO_TUI=1 \
 | `LAMASYNC_MOBILE_MAX_UPLOAD_BYTES` | server (LAMA-296 stage 1) | `2147483648` (2 GiB) — per-upload cap |
 | `LAMASYNC_MOBILE_STAGING_QUOTA_BYTES` | server (LAMA-296 stage 1) | `8589934592` (8 GiB) — rough total staging bound |
 | `LAMASYNC_MOBILE_ABANDON_TTL_MS` / `LAMASYNC_MOBILE_SWEEP_MS` | server (LAMA-296 stage 1) | `7d` / `24h` — abandoned-staging reconcile TTL / sweep interval (`0` disables the timer) |
-| `LAMASYNC_NO_TUI` | TUI | — (set to `"1"` for CLI fallback) |
-| `LAMASYNC_SOCKET_PATH` | daemon, TUI local mode | `$XDG_RUNTIME_DIR/lamasync.sock` (falls back to `~/.lamasync/lamasync.sock` when XDG is unset) |
+| `LAMASYNC_SOCKET_PATH` | daemon, CLI local mode | `$XDG_RUNTIME_DIR/lamasync.sock` (falls back to `~/.lamasync/lamasync.sock` when XDG is unset) |
 
 ## Writing tests
 
 Tests use `bun:test` (`describe`, `test`, `expect`). Place them alongside the source files as `*.test.ts`. Run with `bun test` from the repo root.
 
-For a quick end-to-end smoke that starts a real server + daemon and exercises the TUI and web UI routes, run:
+For a quick end-to-end smoke that starts a real server + daemon and exercises the CLI and web UI routes, run:
 
 ```bash
 ./scripts/e2e-harness.sh
@@ -106,8 +100,7 @@ passing and 9 skipped on 2026-08-30). Worth knowing by name:
 - `packages/server/src/routes/config.test.ts` — rclone config generation, encryption, peer detection
 - `packages/server/src/routes/{shares,operations,restic,conflicts,backends,browse,stats,actions,hosts}.test.ts` — REST routes
 - `packages/daemon/src/{socket,systemd,self-update,lock,config,executor,scheduler,hooks,lan-peer,update-check,actions,report-queue}.test.ts` — daemon behaviour
-- `packages/tui/src/{index.test.ts,cli/*.{args,output,client,commands,dispatch}.test.ts,app/{keymap,view-manager,wizard}.test.ts}` — TUI + CLI dispatch
-- Renderer-bound tests are gated behind `LAMASYNC_TUI_TEST_VIEWS=1` (foundation wired; bring them online when the harness becomes stable).
+- `packages/cli/src/cli/{args,output,client,commands,dispatch}.test.ts` — CLI dispatch + helpers
 
 ## Adding a new API endpoint
 
@@ -119,13 +112,15 @@ passing and 9 skipped on 2026-08-30). Worth knowing by name:
 6. Add the endpoint to `packages/agent-skill/reference/api.md` (drift-checked by `scripts/check-skill-drift.ts` in CI)
 7. Run `bun x tsc --noEmit` and `curl`-test the endpoint
 
-## Adding a new TUI view (LAMA-173 contract)
+## Adding a new CLI subcommand
 
-1. Add the id to `ViewId` in `packages/tui/src/app/view-manager.ts` if it's new.
-2. Create a class `XView implements View` in `packages/tui/src/views/x.ts` with `id`, `title`, `container: Renderable` (built once in the constructor), `hotkeys()`, `onShow(ctx)`, optional `onHide()`, `handleKey(e)`, `destroy()`. Every OpenTUI node the view mutates after mount — the container, body boxes, selects — MUST be a real renderable: take the renderer via the constructor (or `ctx.renderer`) and wrap each `Box()`/`Select()`/`Text()` VNode in `realize(renderer, vnode)` from `app/widgets.ts` (LAMA-181; VNode proxies silently drop post-mount mutations). Swap body content with `swapChildren(box, next)`. Renderer-less tests pass `renderer: null` and get the old proxy behavior.
-3. Register the view in `packages/tui/src/boot.ts` inside the `views` array. The `Shell` builds `ViewSpec`s automatically.
-4. Add a hotkey dispatch path: only if your view owns internal keys, set `ViewSpec.handleKey = view.handleKey.bind(view)`; otherwise global hotkeys via `view.hotkeys()`.
-5. Add a unit test in `packages/tui/src/views/x.test.ts` if the view has pure logic; gate any renderer-bound test behind `process.env.LAMASYNC_TUI_TEST_VIEWS === "1"`.
+1. Create `packages/cli/src/cli/<command>.ts` implementing `CliCommand`
+   (run + help; see `dispatch.ts` for the type and `folders.ts` for a
+   representative module).
+2. Register it in the dispatch tree in `packages/cli/src/cli/dispatch.ts`.
+3. Add unit tests next to the command module.
+4. Document the command in `packages/agent-skill/reference/cli.md`
+   (strict drift check runs in CI).
 
 ## Android companion (LAMA-296 phase 1 + stage 1)
 
@@ -259,7 +254,7 @@ The image includes `rclone` and `tini`. Volumes are named (`lamasync-data`, `lam
 - **Version source of truth**: root `package.json` `version` field (currently `0.3.4`).
 - **Generated constant**: `scripts/gen-version.ts` writes `packages/core/src/version.ts`, which is re-exported from `@lamasync/core`.
 - **All three standalone binaries** support `--version` and `-V`:
-  `lamasync-server`, `lamasyncd`, `lamasync-tui`. The web UI is bundled
+  `lamasync-server`, `lamasyncd`, `lamasync`. The web UI is bundled
   inside `lamasync-server` (built with `--loader .html:text`) and served
   from `GET /`; it has no separate version flag.
 - **GitHub Actions**: `.github/workflows/ci.yml` runs type-checks, tests, builds the three binaries, publishes them to a GitHub Release on `v*` tags, and pushes a Docker image to GHCR.

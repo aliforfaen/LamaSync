@@ -41,12 +41,12 @@ echo "lamasyncd 99.99.99"
 EOF
 chmod +x "$TEST_DIR/lamasyncd"
 
-# Fake TUI release binary.
-cat > "$TEST_DIR/lamasync-tui" <<'EOF'
+# Fake CLI release binary (version 99.99.99).
+cat > "$TEST_DIR/lamasync" <<'EOF'
 #!/bin/sh
-echo "lamasync-tui 99.99.99"
+echo "lamasync 99.99.99"
 EOF
-chmod +x "$TEST_DIR/lamasync-tui"
+chmod +x "$TEST_DIR/lamasync"
 
 # Copy updater script.
 cp "$ROOT/packaging/install/update.sh" "$TEST_DIR/update.sh"
@@ -122,14 +122,20 @@ docker run --rm \
     echo '[client] Installing old lamasyncd from test server...'
     curl -fsSL http://$SERVER_NAME/lamasyncd-old -o /root/.local/bin/lamasyncd
     chmod +x /root/.local/bin/lamasyncd
+    # LAMA-323: legacy lamasync-tui companion from a pre-rename install.
+    printf '#!/bin/sh\necho \"lamasync-tui 0.1.0\"\n' > /root/.local/bin/lamasync-tui
+    chmod +x /root/.local/bin/lamasync-tui
     echo '[client] Installed version:'
     /root/.local/bin/lamasyncd --version
     echo '[client] Running update.sh...'
     curl -sSL http://$SERVER_NAME/update.sh | bash -s -- --yes
     echo '[client] Verifying update...'
     /root/.local/bin/lamasyncd --version
-    /root/.local/bin/lamasync-tui --version
+    /root/.local/bin/lamasync --version
     /root/.local/bin/lamasyncd --version | grep -q '99.99.99'
+    /root/.local/bin/lamasync --version | grep -q '99.99.99'
+    # LAMA-323: the legacy lamasync-tui binary is refreshed in place (it now
+    # behaves like the renamed CLI binary for the transition release).
     /root/.local/bin/lamasync-tui --version | grep -q '99.99.99'
     # LAMA-230: the skill refresh must have run per the persisted preference.
     test -f /root/.agents/skills/lamasync/SKILL.md

@@ -142,7 +142,7 @@ cat ~/.config/lamasync/client.toml
 #    client.toml and restarts the daemon.
 LAMASYNC_API_KEY=<current-server-key> \
   curl -sSL https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh \
-  | bash -s -- --server-url <server-url> --api-key <current-server-key> --with-tui
+  | bash -s -- --server-url <server-url> --api-key <current-server-key> --with-cli
 
 # 4. Re-run `lamasync doctor` to confirm exit 0.
 lamasync doctor

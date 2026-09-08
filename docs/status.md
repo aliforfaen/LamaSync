@@ -6,11 +6,23 @@ Older release notes and completed work are in
 
 ## Current release
 
-v0.3.7 is deployed. The server, daemon, TUI/CLI, web UI, agent skill, and
+v0.3.7 is deployed. The server, daemon, CLI, web UI, agent skill, and
 deploy agent build from the same Bun workspace. CI runs type-check, web build,
 tests, strict skill drift, and distributable binary build.
 
 ## Recently shipped
+
+- **LAMA-323 — TUI removed, CLI extracted to `packages/cli`.** The
+  interactive OpenTUI shell is gone (`@opentui/core` dependency dropped);
+  `packages/tui` became `packages/cli` building the non-interactive
+  `lamasync` binary (bare invocation prints help, exit 0). The legacy
+  `lamasync-tui` name ships for one transition release as a copy of
+  `lamasync` with a stderr-only deprecation notice; the installer gains
+  `--with-cli` (with `--with-tui` as a deprecated alias) and update.sh
+  refreshes a pre-existing `lamasync-tui` in place. First-run setup is
+  handled by `lamasync register` + the install script; fleet management is
+  web UI + REST API (agent skill). Follow-up: LAMA-326 trims the CLI to its
+  local-daemon surface.
 
 - **LAMA-296 (stage 1) — usable manual uploads.** On top of the accepted
   phase-1 baseline: Android share/document intake (`ACTION_SEND`/`_MULTIPLE`

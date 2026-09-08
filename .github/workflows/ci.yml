@@ -67,11 +67,13 @@ jobs:
           path: packages/daemon/dist/lamasyncd
           if-no-files-found: error
 
-      - name: Upload tui binary
+      - name: Upload cli binary
         uses: actions/upload-artifact@v4
         with:
-          name: lamasync-tui
-          path: packages/tui/dist/lamasync-tui
+          name: lamasync
+          path: |
+            packages/cli/dist/lamasync
+            packages/cli/dist/lamasync-tui
           if-no-files-found: error
 
       - name: Upload skill bundle (LAMA-230)
@@ -126,11 +128,11 @@ jobs:
           name: lamasyncd
           path: dist/lamasyncd
 
-      - name: Download tui binary
+      - name: Download cli binary
         uses: actions/download-artifact@v4
         with:
-          name: lamasync-tui
-          path: dist/lamasync-tui
+          name: lamasync
+          path: dist/lamasync
 
       - name: Download skill bundle (LAMA-230)
         uses: actions/download-artifact@v4
@@ -139,7 +141,7 @@ jobs:
           path: dist/lamasync-skill
 
       - name: Make binaries executable
-        run: chmod +x dist/lamasync-server/lamasync-server dist/lamasyncd/lamasyncd dist/lamasync-tui/lamasync-tui dist/lamasync-skill/lamasync-skill-*.tar.gz
+        run: chmod +x dist/lamasync-server/lamasync-server dist/lamasyncd/lamasyncd dist/lamasync/lamasync dist/lamasync/lamasync-tui dist/lamasync-skill/lamasync-skill-*.tar.gz
 
       - name: Stage updater script
         run: cp packaging/install/update.sh dist/update.sh
@@ -150,7 +152,8 @@ jobs:
           files: |
             dist/lamasync-server/lamasync-server
             dist/lamasyncd/lamasyncd
-            dist/lamasync-tui/lamasync-tui
+            dist/lamasync/lamasync
+            dist/lamasync/lamasync-tui
             dist/lamasync-skill/lamasync-skill-*.tar.gz
             dist/update.sh
           generate_release_notes: true

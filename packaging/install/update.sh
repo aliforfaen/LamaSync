@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# update.sh — standalone updater for lamasyncd + lamasync-tui.
+# update.sh — standalone updater for lamasyncd + lamasync.
 #
 # Usage:
 #   curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/update.sh | bash
@@ -7,9 +7,11 @@
 # Behavior:
 #   1. If lamasyncd is not installed → prints the install command and exits.
 #   2. If lamasyncd is installed at the latest version → prints "already up to date".
-#   3. Otherwise → downloads lamasyncd and lamasync-tui from the latest GitHub
+#   3. Otherwise → downloads lamasyncd and lamasync from the latest GitHub
 #      release and atomically replaces the binaries in --binary-dir (default
-#      ~/.local/bin).
+#      ~/.local/bin). A legacy lamasync-tui binary (LAMA-323 transition) is
+#      refreshed in place when one already exists; it is never installed
+#      fresh.
 #
 # All downloads land in a temp directory; binaries are only moved into place
 # after a successful download. set -euo pipefail means any failed download or
@@ -81,7 +83,7 @@ To install, run:
   curl -sSL https://github.com/${REPO}/releases/latest/download/install.sh \\
     | bash -s -- --server-url URL --api-key KEY
 
-(Add --with-tui to also install the lamasync-tui companion.)
+(Add --with-cli to also install the lamasync CLI.)
 EOF
   exit 20
 fi
@@ -119,9 +121,9 @@ if [[ "${INSTALLED_VERSION}" == "${LATEST_VERSION}" ]]; then
 fi
 
 DAEMON_ASSET="lamasyncd"
-TUI_ASSET="lamasync-tui"
+CLI_ASSET="lamasync"
 DAEMON_URL="${INSTALL_BASE_URL}/${DAEMON_ASSET}"
-TUI_URL="${INSTALL_BASE_URL}/${TUI_ASSET}"
+CLI_URL="${INSTALL_BASE_URL}/${CLI_ASSET}"
 
 echo "==> Update available: ${INSTALLED_VERSION} → ${LATEST_VERSION}"
 echo "    Target directory: ${BINARY_DIR}"
@@ -157,16 +159,16 @@ if ! download_asset "${DAEMON_URL}" "${TMP_DIR}/lamasyncd"; then
   exit 6
 fi
 
-TUI_DOWNLOADED=0
-if curl -fsSI "${TUI_URL}" >/dev/null 2>&1; then
-  echo "==> Downloading ${TUI_ASSET}"
-  if download_asset "${TUI_URL}" "${TMP_DIR}/lamasync-tui"; then
-    TUI_DOWNLOADED=1
+CLI_DOWNLOADED=0
+if curl -fsSI "${CLI_URL}" >/dev/null 2>&1; then
+  echo "==> Downloading ${CLI_ASSET}"
+  if download_asset "${CLI_URL}" "${TMP_DIR}/lamasync"; then
+    CLI_DOWNLOADED=1
   else
-    echo "Warning: TUI download failed; skipping TUI update" >&2
+    echo "Warning: CLI download failed; skipping CLI update" >&2
   fi
 else
-  echo "    (TUI asset not in release; skipping)"
+  echo "    (CLI asset not in release; skipping)"
 fi
 
 # Verify the staged files actually look like binaries before we move them
@@ -176,16 +178,24 @@ if [[ ! -s "${TMP_DIR}/lamasyncd" ]]; then
   exit 6
 fi
 chmod +x "${TMP_DIR}/lamasyncd"
-if [[ "${TUI_DOWNLOADED}" -eq 1 ]]; then
-  chmod +x "${TMP_DIR}/lamasync-tui"
+if [[ "${CLI_DOWNLOADED}" -eq 1 ]]; then
+  chmod +x "${TMP_DIR}/lamasync"
 fi
 
 # Move into place. Use mv so the rename is atomic on the same filesystem;
-# create BINARY_DIR if it doesn't exist (first-time install of TUI).
+# create BINARY_DIR if it doesn't exist (first-time install of the CLI).
 mkdir -p "${BINARY_DIR}"
 mv -f "${TMP_DIR}/lamasyncd" "${BINARY_DIR}/lamasyncd"
-if [[ "${TUI_DOWNLOADED}" -eq 1 ]]; then
-  mv -f "${TMP_DIR}/lamasync-tui" "${BINARY_DIR}/lamasync-tui"
+if [[ "${CLI_DOWNLOADED}" -eq 1 ]]; then
+  mv -f "${TMP_DIR}/lamasync" "${BINARY_DIR}/lamasync"
+fi
+
+# LAMA-323 transition: refresh a pre-existing legacy lamasync-tui binary in
+# place so existing installs keep working during the rename. Never installs
+# lamasync-tui fresh.
+if [[ "${CLI_DOWNLOADED}" -eq 1 ]] && [[ -f "${BINARY_DIR}/lamasync-tui" ]]; then
+  cp -f "${BINARY_DIR}/lamasync" "${BINARY_DIR}/lamasync-tui"
+  echo "==> Refreshed legacy lamasync-tui companion (deprecated; remove it once nothing uses it)."
 fi
 
 # Verify the new binary still answers --version. A quick sanity check that
@@ -198,8 +208,8 @@ if [[ "${NEW_VERSION}" != "${LATEST_VERSION}" ]]; then
 fi
 
 echo "==> Updated lamasyncd to ${LATEST_VERSION}."
-if [[ "${TUI_DOWNLOADED}" -eq 1 ]]; then
-  echo "==> Updated lamasync-tui to ${LATEST_VERSION}."
+if [[ "${CLI_DOWNLOADED}" -eq 1 ]]; then
+  echo "==> Updated lamasync to ${LATEST_VERSION}."
 fi
 
 # LAMA-230: refresh the agent-skill bundle too, when the install-time

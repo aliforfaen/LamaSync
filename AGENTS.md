@@ -10,7 +10,7 @@ keys are the trust boundary.
 - `core` — shared types, SQLite schema/migrations, TOML, API client
 - `server` — Elysia REST, WebSocket, Swagger, auth
 - `daemon` — heartbeat, scheduler, rclone, mounts, local socket
-- `tui` — OpenTUI shell and `lamasync` non-interactive CLI
+- `cli` — `lamasync` non-interactive CLI (local daemon + fleet surface)
 - `web-ui` — embedded React SPA
 - `agent-skill` — installed CLI-first operator guidance
 - `deploy-agent` — fixed-script LXC production deploy runner
@@ -49,11 +49,9 @@ Docker and a system-installed rclone; never install rclone in a worktree.
 - DB changes go in both `SERVER_SCHEMA` and `MIGRATIONS`.
 - No `any` or inline casts: narrow `unknown` with type guards.
 - No `console.log` in library code; daemon/server may log operationally, while
-  the TUI renders through OpenTUI.
+  the CLI writes structured output (tables/JSON) through its output helpers.
 - Any route, CLI command, or flag change must update
   `packages/agent-skill/reference/`; CI enforces strict drift checking.
-- TUI wizards use `WizardRunner`; `ViewManager.show()` only changes visibility;
-  never add a global Enter handler in `app/shell.ts`.
 
 ## Safety and release
 

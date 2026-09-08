@@ -24,11 +24,11 @@ chmod +x /home/testuser/install.sh
   --server-url "${SERVER_URL}" \
   --api-key "${API_KEY}" \
   --hostname "${HOSTNAME}" \
-  --with-tui
+  --with-cli
 
 # Verify binaries
 lamasyncd --version
-lamasync-tui --version
+lamasync --version
 
 # ---------------------------------------------------------------------------
 # 2. Write client config

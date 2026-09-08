@@ -8,7 +8,7 @@ This reference is **sourced from** `lamasync <command> --help` — the drift
 checker (`scripts/check-skill-drift.ts`) verifies every command and flag
 mentioned here exists in the CLI's help output and runs in CI. If you add
 or rename a command/flag, update the relevant section below AND the help
-block in `packages/tui/src/cli/dispatch.ts`, then run
+block in `packages/cli/src/cli/dispatch.ts`, then run
 `bun scripts/check-skill-drift.ts` locally (no generator script exists —
 this file stays curated prose on top of the help texts).
 
@@ -30,12 +30,9 @@ this file stays curated prose on top of the help texts).
   2. `LAMASYNC_SERVER_URL` / `LAMASYNC_API_KEY` env vars
   3. `~/.config/lamasync/client.toml` (written by the installer — on a
      daemon host this is always present, so an agent needs no setup)
-- **Split-by-surface fallback (LAMA-248 / endgame)**: bare `lamasync`
-  (interactive TUI or `LAMASYNC_NO_TUI=1`) keeps the friendly
-  `localhost/dev-key` default + the LAMA-254 loud warning when no
-  `client.toml` exists — that's a local-dev affordance. Any explicit
-  subcommand (`lamasync folders list`, `lamasync doctor`, …) refuses
-  fast instead. Three exemptions: `lamasync doctor` (diagnosing the
+- **No interactive mode (LAMA-323)**: the binary is purely non-interactive.
+  Bare `lamasync` prints concise top-level help and exits 0. Explicit
+  subcommands with no `client.toml` refuse fast instead (below). Three exemptions: `lamasync doctor` (diagnosing the
   missing-config state is its job), the `lamasync local *` subtree
   (talks to the daemon Unix socket, not the server), and `lamasync
   register` (LAMA-262 — writes the `client.toml` as its first

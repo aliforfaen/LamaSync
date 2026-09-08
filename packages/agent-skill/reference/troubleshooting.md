@@ -70,11 +70,13 @@ anything real.
 `lamasync-client.md`. On a daemon host, the installer already populated
 the file — you should never see this.
 
-> LAMA-248: this row's advice now reads "default (localhost/dev-key) —
-> only used for bare-TTY (subcommands refuse exit 3 without client.toml)".
-> The bare `lamasync` interactive shell (and `LAMASYNC_NO_TUI=1`) still
-> uses the localhost/dev-key default with the loud fake-key warning —
-> that's the local-dev loop. Everything else refuses.
+> LAMA-248, updated for LAMA-323: there is no interactive shell anymore —
+> bare `lamasync` prints top-level help and exits 0. Explicit subcommands
+> refuse fast (exit 3) when `client.toml` is missing. Exemptions:
+> `lamasync doctor` (diagnosing the missing-config state is its job), the
+> `lamasync local *` subtree (talks to the daemon Unix socket, not the
+> server), and `lamasync register` (writes `client.toml` as its first
+> side-effect).
 
 ## Symptom: `lamasync doctor` reports `FAIL` on `socket: daemon`
 

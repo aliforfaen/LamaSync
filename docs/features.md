@@ -7,13 +7,13 @@
 |`@lamasync/core` — shared types, DB schema, TOML config, API client|done|
 |`@lamasync/server` — REST + WebSocket + Swagger + auth|done|
 |`@lamasync/daemon` — heartbeat, rclone execution, mounts, scheduler, socket server|done|
-|`@lamasync/tui` — Single tabbed shell with 6 views + guided wizards + CLI fallback (LAMA-173)|done|
+|`@lamasync/cli` — non-interactive CLI (LAMA-229/227; interactive TUI removed in LAMA-323)|done|
 |`@lamasync/web-ui` — React SPA embedded in the server binary (Dashboard, Folders, Apps, Conflicts, Admin)|done|
 |Agent skill (`lamasync` two-tier bundle: `SKILL.md` + `reference/`) — LAMA-230|done (+ installed)|
 |Docker: `Dockerfile.server`, `docker-compose.yml`|done|
 |`bun run build` → standalone binaries|working|
-|Unit tests (core + server + daemon + self-update + TUI + executor + offset + web-ui + wizard)|passing|
-|End-to-end smoke verification (health, register, folders, app snapshots, daemon, TUI, web UI)|done|
+|Unit tests (core + server + daemon + self-update + CLI + executor + offset + web-ui)|passing|
+|End-to-end smoke verification (health, register, folders, app snapshots, daemon, CLI, web UI)|done|
 
 ## Implemented features by issue
 

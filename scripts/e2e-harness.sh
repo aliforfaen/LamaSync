@@ -62,7 +62,7 @@ echo ""
 rm -rf "$E2E_LOG_DIR"
 mkdir -p "$LAMASYNC_DATA_DIR" "$LAMASYNC_BACKUP_DIR" "$TMP_HOME/.config/lamasync" "$TMP_HOME/E2E-Files"
 
-if [ "$REBUILD" -eq 1 ] || [ ! -f "packages/server/dist/lamasync-server" ] || [ ! -f "packages/daemon/dist/lamasyncd" ] || [ ! -f "packages/tui/dist/lamasync-tui" ]; then
+if [ "$REBUILD" -eq 1 ] || [ ! -f "packages/server/dist/lamasync-server" ] || [ ! -f "packages/daemon/dist/lamasyncd" ] || [ ! -f "packages/cli/dist/lamasync" ]; then
   echo "[build] Building binaries..."
   bun run build > "$E2E_LOG" 2>&1
   echo "[build] OK"
@@ -122,8 +122,8 @@ done
 ONLINE=$(curl -s -H "Authorization: Bearer $LAMASYNC_API_KEY" "http://127.0.0.1:${PORT}/api/v1/health" | python3 -c 'import sys, json; print(json.load(sys.stdin)["onlineCount"])')
 echo "[daemon] Online hosts: $ONLINE"
 
-echo "[tui] Running TUI CLI fallback..."
-HOME="$TMP_HOME" LAMASYNC_NO_TUI=1 LAMASYNC_SERVER_URL="http://127.0.0.1:${PORT}" LAMASYNC_API_KEY="$LAMASYNC_API_KEY" ./packages/tui/dist/lamasync-tui
+echo "[cli] Running lamasync status..."
+HOME="$TMP_HOME" LAMASYNC_SERVER_URL="http://127.0.0.1:${PORT}" LAMASYNC_API_KEY="$LAMASYNC_API_KEY" ./packages/cli/dist/lamasync status
 
 echo ""
 echo "=== Harness is running ==="
@@ -135,11 +135,11 @@ echo "Socket:   $SOCKET_PATH"
 echo "Logs:     $E2E_LOG_DIR/"
 echo ""
 echo "Usage examples:"
-echo "  # Interactive TUI (local mode via Unix socket)"
-echo "  HOME=$TMP_HOME LAMASYNC_SOCKET_PATH=$SOCKET_PATH ./packages/tui/dist/lamasync-tui"
+echo "  # CLI (local daemon mode via Unix socket)"
+echo "  HOME=$TMP_HOME LAMASYNC_SOCKET_PATH=$SOCKET_PATH ./packages/cli/dist/lamasync local status"
 echo ""
-echo "  # CLI fallback (fleet summary, no native renderer needed)"
-echo "  HOME=$TMP_HOME LAMASYNC_NO_TUI=1 LAMASYNC_SERVER_URL=http://127.0.0.1:${PORT} LAMASYNC_API_KEY=$LAMASYNC_API_KEY ./packages/tui/dist/lamasync-tui"
+echo "  # CLI against the server (fleet status)"
+echo "  HOME=$TMP_HOME LAMASYNC_SERVER_URL=http://127.0.0.1:${PORT} LAMASYNC_API_KEY=$LAMASYNC_API_KEY ./packages/cli/dist/lamasync status"
 echo ""
 echo "  # API sanity check"
 echo "  curl -H 'Authorization: Bearer $LAMASYNC_API_KEY' http://127.0.0.1:${PORT}/api/v1/health"

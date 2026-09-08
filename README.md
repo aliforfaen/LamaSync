@@ -9,17 +9,16 @@ through **rclone** over your own tailnet.
  ┌──────────────┐         ┌──────────────┐          ┌──────────────┐
  │ lamasync-    │◄──REST──┤ lamasyncd    │          │ lamasyncd    │
  │ server       │◄──WS────┤  (daemon)    │◄─────────┤  (daemon)    │
- │ SQLite       │         │ lamasync-tui │          │ lamasync-tui │
- │ rclone       │◄──rclone│  (TUI + CLI) │          │  (TUI + CLI) │
+ │ SQLite       │         │ lamasync     │          │ lamasync     │
+ │ rclone       │◄──rclone│  (CLI)       │          │  (CLI)       │
  └──────────────┘         └──────────────┘          └──────────────┘
 ```
 
 The server is the control plane: it holds your folder definitions, schedules,
 and a generated rclone config per device, and it records every sync/backup
 operation. Each device runs a lightweight daemon that does the actual file
-work and reports back. The terminal UI (`lamasync-tui`) is a fast local
-cockpit; the web UI is the fleet control plane; a scriptable CLI rides on the
-same binary.
+work and reports back. The web UI is the fleet control plane; a scriptable
+CLI (`lamasync`) handles local-daemon control and headless operations.
 
 ## What does this do for me?
 
@@ -114,17 +113,17 @@ public-safe.
 curl -sSL https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh | \
   bash -s -- --server-url http://<server-tailnet-ip>:8080 \
              --api-key "$LAMASYNC_API_KEY" \
-             --with-tui
+             --with-cli
 ```
 
-This downloads `lamasyncd` (+ the terminal UI with `--with-tui`), writes
+This downloads `lamasyncd` (+ the `lamasync` CLI with `--with-cli`), writes
 `~/.config/lamasync/client.toml` (mode 600), installs the systemd **user**
 service, and starts it.
 
 > The install script pulls binaries from the latest GitHub Release. If a
 > release has not been published for the current checkout yet, build from
 > source (see [Development](#development)) and copy
-> `packages/daemon/dist/lamasyncd` / `packages/tui/dist/lamasync-tui` to
+> `packages/daemon/dist/lamasyncd` / `packages/cli/dist/lamasync` to
 > `~/.local/bin/` yourself.
 
 Check it's alive:
@@ -138,18 +137,15 @@ journalctl --user -u lamasyncd -f
 
 - **Web UI** — log in with the API key, open **Synced folders** → new folder,
   pick the type, choose a storage destination, and set it up on a device.
-- **TUI** — tab to **This device**, press `w` for a guided new-backup wizard.
 - **CLI** — scriptable, same thing:
 
 ```bash
-lamasync-tui folders create --name LamaFiles --type sync
-lamasync-tui folders assign LamaFiles --host <device-id> --path /home/you/LamaFiles
+lamasync folders create --name LamaFiles --type sync
+lamasync folders assign LamaFiles --host <device-id> --path /home/you/LamaFiles
 ```
 
-(Any subcommand after `lamasync-tui` runs the CLI; bare `lamasync-tui` on a
-TTY boots the terminal UI. On an installed client, tab to **Backups & apps**
-to see fleet-wide backup folders + restore app settings, and **More** for
-GitHub repo adoption.)
+(`lamasync` is fully non-interactive; every command has `--help` and a
+`--json` mode.)
 
 Within one daemon config refresh (≤5 min), the device picks up the folder and
 starts syncing on schedule. Watch it happen in the **Activity** view.
@@ -159,28 +155,8 @@ starts syncing on schedule. Watch it happen in the **Activity** view.
 | Component | Purpose |
 |-----------|---------|
 | `lamasync-server` | REST + WebSocket + SQLite + embedded React web UI. Owns folder definitions, schedules, per-device generated rclone configs, and the operation log. |
-| `lamasyncd` | One per device (systemd user service). Runs the scheduled rclone operations, mounts, hooks, and ignore patterns; exposes a Unix socket for the local TUI. |
-| `lamasync-tui` | Terminal UI **and** CLI in one binary. Local mode talks to the daemon over its socket; fleet mode talks to the server; any positional command is a headless CLI (stable exit codes, `--json`). |
-
-The terminal UI (task-oriented tabs, 80-column-friendly):
-
-```
- This device  All devices  Backups      Conflicts    Activity     More
-▬▬▬▬▬▬▬▬▬▬▬▬▬
-
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Backups & apps                                                               │
-│ Backup folders (3)                                                           │
-│   appdata-backups — sftp                                                     │
-│   home-snapshots — sftp                                                      │
-│   photos-archive — sftp                                                      │
-│                                                                              │
-│ App settings — protection snapshots                                           │
-│ Select an app to inspect or download its snapshots.                           │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-(More captures: `docs/lama275-artifacts/`.)
+| `lamasyncd` | One per device (systemd user service). Runs the scheduled rclone operations, mounts, hooks, and ignore patterns; exposes a Unix socket for local CLI control. |
+| `lamasync` | Non-interactive CLI. Local mode talks to the daemon over its socket; fleet mode talks to the server. Stable exit codes, `--json` everywhere. The legacy `lamasync-tui` name is published as a deprecated alias for one transition release. |
 
 ### How a sync happens
 
@@ -196,7 +172,7 @@ The terminal UI (task-oriented tabs, 80-column-friendly):
    hooks and ignore files, and streams a JSON log back for real transfer
    counts.
 4. Every run lands in the operation log and broadcasts over WebSocket to the
-   TUI/web Activity views (and to your notification channels, if configured).
+   web Activity view (and to your notification channels, if configured).
 
 ### Storage destinations
 
@@ -215,7 +191,7 @@ bun test
 bun run build             # → standalone binaries in packages/*/dist/
 ```
 
-Dev servers (`dev:server` / `dev:daemon` / `dev:tui` / `dev:web-ui`), the
+Dev servers (`dev:server` / `dev:daemon` / `dev:cli` / `dev:web-ui`), the
 E2E harness (`scripts/e2e-harness.sh`), and the installer/updater smoke
 tests (`scripts/test-install.sh`, `scripts/test-update.sh`) are described in
 `docs/development.md`. The repo layout, design notes, and the rolling status

@@ -1,0 +1,168 @@
+import { connect } from "node:net";
+import { defaultSocketPath } from "@lamasync/core";
+
+export interface SocketResponse {
+  ok: boolean;
+  data?: unknown;
+  error?: string;
+}
+
+export interface SocketClient {
+  cmd(req: Record<string, unknown>): Promise<SocketResponse>;
+  close(): void;
+}
+
+
+/**
+ * Opens a fresh Unix-socket connection per request and exchanges a single
+ * line of JSON. Returns a handle that can be reused for subsequent calls.
+ *
+ * The daemon (or any counterpart) is expected to read one line, write a
+ * single JSON response terminated by `\n`, and close the connection.
+ *
+ * LAMA-218: the default socket path comes from `@lamasync/core`'s shared
+ * helper — same resolution chain as the daemon (env → XDG → ~/.lamasync)
+ * so the CLI always points at the daemon the user actually started.
+ */
+export function connectSocket(path?: string): Promise<SocketClient> {
+  const socketPath = path ?? defaultSocketPath();
+  const { promise, resolve, reject } = Promise.withResolvers<SocketClient>();
+  let settled = false;
+  const probe = connect(socketPath);
+  probe.once("connect", () => {
+    settled = true;
+    probe.end();
+    resolve(buildClient(socketPath));
+  });
+  probe.once("error", (err: NodeJS.ErrnoException) => {
+    if (settled) return;
+    settled = true;
+    reject(err);
+  });
+  return promise;
+}
+
+function buildClient(socketPath: string): SocketClient {
+  return {
+    cmd(req) {
+      return sendRequest(socketPath, req);
+    },
+    close() {
+      // Stateless: no persistent connection to close.
+    },
+  };
+}
+
+function sendRequest(
+  socketPath: string,
+  req: Record<string, unknown>,
+): Promise<SocketResponse> {
+  const { promise, resolve, reject } = Promise.withResolvers<SocketResponse>();
+  const sock = connect(socketPath);
+  let buf = "";
+  let resolved = false;
+
+  const finish = (value: SocketResponse): void => {
+    if (resolved) return;
+    resolved = true;
+    sock.destroy();
+    resolve(value);
+  };
+
+  const fail = (err: Error): void => {
+    if (resolved) return;
+    resolved = true;
+    sock.destroy();
+    reject(err);
+  };
+
+  sock.setEncoding("utf8");
+  sock.once("connect", () => {
+    sock.write(JSON.stringify(req) + "\n");
+  });
+  sock.on("data", (chunk: string) => {
+    buf += chunk;
+    const idx = buf.indexOf("\n");
+    if (idx >= 0) {
+      const line = buf.slice(0, idx).trim();
+      try {
+        const parsed = JSON.parse(line) as SocketResponse;
+        finish(parsed);
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+  });
+  sock.once("error", fail);
+  sock.once("close", () => {
+    if (!resolved) {
+      fail(new Error("socket closed before response"));
+    }
+  });
+  sock.once("timeout", () => fail(new Error("socket timeout")));
+
+  return promise;
+}
+
+/**
+ * Convenience wrappers around the daemon socket for switch-to-mount /
+ * switch-to-sync commands. Both return the dispatch `data` on success and
+ * throw on transport or dispatch error.
+ */
+export async function requestSwitchMount(
+  folderId: string,
+  socketPath?: string,
+): Promise<unknown> {
+  const client = await connectSocket(socketPath);
+  try {
+    const res = await client.cmd({ cmd: "switch-to-mount", folderId });
+    if (!res.ok) {
+      throw new Error(res.error ?? "switch-to-mount failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}
+
+export async function requestSyncOne(folderId: string, socketPath?: string): Promise<unknown> {
+  const client = await connectSocket(socketPath);
+  try {
+    const res = await client.cmd({ cmd: "sync", folderId });
+    if (!res.ok) {
+      throw new Error(res.error ?? "sync failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}
+
+export async function requestSyncAll(socketPath?: string): Promise<unknown> {
+  const client = await connectSocket(socketPath);
+  try {
+    const res = await client.cmd({ cmd: "sync-all" });
+    if (!res.ok) {
+      throw new Error(res.error ?? "sync-all failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}
+
+export async function requestSwitchSync(
+  folderId: string,
+  socketPath?: string,
+): Promise<unknown> {
+  const client = await connectSocket(socketPath);
+  try {
+    const res = await client.cmd({ cmd: "switch-to-sync", folderId });
+    if (!res.ok) {
+      throw new Error(res.error ?? "switch-to-sync failed");
+    }
+    return res.data;
+  } finally {
+    client.close();
+  }
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/test-install.sh — test the curl-to-bash install path in Docker.
 #
-# Builds the daemon + TUI binaries, starts a tiny local "release" HTTP server,
+# Builds the daemon + CLI binaries, starts a tiny local "release" HTTP server,
 # then runs the install script in a fresh Debian container via curl | bash.
 # Verifies that the binary, config, and systemd unit are written correctly.
 
@@ -24,7 +24,7 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 echo "[build] Building lamasync binaries..."
-if [ ! -f "$ROOT/packages/daemon/dist/lamasyncd" ] || [ ! -f "$ROOT/packages/tui/dist/lamasync-tui" ]; then
+if [ ! -f "$ROOT/packages/daemon/dist/lamasyncd" ] || [ ! -f "$ROOT/packages/cli/dist/lamasync" ]; then
   bun run build
 fi
 
@@ -33,10 +33,10 @@ TEST_DIR="$ROOT/tmp/install-test"
 rm -rf "$TEST_DIR"
 mkdir -p "$TEST_DIR"
 cp "$ROOT/packages/daemon/dist/lamasyncd" "$TEST_DIR/lamasyncd"
-cp "$ROOT/packages/tui/dist/lamasync-tui" "$TEST_DIR/lamasync-tui"
+cp "$ROOT/packages/cli/dist/lamasync" "$TEST_DIR/lamasync"
 cp "$ROOT/packaging/install/install.sh" "$TEST_DIR/install.sh"
 # LAMA-230: the install script fetches lamasync-skill-<version>.tar.gz
-# when the skill install is opted in (--with-tui defaults it to yes).
+# when the skill install is opted in (--with-cli defaults it to yes).
 bash "$ROOT/packaging/build-skill-tarball.sh" "$TEST_DIR" >/dev/null
 
 echo "[docker] Creating network ${NETWORK}..."
@@ -75,10 +75,10 @@ docker run --rm \
       --server-url http://lamasync-server:8080 \
       --api-key test-install-key \
       --hostname install-test-host \
-      --with-tui
+      --with-cli
     echo '[client] Verifying install...'
     ~/.local/bin/lamasyncd --version
-    ~/.local/bin/lamasync-tui --version
+    ~/.local/bin/lamasync --version
     grep -q 'serverUrl = \"http://lamasync-server:8080\"' ~/.config/lamasync/client.toml
     grep -q 'apiKey = \"test-install-key\"' ~/.config/lamasync/client.toml
     grep -q 'ExecStart=/root/.local/bin/lamasyncd' ~/.config/systemd/user/lamasyncd.service
@@ -90,6 +90,15 @@ docker run --rm \
     test -f ~/.agents/skills/lamasync/SKILL.md
     test -f ~/.agents/skills/lamasync/VERSION
     test -d ~/.agents/skills/lamasync/reference
+    echo '[client] Verifying deprecated --with-tui alias...'
+    ~/.local/bin/lamasyncd --version >/dev/null
+    curl -sSL http://$SERVER_NAME/install.sh | bash -s -- \
+      --server-url http://lamasync-server:8080 \
+      --api-key test-install-key \
+      --hostname install-test-host \
+      --with-tui 2> /tmp/install-tui-alias.stderr
+    grep -q 'deprecated' /tmp/install-tui-alias.stderr
+    test -x ~/.local/bin/lamasync
     echo '[client] All install checks passed.'
   "
 

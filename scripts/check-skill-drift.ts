@@ -24,7 +24,7 @@ import { spawnSync } from "bun";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, relative, resolve } from "path";
 
-import { listInvocations } from "../packages/tui/src/cli/dispatch.ts";
+import { listInvocations } from "../packages/cli/src/cli/dispatch.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const REPO = ROOT;
@@ -249,28 +249,28 @@ function dumpCliHelp(): { invocations: Set<string>; perCmd: Map<string, string> 
 }
 
 function runHelp(args: string[]): string {
-  const binary = join(REPO, "packages/tui/dist/lamasync-tui");
+  const binary = join(REPO, "packages/cli/dist/lamasync");
   if (existsSync(binary)) {
     const res = spawnSync({
       cmd: [binary, ...args],
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, LAMASYNC_NO_TUI: "1" },
+      env: { ...process.env },
     });
     if (res.exitCode === 0) {
       return res.stdout.toString() + "\n" + res.stderr.toString();
     }
   }
-  // Fall back to running the TUI entrypoint from source when the compiled
-  // binary isn't built (e.g. the CI check job). `packages/tui/src/index.ts`
-  // routes any positional argv to the CLI dispatcher before booting the
-  // TUI; `cli/index.ts` is only a re-export barrel and prints nothing.
-  const src = join(REPO, "packages/tui/src/index.ts");
+  // Fall back to running the CLI entrypoint from source when the compiled
+  // binary isn't built (e.g. the CI check job). `packages/cli/src/index.ts`
+  // routes all argv to the CLI dispatcher; `cli/index.ts` is only a
+  // re-export barrel and prints nothing.
+  const src = join(REPO, "packages/cli/src/index.ts");
   const srcRes = spawnSync({
     cmd: ["bun", "run", src, ...args],
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, LAMASYNC_NO_TUI: "1" },
+    env: { ...process.env },
   });
   return srcRes.stdout.toString() + "\n" + srcRes.stderr.toString();
 }

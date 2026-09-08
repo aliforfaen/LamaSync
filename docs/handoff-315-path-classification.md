@@ -75,7 +75,7 @@ and are already captured-with-snapshot by the existing `captured_spec`.
 1. **Authoring.** Templates are CRUD'd over the API
    (`packages/server/src/routes/apps.ts`: `GET|POST /apps/templates`,
    `GET|PUT|DELETE /apps/templates/:id`) and the CLI
-   (`packages/tui/src/cli/apps.ts`). `normalizeCaptureSpec` (apps.ts:128)
+   (`packages/cli/src/cli/apps.ts`). `normalizeCaptureSpec` (apps.ts:128)
    accepts either a full `CaptureSpec` or a legacy `string[]` of raw paths; a
    legacy string entry is promoted to
    `{ path, classification: "unknown", rationale: null }`. It validates every
@@ -441,7 +441,7 @@ Target is additive and backward-compatible:
 - **packages/daemon** — no behavioral change in stage 1: the wire
   (`AppCaptureAssignment`) is unchanged; capture/exclude logic is untouched.
   Only confirm the spec readers ignore the new JSON keys.
-- **packages/tui** (`cli/apps.ts`, `dispatch.ts:405–570`) — extend
+- **packages/cli** (`cli/apps.ts`, `dispatch.ts:405–570`) — extend
   `apps templates create|update` with per-path classification flags (or a small
   `--classify` review helper) and show classes in `apps protections get` /
   `apps templates get` JSON output. Keep output `--json` additive.

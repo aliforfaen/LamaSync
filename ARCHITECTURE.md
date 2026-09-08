@@ -20,7 +20,7 @@
 ┌───────┴───────┐  ┌───────┴───────┐  ┌───────┴───────┐
 │ Client A      │  │ Client B      │  │ Client C      │
 │ lamasyncd     │  │ lamasyncd     │  │ lamasyncd     │
-│ lamasync-tui  │  │ lamasync-tui  │  │ lamasync-tui  │
+│ lamasync      │  │ lamasync      │  │ lamasync      │
 │ rclone        │  │ rclone        │  │ rclone        │
 └───────────────┘  └───────────────┘  └───────────────┘
 ```
@@ -32,9 +32,10 @@ Three binaries per machine:
   generator. Runs in Docker on TrueNAS.
 - **`lamasyncd`** — background daemon (`systemd --user`), spawns and supervises
   rclone processes, runs cron-driven sync schedules, reports status to the
-  server, exposes a Unix socket for the local TUI.
-- **`lamasync-tui`** — OpenTUI frontend, talks to the local daemon over a
-  Unix socket for the local view and to the server REST/WS for the fleet view.
+  server, exposes a Unix socket for local CLI control.
+- **`lamasync`** — non-interactive CLI; talks to the local daemon over a
+  Unix socket for local operations and to the server REST/WS for fleet
+  operations.
 - **Management Web UI** — React SPA embedded in `lamasync-server` at `GET /`.
   Built with Vite and inlined into a single `dist/index.html` by
   `scripts/inline-web-ui.ts`; auth uses the same pre-shared API key via
@@ -411,7 +412,7 @@ Credentials resolve to one of three typed principals (`AuthPrincipal` in
 
 **Lifecycle of a sync:**
 
-1. Scheduler fires (or manual trigger from the TUI).
+1. Scheduler fires (or manual trigger from the CLI / web UI).
 2. Pulls folder config from local cache (synced with the server).
 3. Acquires the server-side lock keyed by the folder's **canonical
    destination/repository key** (`acquireLock`), with bounded backoff +
@@ -469,26 +470,15 @@ script is a standalone `curl | bash` updater for clients.
   the duration of the sync; the other connects SFTP to the peer's LAN IP.
 - On 5s connection timeout, fall back to the standard server relay.
 
-### `lamasync` (CLI + TUI, LAMA-229/276)
+### `lamasync` (CLI, LAMA-229/276)
 
-The `lamasync` binary is BOTH the OpenTUI shell AND a non-interactive CLI:
-any positional subcommand (`lamasync status`, `lamasync folders list …`)
-routes to non-interactive dispatch (exit codes 0/1/2/3/4 = ok/runtime/
-usage/auth-failure/unreachable; `--json` everywhere); bare invocation with a
-TTY boots the shell; `LAMASYNC_NO_TUI=1` keeps the legacy CLI fallback.
-
-The shell's tabs are task-oriented (LAMA-275 D3/D4, approved):
-
-- **This device** — folder list for the local host (hotkeys `1` sync all,
-  `2` sync one, `3` refresh, `p` cache profile, `s` switch type,
-  `n` network shares, `w` new backup; the footer repaints per-folder
-  actions for the selected row).
-- **All devices** — live fleet via `/api/v1/ws` host events.
-- **Backups & apps** — fleet-wide backup folders + app snapshot restores.
-- **Conflicts** / **Activity** — pending resolutions / operation log.
-- **More** — tools & integrations; GitHub (repo adoption via `gh`) is a
-  drill-in view hidden from the tab bar, reached from More or the `g`
-  hotkey, Esc returns to More.
+The `lamasync` binary is a purely non-interactive CLI: any positional
+subcommand (`lamasync status`, `lamasync folders list …`) routes to the
+dispatch tree (exit codes 0/1/2/3/4 = ok/runtime/usage/auth-failure/
+unreachable; `--json` everywhere); bare invocation prints top-level help and
+exits 0. The legacy interactive OpenTUI shell was removed in LAMA-323; fleet
+management lives in the web UI, and the `packages/agent-skill/` bundle is the
+agent surface.
 
 **Local mode** (default, connects to Unix socket); **Fleet mode** connects
 to server REST + WS and subscribes to `/api/v1/ws` host events.
@@ -535,7 +525,7 @@ Cleanup temp tarball
 ### Restore (server → client)
 
 ```
-TUI app-settings view / `lamasync apps snapshots download`
+`lamasync apps snapshots download`
        │
        ▼
 Pick protection → pick snapshot → inspect archive contents
@@ -585,7 +575,7 @@ Configured per folder, stored in `folder_assignments.conflict_strategy`:
 | `newer_wins`  | Last-modified timestamp decides                         |
 | `source_wins` | Designated source host always wins                      |
 | `keep_both`   | Rename conflicting file with `.conflict-YYYYMMDD` suffix|
-| `manual`      | Queue conflict, notify TUI, pause folder until resolved|
+| `manual`      | Queue conflict, notify channels, pause folder until resolved|
 
 ---
 
@@ -608,7 +598,7 @@ notifies via NTFY.
 
 | Layer              | Choice                      | Rationale                                                |
 |--------------------|-----------------------------|----------------------------------------------------------|
-| Language           | TypeScript                  | Single-language stack across server, daemon, TUI         |
+| Language           | TypeScript                  | Single-language stack across server, daemon, CLI         |
 | Runtime            | Bun ≥ 1.3                   | `bun:sqlite`, `Bun.spawn`, single-file `--compile` binaries |
 | HTTP server        | Elysia                      | Lightweight, built-in validation, Swagger plugin         |
 | HTTP client        | global `fetch` (Bun)        | Zero-dependency HTTP                                      |
@@ -617,9 +607,8 @@ notifies via NTFY.
 | Schema migrations  | Idempotent `ALTER TABLE`    | Applied in `initDb()`; duplicate-column errors ignored   |
 | Serialization      | `JSON.parse` / `JSON.stringify` | Standard, no schema framework needed for internal use |
 | Config format      | TOML (server, client)       | Human-writable; server uses env for runtime config       |
-| TUI framework      | OpenTUI (`@opentui/core`)   | Native terminal rendering with vnode model               |
 | rclone integration | `Bun.spawn(["rclone", ...])`| Direct argv; no shell escaping concerns                   |
-| Unix socket        | `node:net.Server`           | Daemon ↔ TUI control channel                             |
+| Unix socket        | `node:net.Server`           | Daemon ↔ CLI control channel                             |
 | Testing            | `bun:test`                  | Built-in test runner                                     |
 | Build              | `bun build --compile`       | Produces standalone binaries per package                  |
 
@@ -682,9 +671,9 @@ GitHub Release directly. See `packaging/install/update.sh` for the standalone
 
 ```bash
 # One-liner install — pulls the platform-specific binary
-# (omit --with-tui if you only need the daemon)
-curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/install.sh | bash -s -- --with-tui
-# → downloads lamasyncd and lamasync-tui, creates ~/.config/lamasync/,
+# (omit --with-cli if you only need the daemon)
+curl -sSL https://github.com/aliforfaen/LamaSync/releases/latest/download/install.sh | bash -s -- --with-cli
+# → downloads lamasyncd and lamasync, creates ~/.config/lamasync/,
 #   installs systemd --user unit (see packaging/systemd/)
 
 # One-liner update (checks GitHub Releases and replaces binaries)
@@ -758,9 +747,9 @@ lamasync/
 │   │   ├── src/mounts.ts     # mount registry, restart, health-check
 │   │   ├── src/socket.ts     # Unix socket control protocol
 │   │   └── src/lock.ts       # server-side lock coordination
-│   ├── tui/                  # @lamasync/tui — OpenTUI frontend
+│   ├── cli/                  # @lamasync/cli — non-interactive CLI (LAMA-227)
 │   │   ├── src/index.ts
-│   │   └── src/views/        # menu, local, fleet, logs, dotfiles
+│   │   └── src/cli/          # dispatch tree, command modules, output helpers
 │   └── agent-skill/          # CLI-first agent skill (LAMA-230)
 │       ├── SKILL.md          #   trigger + decision tree + safety summary
 │       ├── reference/        #   cli.md, api.md, recipes.md, troubleshooting.md, safety.md

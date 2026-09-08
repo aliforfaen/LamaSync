@@ -28,14 +28,14 @@ LAMASYNC_BACKUP_DIR=/tmp/lamasync-test-backups \
   bun run dev:server
 ```
 
-`bun run dev:daemon`, `bun run dev:tui`, and `bun run dev:web-ui` start the
+`bun run dev:daemon`, `bun run dev:cli`, and `bun run dev:web-ui` start the
 other pieces (see `docs/development.md` for the full dev guide and recipes).
 
 ## Validation gates (CI runs these too)
 
 1. `bun x tsc --noEmit` — must be clean.
 2. `bun run build:web-ui` — needed before tests.
-3. `bun test` — the whole suite must pass (expect the TUI suite to be fast
+3. `bun test` — the whole suite must pass (expect the CLI suite to be fast
    and hermetic; e2e rclone/Docker tests skip cleanly when tools are absent).
 4. `bun scripts/check-skill-drift.ts` — after **any** CLI/help copy change or
    new route/command: the agent-skill `reference/*.md` must match the binaries.
@@ -52,7 +52,7 @@ other pieces (see `docs/development.md` for the full dev guide and recipes).
   `packages/server/src/routes/` with its own `prefix` + Swagger `detail`.
 - **DB changes** go in BOTH `SERVER_SCHEMA` and the `MIGRATIONS` array.
 - **No `console.log` in library code**; daemon/server log to stdout/stderr,
-  the TUI renders via OpenTUI only.
+  the CLI writes structured output only.
 - **No `any` / inline casts** — narrow with `unknown` + type guards.
 - **Glossary**: user-facing copy uses *devices*, *storage destinations*,
   *app settings backups*, *Activity* — see `docs/terminology.md`. Never

@@ -25,7 +25,7 @@
       "@lamasync/core/*": ["./packages/core/src/*"],
       "@lamasync/server": ["./packages/server/src/index.ts"],
       "@lamasync/daemon": ["./packages/daemon/src/index.ts"],
-      "@lamasync/tui": ["./packages/tui/src/index.ts"]
+      "@lamasync/cli": ["./packages/cli/src/index.ts"]
     }
   },
   "include": ["packages/**/src/**/*.ts", "packages/**/src/**/*.tsx"],

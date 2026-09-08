@@ -1,6 +1,6 @@
 ---
 name: lamasync-client
-description: Install and operate LamaSync as a client on this host — prereqs, daemon/TUI install, registration verification, and day-2 usage against the fleet server.
+description: Install and operate LamaSync as a client on this host — prereqs, daemon/CLI install, registration verification, and day-2 usage against the fleet server.
 ---
 
 # lamasync-client
@@ -60,7 +60,7 @@ bun install && bun run build   # produces packages/daemon/dist/lamasyncd etc.
 ./packaging/install/install.sh \
   --server-url http://100.113.52.108:8080 \
   --api-key "$LAMASYNC_API_KEY" \
-  --with-tui
+  --with-cli
 ```
 
 Or the one-liner, which downloads binaries from the latest GitHub Release
@@ -70,12 +70,12 @@ Or the one-liner, which downloads binaries from the latest GitHub Release
 curl -sSL https://raw.githubusercontent.com/aliforfaen/LamaSync/master/packaging/install/install.sh | bash -s -- \
   --server-url http://100.113.52.108:8080 \
   --api-key "$LAMASYNC_API_KEY" \
-  --with-tui
+  --with-cli
 ```
 
 The installer:
 
-- installs `lamasyncd` (and `lamasync-tui` with `--with-tui`) into `~/.local/bin`
+- installs `lamasyncd` (and the `lamasync` CLI with `--with-cli`) into `~/.local/bin`
 - writes `~/.config/lamasync/client.toml` (mode 600) with serverUrl/apiKey/hostname
 - installs + enables + starts the systemd **user** unit `lamasyncd.service`
 - enables lingering
@@ -119,8 +119,10 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
   # also: {"type":"trigger_sync"} / {"type":"trigger_backup"} (optional payload {"folderId":"..."})
   ```
 
-- **TUI**: `lamasync-tui` talks to the local daemon over its Unix socket.
-  For agents / no-TTY contexts use the CLI fallback: `LAMASYNC_NO_TUI=1 lamasync-tui`.
+- **CLI**: `lamasync` is non-interactive everywhere; `lamasync local *`
+  talks to the local daemon over its Unix socket, everything else talks to
+  the server REST API. The legacy `lamasync-tui` binary name is a
+  deprecated alias kept for one transition release.
 - **Local state**: `~/.local/share/lamasync` (config cache),
   socket at `$XDG_RUNTIME_DIR/lamasync.sock`.
 - **Read-only mounts run as per-folder systemd user units.** For every
@@ -172,5 +174,5 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
 
 - `lamasync` skill (sibling) — CLI-first with `reference/api.md` as the REST
   escape hatch.
-- `README.md` in the repo root — architecture, server deployment, TUI.
+- `README.md` in the repo root — architecture, server deployment, CLI.
 - `ARCHITECTURE.md` — system design and DB schema.

@@ -1,6 +1,7 @@
-// Cron sanity checker for the Folders assign form. Mirrors the TUI's
-// `packages/tui/src/app/cron.ts` (web-ui cannot import from the tui package).
-// Plain string → error-string function: five whitespace-separated fields,
+// Cron sanity checker for the Folders assign form. Originated as a copy of
+// the (now removed) TUI's `packages/tui/src/app/cron.ts`; since LAMA-323 this
+// is the only copy in the repo. Plain string → error-string function: five
+// whitespace-separated fields,
 // numeric ranges per field, `*` / steps / ranges / lists, plus the
 // @-keywords the daemon can actually schedule.
 //

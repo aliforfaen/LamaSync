@@ -1,8 +1,7 @@
 // Schedule presets shared by every web-ui surface that picks a schedule
 // (assignment editor, folder setup form, app settings manifest form).
-// Labels are the single source of truth for the web — the TUI keeps an
-// identical copy in `packages/tui/src/app/schedule-presets.ts`, so the two
-// must stay in lock-step (LAMA-267).
+// Labels are the single source of truth for the web (LAMA-267); the TUI's
+// mirror copy was removed with the TUI in LAMA-323.
 
 export interface SchedulePreset {
   readonly label: string;

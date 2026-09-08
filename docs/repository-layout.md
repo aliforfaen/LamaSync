@@ -106,13 +106,11 @@ lamasync/                     # Bun workspace root
         actions.test.ts       # action handlers + LAMA-220 backup folder filter
         daemon-update.ts      # LAMA-299: injected update helper (preflight → release → asset → replace), shared by --update + the remote update_daemon action
         daemon-update.test.ts # helper tests (no secret leaks asserted per outcome)
-    tui/                      # @lamasync/tui — OpenTUI frontend + CLI subcommands (LAMA-227)
+    cli/                      # @lamasync/cli — non-interactive CLI (LAMA-227)
       src/
-        index.ts              # slim entry: flags, CLI fallback, bootShell() — CLI dispatch FIRST
-        boot.ts               # wires Shell with Local/Fleet/Dotfiles/Conflicts/Logs/Gh views
+        index.ts              # binary entry: --version, deprecation notice, runCli()
         api.ts                # client builder (env → config file → defaults)
         socket-client.ts      # Unix socket client for local mode
-        cli-fallback.ts       # LAMASYNC_NO_TUI=1 CLI mode
         cli/                  # LAMA-229 + LAMA-231: non-interactive subcommand CLI
           index.ts            #   dispatch entry
           dispatch.ts         #   greedy walker over the command tree
@@ -139,27 +137,6 @@ lamasync/                     # Bun workspace root
           browse.ts           #   `lamasync browse local|s3|restic|jobs`
           notifications.ts    #   `lamasync notifications list|channels`
           admin.ts            #   `lamasync admin prune`
-        app/
-          theme.ts            # status prefixes + title strings
-          widgets.ts          # pageShell, hotkeyFooter, statusBox, loading/error/emptyBox, realize()
-          keymap.ts           # Hotkey type + matchHotkey() (char / name dispatch)
-          keymap.test.ts      # keymap dispatch unit tests
-          view-manager.ts     # View interface, ViewSpec, ViewManager (visible-toggle)
-          view-manager.test.ts # view-manager unit tests (fake + gated real renderer)
-          shell.ts            # Shell class — TabSelect bar + global dispatch + status
-          wizard.ts           # WizardRunner + Wizard/WizardStep + registry
-          wizard.test.ts      # wizard state-machine tests (pure)
-          fleet-service.ts    # createFleetService() — WS subscription lifted out
-          schedule-presets.ts # preset table (mirror web-ui/Dotfiles.tsx)
-        views/
-          local.ts            # LocalView (folder list + sync/cache/wizard hotkeys)
-          fleet.ts            # FleetView (uses FleetService for live WS hosts)
-          dotfiles.ts         # app protections/snapshots browser + restore state machine (view id kept internal)
-          conflicts.ts        # ConflictsView (highlighted-row resolution + confirm)
-          logs.ts             # LogsView (ScrollBox + paginated operations)
-          gh-selector.ts      # GhView (GitHub repo adoption via `gh` CLI)
-        flows/
-          backup-setup.ts     # Wizard factory: create folder + assign host
     agent-skill/              # CLI-first agent skill (LAMA-230); two-tier bundle
       SKILL.md                # frontmatter trigger + decision tree + safety summary
       lamasync-client.md      # separate client-install onboarding skill
@@ -229,7 +206,7 @@ lamasync/                     # Bun workspace root
         runner.test.ts        # injected spawner/probe tests (success, failure, health timeout, scrub, cap)
   packaging/                  # curl | bash installer + skill tarball + systemd template
     install/
-      install.sh              # install lamasyncd (+ optional TUI) and systemd unit
+      install.sh              # install lamasyncd (+ optional lamasync CLI) and systemd unit
       update.sh               # standalone self-update script
     systemd/
       lamasyncd.service       # systemd user-unit template

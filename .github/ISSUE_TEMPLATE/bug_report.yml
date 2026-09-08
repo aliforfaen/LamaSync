@@ -15,7 +15,7 @@ body:
       description: Which part of LamaSync is affected?
       options:
         - Web UI
-        - TUI / CLI (lamasync-tui)
+        - CLI (lamasync)
         - Daemon (lamasyncd)
         - Server (API / sync engine)
         - Install / update / packaging
@@ -44,7 +44,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `lamasync-tui --version` / `lamasyncd --version`, or the release tag.
+      description: Output of `lamasync --version` / `lamasyncd --version`, or the release tag.
   - type: textarea
     id: logs
     attributes:

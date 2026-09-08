@@ -75,10 +75,10 @@ snapshot() {
   } > "$REPORT_DIR/${name}.txt" 2>&1
 }
 
-run_tui() {
+run_cli() {
   local name="$1"
-  log "running TUI CLI fallback: $name"
-  LAMASYNC_NO_TUI=1 lamasync-tui > "$REPORT_DIR/${name}.txt" 2>&1 || true
+  log "running lamasync CLI: $name"
+  lamasync doctor > "$REPORT_DIR/${name}.txt" 2>&1 || true
 }
 
 socket_cmd() {
@@ -90,7 +90,7 @@ main() {
   wait_for_daemon_socket
   setup_minio
 
-  run_tui "tui-before-setup"
+  run_cli "cli-before-setup"
   snapshot "api-before-setup"
 
   log "creating S3 folder..."
@@ -130,7 +130,7 @@ main() {
   log "refreshing daemon config..."
   socket_cmd '{"cmd":"status"}' | tee "$REPORT_DIR/daemon-status-before-sync.txt"
 
-  run_tui "tui-after-assignment"
+  run_cli "cli-after-assignment"
   snapshot "api-after-assignment"
 
   log "creating test file on daemon..."
@@ -150,7 +150,7 @@ main() {
   done
 
   snapshot "api-after-sync"
-  run_tui "tui-after-sync"
+  run_cli "cli-after-sync"
   socket_cmd '{"cmd":"list-ops"}' | tee "$REPORT_DIR/daemon-ops.txt"
 
   log "checking bucket contents..."

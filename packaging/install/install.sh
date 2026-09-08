@@ -6,7 +6,7 @@
 #     --server-url http://100.64.0.1:8080 \
 #     --api-key <your-key> \
 #     [--hostname myhost] \
-#     [--with-tui] \
+#     [--with-cli] \
 #     [--binary-dir ~/.local/bin] \
 #     [--check]
 #
@@ -40,13 +40,16 @@ fi
 SERVER_URL=""
 API_KEY=""
 HOSTNAME_VAL="$(hostname)"
-WITH_TUI=0
+WITH_CLI=0
+# --with-tui is a deprecated alias for --with-cli, kept for one release
+# (LAMA-323); it behaves exactly like --with-cli.
+WITH_TUI_ALIAS=0
 CHECK_ONLY=0
 PRINT_VERSION=0
 ASSUME_YES=0
 
 ASSET_DAEMON="lamasyncd"
-ASSET_TUI="lamasync-tui"
+ASSET_CLI="lamasync"
 
 # Write a systemd user unit that matches the install location and socket path.
 # Defined inline so the script is self-contained when piped from curl.
@@ -107,10 +110,11 @@ Required:
 
 Options:
   --hostname NAME     Override hostname (default: $(hostname))
-  --with-tui          Also install the lamasync-tui binary to BINARY_DIR
+  --with-cli          Also install the lamasync CLI binary to BINARY_DIR
+  --with-tui          (Deprecated alias for --with-cli; removed in an upcoming release)
   --binary-dir DIR    Install binaries into DIR (default: ~/.local/bin)
   --check             Only check for updates; never write to disk
-  --yes, -y           Skip prompts (default skill install when --with-tui)
+  --yes, -y           Skip prompts (default skill install when --with-cli)
   --version           Print installer version (0.2.1) and exit
   -h, --help          Show this help
 
@@ -126,7 +130,8 @@ while [[ $# -gt 0 ]]; do
     --server-url)  SERVER_URL="$2"; shift 2 ;;
     --api-key)     API_KEY="$2"; shift 2 ;;
     --hostname)    HOSTNAME_VAL="$2"; shift 2 ;;
-    --with-tui)    WITH_TUI=1; shift ;;
+    --with-cli)    WITH_CLI=1; shift ;;
+    --with-tui)    WITH_CLI=1; WITH_TUI_ALIAS=1; shift ;;
     --binary-dir)  BINARY_DIR="$2"; shift 2 ;;
     --check)       CHECK_ONLY=1; shift ;;
     --yes|-y)      ASSUME_YES=1; shift ;;
@@ -187,7 +192,12 @@ fi
 
 INSTALL_BASE_URL="${LAMASYNC_INSTALL_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
 DOWNLOAD_URL="${INSTALL_BASE_URL}/${ASSET_DAEMON}"
-TUI_URL="${INSTALL_BASE_URL}/${ASSET_TUI}"
+CLI_URL="${INSTALL_BASE_URL}/${ASSET_CLI}"
+
+# Deprecated --with-tui alias: notice on stderr only (LAMA-323).
+if [[ "${WITH_TUI_ALIAS}" -eq 1 ]]; then
+  echo "install.sh: --with-tui is deprecated; use --with-cli (the TUI was removed; lamasync is the CLI)." >&2
+fi
 
 echo "==> Installing lamasyncd to ${BINARY_DIR}"
 mkdir -p "$BINARY_DIR"
@@ -219,19 +229,19 @@ if [[ -z "$INSTALLED_VERSION" ]]; then
 fi
 echo "==> Verified lamasyncd ${INSTALLED_VERSION}"
 
-# Optionally install the TUI companion binary.
-if [[ "${WITH_TUI}" -eq 1 ]]; then
-  echo "==> Installing lamasync-tui to ${BINARY_DIR}"
-  if ! curl -fsSL -o "${BINARY_DIR}/lamasync-tui" "$TUI_URL"; then
-    echo "Warning: ${ASSET_TUI} not found in latest release, falling back to ./packages/tui/dist/lamasync-tui" >&2
-    if [[ -f "./packages/tui/dist/lamasync-tui" ]]; then
-      cp "./packages/tui/dist/lamasync-tui" "${BINARY_DIR}/lamasync-tui"
+# Optionally install the CLI companion binary.
+if [[ "${WITH_CLI}" -eq 1 ]]; then
+  echo "==> Installing lamasync to ${BINARY_DIR}"
+  if ! curl -fsSL -o "${BINARY_DIR}/lamasync" "$CLI_URL"; then
+    echo "Warning: ${ASSET_CLI} not found in latest release, falling back to ./packages/cli/dist/lamasync" >&2
+    if [[ -f "./packages/cli/dist/lamasync" ]]; then
+      cp "./packages/cli/dist/lamasync" "${BINARY_DIR}/lamasync"
     else
-      echo "Error: TUI binary not available locally and no release asset found" >&2
+      echo "Error: CLI binary not available locally and no release asset found" >&2
       exit 3
     fi
   fi
-  chmod +x "${BINARY_DIR}/lamasync-tui"
+  chmod +x "${BINARY_DIR}/lamasync"
 fi
 
 # Write client config
@@ -302,8 +312,8 @@ mkdir -p "${INSTALL_STATE_DIR}"
 INSTALL_SKILL="n"
 if [[ "${ASSUME_YES}" -eq 1 ]]; then
   INSTALL_SKILL="y"
-elif [[ "${WITH_TUI}" -eq 1 ]]; then
-  # When the operator asked for the TUI companion, they're signaling
+elif [[ "${WITH_CLI}" -eq 1 ]]; then
+  # When the operator asked for the CLI companion, they're signaling
   # "I want the agent-friendly stack" — default the skill to yes too.
   INSTALL_SKILL="y"
 elif [[ -t 0 ]]; then
@@ -350,14 +360,14 @@ if [[ "${INSTALL_SKILL}" == "y" ]]; then
 fi
 
 if [[ ":${PATH}:" != *":${BINARY_DIR}:"* ]]; then
-  echo "    (Add ${BINARY_DIR} to your PATH to run lamasyncd/lamasync-tui from anywhere)"
+  echo "    (Add ${BINARY_DIR} to your PATH to run lamasyncd/lamasync from anywhere)"
 fi
 
 echo "==> Done."
 echo "    Config: ${CONFIG_DIR}/client.toml"
 echo "    Binary: ${BINARY_DIR}/lamasyncd"
-if [[ "${WITH_TUI}" -eq 1 ]]; then
-  echo "    TUI:    ${BINARY_DIR}/lamasync-tui"
+if [[ "${WITH_CLI}" -eq 1 ]]; then
+  echo "    CLI:    ${BINARY_DIR}/lamasync"
 fi
 echo "    Socket: ${SOCKET_PATH}"
 if [[ "${INSTALL_SKILL:-n}" == "y" ]]; then
