@@ -98,7 +98,7 @@ lamasync/                     # Bun workspace root
         update-check.ts       # LAMA-243: 15-min persisted cooldown for crash-loop guard
         update-check.test.ts  # update-check tests
         skill-update.ts       # LAMA-230: --update skill refreshes the agent-skill bundle
-        systemd.ts            # systemd unit generation helpers (PATH, ReadWritePaths, StartLimit)
+        systemd.ts            # systemd unit generation helpers (PATH, hardening, StartLimit)
         systemd.test.ts       # systemd unit template tests
         usage.ts              # LAMA-242: daemonUsage() + DAEMON_KNOWN_FLAGS
         usage.test.ts         # usage tests

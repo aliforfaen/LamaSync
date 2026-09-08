@@ -1,6 +1,6 @@
 # LAMA-302 — Event-triggered sync for active local worktrees
 
-## Progress (this pass — steps 1-4 implemented, soak outstanding)
+## Progress (steps 1-5 complete)
 
 Landed the core/server contract, the platform-neutral debounce/single-flight
 controller, the Linux inotify adapter + daemon lifecycle reconciliation, the
@@ -10,11 +10,25 @@ surfaces were subsequently removed in LAMA-326 and LAMA-323. Gates green:
 `bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` (1239 pass / 0 fail),
 `bun scripts/check-skill-drift.ts --strict`.
 
-**Outstanding / next:**
-- Step 5 — real Linux daemon smoke/soak against a busy Git fixture (observe
-  the bounded-run behavior and record it here).
-- Assignment watch settings are managed through the web UI or REST API; the
-  removed TUI/fleet CLI need no follow-up editor.
+Assignment watch settings are managed through the web UI or REST API; the
+removed TUI/fleet CLI need no follow-up editor.
+
+### Live Linux soak (2026-09-08)
+
+The real compiled Linux daemon was run against the disposable server with a
+local backend and an 80-file Git worktree. The assignment used
+`watchEnabled=true`, `watchQuietSec=10`, `ignoreGitMetadata=true`, and the
+recommended `*/15 * * * *` periodic reconciliation schedule. A burst of 240
+working-tree writes followed by a Git commit produced exactly one
+`trigger=watch` operation after the quiet period:
+
+```text
+status=success summary=sync ok: 81 transfers, 1.9 KiB in 0s
+```
+
+The daemon log contained one watcher start and one corresponding run, with no
+cron timer overflow or event-driven sync storm. The disposable server,
+daemon, worktree, and backend were removed at the end of the run.
 
 The watch config is **default-off**, so existing assignments keep their exact
 schedule-only behavior after upgrade. See `docs/features.md` (LAMA-302) and

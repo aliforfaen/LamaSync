@@ -148,11 +148,14 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
   it into `/usr/local/bin` or adjust `Environment=PATH=` in
   `~/.config/systemd/user/lamasyncd.service`, then
   `systemctl --user daemon-reload && systemctl --user restart lamasyncd`.
-- The unit runs with `ProtectHome=read-only`; writes under `$HOME` are
-  limited to `ReadWritePaths` (lamasync dirs, `~/projects`,
-  `/run/user/<uid>`). `backup`-type folders (read local → write remote)
-  work anywhere; `sync`-type folders that must **write** outside those
-  paths need the unit's `ReadWritePaths` extended.
+- The daemon retains `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem=full`,
+  but does not use `ProtectHome=read-only` or a static `ReadWritePaths`
+  allowlist. Sync and mount assignments may target arbitrary operator-selected
+  paths under `$HOME`; systemd cannot derive a safe dynamic allowlist before
+  the daemon fetches assignments. Treat the daemon's configured local paths
+  and its fleet credentials as the deliberate trust boundary. Genuine
+  filesystem permission errors still need to be fixed at the path/filesystem
+  level.
 - App-protection capture **hard-fails the whole run if any listed path is
   missing** on the host — keep per-host capture specs host-specific
   (protections are already bound to one host at enrollment), or use

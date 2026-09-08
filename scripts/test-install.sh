@@ -85,7 +85,9 @@ docker run --rm \
     # LAMA-218: the root container has no XDG_RUNTIME_DIR, so the socket
     # falls back to /root/.lamasync/lamasync.sock.
     grep -q 'LAMASYNC_SOCKET_PATH=/root/.lamasync/lamasync.sock' ~/.config/systemd/user/lamasyncd.service
-    grep -q 'ReadWritePaths=.*%h/.lamasync' ~/.config/systemd/user/lamasyncd.service
+    ! grep -q '^ProtectHome=read-only$' ~/.config/systemd/user/lamasyncd.service
+    ! grep -q '^ReadWritePaths=' ~/.config/systemd/user/lamasyncd.service
+    ! grep -q '%h/projects' ~/.config/systemd/user/lamasyncd.service
     # LAMA-230: the agent skill bundle must have landed alongside the binary.
     test -f ~/.agents/skills/lamasync/SKILL.md
     test -f ~/.agents/skills/lamasync/VERSION

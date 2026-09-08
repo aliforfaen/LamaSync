@@ -106,8 +106,8 @@ lamasync local ops
 
 **Cause.** rclone errored; the most common causes are:
 - `Local file doesn't exist` — `localPath` is wrong / not yet mounted.
-- `Permission denied` — the daemon's `ReadWritePaths=` (systemd user
-  unit) doesn't cover the path; fix the unit or move the path.
+- `Permission denied` — the target path or filesystem permissions reject the
+  daemon user; check ownership, mount options, ACLs, and available space.
 - `Backend not found` — bucket/endpoint/repo went missing.
 - `rclone: command not found` — rclone is installed outside `PATH`. The
   unit sets

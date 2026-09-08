@@ -79,10 +79,16 @@ tests, strict skill drift, and distributable binary build.
   immutable snapshot history. Legacy tables remain read-only for migration
   safety; `_global` inheritance and the `lamasync dotfiles` CLI namespace are
   gone.
-- **LAMA-307–311 — device setup and release hardening.** New sync targets are
+- **LAMA-307–310 — device setup and release hardening.** New sync targets are
   created safely where appropriate, duplicate runs are serialized, home paths
   expand correctly, initial read-only mount setup is available, and sandbox
   release discovery is documented.
+- **LAMA-311 — arbitrary home-path writes under the daemon sandbox.** The
+  daemon service keeps `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`,
+  resource limits, and restart hardening, but no longer applies a static
+  `ProtectHome`/`ReadWritePaths` allowlist that cannot know future assignments.
+  Installer, packaged, and generated units now share the same contract; the
+  install and daemon template tests cover arbitrary operator-selected paths.
 - **LAMA-320 — mount lifecycle hardening.** `--allow-other` is passed to
   rclone only when `/etc/fuse.conf` enables `user_allow_other` (otherwise
   mounts start single-user with a daemon warning); mount readiness is real

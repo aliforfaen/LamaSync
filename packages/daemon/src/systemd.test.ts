@@ -189,6 +189,16 @@ describe("daemonServiceTemplate", () => {
     expect(content).toContain("Environment=PATH=%h/.local/bin");
   });
 
+  test("leaves operator-selected home paths writable (LAMA-311)", () => {
+    const content = daemonServiceTemplate();
+    expect(content).not.toContain("ProtectHome=read-only");
+    expect(content).not.toContain("ReadWritePaths=");
+    expect(content).not.toContain("%h/projects");
+    expect(content).toContain("NoNewPrivileges=true");
+    expect(content).toContain("PrivateTmp=true");
+    expect(content).toContain("ProtectSystem=full");
+  });
+
   test("honours custom binaryPath and socketPath", () => {
     const content = daemonServiceTemplate({
       binaryPath: "/opt/lamasyncd",

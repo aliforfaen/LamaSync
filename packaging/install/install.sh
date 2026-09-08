@@ -24,11 +24,8 @@ DEFAULT_BINARY_DIR="${HOME}/.local/bin"
 BINARY_DIR="${DEFAULT_BINARY_DIR}"
 CONFIG_DIR="${HOME}/.config/lamasync"
 SERVICE_DIR="${HOME}/.config/systemd/user"
-# Default socket path: prefer XDG_RUNTIME_DIR (always writable under
-# systemd --user, no ReadWritePaths exception needed). Fall back to
-# ~/.lamasync/lamasync.sock which lives in a dedicated subdirectory of
-# $HOME rather than polluting $HOME itself (and conflicting with
-# ProtectHome=read-only).
+# Default socket path: prefer XDG_RUNTIME_DIR. Fall back to
+# ~/.lamasync/lamasync.sock when XDG_RUNTIME_DIR is unavailable.
 if [[ -n "${LAMASYNC_SOCKET_PATH:-}" ]]; then
   SOCKET_PATH="${LAMASYNC_SOCKET_PATH}"
 elif [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
@@ -77,13 +74,13 @@ SyslogIdentifier=lamasyncd
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=read-only
-# IMPORTANT: ProtectHome=read-only also marks /run/user as read-only. The
-# socket defaults to \$XDG_RUNTIME_DIR/lamasync.sock = /run/user/<uid>/...
-# so /run/user must be explicitly whitelisted or the bind fails with
-# EROFS. If SOCKET_PATH falls back to ~/.lamasync/lamasync.sock, the
-# %h/.lamasync entry below covers it.
-ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
+# The daemon is authorized to write the operator-selected local paths from
+# its assignments, including arbitrary paths below \$HOME.
+# A home read-only sandbox paired with a static writable-path list cannot
+# express that contract: systemd applies the sandbox before assignments are
+# fetched, and a running daemon cannot safely rewrite its own unit. Keep the
+# system-wide protection above; the daemon's configured paths are the
+# deliberate trust boundary.
 Environment=LAMASYNC_SOCKET_PATH=${socket_path}
 # systemd user services inherit a minimal PATH from the user manager
 # (/usr/local/bin:/usr/bin) regardless of what \`systemctl --user show-environment\`

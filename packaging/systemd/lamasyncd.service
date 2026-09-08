@@ -26,18 +26,13 @@ SyslogIdentifier=lamasyncd
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=read-only
-# ReadWritePaths lists the directories and socket files the daemon needs
-# to write. Paths must be absolute (systemd does not expand %h here) and
-# must NOT live under $HOME itself, because ProtectHome=read-only blanks
-# the whole tree. The socket defaults to $XDG_RUNTIME_DIR/lamasync.sock
-# (=/run/user/<uid>/lamasync.sock); /run/user must be explicitly
-# whitelisted or the bind fails with EROFS. If the socket falls back to
-# ~/.lamasync/lamasync.sock (no XDG_RUNTIME_DIR — e.g. root containers,
-# old shells), %h/.lamasync covers it. Add custom project mount roots
-# here, e.g.:
-#   ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
-ReadWritePaths=%h/.config/lamasync %h/.local/share/lamasync %h/.cache/lamasync %h/.lamasync %h/projects /run/user/%U
+# The daemon is authorized to write the operator-selected local paths from
+# its assignments, including arbitrary paths below $HOME.
+# A home read-only sandbox paired with a static writable-path list cannot
+# express that contract: systemd applies the sandbox before assignments are
+# fetched, and a running daemon cannot safely rewrite its own unit. Keep the
+# system-wide protection above; the daemon's configured paths are the
+# deliberate trust boundary.
 # Standardize socket path so the daemon, local CLI, and per-mount units agree.
 # `$XDG_RUNTIME_DIR` expands to /run/user/<uid> at runtime under
 # systemd --user; matches the default in @lamasync/core's socket-path
