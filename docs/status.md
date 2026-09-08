@@ -83,12 +83,10 @@ tests, strict skill drift, and distributable binary build.
   created safely where appropriate, duplicate runs are serialized, home paths
   expand correctly, initial read-only mount setup is available, and sandbox
   release discovery is documented.
-- **LAMA-311 — arbitrary home-path writes under the daemon sandbox.** The
-  daemon service keeps `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`,
-  resource limits, and restart hardening, but no longer applies a static
-  `ProtectHome`/`ReadWritePaths` allowlist that cannot know future assignments.
-  Installer, packaged, and generated units now share the same contract; the
-  install and daemon template tests cover arbitrary operator-selected paths.
+- **LAMA-302 — event-triggered local sync.** Opt-in Linux inotify watching,
+  debounce/single-flight execution, Git-aware filtering, operation trigger
+  origins, and the web/API contract are complete; a real daemon soak against
+  a busy Git worktree confirmed one bounded watch-triggered bisync run.
 - **LAMA-320 — mount lifecycle hardening.** `--allow-other` is passed to
   rclone only when `/etc/fuse.conf` enables `user_allow_other` (otherwise
   mounts start single-user with a daemon warning); mount readiness is real
@@ -129,9 +127,9 @@ tests, strict skill drift, and distributable binary build.
    preflight, dry-run/change plan, populated-target decisions, revalidation
    before writes, rollback artifact, and execution journal. Direct app restore
    remains intentionally unavailable until this exists.
-4. **LAMA-302 — event-triggered sync.** Implementation is complete; the
-   remaining work is a live soak on a busy Git worktree. See
-   [`handoff-302-event-triggered-sync.md`](handoff-302-event-triggered-sync.md).
+4. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
+  validation are complete; production-client rollout/acceptance on `cachy`
+  remains pending because it requires an explicit restart/update authority.
 5. **LAMA-321 follow-up — trash retention.** Optional per-folder
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue

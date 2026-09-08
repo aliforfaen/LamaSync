@@ -238,7 +238,7 @@ user write—prefer a bounded extra no-op bisync over losing a change.
 - No Windows/Android watcher implementation in this issue; only the interface
   boundary to make those additions straightforward.
 
-## Implementation order
+## Implementation order (complete)
 
 1. Land core/server fields and documented CLI/API contract, default-off.
 2. Implement and unit-test the platform-neutral debounce/single-flight
@@ -246,7 +246,7 @@ user write—prefer a bounded extra no-op bisync over losing a change.
 3. Add Linux inotify adapter and daemon lifecycle reconciliation.
 4. Wire web/API controls and operation-origin visibility.
 5. Run a real Linux daemon smoke/soak against a busy Git fixture and capture
-   the observed bounded-run behavior in the issue handoff.
+   the observed bounded-run behavior in the issue handoff — completed above.
 
 ## Decisions closed by the owner
 
