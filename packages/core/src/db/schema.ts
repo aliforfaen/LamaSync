@@ -141,6 +141,15 @@ CREATE TABLE IF NOT EXISTS application_protections (
     enabled           INTEGER NOT NULL DEFAULT 1,
     schedule          TEXT,
     destination       TEXT NOT NULL DEFAULT 'server_archive',
+    -- LAMA-324: the storage backend FUTURE captures are relayed to after
+    -- the daemon uploads the tarball to the server. NULL = server-local
+    -- archive (backward compatible). Controls future captures only;
+    -- every snapshot persists its own immutable location.
+    backend_id        TEXT REFERENCES backends(id),
+    -- LAMA-324: bucket for s3-kind backends (required then). Backends carry
+    -- credentials only; the bucket stays per protected resource like
+    -- folders.s3_bucket. NULL for local/nfs kinds and server archive.
+    s3_bucket         TEXT,
     capture_spec      TEXT NOT NULL, -- JSON CaptureSpec
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL,
@@ -162,7 +171,18 @@ CREATE TABLE IF NOT EXISTS application_snapshots (
     description        TEXT,
     captured_spec      TEXT NOT NULL, -- JSON CaptureSpec
     integrity_status   TEXT NOT NULL DEFAULT 'unverified',
-    demo               INTEGER NOT NULL DEFAULT 0
+    demo               INTEGER NOT NULL DEFAULT 0,
+    -- LAMA-324: immutable physical location, frozen at capture time. NULL
+    -- backend_id = server-local archive under LAMASYNC_BACKUP_DIR (archive
+    -- path is BACKUP_DIR-relative). Non-null = the object lives on that
+    -- backend under object_key (backend-relative). Download/delete dispatch
+    -- from these stored values; never from the protection's current
+    -- backend_id (destinations may change after capture).
+    backend_id         TEXT REFERENCES backends(id),
+    object_key         TEXT,
+    -- LAMA-324: bucket the object lives in (s3-kind snapshots only). Frozen
+    -- at capture time alongside backend_id/object_key.
+    s3_bucket          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_protections_host
@@ -810,6 +830,14 @@ export const MIGRATIONS: string[] = [
   // add a UNIQUE column with ALTER TABLE ADD COLUMN.
   "ALTER TABLE operation_log ADD COLUMN dedupe_key TEXT",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_log_dedupe_key ON operation_log(dedupe_key) WHERE dedupe_key IS NOT NULL",
+  // LAMA-324: app backup storage destinations (server-relay). Existing
+  // databases get the nullable columns; fresh DBs get them from
+  // SERVER_SCHEMA. NULL backend_id keeps the server-local archive default.
+  "ALTER TABLE application_protections ADD COLUMN backend_id TEXT",
+  "ALTER TABLE application_protections ADD COLUMN s3_bucket TEXT",
+  "ALTER TABLE application_snapshots ADD COLUMN backend_id TEXT",
+  "ALTER TABLE application_snapshots ADD COLUMN object_key TEXT",
+  "ALTER TABLE application_snapshots ADD COLUMN s3_bucket TEXT",
 ];
 
 /**

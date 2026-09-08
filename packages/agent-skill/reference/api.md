@@ -127,7 +127,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/admin/b2-management/test`                | Test the stored Backblaze B2 bucket-management credentials |
 | GET      | `/backends/:backendId`                     | Read one backend (additive `lastProveAt`/`lastProveOk` for the badge) |
 | PATCH    | `/backends/:backendId`                     | Update/rotate backend credentials                |
-| DELETE   | `/backends/:backendId`                     | Delete backend (409 while folders use it)        |
+| DELETE   | `/backends/:backendId`                     | Delete a backend (409 while folders, app protections, or stored app snapshots reference it — LAMA-324) |
 | POST     | `/backends/:backendId/test`                | Test connection (rclone lsd, 5s timeout)         |
 | POST     | `/backends/:backendId/prove`               | Run a "Prove it" restore test against the backend's latest restic snapshot into a private tempdir (LAMA-266) |
 | POST     | `/backends/:backendId/drill`               | Run a full fire drill (liveness probe + prove-it + audit row + notification) (LAMA-266) |
@@ -138,15 +138,15 @@ All paths are under `/api/v1/` unless noted.
 | PUT      | `/apps/templates/:id`                      | Update an app template (admin; bumps `revision`; never touches protections) |
 | DELETE   | `/apps/templates/:id`                      | Delete an app template (409 while protections use it) |
 | GET      | `/apps/protections?hostId=...`             | List app protections (admin: all hosts; device: `hostId` required and must be its own) |
-| POST     | `/apps/protections`                        | Enroll a protection from a template (admin; 409 on duplicate host+template) |
+| POST     | `/apps/protections`                        | Enroll a protection from a template (admin; 409 on duplicate host+template). Optional `backendId`+`s3Bucket` select the storage destination for FUTURE captures (LAMA-324) |
 | GET      | `/apps/protections/:id`                    | Read one protection (device: own host only)      |
-| PUT      | `/apps/protections/:id`                    | Update name/enabled/schedule/destination (admin; capture spec never editable) |
+| PUT      | `/apps/protections/:id`                    | Update name/enabled/schedule/backendId/s3Bucket (admin; capture spec never editable). Destination changes affect future captures only (LAMA-324) |
 | DELETE   | `/apps/protections/:id`                    | Delete an empty protection (admin; 409 when snapshot history exists — disable it instead) |
 | GET      | `/apps/protections/:id/snapshots`          | List a protection's snapshots                    |
-| POST     | `/apps/protections/:id/snapshots`          | Upload a snapshot (multipart `tarball`; 409 while the protection is disabled) |
+| POST     | `/apps/protections/:id/snapshots`          | Upload a snapshot (multipart `tarball`; 409 while the protection is disabled). Server relays the archive to the protection's selected backend under `lamasync/apps/<protectionId>/<snapshotId>.tar.gz` (LAMA-324) |
 | GET      | `/apps/snapshots/:id`                      | Read one snapshot row                            |
-| GET      | `/apps/snapshots/:id/download`             | Download a snapshot tarball                      |
-| DELETE   | `/apps/snapshots/:id`                      | Delete a snapshot row + archive file (admin)     |
+| GET      | `/apps/snapshots/:id/download`             | Download a snapshot tarball from its STORED location (LAMA-324) |
+| DELETE   | `/apps/snapshots/:id`                      | Delete a snapshot row + archive at its STORED location (admin; 502 when the archive delete fails — the row is kept) (LAMA-324) |
 | POST     | `/report`                                  | Append an `operation_log` row                    |
 | GET      | `/operations`                              | Query the operation log                          |
 | GET      | `/operations/locks`                        | List active destination locks                    |
@@ -267,8 +267,8 @@ spec. The high-level shapes (verbose commentary):
 - `CaptureSpecPath { path, classification: "portable_config"|"machine_state"|"cache"|"secrets"|"custom"|"unknown", rationale?, archivePath? }` — LAMA-315 taxonomy; this delivery only stamps `"unknown"`. `archivePath` is server-generated snapshot metadata, never client input.
 - `CaptureSpec { paths: { linux?: CaptureSpecPath[], macos?: CaptureSpecPath[], windows?: CaptureSpecPath[] }, excludes: string[], notes: string|null }` — per-OS candidate paths + exclude globs + operator notes.
 - `ApplicationTemplate { id, name, origin: "built_in"|"custom", description?, emoji?, color?, paths: CaptureSpec, installUrl?, installInstructions?, restoreInstructions?, revision, createdAt, updatedAt }` — operator-owned recipe; admin-only routes.
-- `ApplicationProtection { id, templateId, templateRevision, hostId, name, enabled, schedule?, destination: "server_archive", captureSpec: CaptureSpec, createdAt, updatedAt }` — a template bound to exactly one host; `captureSpec` is copied at enrollment and never mutated by template edits. List responses (GET `/apps/protections`) extend this with `templateOrigin`/`templateName`/`templateEmoji`/`templateColor` plus the joined `latestSnapshot` (`{ id, createdAt, sizeBytes, integrityStatus } | null`).
-- `ApplicationSnapshot { id, protectionId, templateId, templateRevision, sourceHostId, createdAt, archivePath, archiveFormat: "tar.gz", sizeBytes?, checksumSha256?, description?, capturedSpec: CaptureSpec, integrityStatus: "verified"|"unverified"|"failed" }` — immutable archive metadata; `capturedSpec` records only the source host's OS bucket and its server-generated archive-member mappings at capture time, never client-supplied.
+- `ApplicationProtection { id, templateId, templateRevision, hostId, name, enabled, schedule?, destination, backendId, backendName, s3Bucket, captureSpec: CaptureSpec, createdAt, updatedAt }` — a template bound to exactly one host; `captureSpec` is copied at enrollment and never mutated by template edits. LAMA-324: `destination` is the display label (`"server_archive"` when `backendId` is null, else the backend's name); `backendId` (null = server archive) selects where FUTURE captures are relayed; `s3Bucket` is required for s3-kind backends. Allowed destination kinds: `s3`, `local`, `nfs` — never `restic`. List responses (GET `/apps/protections`) extend this with `templateOrigin`/`templateName`/`templateEmoji`/`templateColor` plus the joined `latestSnapshot` (`{ id, createdAt, sizeBytes, integrityStatus } | null`).
+- `ApplicationSnapshot { id, protectionId, templateId, templateRevision, sourceHostId, createdAt, archivePath, backendId, objectKey, s3Bucket, archiveFormat: "tar.gz", sizeBytes?, checksumSha256?, description?, capturedSpec: CaptureSpec, integrityStatus: "verified"|"unverified"|"failed" }` — immutable archive metadata; `capturedSpec` records only the source host's OS bucket and its server-generated archive-member mappings at capture time, never client-supplied. LAMA-324: `backendId`/`objectKey`/`s3Bucket` are the snapshot's IMMUTABLE physical location frozen at capture time (null = server-local archive under the backup root); download/delete dispatch from these values, never from the protection's current destination.
 - `ResticSnapshot { id, snapshotId, folderId, hostId, timestamp, paths[], sizeBytes?, tags? }`
 - `FolderSnapshot { id, time, host?, paths? }` (LAMA-259) — `id` is restic's snapshot id; `time` is epoch ms. Slider feed.
 - `FolderSnapshotsResponse { snapshots: FolderSnapshot[] }` (LAMA-259)

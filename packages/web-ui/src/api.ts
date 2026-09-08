@@ -719,11 +719,16 @@ export const api = {
     hostId: string;
     schedule?: string | null;
     name?: string;
+    backendId?: string | null;
+    s3Bucket?: string | null;
   }) => apiPost<ApplicationProtection>("/apps/protections", body),
   updateAppProtection: (
     id: string,
     body: Partial<
-      Pick<ApplicationProtection, "name" | "enabled" | "schedule" | "destination">
+      Pick<
+        ApplicationProtection,
+        "name" | "enabled" | "schedule" | "backendId" | "s3Bucket"
+      >
     >,
   ) => apiPut<ApplicationProtection>(`/apps/protections/${encodeURIComponent(id)}`, body),
   deleteAppProtection: (id: string) =>

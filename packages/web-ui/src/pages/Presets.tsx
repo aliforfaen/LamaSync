@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type {
   ApplicationTemplate,
+  Backend,
   CaptureSpec,
   CaptureSpecPath,
   Host,
@@ -63,6 +64,9 @@ interface EnrollDraft {
   name: string;
   schedulePreset: string;
   schedule: string;
+  /** LAMA-324: selected storage destination (null = server archive). */
+  backendId: string | null;
+  s3Bucket: string;
 }
 
 export type TemplateCreatePayload = Omit<
@@ -208,6 +212,8 @@ export interface TemplateEnrollServices {
     hostId: string;
     schedule?: string | null;
     name?: string;
+    backendId?: string | null;
+    s3Bucket?: string | null;
   }): Promise<unknown>;
 }
 
@@ -220,6 +226,9 @@ export interface EnrollOptions {
   /** Optional protection name; omitted => server defaults to template name. */
   name?: string;
   schedule?: string | null;
+  /** LAMA-324: optional storage destination (null = server archive). */
+  backendId?: string | null;
+  s3Bucket?: string | null;
 }
 
 /**
@@ -254,9 +263,13 @@ export async function runTemplateEnrollment(
       hostId: string;
       schedule?: string | null;
       name?: string;
+      backendId?: string | null;
+      s3Bucket?: string | null;
     } = { templateId, hostId: opts.hostId };
     if (protectionName) body.name = protectionName;
     if (opts.schedule) body.schedule = opts.schedule;
+    body.backendId = opts.backendId ?? null;
+    body.s3Bucket = opts.s3Bucket?.trim() || null;
     await services.enrollAppProtection(body);
     return null;
   } catch (err) {
@@ -450,18 +463,23 @@ export function AppTemplates() {
   const [editorDraft, setEditorDraft] = useState<TemplateDraft | null>(null);
   const [editorBusy, setEditorBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<TemplateCardData | null>(null);
+  // LAMA-324: selectable backup destinations for enrollment (s3/local/nfs
+  // backends; restic is not a valid app-archive destination).
+  const [backends, setBackends] = useState<Backend[]>([]);
 
   async function refresh(): Promise<void> {
     setLoading(true);
     setError(null);
     try {
-      const [hostList, templateList, protectionList] = await Promise.all([
+      const [hostList, templateList, protectionList, backendList] = await Promise.all([
         api.listHosts(),
         api.listAppTemplates(),
         api.listAppProtections(),
+        api.listBackends(),
       ]);
       setHosts(hostList);
       setTemplates(templateList);
+      setBackends(backendList.filter((b) => b.kind !== "restic"));
       const byName = new Map<string, string[]>();
       for (const protection of protectionList) {
         const hostnames = byName.get(protection.templateName) ?? [];
@@ -484,6 +502,10 @@ export function AppTemplates() {
   }, []);
 
   const starterCards = useMemo(() => APP_PRESETS.map(cardFromStarter), []);
+  const selectedEnrollBackend = useMemo(() => {
+    if (!enrollDraft || enrollDraft.backendId === null) return null;
+    return backends.find((b) => b.id === enrollDraft.backendId) ?? null;
+  }, [enrollDraft, backends]);
   const builtInRows = useMemo(
     () => [
       ...starterCards,
@@ -509,6 +531,8 @@ export function AppTemplates() {
       name: "",
       schedulePreset: "custom",
       schedule: "",
+      backendId: null,
+      s3Bucket: "",
     });
   }
 
@@ -586,6 +610,8 @@ export function AppTemplates() {
         hostId: enrollDraft.hostId,
         name: enrollDraft.name,
         schedule: enrollDraft.schedule.trim() || null,
+        backendId: enrollDraft.backendId,
+        s3Bucket: enrollDraft.s3Bucket.trim() || null,
       });
       if (message !== null) {
         setError(message);
@@ -730,8 +756,44 @@ export function AppTemplates() {
               />
             </label>
           ) : null}
+          <label className="field">
+            <span>Destination (optional)</span>
+            <select
+              value={enrollDraft.backendId ?? ""}
+              onChange={(e) => {
+                const value = e.target.value;
+                setEnrollDraft({
+                  ...enrollDraft,
+                  backendId: value === "" ? null : value,
+                  s3Bucket: value === "" ? "" : enrollDraft.s3Bucket,
+                });
+              }}
+            >
+              <option value="">Server archive (default)</option>
+              {backends.map((backend) => (
+                <option key={backend.id} value={backend.id}>
+                  {backend.name} ({backend.kind})
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedEnrollBackend?.kind === "s3" ? (
+            <label className="field">
+              <span>Bucket</span>
+              <input
+                placeholder="lamasync-apps"
+                value={enrollDraft.s3Bucket}
+                onChange={(e) => setEnrollDraft({ ...enrollDraft, s3Bucket: e.target.value })}
+              />
+            </label>
+          ) : null}
+          {selectedEnrollBackend !== null && selectedEnrollBackend.kind !== "s3" ? (
+            <p className="muted">
+              Snapshots will be stored under <code>lamasync/apps/…</code> on this destination.
+            </p>
+          ) : null}
           {enrollDraft.schedule ? (
-            <p className="muted">Snapshots will be captured on this schedule once the device’s daemon has a matching folder assignment.</p>
+            <p className="muted">Snapshots will be captured on this schedule by the device’s daemon for this protection.</p>
           ) : null}
           {enrollDraft.card.id === null ? (
             <p className="muted">

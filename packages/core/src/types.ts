@@ -414,8 +414,19 @@ export interface ApplicationProtection {
   name: string;
   enabled: boolean;
   schedule: string | null;
-  /** Explicit extensible value; only `server_archive` is supported today. */
-  destination: "server_archive";
+  /** Display destination label. `server_archive` when backendId is null,
+   *  otherwise the backend's name (LAMA-324: destinations are selectable). */
+  destination: string;
+  /** LAMA-324: backend future captures are relayed to; null = server
+   *  archive. Controls FUTURE captures only — each snapshot persists its
+   *  own immutable physical location. */
+  backendId: string | null;
+  /** Backend name for display; null when backendId is null. List DTOs
+   *  carry it so the UI does not N+1 fetch backends (LAMA-324). */
+  backendName: string | null;
+  /** LAMA-324: bucket for s3-kind backends (required then); null for
+   *  local/nfs kinds and server archive. */
+  s3Bucket: string | null;
   /** Copied at enrollment; never mutated by template edits. */
   captureSpec: CaptureSpec;
   createdAt: number;
@@ -430,7 +441,18 @@ export interface ApplicationSnapshot {
   templateRevision: number;
   sourceHostId: string;
   createdAt: number;
+  /** Location path within the snapshot's destination. For server-local
+   *  archives this is BACKUP_DIR-relative; for backend snapshots it is the
+   *  backend-relative object key (same value as objectKey). */
   archivePath: string;
+  /** LAMA-324: immutable physical backend this snapshot lives on (null =
+   *  server-local archive). Frozen at capture time; never derived from the
+   *  protection's current backend. */
+  backendId: string | null;
+  /** Backend-relative object key when backendId is non-null, else null. */
+  objectKey: string | null;
+  /** LAMA-324: bucket the object lives in (s3-kind snapshots only). */
+  s3Bucket: string | null;
   archiveFormat: "tar.gz";
   sizeBytes: number | null;
   checksumSha256: string | null;

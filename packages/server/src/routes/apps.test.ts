@@ -5,10 +5,15 @@ import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
 
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "apps-test-key";
 process.env.LAMASYNC_BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR ?? "/tmp/lamasync-apps-test";
+process.env.LAMASYNC_DATA_DIR = process.env.LAMASYNC_DATA_DIR ?? "/tmp/lamasync-apps-test-data";
+process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "apps-test-secret-key-0123456789abcdef";
+process.env.LAMASYNC_APPS_STAGING_DIR = process.env.LAMASYNC_APPS_STAGING_DIR ?? "/tmp/lamasync-apps-test-staging";
 
 const { getAuthPlugin } = await import("../auth.ts");
 const { __setDb, appsRoutes } = (await import("./apps.ts")) as typeof import("./apps.ts");
 const { __setDb: __setConfigRevisionDb } = (await import("../config-revision.ts")) as typeof import("../config-revision.ts");
+const { __setRcloneExecForTest } = await import("../app-storage.ts");
+const { encryptSecret } = await import("../crypto.ts");
 
 let db: Database;
 let app: { handle(request: Request): Response | Promise<Response> };
@@ -31,6 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   db.close();
+  __setRcloneExecForTest(null);
 });
 
 function authHeaders(): Headers {
@@ -353,5 +359,287 @@ describe("apps snapshots (LAMA-316)", () => {
       paths: { paths: { linux: [{ path: "~/.config/x", classification: "not-real" }] }, excludes: [], notes: null },
     });
     expect(invalidClass.status).toBe(400);
+  });
+});
+
+describe("apps storage destinations (LAMA-324)", () => {
+  function insertLocalBackend(path: string): string {
+    const id = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends (id, name, kind, local_path, created_at) VALUES (?, 'local-dest', 'local', ?, ?)`,
+      [id, path, Date.now()],
+    );
+    return id;
+  }
+
+  function insertS3Backend(): string {
+    const id = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
+       VALUES (?, 's3-dest', 's3', 'other', 'https://s3.example.test', 'r1', 'AK', ?, ?)`,
+      [id, encryptSecret("route-secret"), Date.now()],
+    );
+    return id;
+  }
+
+  function insertResticBackend(): string {
+    const id = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends (id, name, kind, restic_repository, restic_password_enc, created_at)
+       VALUES (?, 'restic-dest', 'restic', 'repo:test', 'enc', ?)`,
+      [id, Date.now()],
+    );
+    return id;
+  }
+
+  async function upload(protectionId: string, contents = "route-archive"): Promise<Response> {
+    const form = new FormData();
+    form.append("tarball", new File([contents], "snap.tar.gz", { type: "application/gzip" }));
+    form.append("description", "LAMA-324 test upload");
+    return app.handle(
+      new Request(`http://localhost/api/v1/apps/protections/${protectionId}/snapshots`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: form,
+      }),
+    );
+  }
+
+  test("destination validation: local backend accepted; s3 needs bucket; restic/unknown rejected", async () => {
+    const tpl = async (name: string): Promise<string> => {
+      const res = await postJson("/api/v1/apps/templates", {
+        name,
+        origin: "custom",
+        paths: spec(["~/.config/nvim"]),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { id: string }).id;
+    };
+    const localBackendId = insertLocalBackend("/tmp/lamasync-apps-test-local");
+    const s3BackendId = insertS3Backend();
+    const resticBackendId = insertResticBackend();
+
+    const local = await postJson("/api/v1/apps/protections", {
+      templateId: await tpl("tpl-local"),
+      hostId: "host-a",
+      backendId: localBackendId,
+    });
+    expect(local.status).toBe(201);
+    const localBody = (await local.json()) as { backendId: string | null; backendName: string | null; destination: string; s3Bucket: string | null };
+    expect(localBody.backendId).toBe(localBackendId);
+    expect(localBody.backendName).toBe("local-dest");
+    expect(localBody.destination).toBe("local-dest");
+    expect(localBody.s3Bucket).toBeNull();
+
+    const s3NoBucket = await postJson("/api/v1/apps/protections", {
+      templateId: await tpl("tpl-s3-nobucket"),
+      hostId: "host-a",
+      backendId: s3BackendId,
+    });
+    expect(s3NoBucket.status).toBe(400);
+    const s3WithBucket = await postJson("/api/v1/apps/protections", {
+      templateId: await tpl("tpl-s3-bucket"),
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "apps-bucket",
+    });
+    expect(s3WithBucket.status).toBe(201);
+
+    const restic = await postJson("/api/v1/apps/protections", {
+      templateId: await tpl("tpl-restic"),
+      hostId: "host-a",
+      backendId: resticBackendId,
+    });
+    expect(restic.status).toBe(400);
+
+    const unknown = await postJson("/api/v1/apps/protections", {
+      templateId: await tpl("tpl-unknown"),
+      hostId: "host-a",
+      backendId: "no-such-backend",
+    });
+    expect(unknown.status).toBe(400);
+  });
+
+  test("NULL/default destination stays server archive (backward compatible)", async () => {
+    templateId = await createTemplate();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    expect(enroll.status).toBe(201);
+    const body = (await enroll.json()) as { backendId: string | null; backendName: string | null; destination: string };
+    expect(body.backendId).toBeNull();
+    expect(body.backendName).toBeNull();
+    expect(body.destination).toBe("server_archive");
+    const row = db
+      .query<{ backend_id: string | null }, [string]>(
+        "SELECT backend_id FROM application_protections WHERE host_id = 'host-a'",
+      )
+      .get(templateId) as unknown as { backend_id: string | null } | undefined;
+    // The first enrollment on host-a may be this one; assert via the response only.
+    void row;
+  });
+
+  test("change destination → future captures relay; old snapshots keep immutable location", async () => {
+    templateId = await createTemplate();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    const prot = (await enroll.json()) as { id: string };
+
+    // Capture 1: server-local default.
+    const first = await upload(prot.id, "first-archive");
+    expect(first.status).toBe(201);
+    const firstSnap = (await first.json()) as {
+      id: string;
+      backendId: string | null;
+      objectKey: string | null;
+      s3Bucket: string | null;
+    };
+    expect(firstSnap.backendId).toBeNull();
+    expect(firstSnap.objectKey).toBeNull();
+
+    // Change destination to a local backend.
+    const localBackendId = insertLocalBackend("/tmp/lamasync-apps-test-dest-b");
+    const changed = await putJson(`/api/v1/apps/protections/${prot.id}`, { backendId: localBackendId });
+    expect(changed.status).toBe(200);
+    const changedBody = (await changed.json()) as { backendId: string | null; backendName: string | null };
+    expect(changedBody.backendId).toBe(localBackendId);
+    expect(changedBody.backendName).toBe("local-dest");
+
+    // Capture 2: relayed to the backend under the fixed key.
+    const second = await upload(prot.id, "second-archive");
+    expect(second.status).toBe(201);
+    const secondSnap = (await second.json()) as {
+      id: string;
+      backendId: string | null;
+      objectKey: string;
+    };
+    expect(secondSnap.backendId).toBe(localBackendId);
+    expect(secondSnap.objectKey).toBe(`lamasync/apps/${prot.id}/${secondSnap.id}.tar.gz`);
+
+    // The old snapshot remains downloadable from its ORIGINAL location.
+    const dlFirst = await app.handle(
+      new Request(`http://localhost/api/v1/apps/snapshots/${firstSnap.id}/download`, {
+        headers: authHeaders(),
+      }),
+    );
+    expect(dlFirst.status).toBe(200);
+    expect(await dlFirst.text()).toBe("first-archive");
+
+    const dlSecond = await app.handle(
+      new Request(`http://localhost/api/v1/apps/snapshots/${secondSnap.id}/download`, {
+        headers: authHeaders(),
+      }),
+    );
+    expect(dlSecond.status).toBe(200);
+    expect(await dlSecond.text()).toBe("second-archive");
+
+    // List DTO carries backend name (no N+1 needed by the UI).
+    const list = await app.handle(
+      new Request(`http://localhost/api/v1/apps/protections?hostId=host-a`, { headers: authHeaders() }),
+    );
+    const rows = (await list.json()) as {
+      backendId: string | null;
+      backendName: string | null;
+    }[];
+    expect(rows[0]?.backendId).toBe(localBackendId);
+    expect(rows[0]?.backendName).toBe("local-dest");
+  });
+
+  test("relay failure leaves no snapshot row (502, nothing orphaned)", async () => {
+    templateId = await createTemplate();
+    const s3BackendId = insertS3Backend();
+    const enroll = await postJson("/api/v1/apps/protections", {
+      templateId,
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "apps-bucket",
+    });
+    const prot = (await enroll.json()) as { id: string };
+    __setRcloneExecForTest(async () => ({ code: 1, stdout: "", stderr: "AccessDenied: denied\n" }));
+
+    const res = await upload(prot.id, "never-lands");
+    expect(res.status).toBe(502);
+    const n = db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM application_snapshots`)
+      .get() as { n: number };
+    expect(n.n).toBe(0);
+  });
+
+  test("successful remote upload/download/delete through the fake rclone boundary", async () => {
+    templateId = await createTemplate();
+    const s3BackendId = insertS3Backend();
+    const enroll = await postJson("/api/v1/apps/protections", {
+      templateId,
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "apps-bucket",
+    });
+    const prot = (await enroll.json()) as { id: string };
+    const calls: string[][] = [];
+    __setRcloneExecForTest(async (argv) => {
+      calls.push(argv);
+      if (argv.includes("cat")) return { code: 0, stdout: "remote-archive", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    const up = await upload(prot.id, "remote-archive");
+    expect(up.status).toBe(201);
+    const snap = (await up.json()) as { id: string; objectKey: string };
+    const copyCall = calls.find((a) => a.includes("copyto"))!;
+    expect(copyCall.find((a) => a.startsWith("relay:"))).toBe(
+      `relay:apps-bucket/lamasync/apps/${prot.id}/${snap.id}.tar.gz`,
+    );
+
+    const dl = await app.handle(
+      new Request(`http://localhost/api/v1/apps/snapshots/${snap.id}/download`, {
+        headers: authHeaders(),
+      }),
+    );
+    expect(dl.status).toBe(200);
+    expect(await dl.text()).toBe("remote-archive");
+
+    const del = await app.handle(
+      new Request(`http://localhost/api/v1/apps/snapshots/${snap.id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
+    );
+    expect(del.status).toBe(204);
+    const delCall = calls.find((a) => a.includes("deletefile"))!;
+    expect(delCall.find((a) => a.startsWith("relay:"))).toBe(
+      `relay:apps-bucket/lamasync/apps/${prot.id}/${snap.id}.tar.gz`,
+    );
+    const n = db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM application_snapshots`)
+      .get() as { n: number };
+    expect(n.n).toBe(0);
+  });
+
+  test("snapshot delete failure keeps the row (failure is not silent)", async () => {
+    templateId = await createTemplate();
+    const s3BackendId = insertS3Backend();
+    const enroll = await postJson("/api/v1/apps/protections", {
+      templateId,
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "apps-bucket",
+    });
+    const prot = (await enroll.json()) as { id: string };
+    __setRcloneExecForTest(async (argv) => {
+      if (argv.includes("copyto")) return { code: 0, stdout: "", stderr: "" };
+      return { code: 1, stdout: "", stderr: "backend unreachable" };
+    });
+    const up = await upload(prot.id, "stuck-archive");
+    expect(up.status).toBe(201);
+    const snap = (await up.json()) as { id: string };
+
+    const del = await app.handle(
+      new Request(`http://localhost/api/v1/apps/snapshots/${snap.id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
+    );
+    expect(del.status).toBe(502);
+    const row = db
+      .query<{ id: string }, [string]>("SELECT id FROM application_snapshots WHERE id = ?")
+      .get(snap.id);
+    expect(row).not.toBeNull();
   });
 });

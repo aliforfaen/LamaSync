@@ -18,6 +18,7 @@ import {
   type TemplateEnrollServices,
 } from "./Presets.tsx";
 import {
+  changeProtectionDestination,
   setProtectionEnabled,
   uploadProtectionSnapshot,
   UPLOAD_DESCRIPTION,
@@ -28,6 +29,8 @@ type EnrollCall = {
   hostId: string;
   schedule?: string | null;
   name?: string;
+  backendId?: string | null;
+  s3Bucket?: string | null;
 };
 
 function specOf(linux: string[]): CaptureSpec {
@@ -112,6 +115,28 @@ describe("App templates — enrollment flow", () => {
         hostId: "host-b",
         name: "Laptop nvim",
         schedule: "0 */6 * * *",
+        backendId: null,
+        s3Bucket: null,
+      },
+    ]);
+  });
+
+  test("passes the selected storage destination (LAMA-324) through to enrollment", async () => {
+    const { services, enrollCalls } = recordServices();
+    const message = await runTemplateEnrollment(services, {
+      template: templateCard(),
+      hostId: "host-a",
+      backendId: "backend-s3",
+      s3Bucket: "apps-bucket",
+    });
+
+    expect(message).toBeNull();
+    expect(enrollCalls).toEqual([
+      {
+        templateId: "tpl-1",
+        hostId: "host-a",
+        backendId: "backend-s3",
+        s3Bucket: "apps-bucket",
       },
     ]);
   });
@@ -124,7 +149,9 @@ describe("App templates — enrollment flow", () => {
     });
 
     expect(message).toBeNull();
-    expect(enrollCalls).toEqual([{ templateId: "tpl-1", hostId: "host-a" }]);
+    expect(enrollCalls).toEqual([
+      { templateId: "tpl-1", hostId: "host-a", backendId: null, s3Bucket: null },
+    ]);
   });
 
   test("a built-in starter is materialized into a custom template exactly once, then reused", async () => {
@@ -152,8 +179,8 @@ describe("App templates — enrollment flow", () => {
     expect(createCalls[0]).toMatchObject({ name: "Neovim" });
     // Both enrollments target the real template id, never a starter id.
     expect(enrollCalls).toEqual([
-      { templateId: "tpl-1", hostId: "h1" },
-      { templateId: "tpl-1", hostId: "h1" },
+      { templateId: "tpl-1", hostId: "h1", backendId: null, s3Bucket: null },
+      { templateId: "tpl-1", hostId: "h1", backendId: null, s3Bucket: null },
     ]);
   });
 
@@ -251,5 +278,34 @@ describe("App backups — enable/disable flow", () => {
 
     expect(message).toBeNull();
     expect(calls).toEqual([{ id: "protection-1", enabled: false }]);
+  });
+});
+
+describe("App backups — destination change flow (LAMA-324)", () => {
+  test("sends backendId + s3Bucket and returns null on success", async () => {
+    const calls: Array<{ id: string; body: { backendId: string | null; s3Bucket?: string | null } }> = [];
+    const services = {
+      updateAppProtection: async (id: string, body: { backendId: string | null; s3Bucket?: string | null }) => {
+        calls.push({ id, body });
+      },
+    };
+    const message = await changeProtectionDestination(
+      services,
+      "protection-1",
+      "backend-local",
+      null,
+    );
+    expect(message).toBeNull();
+    expect(calls).toEqual([{ id: "protection-1", body: { backendId: "backend-local", s3Bucket: null } }]);
+  });
+
+  test("surfaces server errors (e.g. restic backend rejected)", async () => {
+    const services = {
+      updateAppProtection: async () => {
+        throw new Error("backend kind 'restic' is not a valid app backup destination");
+      },
+    };
+    const message = await changeProtectionDestination(services, "protection-1", "backend-restic", null);
+    expect(message).toContain("not a valid app backup destination");
   });
 });

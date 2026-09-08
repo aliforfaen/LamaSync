@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { mkdirSync, unlinkSync, existsSync } from "fs";
+import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { db as defaultDb } from "../db.ts";
 import type { Database } from "bun:sqlite";
@@ -14,8 +14,19 @@ import type {
 } from "@lamasync/core";
 import { bumpConfigRevision } from "../config-revision.ts";
 import { deviceMayAccessHost, principalOf, requireAdmin, requireHostAccess } from "../auth.ts";
+import {
+  AppStorageError,
+  appStagingRoot,
+  compensatePublishedObject,
+  deleteSnapshotArchiveForRow,
+  isAllowedAppBackendKind,
+  locationForSnapshot,
+  publishSnapshotArchive,
+  resolveAppBackend,
+  snapshotDownload,
+  type ResolvedAppBackend,
+} from "../app-storage.ts";
 
-const BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR || "/backups";
 const MAX_BYTES = Number(process.env.LAMASYNC_APPS_MAX_BYTES || 512 * 1024 * 1024);
 const GLOBAL_HOST_ID = "_global";
 
@@ -49,6 +60,8 @@ interface ProtectionRow {
   enabled: number;
   schedule: string | null;
   destination: string;
+  backend_id: string | null;
+  s3_bucket: string | null;
   capture_spec: string;
   created_at: number;
   updated_at: number;
@@ -59,6 +72,7 @@ interface ProtectionListRow extends ProtectionRow {
   template_name: string;
   template_emoji: string | null;
   template_color: string | null;
+  backend_name: string | null;
   latest_id: string | null;
   latest_created_at: number | null;
   latest_size_bytes: number | null;
@@ -79,6 +93,9 @@ interface SnapshotRow {
   description: string | null;
   captured_spec: string;
   integrity_status: string;
+  backend_id: string | null;
+  object_key: string | null;
+  s3_bucket: string | null;
 }
 
 function parseCaptureSpec(raw: string | null | undefined): CaptureSpec {
@@ -274,11 +291,22 @@ function rowToProtection(r: ProtectionRow): ApplicationProtection {
     name: r.name,
     enabled: r.enabled === 1,
     schedule: r.schedule,
-    destination: "server_archive",
+    destination: destinationLabel(r),
+    backendId: r.backend_id,
+    backendName: "backend_name" in r ? (r as ProtectionListRow).backend_name : null,
+    s3Bucket: r.s3_bucket,
     captureSpec: parseCaptureSpec(r.capture_spec),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
+}
+
+/** Display label for a protection's destination. NULL backend_id resolves
+ *  to the historical server archive; otherwise the backend's name (or a
+ *  placeholder when the backend row is missing — see the delete guard). */
+function destinationLabel(r: Pick<ProtectionRow, "backend_id"> & { backend_name?: string | null }): string {
+  if (r.backend_id === null || r.backend_id === undefined) return "server_archive";
+  return r.backend_name ?? "backend";
 }
 
 function rowToListItem(r: ProtectionListRow): ApplicationProtectionListItem {
@@ -309,6 +337,9 @@ function rowToSnapshot(r: SnapshotRow): ApplicationSnapshot {
     sourceHostId: r.source_host_id,
     createdAt: r.created_at,
     archivePath: r.archive_path,
+    backendId: r.backend_id,
+    objectKey: r.object_key,
+    s3Bucket: r.s3_bucket,
     archiveFormat: "tar.gz",
     sizeBytes: r.size_bytes,
     checksumSha256: r.checksum_sha256,
@@ -318,12 +349,73 @@ function rowToSnapshot(r: SnapshotRow): ApplicationSnapshot {
   };
 }
 
-async function sha256Hex(blob: Blob): Promise<string> {
-  const buf = await blob.arrayBuffer();
-  const digest = await crypto.subtle.digest("SHA-256", buf);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+/** Fetch one protection with its resolved backend name (LEFT JOIN). */
+function protectionById(id: string): ProtectionListRow | null {
+  return activeDb
+    .query<ProtectionListRow, [string]>(
+      `SELECT p.*, b.name AS backend_name,
+              NULL AS template_origin, NULL AS template_name,
+              NULL AS template_emoji, NULL AS template_color,
+              NULL AS latest_id, NULL AS latest_created_at,
+              NULL AS latest_size_bytes, NULL AS latest_integrity_status
+         FROM application_protections p
+         LEFT JOIN backends b ON b.id = p.backend_id
+        WHERE p.id = ?`,
+    )
+    .get(id);
+}
+
+interface DestinationChoice {
+  backendId: string | null;
+  s3Bucket: string | null;
+  destination: string;
+  error: string | null;
+}
+
+/** Validate a protection destination choice (LAMA-324). NULL backend =
+ *  server archive; else the backend must exist, be of an allowed kind
+ *  (s3/local/nfs — never restic), and s3 kinds require a bucket. */
+function validateDestination(body: { backendId?: string | null; s3Bucket?: string | null }): DestinationChoice {
+  const backendId = body.backendId ?? null;
+  if (backendId === null || backendId.trim() === "") {
+    if (body.s3Bucket !== undefined && body.s3Bucket !== null && body.s3Bucket.trim() !== "") {
+      return { backendId: null, s3Bucket: null, destination: "server_archive", error: "s3Bucket is only valid with a backend" };
+    }
+    return { backendId: null, s3Bucket: null, destination: "server_archive", error: null };
+  }
+  const id = backendId.trim();
+  const backend = activeDb
+    .query<{ id: string; name: string; kind: string }, [string]>(
+      `SELECT id, name, kind FROM backends WHERE id = ?`,
+    )
+    .get(id);
+  if (!backend) {
+    return { backendId: null, s3Bucket: null, destination: "server_archive", error: "backend not found" };
+  }
+  if (!isAllowedAppBackendKind(backend.kind)) {
+    return {
+      backendId: null,
+      s3Bucket: null,
+      destination: "server_archive",
+      error: `backend kind '${backend.kind}' is not a valid app backup destination (allowed: s3, local, nfs)`,
+    };
+  }
+  const s3Bucket =
+    body.s3Bucket !== undefined && body.s3Bucket !== null && body.s3Bucket.trim() !== ""
+      ? body.s3Bucket.trim()
+      : null;
+  if (backend.kind === "s3" && (s3Bucket === null || s3Bucket === "")) {
+    return { backendId: null, s3Bucket: null, destination: "server_archive", error: "s3 backends require a bucket" };
+  }
+  if (backend.kind !== "s3" && s3Bucket !== null) {
+    return {
+      backendId: null,
+      s3Bucket: null,
+      destination: "server_archive",
+      error: `s3Bucket is only valid for s3 backends (selected: ${backend.kind})`,
+    };
+  }
+  return { backendId: id, s3Bucket, destination: backend.name, error: null };
 }
 
 const templateBody = t.Object({
@@ -337,6 +429,24 @@ const templateBody = t.Object({
   installInstructions: t.Optional(t.Union([t.String(), t.Null()])),
   restoreInstructions: t.Optional(t.Union([t.String(), t.Null()])),
 });
+
+/** Resolve the publish destination for a protection: null = server-local
+ *  archive, else the resolved backend (validated allowed kind + complete
+ *  config) and its bucket. Throws AppStorageError on an unresolvable
+ *  destination so uploads fail closed mid-relay. */
+function publishDestinationFor(
+  protection: { backend_id: string | null; s3_bucket: string | null },
+): { backend: ResolvedAppBackend; s3Bucket: string } | null {
+  const backendId = protection.backend_id;
+  if (backendId === null || backendId === "") return null;
+  const resolved = resolveAppBackend(activeDb, backendId);
+  if (resolved === null) {
+    throw new AppStorageError(
+      "protection backend is missing, invalid, or of an unallowed kind",
+    );
+  }
+  return { backend: resolved, s3Bucket: protection.s3_bucket ?? "" };
+}
 
 export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   // ---------------------------------------------------------------------------
@@ -537,12 +647,14 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
       const sql = `
         SELECT p.*, t.origin AS template_origin, t.name AS template_name,
                t.emoji AS template_emoji, t.color AS template_color,
+               b.name AS backend_name,
                (SELECT s.id            FROM application_snapshots s WHERE s.protection_id = p.id ORDER BY s.created_at DESC LIMIT 1) AS latest_id,
                (SELECT s.created_at    FROM application_snapshots s WHERE s.protection_id = p.id ORDER BY s.created_at DESC LIMIT 1) AS latest_created_at,
                (SELECT s.size_bytes    FROM application_snapshots s WHERE s.protection_id = p.id ORDER BY s.created_at DESC LIMIT 1) AS latest_size_bytes,
                (SELECT s.integrity_status FROM application_snapshots s WHERE s.protection_id = p.id ORDER BY s.created_at DESC LIMIT 1) AS latest_integrity_status
           FROM application_protections p
           JOIN application_templates t ON t.id = p.template_id
+          LEFT JOIN backends b ON b.id = p.backend_id
           ${query.hostId ? "WHERE p.host_id = ?" : ""}
           ORDER BY p.created_at ASC`;
       const rows = query.hostId
@@ -589,6 +701,11 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 409;
         return { error: "A protection already exists for this host and template" };
       }
+      const destination = validateDestination(body);
+      if (destination.error) {
+        set.status = 400;
+        return { error: destination.error };
+      }
       const id = crypto.randomUUID();
       const ts = Date.now();
       const name = body.name ?? template.name;
@@ -601,8 +718,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
       activeDb.run(
         `INSERT INTO application_protections
            (id, template_id, template_revision, host_id, name, enabled, schedule,
-            destination, capture_spec, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, 'server_archive', ?, ?, ?)`,
+            destination, backend_id, s3_bucket, capture_spec, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           template.id,
@@ -610,15 +727,16 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
           body.hostId,
           name,
           body.schedule ?? null,
+          destination.destination,
+          destination.backendId,
+          destination.s3Bucket,
           JSON.stringify(captureSpec),
           ts,
           ts,
         ],
       );
       bumpConfigRevision([body.hostId]);
-      const row = activeDb
-        .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
-        .get(id);
+      const row = protectionById(id);
       set.status = 201;
       return rowToProtection(row!);
     },
@@ -628,6 +746,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         hostId: t.String(),
         schedule: t.Optional(t.Union([t.String(), t.Null()])),
         name: t.Optional(t.String()),
+        backendId: t.Optional(t.Union([t.String(), t.Null()])),
+        s3Bucket: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: { summary: "Enroll an app protection", tags: ["Apps"] },
     },
@@ -635,9 +755,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/apps/protections/:id",
     ({params, set, request}) => {
-      const row = activeDb
-        .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
-        .get(params.id);
+      const row = protectionById(params.id);
       if (!row) {
         set.status = 404;
         return { error: "Protection not found" };
@@ -658,9 +776,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 403;
         return { error: "Forbidden" };
       }
-      const existing = activeDb
-        .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
-        .get(params.id);
+      const existing = protectionById(params.id);
       if (!existing) {
         set.status = 404;
         return { error: "Protection not found" };
@@ -674,17 +790,36 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
       if (body.name !== undefined) push("name", body.name);
       if (body.enabled !== undefined) push("enabled", body.enabled ? 1 : 0);
       if (body.schedule !== undefined) push("schedule", body.schedule);
-      if (body.destination !== undefined) push("destination", body.destination);
+      if (body.backendId !== undefined || body.s3Bucket !== undefined) {
+        // LAMA-324: destination changes affect FUTURE captures only. The
+        // backend is validated like enrollment; snapshots keep their own
+        // immutable recorded location and history stays intact.
+        const destination = validateDestination({
+          backendId: body.backendId ?? existing.backend_id,
+          s3Bucket: body.s3Bucket ?? existing.s3_bucket,
+        });
+        if (destination.error) {
+          set.status = 400;
+          return { error: destination.error };
+        }
+        push("backend_id", destination.backendId);
+        push("s3_bucket", destination.s3Bucket);
+        push("destination", destination.destination);
+      }
       assignments.push("updated_at = ?");
       bindings.push(Date.now(), params.id);
-      activeDb.run(
-        `UPDATE application_protections SET ${assignments.join(", ")} WHERE id = ?`,
-        bindings,
-      );
+      try {
+        activeDb.run(
+          `UPDATE application_protections SET ${assignments.join(", ")} WHERE id = ?`,
+          bindings,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set.status = 409;
+        return { error: `Failed to update protection: ${message}` };
+      }
       bumpConfigRevision([existing.host_id]);
-      const row = activeDb
-        .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
-        .get(params.id);
+      const row = protectionById(params.id);
       return rowToProtection(row!);
     },
     {
@@ -692,7 +827,8 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         name: t.Optional(t.String()),
         enabled: t.Optional(t.Boolean()),
         schedule: t.Optional(t.Union([t.String(), t.Null()])),
-        destination: t.Optional(t.Literal("server_archive")),
+        backendId: t.Optional(t.Union([t.String(), t.Null()])),
+        s3Bucket: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: { summary: "Update app protection", tags: ["Apps"] },
     },
@@ -763,9 +899,7 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/apps/protections/:id/snapshots",
     async ({params, request, set}) => {
-      const protection = activeDb
-        .query<ProtectionRow, [string]>(`SELECT * FROM application_protections WHERE id = ?`)
-        .get(params.id);
+      const protection = protectionById(params.id);
       if (!protection) {
         set.status = 404;
         return { error: "Protection not found" };
@@ -798,59 +932,103 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
       const description =
         typeof descriptionRaw === "string" && descriptionRaw.length > 0 ? descriptionRaw : null;
 
-      const protectionDir = join(BACKUP_DIR, "apps", protection.id);
-      mkdirSync(protectionDir, { recursive: true });
-      const timestamp = Date.now();
-      // Timestamps are metadata, not a collision-safe archive identity:
-      // concurrent retries can share one millisecond. Keep every snapshot in
-      // a unique file so one upload cannot silently replace another.
-      const filename = `${timestamp}-${crypto.randomUUID()}.tar.gz`;
-      const fullPath = join(protectionDir, filename);
-      const relPath = join("apps", protection.id, filename);
-
-      const buf = Buffer.from(await file.arrayBuffer());
-      await Bun.write(fullPath, buf);
-      const checksum = await sha256Hex(file);
-
-      const id = crypto.randomUUID();
+      // LAMA-324 flow: stage outside browse roots → compute size/SHA-256 →
+      // revalidate protection + destination immediately before publication →
+      // publish → insert metadata → compensate best-effort on DB failure.
+      const snapshotId = crypto.randomUUID();
+      const stagingDir = appStagingRoot();
+      mkdirSync(stagingDir, { recursive: true });
+      const stagedPath = join(stagingDir, `${snapshotId}.tar.gz`);
       try {
-        activeDb.transaction(() => {
-          activeDb.run(
-            `INSERT INTO application_snapshots
-               (id, protection_id, template_id, template_revision, source_host_id, created_at,
-                archive_path, archive_format, size_bytes, checksum_sha256, description,
-                captured_spec, integrity_status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'tar.gz', ?, ?, ?, ?, 'verified')`,
-            [
-              id,
-              protection.id,
-              protection.template_id,
-              protection.template_revision,
-              principal?.kind === "device" ? principal.hostId : protection.host_id,
-              timestamp,
-              relPath,
-              buf.length,
-              checksum,
-              description,
-              JSON.stringify(capturedSpec), // server-side exact capture record
-            ],
-          );
-        })();
+        await Bun.write(stagedPath, Buffer.from(await file.arrayBuffer()));
       } catch {
         try {
-          unlinkSync(fullPath);
+          rmSync(stagedPath, { force: true });
         } catch {
           /* best-effort */
         }
         set.status = 500;
-        return { error: "Failed to record snapshot" };
+        return { error: "Failed to stage snapshot upload" };
       }
 
-      const row = activeDb
-        .query<SnapshotRow, [string]>(`SELECT * FROM application_snapshots WHERE id = ?`)
-        .get(id);
-      set.status = 201;
-      return rowToSnapshot(row!);
+      try {
+        // Revalidate under fresh state right before publication: a disable,
+        // destination change, or backend removal concurrent with the upload
+        // must abort here rather than write to a stale destination.
+        const fresh = protectionById(params.id);
+        if (!fresh || fresh.enabled !== 1) {
+          set.status = 409;
+          return { error: "Protection is disabled or no longer exists" };
+        }
+        const destination = publishDestinationFor(fresh);
+        const result = await publishSnapshotArchive({
+          stagedPath,
+          protectionId: fresh.id,
+          snapshotId,
+          destination,
+        });
+
+        const hostId = principal?.kind === "device" ? principal.hostId : fresh.host_id;
+        try {
+          activeDb.transaction(() => {
+            activeDb.run(
+              `INSERT INTO application_snapshots
+                 (id, protection_id, template_id, template_revision, source_host_id, created_at,
+                  archive_path, archive_format, size_bytes, checksum_sha256, description,
+                  captured_spec, integrity_status, backend_id, object_key, s3_bucket)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'tar.gz', ?, ?, ?, ?, 'verified', ?, ?, ?)`,
+              [
+                snapshotId,
+                fresh.id,
+                fresh.template_id,
+                fresh.template_revision,
+                hostId,
+                Date.now(),
+                result.objectKey ?? result.localRelPath!,
+                result.sizeBytes,
+                result.checksumSha256,
+                description,
+                JSON.stringify(capturedSpec), // server-side exact capture record
+                fresh.backend_id,
+                result.objectKey,
+                fresh.s3_bucket,
+              ],
+            );
+          })();
+        } catch {
+          // Publication succeeded but the metadata insert failed: best-effort
+          // remove the just-published object and report cleanup failure
+          // operationally. The staged file is always cleaned (finally).
+          await compensatePublishedObject(
+            activeDb,
+            result,
+            destination === null
+              ? null
+              : { backendId: destination.backend.row.id, s3Bucket: destination.s3Bucket },
+          );
+          set.status = 500;
+          return { error: "Failed to record snapshot" };
+        }
+
+        const row = activeDb
+          .query<SnapshotRow, [string]>(`SELECT * FROM application_snapshots WHERE id = ?`)
+          .get(snapshotId);
+        set.status = 201;
+        return rowToSnapshot(row!);
+      } catch (err) {
+        if (err instanceof AppStorageError) {
+          set.status = 502;
+          return { error: err.message };
+        }
+        set.status = 500;
+        return { error: err instanceof Error ? err.message : String(err) };
+      } finally {
+        try {
+          rmSync(stagedPath, { force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
     },
     { detail: { summary: "Upload an app snapshot", tags: ["Apps"] } },
   )
@@ -888,20 +1066,37 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 403;
         return { error: "Forbidden" };
       }
-      const fullPath = join(BACKUP_DIR, row.archive_path);
-      if (!existsSync(fullPath)) {
-        set.status = 404;
-        return { error: "Snapshot archive not found" };
+      // LAMA-324: dispatch from the snapshot's STORED location. No silent
+      // fallback to another backend; an unresolvable location is a 404.
+      try {
+        const download = await snapshotDownload(activeDb, locationForSnapshot(row));
+        set.headers["Content-Type"] = "application/gzip";
+        if (download.kind === "file") {
+          return new Response(Bun.file(download.absPath));
+        }
+        // rclone cat streams the object; failures truncate the stream and
+        // are logged operationally (we cannot retroactively 404 mid-body).
+        void download.run.then((r) => {
+          if (r.code !== 0) {
+            console.error(
+              `[apps] snapshot ${params.id} s3 download failed: ${r.stderr.trim().split("\n").pop() ?? "rclone cat failed"}`,
+            );
+          }
+        });
+        return new Response(download.stream);
+      } catch (err) {
+        if (err instanceof AppStorageError) {
+          set.status = 404;
+          return { error: err.message };
+        }
+        throw err;
       }
-      set.headers["Content-Type"] = "application/gzip";
-      const st = Bun.file(fullPath);
-      return new Response(st);
     },
     { detail: { summary: "Download app snapshot", tags: ["Apps"] } },
   )
   .delete(
     "/apps/snapshots/:id",
-    ({params, set, request}) => {
+    async ({params, set, request}) => {
       if (!requireAdmin({ principal: principalOf(request) })) {
         set.status = 403;
         return { error: "Forbidden" };
@@ -913,12 +1108,15 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Snapshot not found" };
       }
-      activeDb.run(`DELETE FROM application_snapshots WHERE id = ?`, [params.id]);
-      try {
-        unlinkSync(join(BACKUP_DIR, row.archive_path));
-      } catch {
-        /* best-effort */
+      // LAMA-324: delete the archive at its STORED location BEFORE removing
+      // the row (a failed delete keeps the row so the operator can retry;
+      // an already-absent object proceeds to row removal).
+      const outcome = await deleteSnapshotArchiveForRow(activeDb, row);
+      if (outcome.status === "failed") {
+        set.status = 502;
+        return { error: `Failed to delete snapshot archive: ${outcome.error}` };
       }
+      activeDb.run(`DELETE FROM application_snapshots WHERE id = ?`, [params.id]);
       set.status = 204;
       return undefined;
     },

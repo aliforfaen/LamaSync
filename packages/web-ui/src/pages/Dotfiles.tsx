@@ -4,16 +4,17 @@
 // uploaded manually here. No restore/setup/replace actions exist in this
 // delivery — a snapshot is downloaded and inspected elsewhere.
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type {
   ApplicationProtectionListItem,
   ApplicationSnapshot,
+  Backend,
   Host,
 } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
-import { ConfirmDialog } from "../components/Modal.tsx";
+import { ConfirmDialog, Modal } from "../components/Modal.tsx";
 import { formatBytes } from "../format-bytes.ts";
 import { nextRunSentence } from "../next-run.ts";
 
@@ -28,6 +29,13 @@ const INTEGRITY_BADGE: Record<string, string> = {
 const DESTINATION_LABEL: Record<string, string> = {
   server_archive: "Server archive",
 };
+
+/** Display destination: the backend name when one is selected (LAMA-324),
+ *  else the legacy literal label. */
+function destinationDisplay(protection: ApplicationProtectionListItem): string {
+  if (protection.backendName) return protection.backendName;
+  return DESTINATION_LABEL[protection.destination] ?? protection.destination ?? "Server archive";
+}
 
 /** Description stamped on snapshots uploaded from this page. */
 export const UPLOAD_DESCRIPTION = "Manual upload from the web UI";
@@ -83,6 +91,30 @@ export async function setProtectionEnabled(
   }
 }
 
+export interface DestinationChangeServices {
+  updateAppProtection(
+    id: string,
+    body: { backendId: string | null; s3Bucket?: string | null },
+  ): Promise<unknown>;
+}
+
+/** LAMA-324: change a protection's destination. Affects FUTURE captures
+ *  only — snapshot history keeps its immutable recorded location. Returns
+ *  null on success, otherwise the error text to render. */
+export async function changeProtectionDestination(
+  services: DestinationChangeServices,
+  id: string,
+  backendId: string | null,
+  s3Bucket: string | null,
+): Promise<string | null> {
+  try {
+    await services.updateAppProtection(id, { backendId, s3Bucket });
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Page.
 // ---------------------------------------------------------------------------
@@ -108,14 +140,23 @@ export function AppBackups() {
   const [deletingProtection, setDeletingProtection] =
     useState<ApplicationProtectionListItem | null>(null);
   const [deletingSnapshot, setDeletingSnapshot] = useState<ApplicationSnapshot | null>(null);
+  // LAMA-324: selectable destinations (s3/local/nfs backends; restic is not
+  // a valid app-archive destination) + the change-destination dialog state.
+  const [backends, setBackends] = useState<Backend[]>([]);
+  const [destinationDraft, setDestinationDraft] = useState<{
+    protection: ApplicationProtectionListItem;
+    backendId: string | null;
+    s3Bucket: string;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const list = await api.listHosts();
+        const [list, backendList] = await Promise.all([api.listHosts(), api.listBackends()]);
         if (cancelled) return;
         setHosts(list);
+        setBackends(backendList.filter((b) => b.kind !== "restic"));
         setHostId((current) => current ?? list[0]?.id ?? null);
       } catch (err) {
         if (cancelled) return;
@@ -232,6 +273,26 @@ export function AppBackups() {
     await reloadProtections();
   }
 
+  async function confirmDestinationChange(): Promise<void> {
+    if (!destinationDraft) return;
+    const draft = destinationDraft;
+    setBusyProtectionId(draft.protection.id);
+    setError(null);
+    const message = await changeProtectionDestination(
+      api,
+      draft.protection.id,
+      draft.backendId,
+      draft.s3Bucket.trim() || null,
+    );
+    setBusyProtectionId(null);
+    if (message !== null) {
+      setError(message);
+      return;
+    }
+    setDestinationDraft(null);
+    await reloadProtections();
+  }
+
   async function confirmDeleteProtection(): Promise<void> {
     if (!deletingProtection) return;
     const protection = deletingProtection;
@@ -281,6 +342,10 @@ export function AppBackups() {
   }
 
   const selectedHostname = hostId ? hostLabel(hostId) : null;
+  const destinationBackend = useMemo(() => {
+    if (!destinationDraft || destinationDraft.backendId === null) return null;
+    return backends.find((b) => b.id === destinationDraft.backendId) ?? null;
+  }, [destinationDraft, backends]);
 
   return (
     <div className="page">
@@ -373,7 +438,10 @@ export function AppBackups() {
                       )}
                     </td>
                     <td className="muted">
-                      {DESTINATION_LABEL[protection.destination] ?? protection.destination}
+                      {destinationDisplay(protection)}
+                      {protection.s3Bucket ? (
+                        <span className="muted"> · {protection.s3Bucket}</span>
+                      ) : null}
                     </td>
                     <td className="muted">
                       {protection.latestSnapshot ? (
@@ -420,6 +488,19 @@ export function AppBackups() {
                       <details className="row-menu">
                         <summary className="action">More</summary>
                         <div className="row-menu-panel">
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              setDestinationDraft({
+                                protection,
+                                backendId: protection.backendId,
+                                s3Bucket: protection.s3Bucket ?? "",
+                              })
+                            }
+                          >
+                            Change destination…
+                          </button>
                           <button type="button" disabled={busy} onClick={() => void onToggle(protection)}>
                             {protection.enabled ? "Disable protection" : "Enable protection"}
                           </button>
@@ -522,6 +603,62 @@ export function AppBackups() {
           onConfirm={() => void confirmDeleteProtection()}
           onCancel={() => setDeletingProtection(null)}
         />
+      ) : null}
+
+      {destinationDraft ? (
+        <Modal
+          title={`Change destination — ${destinationDraft.protection.name}`}
+          onClose={() => setDestinationDraft(null)}
+          footer={
+            <>
+              <button type="button" className="action" onClick={() => setDestinationDraft(null)}>Cancel</button>
+              <button
+                type="button"
+                className="action primary"
+                disabled={busyProtectionId === destinationDraft.protection.id}
+                onClick={() => void confirmDestinationChange()}
+              >
+                Save destination
+              </button>
+            </>
+          }
+        >
+          <label className="field">
+            <span>Destination</span>
+            <select
+              value={destinationDraft.backendId ?? ""}
+              onChange={(e) => {
+                const value = e.target.value;
+                setDestinationDraft({
+                  ...destinationDraft,
+                  backendId: value === "" ? null : value,
+                  s3Bucket: value === "" ? "" : destinationDraft.s3Bucket,
+                });
+              }}
+            >
+              <option value="">Server archive (default)</option>
+              {backends.map((backend) => (
+                <option key={backend.id} value={backend.id}>
+                  {backend.name} ({backend.kind})
+                </option>
+              ))}
+            </select>
+          </label>
+          {destinationBackend?.kind === "s3" ? (
+            <label className="field">
+              <span>Bucket</span>
+              <input
+                placeholder="lamasync-apps"
+                value={destinationDraft.s3Bucket}
+                onChange={(e) => setDestinationDraft({ ...destinationDraft, s3Bucket: e.target.value })}
+              />
+            </label>
+          ) : null}
+          <p className="muted">
+            Only future captures are affected — every existing snapshot stays where it was
+            captured and remains downloadable.
+          </p>
+        </Modal>
       ) : null}
 
       {deletingSnapshot ? (

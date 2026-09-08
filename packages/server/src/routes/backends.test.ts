@@ -373,6 +373,63 @@ describe("DELETE /api/v1/backends/:id", () => {
     );
     expect(res.status).toBe(204);
   });
+
+  test("LAMA-324: refuses to delete a backend referenced by app protections", async () => {
+    const created = await postJson("/api/v1/backends", {
+      name: "prot-dest",
+      kind: "local",
+      localPath: "/tmp/lamasync-backends-test-prots",
+    });
+    const { id } = (await created.json()) as { id: string };
+    db.run(
+      `INSERT INTO application_templates (id, name, origin, paths, revision, created_at, updated_at)
+       VALUES ('app-tpl-1', 'nvim', 'custom', ?, 1, 1, 1)`,
+      [JSON.stringify({ paths: { linux: [{ path: "~/.config/nvim", classification: "unknown" }] }, excludes: [], notes: null })],
+    );
+    db.run(
+      `INSERT INTO application_protections
+         (id, template_id, template_revision, host_id, name, enabled, schedule,
+          destination, backend_id, capture_spec, created_at, updated_at)
+       VALUES ('app-prot-1', 'app-tpl-1', 1, 'host-x', 'nvim on x', 1, NULL, 'prot-dest', ?, ?, 1, 1)`,
+      [id, JSON.stringify({ paths: { linux: [{ path: "~/.config/nvim", classification: "unknown" }] }, excludes: [], notes: null })],
+    );
+    const res = await app.handle(
+      request(`/api/v1/backends/${id}`, { method: "DELETE" }),
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("app protection");
+  });
+
+  test("LAMA-324: refuses to delete a backend that still stores snapshots", async () => {
+    const created = await postJson("/api/v1/backends", {
+      name: "snapshot-holder",
+      kind: "local",
+      localPath: "/tmp/lamasync-backends-test-snaps",
+    });
+    const { id } = (await created.json()) as { id: string };
+    db.run(
+      `INSERT INTO application_protections
+         (id, template_id, template_revision, host_id, name, enabled, schedule,
+          destination, capture_spec, created_at, updated_at)
+       VALUES ('app-prot-holder', 'app-tpl-1', 1, 'host-x', 'holder', 1, NULL, 'server_archive', ?, 1, 1)`,
+      [JSON.stringify({ paths: { linux: [{ path: "~/.config/nvim", classification: "unknown" }] }, excludes: [], notes: null })],
+    );
+    db.run(
+      `INSERT INTO application_snapshots
+         (id, protection_id, template_id, template_revision, source_host_id, created_at,
+          archive_path, archive_format, captured_spec, integrity_status, backend_id, object_key)
+       VALUES ('snap-holder', 'app-prot-holder', 'app-tpl-1', 1, 'host-x', 1,
+               'lamasync/apps/app-prot-holder/snap-holder.tar.gz', 'tar.gz', ?, 'verified', ?, 'lamasync/apps/app-prot-holder/snap-holder.tar.gz')`,
+      [JSON.stringify({ paths: { linux: [{ path: "~/.config/nvim", classification: "unknown" }] }, excludes: [], notes: null }), id],
+    );
+    const res = await app.handle(
+      request(`/api/v1/backends/${id}`, { method: "DELETE" }),
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("still stores");
+  });
 });
 
 describe("GET /api/v1/backends", () => {

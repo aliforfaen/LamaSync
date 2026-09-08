@@ -129,6 +129,30 @@ function folderCount(backendId: string): number {
   );
 }
 
+/** LAMA-324: protections whose FUTURE captures target this backend. */
+function protectionCount(backendId: string): number {
+  return (
+    activeDb
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM application_protections WHERE backend_id = ?",
+      )
+      .get(backendId)?.c ?? 0
+  );
+}
+
+/** LAMA-324: snapshots whose immutable physical location lives on this
+ *  backend. Deleting a backend must not strand snapshot archives that
+ *  download/delete dispatch would resolve through it. */
+function storedSnapshotCount(backendId: string): number {
+  return (
+    activeDb
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM application_snapshots WHERE backend_id = ?",
+      )
+      .get(backendId)?.c ?? 0
+  );
+}
+
 /** Per-kind backend field validation shared by create and PATCH. Returns
  *  an error string, or null when the input is valid. `local` and `nfs` are
  *  named connection targets for a server-side directory (rclone type =
@@ -583,6 +607,23 @@ export const backendsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 409;
         return {
           error: `backend '${existing.name}' is used by ${inUse} folder(s); unassign them first`,
+        };
+      }
+      // LAMA-324: a backend referenced by protections or holding snapshot
+      // archives cannot be deleted — download/delete dispatch depends on it
+      // and protections control future captures with it.
+      const protections = protectionCount(params.backendId);
+      if (protections > 0) {
+        set.status = 409;
+        return {
+          error: `backend '${existing.name}' is the destination of ${protections} app protection(s); change their destination first`,
+        };
+      }
+      const storedSnapshots = storedSnapshotCount(params.backendId);
+      if (storedSnapshots > 0) {
+        set.status = 409;
+        return {
+          error: `backend '${existing.name}' still stores ${storedSnapshots} app snapshot(s); delete or migrate them first`,
         };
       }
       activeDb.run("DELETE FROM backends WHERE id = ?", [params.backendId]);
