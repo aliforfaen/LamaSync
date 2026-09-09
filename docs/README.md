@@ -28,6 +28,8 @@ link to them directly.
 
 [Android phase 1 spec](spec-296-phase-1-android-foundation.md) is the bounded next coding assignment: native scaffolding and QR/session authentication, before uploads.
 
+[Stage-2 automatic protection spec](spec-296-stage-2-auto-protection.md) records the stage-2 data/permission/scheduling design decision; the implementation evidence is [report-296-stage-2-auto-protection.md](report-296-stage-2-auto-protection.md).
+
 ## Archive
 
 Completed August plans, audits, owner briefs, and historical status entries

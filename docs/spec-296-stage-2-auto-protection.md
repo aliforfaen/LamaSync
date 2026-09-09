@@ -79,12 +79,18 @@ process-wide mutation lock, mirroring the stage-1 `UploadQueueStore` pattern.
   per-volume on API 29+ (`getExternalVolumeNames`), `EXTERNAL_CONTENT_URI`
   on API 26–28 (documented: primary volume only).
 - Selection: bounded projection; keyset pagination on
-  `(date_added, _id) DESC` (existing-history import is therefore fully
-  deterministic and resumable) and on `(generation, _id) ASC` for new-only
-  watermarks on API 30+ (generation is the race-safe "new since" cursor);
-  API 26–29 new-only uses a `(date_added, _id)` boundary taken from the
-  newest row at boundary time — race-safe for rows present at boundary time,
-  with per-volume cursors.
+  `(date_added, _id) DESC` for both modes (existing-history import is
+  therefore fully deterministic and resumable). New-only boundaries are the
+  NEWEST row's `(date_added, _id)` captured BEFORE the first import query
+  (race-safe: rows present at capture have keys ≤ the boundary; rows
+  inserted afterwards are strictly newer) with per-volume cursors.
+  MediaStore's GENERATION column is not a public SDK constant before API 36
+  (only `getGeneration()` is), so the keyset boundary is used instead and
+  edits of already-known rows are caught by the known-ids reconciliation.
+- Query execution: `LIMIT` and the WHERE keyset pass through the
+  query-args bundle (`QUERY_ARG_SQL_SORT_ORDER`/`QUERY_ARG_SQL_LIMIT`/
+  `QUERY_ARG_SQL_SELECTION`); API 35 rejects `LIMIT` embedded in the
+  sortOrder string.
 - Classification (pure): camera = relative path `DCIM/Camera` (DATA fallback
   on ≤28); screenshots = relative path containing `Screenshots` (covers
   `Pictures/Screenshots` and OEM variants).
@@ -109,10 +115,13 @@ process-wide mutation lock, mirroring the stage-1 `UploadQueueStore` pattern.
   (serialization-defaulted, backward compatible) linking receipts back to the
   registry for provenance.
 - Idempotency: queue item id and upload idempotency key are deterministic
-  `auto-<identity>#<sha12>` — repeated scans, restarts, retries and duplicate
-  triggers re-create the same item instead of duplicating it. An item in a
-  terminal state is never re-added; a re-protected revision gets a new hash
-  suffix and therefore a distinct item.
+  `autoq-<source>-<id>-<volhash>-<sha12>` (and `autop-…` for the server key)
+  — repeated scans, restarts, retries and duplicate triggers converge on the
+  same item instead of duplicating it. Keys comply with the server's create
+  contract (`^[A-Za-z0-9._-]+$`, ≤ 128 chars). An item in a terminal state
+  is never re-added; a re-protected revision gets a new hash suffix and
+  therefore a distinct item. A user CANCELLED auto item stays cancelled
+  until removed; removing it re-arms protection on the next scan.
 - Collision handling (repeated names): if the server rejects `create` with a
   collision (409), the engine retries under `base (n).ext` names (bounded, 20
   attempts) so repeated names/edited files never silently fail; the server

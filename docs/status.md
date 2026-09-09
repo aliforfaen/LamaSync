@@ -58,6 +58,29 @@ distributable binary build.
   web UI + REST API (agent skill). Follow-up: LAMA-326 trims the CLI to its
   local-daemon surface.
 
+- **LAMA-296 (stage 2) — automatic camera protection.** On top of the
+  stage-1 baseline, the Android companion now discovers camera photos/videos
+  (and optional screenshots) through real MediaStore queries, keeps a
+  durable device-local registry (stable `collection:<id>@<volume>` identity,
+  per-collection/volume discovery cursors, settings, permission scope), and
+  automatically protects them into the server-approved **Camera** inbox via
+  the stage-1 resumable engine — no server or wire changes. New-only
+  boundaries are race-safe; existing-history import is deterministic and
+  resumable; edits are re-protected; deletions are LOCAL-ONLY (the server
+  copy is never touched); “protected through” comes from a contiguous
+  completion chain, never the latest upload timestamp. Scheduling is a
+  unique prompt-discovery + ~6 h periodic-reconciliation WorkManager pair
+  with boot recovery; transfers honor unmetered + charging policy and
+  promote to a dataSync foreground-service worker when the platform allows
+  (graceful degradation otherwise). The setup/status screen shows source
+  toggles, permission recovery, existing-vs-new, destination readiness,
+  waiting reasons, pending bytes and last successful protection; manual
+  Uploads behavior is unchanged. Verified on the API-35 AVD over the
+  disposable HTTPS vertical — real MediaStore photo + >64 MiB video,
+  checksum-verified arrival, real-host operation provenance, no duplicates
+  on repeat scans, local deletion keeping the server copy — plus the
+  shell-prepared permission negatives (revoked/partial). See
+  [`report-296-stage-2-auto-protection.md`](report-296-stage-2-auto-protection.md).
 - **LAMA-296 (stage 1) — usable manual uploads.** On top of the accepted
   phase-1 baseline: Android share/document intake (`ACTION_SEND`/`_MULTIPLE`
   + `ACTION_OPEN_DOCUMENT`), a durable queue bound to the enrollment identity,
@@ -174,12 +197,14 @@ distributable binary build.
   exchange and web-session bootstrap 503 without it. Existing HTTP tailnet
   installations remain served by existing clients but cannot enroll an
   Android device until an HTTPS front door exists.
-- LAMA-296 stage 1 ships manual ingestion only: automatic camera/media
-  discovery, initial-history selection, and onward cloud replication are
-  stage 2+. Real-phone background-transfer behavior (Doze, battery, work
-  constraints) is unverified — the emulator vertical proves the protocol and
-  scheduling machinery; a foreground notification during long uploads is not
-  yet implemented (uploads still run reliably in WorkManager).
+- LAMA-296 stage 2 ships automatic camera/media discovery and protection
+  (camera photos/videos + optional screenshots) with durable device-local
+  state; REAL-PHONE background-transfer behavior (Doze, battery, work
+  constraints, overnight user flows) is still unverified — the API-35
+  emulator vertical proves the protocol, scheduling machinery and
+  MediaStore discovery; the stage-1 vertical (this worktree) is emulator
+  verified. Uploads promote to a dataSync foreground-service worker when
+  the platform allows the notification and degrade gracefully otherwise.
 - App-capture archive rewriting currently relies on GNU tar's `--transform`
   behavior and is verified on Linux. There are no macOS or Windows clients in
   the fleet today; qualify their archive tooling before onboarding either
@@ -224,3 +249,17 @@ server, **42/42 with the rebuilt disposable HTTPS vertical** (phase-1
 enrollment A–D + 65 MiB+ chunked upload with server-side verification +
 checksum-mismatch negative). APK sha256
 `0891fe3302f749b7401660b592e4646be614ebf1c548f21724c346497f9d264a`.
+
+LAMA-296 stage-2 baseline (this worktree): repo gates green (`bun install`,
+`bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` **1589 pass / 9 skip /
+0 fail**, strict skill drift OK, `bun run build`), Android `assembleDebug` +
+`lintDebug` 0 errors, `testDebugUnitTest` **148/148**, and the instrumented
+suite — **53/53 on the API-35 `lamadb-test` AVD with the disposable HTTPS
+vertical** (phase-1 enrollment A–D, stage-1 manual uploads incl. >64 MiB,
+stage-2 auto-protect vertical with real MediaStore photo + >64 MiB video
+through discovery → staging → enqueue → resumable transfer; plus
+scheduler/policy, discovery, uploads, onboarding, work, web, vault tests
+and the evidence-capture test),
+with the two permission-negative tests (revoked + selected-photos partial)
+passing additionally in the shell-prepared negative pass. APK sha256
+`f40ce8f4f177a7d0f9aa14ed53d2513780e2efc61699d5a685b8f0666610af5d`.
