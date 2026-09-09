@@ -13,8 +13,15 @@ import type {
 import {
   runTemplateEnrollment,
   tryDeleteTemplate,
+  applySuggestionToEntry,
+  confirmSuggestedEntry,
+  specFromDraft,
+  pathAnnotationKey,
+  confidenceLabel,
+  isSecretsClass,
   type TemplateCardData,
   type TemplateCreatePayload,
+  type TemplateDraft,
   type TemplateEnrollServices,
 } from "./Presets.tsx";
 import {
@@ -307,5 +314,96 @@ describe("App backups — destination change flow (LAMA-324)", () => {
     };
     const message = await changeProtectionDestination(services, "protection-1", "backend-restic", null);
     expect(message).toContain("not a valid app backup destination");
+  });
+});
+
+describe("App templates — path classification annotations (LAMA-315)", () => {
+  test("applying a suggestion confirms it: manual source, confidence dropped, explanation kept", () => {
+    const entry = applySuggestionToEntry("~/.cache", {
+      classification: "cache",
+      rationale: "Detected as cache: well-known cache directory `~/.cache`.",
+      confidence: 0.9,
+      confidenceLevel: "high",
+      ruleId: "cache-home-cache-dir",
+      path: "~/.cache",
+    });
+    expect(entry).toEqual({
+      path: "~/.cache",
+      classification: "cache",
+      rationale: "Detected as cache: well-known cache directory `~/.cache`.",
+      classificationSource: "manual",
+      confidence: null,
+    });
+  });
+
+  test("confirming a pending suggestion drops its confidence", () => {
+    const pending: CaptureSpecPath = {
+      path: "~/.ssh",
+      classification: "secrets",
+      rationale: "well-known identity/credential directory `~/.ssh`",
+      classificationSource: "suggested",
+      confidence: 0.9,
+    };
+    expect(confirmSuggestedEntry(pending)).toEqual({
+      path: "~/.ssh",
+      classification: "secrets",
+      rationale: "well-known identity/credential directory `~/.ssh`",
+      classificationSource: "manual",
+      confidence: null,
+    });
+  });
+
+  test("specFromDraft merges annotations; untouched lines save as unknown/default", () => {
+    const draft: TemplateDraft = {
+      id: null,
+      name: "mixed",
+      description: "",
+      emoji: "",
+      color: "",
+      linuxPaths: "~/.cache\n~/.config/nvim",
+      macosPaths: "",
+      windowsPaths: "",
+      excludes: "",
+      notes: "",
+      installUrl: "",
+      installInstructions: "",
+      restoreInstructions: "",
+      annotations: {
+        [pathAnnotationKey("linux", "~/.cache")]: {
+          path: "~/.cache",
+          classification: "cache",
+          rationale: "Detected as cache: well-known cache directory `~/.cache`.",
+          classificationSource: "manual",
+          confidence: null,
+        },
+      },
+    };
+    const spec = specFromDraft(draft);
+    expect(spec.paths.linux).toEqual([
+      {
+        path: "~/.cache",
+        classification: "cache",
+        rationale: "Detected as cache: well-known cache directory `~/.cache`.",
+        classificationSource: "manual",
+        confidence: null,
+      },
+      {
+        path: "~/.config/nvim",
+        classification: "unknown",
+        classificationSource: "default",
+        confidence: null,
+      },
+    ]);
+  });
+
+  test("confidence labels and secrets conspicuity helpers", () => {
+    expect(confidenceLabel(0.9)).toBe("high");
+    expect(confidenceLabel(0.6)).toBe("medium");
+    expect(confidenceLabel(0.3)).toBe("low");
+    expect(confidenceLabel(null)).toBe("");
+    expect(confidenceLabel(undefined)).toBe("");
+    expect(isSecretsClass("secrets")).toBe(true);
+    expect(isSecretsClass("cache")).toBe(false);
+    expect(isSecretsClass(undefined)).toBe(false);
   });
 });

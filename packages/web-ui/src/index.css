@@ -921,6 +921,108 @@ table.data tbody tr:last-child td {
   color: var(--text-dim);
 }
 
+/* LAMA-315 — per-path classification rows in the app template editor. */
+.classify-panel {
+  border: 1px solid var(--badge-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin: var(--space-3) 0;
+  background: rgba(var(--text-muted-rgb), 0.06);
+}
+
+.classify-panel-title {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-weight: 600;
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-2);
+}
+
+.classify-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+  border-top: 1px solid rgba(var(--text-muted-rgb), 0.15);
+}
+
+.classify-row-secrets {
+  border-top-color: var(--accent-critical-border);
+  background: rgba(var(--accent-critical-rgb), 0.06);
+  border-radius: var(--radius-sm);
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+}
+
+.classify-path {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-sm);
+  word-break: break-all;
+}
+
+.classify-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.classify-rationale {
+  font-size: var(--font-size-xs);
+  flex-basis: 100%;
+}
+
+.classify-caution {
+  flex-basis: 100%;
+  font-size: var(--font-size-xs);
+  color: var(--accent-critical);
+  font-weight: 600;
+}
+
+.classify-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.classify-badge-secrets {
+  background: var(--accent-critical-bg);
+  color: var(--accent-critical);
+  border-color: var(--accent-critical-border);
+}
+
+.classify-badge-cache {
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
+.classify-badge-portable_config {
+  background: var(--accent-ok-bg);
+  color: var(--accent-ok);
+}
+
+.classify-badge-machine_state {
+  background: var(--accent-info-bg);
+  color: var(--accent-info);
+}
+
+.classify-badge-custom {
+  background: var(--muted-bg);
+  color: var(--text-dim);
+}
+
+.classify-suggestion {
+  background: var(--accent-info-bg);
+  color: var(--accent-info);
+}
+
+.classify-suggestion-secrets {
+  background: var(--accent-critical-bg);
+  color: var(--accent-critical);
+  border-color: var(--accent-critical-border);
+}
+
 .row-actions {
   display: flex;
   gap: var(--space-2);

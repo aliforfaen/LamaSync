@@ -356,8 +356,10 @@ export interface FolderAssignment {
 // contract). This replaces the dotfile-manifest/profile/version model above.
 // ---------------------------------------------------------------------------
 
-/** LAMA-315 hook: stable path taxonomy. This delivery only stamps every path
- *  as "unknown" and exposes the field; no recommendation/exclusion logic. */
+/** LAMA-315: stable path taxonomy. Classifications are suggestions for
+ *  planning/review — nothing consumes a class to change capture or exclusion.
+ *  `unknown` is "not yet classified" and stays visibly unknown; `custom` is
+ *  an operator's explicit assignment. */
 export type PathClassification =
   | "portable_config"
   | "machine_state"
@@ -366,11 +368,25 @@ export type PathClassification =
   | "custom"
   | "unknown";
 
+/** LAMA-315: provenance of a path's `classification` value.
+ *  - `default`    untouched initial state — always `unknown`.
+ *  - `suggested`  placed by the deterministic recommender, not yet
+ *                 operator-confirmed. Carries the matching `confidence`.
+ *  - `manual`     operator override/confirmation — the only source that
+ *                 locks a recommendation in; confidence is dropped. */
+export type ClassificationSource = "default" | "suggested" | "manual";
+
 /** A single classified path entry inside a capture spec. */
 export interface CaptureSpecPath {
   path: string;
   classification: PathClassification;
   rationale?: string | null;
+  /** LAMA-315: provenance of `classification`; absent/null reads as
+   *  `"default"` on the wire (legacy entries round-trip as unknown/default). */
+  classificationSource?: ClassificationSource | null;
+  /** 0..1 — present only when `classificationSource === "suggested"`.
+   *  Dropped/ignored for `manual`; null for `default`. */
+  confidence?: number | null;
   /** Snapshot-only deterministic archive member root. Never client supplied. */
   archivePath?: string | null;
 }

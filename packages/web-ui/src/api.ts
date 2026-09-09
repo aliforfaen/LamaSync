@@ -58,6 +58,7 @@ import type {
   MobileUploadDestinationRevokeResponse,
   MobileWebSessionLogoutResponse,
   PauseMode,
+  PathClassificationResult,
   PauseState,
   PairingSessionCreateResponse,
   PairingSessionStatusResponse,
@@ -753,6 +754,14 @@ export const api = {
   ) => apiPut<ApplicationTemplate>(`/apps/templates/${encodeURIComponent(id)}`, body),
   deleteAppTemplate: (id: string) =>
     apiDelete(`/apps/templates/${encodeURIComponent(id)}`),
+  // LAMA-315: read-only per-path classification suggestions (deterministic
+  // pattern catalog; nothing is applied or excluded by this call).
+  classifyAppPaths: async (paths: string[]) => {
+    const body = await apiPost<{ results: PathClassificationResult[] }>("/apps/classify", {
+      paths,
+    });
+    return body.results;
+  },
   // LAMA-316: protections bind one template to one host (enrollment copies the
   // template's capture spec; later template edits never mutate protections).
   listAppProtections: (hostId?: string) =>
