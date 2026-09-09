@@ -32,6 +32,15 @@ export {
 export { defaultSocketPath, defaultSocketDir } from "./socket-path.ts";
 // LAMA-239: per-host mount/sync override helper + AssignmentMode narrow.
 export { effectiveFolderType, normalizeAssignmentMode } from "./effective-type.ts";
+// LAMA-315: deterministic explainable path classifier for app capture specs.
+export {
+  classifyPath,
+  classificationRuleIds,
+  CONFIDENCE_BY_LEVEL,
+  type PathSuggestion,
+  type PathClassificationResult,
+  type ConfidenceLevel,
+} from "./path-classification.ts";
 // LAMA-302: event-triggered sync watch configuration contract (defaults,
 // quiet-period validation).
 export {

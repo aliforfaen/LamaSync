@@ -12,11 +12,13 @@ import type {
   CaptureSpec,
   CaptureSpecPath,
   Host,
+  PathClassification,
+  PathClassificationResult,
 } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { Modal } from "../components/Modal.tsx";
-import { APP_PRESETS, type AppPreset } from "../presets.ts";
+import { APP_PRESETS, type AppPreset, type OSKey } from "../presets.ts";
 import { SCHEDULE_PRESETS } from "../schedule-presets.ts";
 
 // ---------------------------------------------------------------------------
@@ -41,7 +43,7 @@ export interface TemplateCardData {
 }
 
 /** Editor state for create / edit / duplicate. */
-interface TemplateDraft {
+export interface TemplateDraft {
   id: string | null;
   name: string;
   description: string;
@@ -55,6 +57,10 @@ interface TemplateDraft {
   installUrl: string;
   installInstructions: string;
   restoreInstructions: string;
+  /** LAMA-315: per-path classification annotations keyed by
+   *  `pathAnnotationKey(os, path)`. Paths without an entry save as untouched
+   *  `unknown`/`default` — raw path entry stays first-class. */
+  annotations: PathAnnotations;
 }
 
 /** Enrollment dialog state. */
@@ -85,9 +91,79 @@ const STARTER_EMOJI: Record<string, string> = {
 
 const STARTER_COLOR = "#5dd6c0";
 
+/** LAMA-315: per-path classification annotations for the template editor.
+ *  Keys are `pathAnnotationKey(os, path)`; values are the class annotation
+ *  (never an archivePath — that is snapshot-only, server-generated). */
+export type PathAnnotations = Record<string, CaptureSpecPath>;
+
+export function pathAnnotationKey(os: OSKey, path: string): string {
+  return `${os}\u0000${path}`;
+}
+
+/** Display labels for the taxonomy in the editor. */
+export const CLASS_LABEL: Record<PathClassification, string> = {
+  portable_config: "Portable config",
+  machine_state: "Machine state",
+  cache: "Cache",
+  secrets: "Secrets",
+  custom: "Custom",
+  unknown: "Unknown",
+};
+
+/** Coarse label for a stored `suggested` confidence number.
+ *  Matches the classifier's documented high/medium/low (0.9/0.6/0.3). */
+export function confidenceLabel(confidence: number | null | undefined): string {
+  if (confidence === null || confidence === undefined) return "";
+  if (confidence >= 0.75) return "high";
+  if (confidence >= 0.45) return "medium";
+  return "low";
+}
+
+/** The annotation a path gets when the operator APPLIES a suggestion: the
+ *  suggested class becomes an operator confirmation (`manual`, confidence
+ *  dropped by design) and the recommendation's explanation stays as the
+ *  rationale. Nothing is applied silently — this is the explicit act. */
+export function applySuggestionToEntry(
+  path: string,
+  suggestion: {
+    classification: PathClassification;
+    rationale?: string | null;
+    confidence?: number | null;
+    confidenceLevel?: string | null;
+    ruleId?: string | null;
+    path?: string;
+  },
+): CaptureSpecPath {
+  return {
+    path,
+    classification: suggestion.classification,
+    rationale: suggestion.rationale ?? null,
+    classificationSource: "manual",
+    confidence: null,
+  };
+}
+
+/** Promote a pending (`suggested`) annotation to an operator confirmation;
+ *  confidence is dropped for confirmed values. */
+export function confirmSuggestedEntry(entry: CaptureSpecPath): CaptureSpecPath {
+  return { ...entry, classificationSource: "manual", confidence: null };
+}
+
+/** Is the current/pending class `secrets` — the conspicuous treatment? */
+export function isSecretsClass(
+  classification: PathClassification | undefined,
+): boolean {
+  return classification === "secrets";
+}
+
 function toEntries(paths: string[] | undefined): CaptureSpecPath[] | undefined {
   return paths && paths.length > 0
-    ? paths.map((path) => ({ path, classification: "unknown" as const }))
+    ? paths.map((path) => ({
+        path,
+        classification: "unknown" as const,
+        classificationSource: "default" as const,
+        confidence: null,
+      }))
     : undefined;
 }
 
@@ -147,6 +223,25 @@ function specPathText(entries: CaptureSpecPath[] | undefined): string {
 }
 
 function draftFromCard(card: TemplateCardData, duplicate: boolean): TemplateDraft {
+  const annotations: PathAnnotations = {};
+  for (const os of ["linux", "macos", "windows"] as const) {
+    for (const entry of card.spec.paths[os] ?? []) {
+      // Untouched `unknown`/`default` entries are equivalent to no
+      // annotation (they are what a raw line saves as anyway); anything
+      // meaningful — a real class, a pending suggestion, a confirmation —
+      // must round-trip through the editor.
+      if (entry.classification === "unknown" && (entry.classificationSource ?? "default") === "default") {
+        continue;
+      }
+      annotations[pathAnnotationKey(os, entry.path)] = {
+        path: entry.path,
+        classification: entry.classification,
+        rationale: entry.rationale ?? null,
+        classificationSource: entry.classificationSource ?? "default",
+        confidence: entry.confidence ?? null,
+      };
+    }
+  }
   return {
     id: duplicate ? null : card.id,
     name: duplicate ? `${card.name} copy` : card.name,
@@ -161,22 +256,34 @@ function draftFromCard(card: TemplateCardData, duplicate: boolean): TemplateDraf
     installUrl: card.installUrl ?? "",
     installInstructions: card.installInstructions ?? "",
     restoreInstructions: card.restoreInstructions ?? "",
+    annotations,
   };
 }
 
-function specFromDraft(draft: TemplateDraft): CaptureSpec {
+/** Build the CaptureSpec from the editor draft. Every raw path line stays a
+ *  first-class entry (nothing is added or removed behind the operator's
+ *  back); paths with an annotation carry their class/source/confidence, all
+ *  others save as untouched `unknown`/`default`. */
+export function specFromDraft(draft: TemplateDraft): CaptureSpec {
   const paths: CaptureSpec["paths"] = {};
+  const entryFor = (os: OSKey, path: string): CaptureSpecPath =>
+    draft.annotations[pathAnnotationKey(os, path)] ?? {
+      path,
+      classification: "unknown",
+      classificationSource: "default",
+      confidence: null,
+    };
   const linuxPaths = lines(draft.linuxPaths);
   const macosPaths = lines(draft.macosPaths);
   const windowsPaths = lines(draft.windowsPaths);
   if (linuxPaths.length > 0) {
-    paths.linux = linuxPaths.map((path) => ({ path, classification: "unknown" as const }));
+    paths.linux = linuxPaths.map((path) => entryFor("linux", path));
   }
   if (macosPaths.length > 0) {
-    paths.macos = macosPaths.map((path) => ({ path, classification: "unknown" as const }));
+    paths.macos = macosPaths.map((path) => entryFor("macos", path));
   }
   if (windowsPaths.length > 0) {
-    paths.windows = windowsPaths.map((path) => ({ path, classification: "unknown" as const }));
+    paths.windows = windowsPaths.map((path) => entryFor("windows", path));
   }
   return {
     paths,
@@ -326,6 +433,7 @@ function emptyDraft(): TemplateDraft {
     installUrl: "",
     installInstructions: "",
     restoreInstructions: "",
+    annotations: {},
   };
 }
 
@@ -398,19 +506,240 @@ function TemplateCardView({
   );
 }
 
+/** One classified path row: current class badge (with conspicuous `secrets`
+ *  treatment), the pending-suggestion chip with Apply/Ignore, and the
+ *  confirmation actions. Read-only with respect to capture: applying a class
+ *  only annotates the spec — nothing is excluded or dropped here. */
+function PathClassRow({
+  os,
+  path,
+  entry,
+  suggestion,
+  ignored,
+  onApply,
+  onIgnore,
+  onConfirm,
+  onRemove,
+}: {
+  os: OSKey;
+  path: string;
+  entry: CaptureSpecPath | undefined;
+  suggestion: PathClassificationResult | undefined;
+  ignored: boolean;
+  onApply: (path: string, result: PathClassificationResult) => void;
+  onIgnore: (path: string) => void;
+  onConfirm: (path: string) => void;
+  onRemove: (path: string) => void;
+}) {
+  const secretsClass = isSecretsClass(
+    entry?.classification ?? (suggestion?.classification !== "unknown" ? suggestion?.classification : undefined),
+  );
+  const pending = entry?.classificationSource === "suggested";
+  return (
+    <div className={`classify-row${secretsClass ? " classify-row-secrets" : ""}`}>
+      <code className="classify-path">{path}</code>
+      <div className="classify-meta">
+        {entry ? (
+          <>
+            <span className={`badge classify-badge classify-badge-${entry.classification}`}>
+              {CLASS_LABEL[entry.classification]}
+              {pending
+                ? ` · pending (${confidenceLabel(entry.confidence)} conf.)`
+                : entry.classificationSource === "manual"
+                  ? " · confirmed"
+                  : ""}
+            </span>
+            {entry.rationale ? <span className="muted classify-rationale">{entry.rationale}</span> : null}
+            {secretsClass ? (
+              <span className="classify-caution">
+                Secrets are backup-eligible and never auto-excluded — review before migrating.
+              </span>
+            ) : null}
+            <span className="classify-actions">
+              {pending ? (
+                <button type="button" className="action primary" onClick={() => onConfirm(path)}>
+                  Confirm
+                </button>
+              ) : null}
+              <button type="button" className="action" onClick={() => onRemove(path)}>
+                {pending ? "Remove" : "Reset"}
+              </button>
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="badge badge-unknown">Unknown</span>
+            {suggestion && suggestion.classification !== "unknown" && !ignored ? (
+              <>
+                <span className={`badge classify-suggestion${secretsClass ? " classify-suggestion-secrets" : ""}`}>
+                  Suggested: {CLASS_LABEL[suggestion.classification]} · {confidenceLabel(suggestion.confidence)} confidence
+                </span>
+                <span className="muted classify-rationale">{suggestion.rationale}</span>
+                {secretsClass ? (
+                  <span className="classify-caution">
+                    Secrets are backup-eligible and never auto-excluded — review before migrating.
+                  </span>
+                ) : null}
+                <span className="classify-actions">
+                  <button type="button" className="action primary" onClick={() => onApply(path, suggestion)}>
+                    Apply
+                  </button>
+                  <button type="button" className="action" onClick={() => onIgnore(path)}>
+                    Ignore
+                  </button>
+                </span>
+              </>
+            ) : ignored ? (
+              <span className="muted classify-rationale">Suggestion ignored — path stays unknown.</span>
+            ) : null}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PathClassPanel({
+  os,
+  osLabel,
+  paths,
+  annotations,
+  suggestions,
+  ignored,
+  onApply,
+  onIgnore,
+  onConfirm,
+  onRemove,
+}: {
+  os: OSKey;
+  osLabel: string;
+  paths: string[];
+  annotations: PathAnnotations;
+  suggestions: Map<string, PathClassificationResult>;
+  ignored: Set<string>;
+  onApply: (os: OSKey, path: string, result: PathClassificationResult) => void;
+  onIgnore: (os: OSKey, path: string) => void;
+  onConfirm: (os: OSKey, path: string) => void;
+  onRemove: (os: OSKey, path: string) => void;
+}) {
+  if (paths.length === 0) return null;
+  return (
+    <div className="classify-panel">
+      <div className="classify-panel-title">
+        {osLabel} path classification
+        <span className="muted">Recommendations are suggestions only — nothing is excluded by classifying it.</span>
+      </div>
+      {paths.map((path) => (
+        <PathClassRow
+          key={path}
+          os={os}
+          path={path}
+          entry={annotations[pathAnnotationKey(os, path)]}
+          suggestion={suggestions.get(path)}
+          ignored={ignored.has(pathAnnotationKey(os, path))}
+          onApply={(p, r) => onApply(os, p, r)}
+          onIgnore={(p) => onIgnore(os, p)}
+          onConfirm={(p) => onConfirm(os, p)}
+          onRemove={(p) => onRemove(os, p)}
+        />
+      ))}
+    </div>
+  );
+}
+
 function TemplateEditor({
   draft,
   busy,
   onChange,
   onSave,
   onClose,
+  onClassify,
 }: {
   draft: TemplateDraft;
   busy: boolean;
   onChange: (draft: TemplateDraft) => void;
   onSave: () => void;
   onClose: () => void;
+  /** Read-only classifier call (LAMA-315): one batched request for every
+   *  currently-listed path; failures degrade to no suggestions. */
+  onClassify: (paths: string[]) => Promise<PathClassificationResult[]>;
 }) {
+  const [suggestions, setSuggestions] = useState<Map<string, PathClassificationResult>>(new Map());
+  const [ignored, setIgnored] = useState<Set<string>>(new Set());
+
+  // Refetch suggestions whenever the set of path lines changes (add/remove/
+  // edit lines) — the classifier is stateless so this is a cheap read-only
+  // call. Class changes (annotations) do not retrigger it.
+  const lineSignature = [
+    draft.linuxPaths,
+    draft.macosPaths,
+    draft.windowsPaths,
+  ].join("\u0000");
+  useEffect(() => {
+    let cancelled = false;
+    const allPaths = [
+      ...lines(draft.linuxPaths),
+      ...lines(draft.macosPaths),
+      ...lines(draft.windowsPaths),
+    ];
+    const unique = Array.from(new Set(allPaths));
+    if (unique.length === 0) {
+      setSuggestions(new Map());
+      return;
+    }
+    void onClassify(unique)
+      .then((results) => {
+        if (cancelled) return;
+        const next = new Map<string, PathClassificationResult>();
+        for (const result of results) next.set(result.path, result);
+        setSuggestions(next);
+      })
+      .catch(() => {
+        if (!cancelled) setSuggestions(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lineSignature]);
+
+  const setAnnotation = (os: OSKey, path: string, entry: CaptureSpecPath): void => {
+    const next = { ...draft.annotations };
+    next[pathAnnotationKey(os, path)] = entry;
+    onChange({ ...draft, annotations: next });
+  };
+  const removeAnnotation = (os: OSKey, path: string): void => {
+    const next = { ...draft.annotations };
+    delete next[pathAnnotationKey(os, path)];
+    onChange({ ...draft, annotations: next });
+  };
+  const applySuggestion = (os: OSKey, path: string, result: PathClassificationResult): void => {
+    setAnnotation(os, path, applySuggestionToEntry(path, result));
+  };
+  const ignoreSuggestion = (os: OSKey, path: string): void => {
+    const key = pathAnnotationKey(os, path);
+    const next = new Set(ignored);
+    next.add(key);
+    setIgnored(next);
+  };
+  const confirmSuggestion = (os: OSKey, path: string): void => {
+    const entry = draft.annotations[pathAnnotationKey(os, path)];
+    if (entry) setAnnotation(os, path, confirmSuggestedEntry(entry));
+  };
+
+  const linux = lines(draft.linuxPaths);
+  const macos = lines(draft.macosPaths);
+  const windows = lines(draft.windowsPaths);
+  const panelProps = {
+    annotations: draft.annotations,
+    suggestions,
+    ignored,
+    onApply: applySuggestion,
+    onIgnore: ignoreSuggestion,
+    onConfirm: confirmSuggestion,
+    onRemove: removeAnnotation,
+  };
+
   return (
     <Modal
       title={draft.id ? "Edit application template" : "New application template"}
@@ -435,6 +764,9 @@ function TemplateEditor({
         <label className="field"><span>macOS paths</span><textarea rows={4} placeholder="One path per line" value={draft.macosPaths} onChange={(e) => onChange({ ...draft, macosPaths: e.target.value })} /></label>
         <label className="field"><span>Windows paths</span><textarea rows={4} placeholder="One path per line" value={draft.windowsPaths} onChange={(e) => onChange({ ...draft, windowsPaths: e.target.value })} /></label>
       </div>
+      <PathClassPanel os="linux" osLabel="Linux" paths={linux} {...panelProps} />
+      <PathClassPanel os="macos" osLabel="macOS" paths={macos} {...panelProps} />
+      <PathClassPanel os="windows" osLabel="Windows" paths={windows} {...panelProps} />
       <label className="field"><span>Excluded paths (one per line, optional)</span><textarea rows={2} value={draft.excludes} onChange={(e) => onChange({ ...draft, excludes: e.target.value })} /></label>
       <label className="field"><span>Capture notes (optional)</span><textarea rows={2} value={draft.notes} onChange={(e) => onChange({ ...draft, notes: e.target.value })} /></label>
       <label className="field"><span>Install or documentation URL (optional)</span><input type="url" value={draft.installUrl} onChange={(e) => onChange({ ...draft, installUrl: e.target.value })} /></label>
@@ -812,6 +1144,7 @@ export function AppTemplates() {
           onChange={setEditorDraft}
           onSave={() => void saveTemplate()}
           onClose={() => setEditorDraft(null)}
+          onClassify={api.classifyAppPaths}
         />
       ) : null}
 
