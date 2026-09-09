@@ -127,6 +127,65 @@ describe("LAMA-315 classifier — weak heuristics (low) and unknown", () => {
   });
 });
 
+describe("LAMA-315 classifier — precedence: secret leafs outrank parent-directory rules", () => {
+  test("REG: ~/.config/nvim/.env is secrets, not portable_config", () => {
+    const suggestion = suggestionFor("~/.config/nvim/.env");
+    expect(suggestion.classification).toBe("secrets");
+    expect(suggestion.ruleId).toBe("secrets-env-file");
+    expect(suggestion.confidenceLevel).toBe("low");
+  });
+
+  test("REG: ~/.cache/project/.env is secrets, not cache", () => {
+    const suggestion = suggestionFor("~/.cache/project/.env");
+    expect(suggestion.classification).toBe("secrets");
+    expect(suggestion.ruleId).toBe("secrets-env-file");
+    expect(suggestion.confidenceLevel).toBe("low");
+  });
+
+  test(".env stays a low secrets suggestion anywhere, at any depth", () => {
+    // Home root, deep app roots, and even inside another secrets tree — the
+    // exact-leaf rule always wins and never escalates confidence.
+    expect(suggestionFor("~/.env").ruleId).toBe("secrets-env-file");
+    expect(suggestionFor("~/projects/backend/src/.env").classification).toBe("secrets");
+    const insideSsh = suggestionFor("~/.ssh/.env");
+    expect(insideSsh.classification).toBe("secrets");
+    expect(insideSsh.confidenceLevel).toBe("low");
+    // Windows: leaf matching is drive/case normalizing — beats the temp rule.
+    const tempEnv = suggestionFor("C:\\Users\\me\\AppData\\Local\\Temp\\.env");
+    expect(tempEnv.classification).toBe("secrets");
+    expect(tempEnv.ruleId).toBe("secrets-env-file");
+  });
+
+  test("the known_hosts exception still outranks the ~/.ssh secrets rule", () => {
+    const knownHosts = suggestionFor("~/.ssh/known_hosts");
+    expect(knownHosts.classification).toBe("machine_state");
+    expect(knownHosts.ruleId).toBe("machine-state-ssh-known-hosts");
+    expect(knownHosts.confidenceLevel).toBe("high");
+  });
+
+  test("broad rules still apply when the leaf override does not match", () => {
+    expect(suggestionFor("~/.config/nvim/settings.json").classification).toBe("portable_config");
+    expect(suggestionFor("~/.cache/nvim/logs/error.log").classification).toBe("cache");
+    expect(suggestionFor("~/.ssh/id_ed25519").classification).toBe("secrets");
+  });
+
+  test("exact-leaf matching: sibling names are not collisions", () => {
+    // Leaf must be exactly `.env` — no substring leakage either way.
+    expect(suggestionFor("~/.config/nvim/.env.example").classification).toBe("portable_config");
+    expect(suggestionFor("~/.config/nvim/env").classification).toBe("portable_config");
+    expect(suggestionFor("~/.cache/.env.backup").classification).toBe("cache");
+  });
+
+  test("evaluation order: leaf overrides precede the whole catalog", () => {
+    const ids = classificationRuleIds();
+    expect(ids.indexOf("secrets-env-file")).toBeLessThan(ids.indexOf("cache-home-cache-dir"));
+    expect(ids.indexOf("secrets-env-file")).toBeLessThan(ids.indexOf("portable-config-nvim-dir"));
+    expect(ids.indexOf("machine-state-ssh-known-hosts")).toBeLessThan(ids.indexOf("secrets-ssh-dir"));
+    expect(ids[0]).toBe("machine-state-ssh-known-hosts");
+    expect(ids[1]).toBe("secrets-env-file");
+  });
+});
+
 describe("LAMA-315 classifier — boundary safety and determinism", () => {
   test("directory-aware prefixes never leak into sibling paths", () => {
     // `~/.ssh` must not match `~/.sshuttle`; `~/.cache` must not match `~/.cachex`.
