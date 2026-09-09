@@ -26,6 +26,9 @@ const EVENT_KINDS = new Set<string>([
   "lock",
   "action",
   "browse_job",
+  // LAMA-327: live rclone sync phases (hydration read fills the gap on
+  // reconnect — see RunningNowPanel).
+  "sync_progress",
 ]);
 
 function isWSEvent(value: unknown): value is WSEvent {

@@ -122,6 +122,8 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   // heartbeat + operation reports
   { method: "POST", pattern: "/api/v1/report/health" },
   { method: "POST", pattern: "/api/v1/report" },
+  // LAMA-327: live sync phase reports (own host only — enforced in the route)
+  { method: "POST", pattern: "/api/v1/sync-progress" },
   // its own config (embeds assignments, pause state, dotfile manifests)
   { method: "GET", pattern: "/api/v1/config/*" },
   // folder operation locks (own host only — enforced in the route)

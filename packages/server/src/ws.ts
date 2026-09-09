@@ -39,6 +39,15 @@ export function isWsSubscriptionAllowed(token: string | null | undefined): boole
 type Subscriber = (event: WSEvent) => void;
 const subscribers = new Set<Subscriber>();
 
+/** Test seam: clear all subscribers + connection bookkeeping between suites. */
+export function __resetWsForTests(): void {
+  subscribers.clear();
+  sessionConnections.clear();
+  connectionsByRegistration.clear();
+  connectionsBySession.clear();
+  connections.clear();
+}
+
 export function subscribe(handler: Subscriber): () => void {
   subscribers.add(handler);
   return () => {

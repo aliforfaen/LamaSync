@@ -42,6 +42,7 @@ import type {
   ServerDeployJob,
   StorageReport,
   FolderSize,
+  LiveSyncProgressUpdate,
 } from "./types.ts";
 
 export class LamaSyncApiError extends Error {
@@ -306,6 +307,19 @@ export class LamaSyncApiClient {
     return this.request<void>(
       "POST",
       "/api/v1/report",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  // LAMA-327: live non-terminal sync phase report. The server keeps this in
+  // an in-memory registry and never writes it to operation_log; failures are
+  // silently dropped by the daemon's reporter (progress must never block or
+  // fail an rclone run).
+  reportSyncProgress(body: LiveSyncProgressUpdate): Promise<void> {
+    return this.request<void>(
+      "POST",
+      "/api/v1/sync-progress",
       JSON.stringify(body),
       "application/json",
     );
