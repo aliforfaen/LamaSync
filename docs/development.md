@@ -177,12 +177,18 @@ export ANDROID_HOME=/opt/android-sdk
   claims deletions (rows outside the selected set become UNREADABLE).
 - **Scheduling**: a unique prompt `:auto-protect-discovery` one-time worker
   (local-only constraints — discovery needs no network) + a ~6 h unique
-  periodic `:auto-protect-reconcile`; transfers run under the SAME
-  policy-constrained drainer as manual uploads (`UPLOAD_QUEUE_WORK_NAME` with
-  `UNMETERED`/charging constraints, REPLACE on policy change). Boot recovery
-  re-enqueues both. Long transfers promote to a `dataSync` foreground-service
-  worker only when `POST_NOTIFICATIONS` is granted; otherwise they degrade
-  gracefully (durable per-chunk offsets keep progress).
+  periodic `:auto-protect-reconcile`. Automatic items drain via the
+  DEDICATED `lamasync:auto-upload-queue` work constrained by the AUTOMATIC
+  policy in `AutoProtectSettings`; manual/user uploads keep the stage-1
+  `UPLOAD_QUEUE_WORK_NAME` drainer with the stage-1 `UploadPolicyStore` —
+  neither policy can delay the other kind (the worker filters by item kind).
+  Boot recovery re-enqueues both. Long transfers promote to a `dataSync`
+  foreground-service worker on every supported API level — notification
+  permission is NOT a precondition (the FGS notification surfaces in the
+  Task Manager even when `POST_NOTIFICATIONS` is denied); only a genuine OS
+  refusal (background FGS start restriction) degrades the pass to a plain
+  constrained worker (durable per-chunk offsets keep progress, and the
+  degradation is reported via worker progress).
 - **Instrumented coverage** runs on the API-35 `lamadb-test` AVD: real
   MediaStore inserts (camera photo, screenshot, >64 MiB video), idempotent
   duplicate scans, local-deletion detection, WorkManager constraint REPLACE
