@@ -4,20 +4,25 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.lamasync.companion.data.UploadPolicy
-import app.lamasync.companion.data.UploadPolicyStore
+import app.lamasync.companion.data.UploadQueueItem
 import app.lamasync.companion.data.UploadQueueStore
+import app.lamasync.companion.data.UploadStatus
 import app.lamasync.companion.media.AutoProtectSettings
 import app.lamasync.companion.media.AutoWaitingReasons
+import app.lamasync.companion.media.MediaCollection
 import app.lamasync.companion.media.MediaCoverage
 import app.lamasync.companion.media.MediaPermissionScope
 import app.lamasync.companion.media.MediaPermissions
 import app.lamasync.companion.media.MediaProtectionStore
+import app.lamasync.companion.media.MediaRecord
+import app.lamasync.companion.media.MediaRecordStatus
 import app.lamasync.companion.media.ScopeMode
 import app.lamasync.companion.work.AutoProtectWorkScheduler
 import app.lamasync.companion.work.UploadWorkScheduler
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -37,14 +42,17 @@ class AutoProtectViewModel(application: Application) : AndroidViewModel(applicat
     private val context = application
     private val recordStore = MediaProtectionStore.getInstance(context)
     private val queueStore = UploadQueueStore.getInstance(context)
-    private val policyStore = UploadPolicyStore(context)
 
     data class AutoProtectUiState(
         val settings: AutoProtectSettings = AutoProtectSettings(),
         val coverage: MediaCoverage.Snapshot = MediaCoverage.Snapshot(null),
         val pendingAutoCount: Long = 0L,
         val pendingAutoBytes: Long = 0L,
-        val scope: MediaPermissionScope = MediaPermissionScope.NOT_GRANTED,
+        /** Live per-collection permission scope (P0-3): each collection is
+         *  checked independently; a denied collection is neither scanned nor
+         *  counted as covered. */
+        val scopes: Map<MediaCollection, MediaPermissionScope> =
+            MediaCollection.entries.associateWith { MediaPermissionScope.NOT_GRANTED },
         val scopeGuidance: String = "",
         val message: String? = null,
         val messageIsError: Boolean = false,
@@ -59,50 +67,40 @@ class AutoProtectViewModel(application: Application) : AndroidViewModel(applicat
     fun initialize() {
         if (initialized) return
         initialized = true
+        // One merged collector: the pending figure derives from BOTH the media
+        // records (records not yet staged because a destination/space/read
+        // problem kept them out of the queue) and the queue's live transfer
+        // progress — deduplicated by media identity so nothing counts twice.
         viewModelScope.launch {
-            recordStore.snapshots.collect { snap ->
-                _ui.update { current ->
-                    current.copy(
-                        settings = snap.settings,
-                        coverage = MediaCoverage.of(snap.records),
-                        pendingAutoCount = pendingAutoCount(),
-                        pendingAutoBytes = pendingAutoBytes(),
-                    )
+            combine(recordStore.snapshots, queueStore.snapshots) { snap, queue -> snap to queue }
+                .collect { (snap, queue) ->
+                    val pending = derivePending(snap.records, queue.items)
+                    _ui.update {
+                        it.copy(
+                            settings = snap.settings,
+                            coverage = MediaCoverage.of(snap.records),
+                            pendingAutoCount = pending.pendingCount,
+                            pendingAutoBytes = pending.pendingBytes,
+                        )
+                    }
                 }
-            }
-        }
-        viewModelScope.launch {
-            queueStore.snapshots.collect { snap ->
-                val auto = snap.items.filter { it.mediaIdentity != null }
-                _ui.update {
-                    it.copy(
-                        pendingAutoCount = auto.count { i ->
-                            i.status != app.lamasync.companion.data.UploadStatus.DONE &&
-                                i.status != app.lamasync.companion.data.UploadStatus.CANCELLED
-                        }.toLong(),
-                        pendingAutoBytes = auto.sumOf { i ->
-                            if (i.status == app.lamasync.companion.data.UploadStatus.DONE ||
-                                i.status == app.lamasync.companion.data.UploadStatus.CANCELLED
-                            ) {
-                                0L
-                            } else {
-                                (i.sizeBytes ?: 0L).coerceAtLeast(0L)
-                            }
-                        },
-                    )
-                }
-            }
         }
         refreshScope()
     }
 
-    /** Permission scope is always checked LIVE (docs: never stored). */
+    /** Permission scopes are always checked LIVE (docs: never stored). */
     fun refreshScope() {
-        val scope = MediaPermissions.current(context)
+        val scopes = MediaPermissions.currentScopes(context)
         _ui.update {
             it.copy(
-                scope = scope,
-                scopeGuidance = MediaPermissions.guidance(scope),
+                scopes = scopes,
+                scopeGuidance = MediaPermissions.guidance(
+                    when {
+                        scopes.values.all { s -> s == MediaPermissionScope.FULL } -> MediaPermissionScope.FULL
+                        scopes.values.any { s -> s != MediaPermissionScope.NOT_GRANTED } -> MediaPermissionScope.PARTIAL
+                        else -> MediaPermissionScope.NOT_GRANTED
+                    },
+                ),
             )
         }
     }
@@ -151,47 +149,50 @@ class AutoProtectViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun setUnmeteredOnly(value: Boolean) {
-        val policy = UploadPolicy(
-            unmeteredOnly = value,
-            chargingOnly = _ui.value.settings.chargingOnly,
-        )
-        applyPolicy(policy)
-    }
+    // ---- transfer policy (AUTOMATIC work only) ----
 
-    fun setChargingOnly(value: Boolean) {
-        val policy = UploadPolicy(
-            unmeteredOnly = _ui.value.settings.unmeteredOnly,
-            chargingOnly = value,
-        )
-        applyPolicy(policy)
-    }
+    /**
+     * P1/P2 policy separation: these conditions govern AUTOMATIC protection
+     * work only and live in [AutoProtectSettings]. They never write the
+     * manual upload policy ([app.lamasync.companion.data.UploadPolicyStore]),
+     * so selecting "Only while charging" here cannot delay an explicit
+     * user-initiated share. Manual behavior is unchanged from stage 1.
+     */
+    fun setUnmeteredOnly(value: Boolean) = updateAutoPolicy { it.copy(unmeteredOnly = value) }
 
-    private fun applyPolicy(policy: UploadPolicy) {
-        policyStore.save(policy)
-        recordStore.updateSettings {
+    fun setChargingOnly(value: Boolean) = updateAutoPolicy { it.copy(chargingOnly = value) }
+
+    private fun updateAutoPolicy(transform: (UploadPolicy) -> UploadPolicy) {
+        val next = recordStore.updateSettings {
+            val p = transform(UploadPolicy(unmeteredOnly = it.unmeteredOnly, chargingOnly = it.chargingOnly))
             it.copy(
-                unmeteredOnly = policy.unmeteredOnly,
-                chargingOnly = policy.chargingOnly,
+                unmeteredOnly = p.unmeteredOnly,
+                chargingOnly = p.chargingOnly,
                 updatedAtEpochMillis = System.currentTimeMillis(),
             )
         }
-        // REPLACE the drainer so the constraint actually takes effect (R6);
-        // re-arm discovery to apply the new policy immediately.
-        UploadWorkScheduler.rescheduleWithPolicy(context, policy)
+        // REPLACE semantics: the next drainer pass carries the new automatic
+        // constraint. Re-arm discovery to apply the new policy immediately.
+        UploadWorkScheduler.scheduleAutoUploads(
+            context,
+            UploadPolicy(unmeteredOnly = next.unmeteredOnly, chargingOnly = next.chargingOnly),
+        )
         AutoProtectWorkScheduler.scheduleDiscovery(context)
     }
 
-    /** Manual sync-now: prompt discovery + drain. */
+    /** Manual sync-now: prompt discovery + drain under the automatic policy. */
     fun syncNow() {
         if (_ui.value.busy) return
         _ui.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             AutoProtectWorkScheduler.rescheduleAfterConfigChange(context)
-            val policy = policyStore.load()
-            UploadWorkScheduler.scheduleUploads(context, policy)
+            val s = recordStore.load().settings
+            UploadWorkScheduler.scheduleAutoUploads(
+                context,
+                UploadPolicy(unmeteredOnly = s.unmeteredOnly, chargingOnly = s.chargingOnly),
+            )
             _ui.update { it.copy(busy = false) }
-            message("Sync requested — media will upload when the network/charging conditions allow.")
+            message("Sync requested — media will upload when the automatic transfer conditions allow.")
         }
     }
 
@@ -201,30 +202,67 @@ class AutoProtectViewModel(application: Application) : AndroidViewModel(applicat
         return AutoWaitingReasons.human(s.lastWaitingReason, _ui.value.pendingAutoCount)
     }
 
-    private fun pendingAutoCount(): Long =
-        queueStore.load().items.count { i ->
-            i.mediaIdentity != null &&
-                i.status != app.lamasync.companion.data.UploadStatus.DONE &&
-                i.status != app.lamasync.companion.data.UploadStatus.CANCELLED
-        }.toLong()
-
-    private fun pendingAutoBytes(): Long =
-        queueStore.load().items.sumOf { i ->
-            if (i.mediaIdentity == null ||
-                i.status == app.lamasync.companion.data.UploadStatus.DONE ||
-                i.status == app.lamasync.companion.data.UploadStatus.CANCELLED
-            ) {
-                0L
-            } else {
-                (i.sizeBytes ?: 0L).coerceAtLeast(0L)
-            }
-        }
-
     private fun message(text: String, isError: Boolean = false) {
         _ui.update { it.copy(message = text, messageIsError = isError) }
     }
 
     fun dismissMessage() {
         _ui.update { it.copy(message = null) }
+    }
+
+    /**
+     * Pure pending derivation (P1): a non-double-counting total from the
+     * media records plus the queue's live progress, with the actionable
+     * unreadable count kept separate.
+     *
+     * Records can be pending WITHOUT being in the queue (no Camera
+     * destination, no staging space, unreadable source), so a queue-only
+     * count can show 0 pending while coverage is blocked. Records and queue
+     * items are unioned by media identity; the queue item's staged byte size
+     * wins when both exist.
+     */
+    companion object {
+        private val RECORD_PENDING = setOf(
+            MediaRecordStatus.DISCOVERED,
+            MediaRecordStatus.STAGED,
+            MediaRecordStatus.FAILED,
+            MediaRecordStatus.UNREADABLE,
+        )
+        private val QUEUE_PENDING = setOf(
+            UploadStatus.PENDING,
+            UploadStatus.UPLOADING,
+            UploadStatus.WAITING,
+            UploadStatus.BLOCKED,
+            UploadStatus.FAILED,
+        )
+
+        data class PendingWork(
+            val pendingCount: Long,
+            val pendingBytes: Long,
+            val unreadableCount: Long,
+        )
+
+        fun derivePending(
+            records: List<MediaRecord>,
+            items: List<UploadQueueItem>,
+        ): PendingWork {
+            val pendingBytesById = linkedMapOf<String, Long>()
+            for (record in records) {
+                if (record.status in RECORD_PENDING) {
+                    pendingBytesById[record.identityKey] = (record.sizeBytes ?: 0L).coerceAtLeast(0L)
+                }
+            }
+            for (item in items) {
+                val identity = item.mediaIdentity ?: continue
+                if (item.status in QUEUE_PENDING) {
+                    pendingBytesById[identity] = (item.sizeBytes ?: 0L).coerceAtLeast(0L)
+                }
+            }
+            return PendingWork(
+                pendingCount = pendingBytesById.size.toLong(),
+                pendingBytes = pendingBytesById.values.sum(),
+                unreadableCount = records.count { it.status == MediaRecordStatus.UNREADABLE }.toLong(),
+            )
+        }
     }
 }

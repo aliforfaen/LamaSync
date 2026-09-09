@@ -273,6 +273,160 @@ class MediaProtectionEngineTest {
         assertNotNull(AutoQueueKeys.queueItemId(identity, shaA))
         assertTrue(AutoQueueKeys.idempotencyKey(identity, shaA).length <= 128)
     }
+
+    // ---- P0-1: queue completion reconciles into the media registry ----
+
+    private fun doneItem(record: MediaRecord, sha: String = "a".repeat(64)) = UploadQueueItem(
+        id = AutoQueueKeys.queueItemId(record.identityKey, sha),
+        origin = "https://fleet.example.com",
+        hostId = "mob-host-1",
+        sourceUri = record.uri,
+        displayName = record.displayName,
+        destinationId = "mdst-camera",
+        destinationRelPath = "Mobile/mob-host-1/Camera",
+        idempotencyKey = AutoQueueKeys.idempotencyKey(record.identityKey, sha),
+        sha256 = sha,
+        staged = true,
+        mediaIdentity = record.identityKey,
+        status = UploadStatus.DONE,
+        receipt = UploadReceipt(
+            uploadId = "mup-1",
+            fileName = "IMG_1 (2).jpg",
+            finalRelPath = "Mobile/mob-host-1/Camera/IMG_1 (2).jpg",
+            browsePath = "Mobile/mob-host-1/Camera/IMG_1 (2).jpg",
+            sizeBytes = 1000L,
+            sha256 = sha,
+            finalizedAtEpochMillis = 9_000L,
+        ),
+        createdAtEpochMillis = 1L,
+        updatedAtEpochMillis = 9_000L,
+    )
+
+    @Test
+    fun queueCompletionMarksStagedRecordProtectedWithReceiptPath() = runTest {
+        val queue = UploadQueueStore(MemoryQueueStorage())
+        val store = MediaProtectionStore(MemoryRecordStorage())
+        val rec = record(1L)
+        store.updateRecords(listOf(rec))
+        val eng = engine(store, queue, FakeByteStager())
+        // Stage + enqueue: the record is STAGED, nothing protected yet.
+        eng.protectPending(
+            settings("mdst-camera"), "https://fleet.example.com", "mob-host-1",
+            DestinationsResult.Ok(cameraDestinations),
+        )
+        assertEquals(MediaRecordStatus.STAGED, store.recordFor(rec.identityKey)!!.status)
+
+        // Simulate the transfer worker's durable completion + reconcile.
+        val item = doneItem(rec)
+        queue.update(item)
+        MediaProtectionEngine.reconcileCompleted(store, item)
+
+        val protected = store.recordFor(rec.identityKey)!!
+        assertEquals(MediaRecordStatus.PROTECTED, protected.status)
+        assertEquals("Mobile/mob-host-1/Camera/IMG_1 (2).jpg", protected.receiptPath)
+        assertEquals(9_000L, protected.protectedAtEpochMillis)
+        // Coverage advances through the verified protection.
+        val coverage = MediaCoverage.of(store.load().records)
+        assertEquals(1L, coverage.contiguousProtectedCount)
+        assertEquals(0L, coverage.pendingCount)
+        // The boundary is the CAPTURE time of the protected item (not the
+        // protection timestamp).
+        assertEquals(1_000L, coverage.protectedThroughEpochMillis)
+    }
+
+    @Test
+    fun restartedRunSeesTheCompletedUploadAndReconcilesWithoutDuplicates() = runTest {
+        val queue = UploadQueueStore(MemoryQueueStorage())
+        val store = MediaProtectionStore(MemoryRecordStorage())
+        val rec = record(1L)
+        store.updateRecords(listOf(rec))
+        val eng = engine(store, queue, FakeByteStager())
+        eng.protectPending(
+            settings("mdst-camera"), "https://fleet.example.com", "mob-host-1",
+            DestinationsResult.Ok(cameraDestinations),
+        )
+        // The item completes on ANOTHER run (process death + restart); the
+        // durable queue item is DONE but the registry was not updated.
+        val item = doneItem(rec)
+        queue.update(item)
+
+        // The reconciled record is absent from the registry (as if the worker
+        // never got to write it): protectPending reconciles STAGED records.
+        val summary = eng.protectPending(
+            settings("mdst-camera"), "https://fleet.example.com", "mob-host-1",
+            DestinationsResult.Ok(cameraDestinations),
+        )
+        assertEquals("no duplicate queue item", 0, summary.stagedCount)
+        assertEquals(1, queue.load().items.size)
+        val rec2 = store.recordFor(rec.identityKey)!!
+        assertEquals(MediaRecordStatus.PROTECTED, rec2.status)
+        assertEquals("Mobile/mob-host-1/Camera/IMG_1 (2).jpg", rec2.receiptPath)
+        assertEquals(9_000L, rec2.protectedAtEpochMillis)
+    }
+
+    @Test
+    fun reconcileCompletedIsIdempotentAndIgnoresManualItems() = runTest {
+        val queue = UploadQueueStore(MemoryQueueStorage())
+        val store = MediaProtectionStore(MemoryRecordStorage())
+        val rec = record(1L)
+        store.updateRecords(listOf(rec))
+        val item = doneItem(rec)
+        assertTrue(MediaProtectionEngine.reconcileCompleted(store, item))
+        val first = store.recordFor(rec.identityKey)!!
+        // Second call: no change.
+        assertTrue(MediaProtectionEngine.reconcileCompleted(store, item))
+        assertEquals(first, store.recordFor(rec.identityKey)!!)
+        // Manual item (no mediaIdentity) is ignored.
+        assertFalse(
+            MediaProtectionEngine.reconcileCompleted(store, item.copy(mediaIdentity = null)),
+        )
+    }
+
+    // ---- P1: destination cache is cleared when authority disappears ----
+
+    @Test
+    fun freshMissingDestinationClearsTheCachedCameraPath() = runTest {
+        val queue = UploadQueueStore(MemoryQueueStorage())
+        val store = MediaProtectionStore(MemoryRecordStorage())
+        store.updateRecords(listOf(record(1L)))
+        engine(store, queue, FakeByteStager()).protectPending(
+            settings("mdst-camera"),
+            "https://fleet.example.com",
+            "mob-host-1",
+            DestinationsResult.Ok(listOf(MobileUploadDestinationDto(id = "mdst-inbox", label = "Inbox", relPath = "Mobile/mob-host-1/Inbox", createdAt = 1L))),
+        )
+        val s = store.load().settings
+        assertNull("stale Camera id must be cleared", s.cameraDestinationId)
+        assertNull(s.cameraDestinationRelPath)
+    }
+
+    @Test
+    fun revokedAuthorityClearsTheCachedCameraPath() = runTest {
+        val queue = UploadQueueStore(MemoryQueueStorage())
+        val store = MediaProtectionStore(MemoryRecordStorage())
+        store.updateRecords(listOf(record(1L)))
+        engine(store, queue, FakeByteStager()).protectPending(
+            settings("mdst-camera"),
+            "https://fleet.example.com",
+            "mob-host-1",
+            DestinationsResult.AuthFailure("revoked"),
+        )
+        assertNull(store.load().settings.cameraDestinationId)
+    }
+
+    @Test
+    fun offlineFallbackRetainsTheCachedDestination() = runTest {
+        val queue = UploadQueueStore(MemoryQueueStorage())
+        val store = MediaProtectionStore(MemoryRecordStorage())
+        store.updateRecords(listOf(record(1L)))
+        engine(store, queue, FakeByteStager()).protectPending(
+            settings("mdst-camera"),
+            "https://fleet.example.com",
+            "mob-host-1",
+            DestinationsResult.NetworkFailure("unreachable"),
+        )
+        assertEquals("offline keeps the last-known destination", "mdst-camera", store.load().settings.cameraDestinationId)
+    }
 }
 
 /** Destination matching (server-approved Camera) + waiting reasons. */

@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.lamasync.companion.media.MediaCollection
 import app.lamasync.companion.media.MediaCoverage
 import app.lamasync.companion.media.MediaPermissionScope
 import app.lamasync.companion.media.MediaPermissions
@@ -106,21 +107,34 @@ fun AutoProtectScreen(
             TextButton(onClick = onBack) { Text("Back") }
         }
 
-        // Request the runtime permissions in ONE dialog (official guidance).
-        LaunchedEffect(state.settings.anySourceEnabled, state.scope) {
+        // Request the runtime permissions in ONE dialog, limited to what the
+        // enabled sources need (P0-3: request only required permissions).
+        LaunchedEffect(state.settings.anySourceEnabled, state.scopes) {
             if (state.settings.anySourceEnabled &&
-                state.scope == MediaPermissionScope.NOT_GRANTED
+                state.scopes.values.all { it == MediaPermissionScope.NOT_GRANTED }
             ) {
-                permissionLauncher.launch(MediaPermissions.requestList(android.os.Build.VERSION.SDK_INT))
+                permissionLauncher.launch(
+                    MediaPermissions.requestList(
+                        android.os.Build.VERSION.SDK_INT,
+                        photosEnabled = state.settings.cameraPhotosEnabled || state.settings.screenshotsEnabled,
+                        videosEnabled = state.settings.cameraVideosEnabled || state.settings.screenshotsEnabled,
+                    ),
+                )
             }
         }
 
-        // Permission status + recovery.
+        // Permission status + recovery (per collection — P0-3).
         PermissionCard(
-            scope = state.scope,
+            scopes = state.scopes,
             guidance = state.scopeGuidance,
             onRequest = {
-                permissionLauncher.launch(MediaPermissions.requestList(android.os.Build.VERSION.SDK_INT))
+                permissionLauncher.launch(
+                    MediaPermissions.requestList(
+                        android.os.Build.VERSION.SDK_INT,
+                        photosEnabled = state.settings.cameraPhotosEnabled || state.settings.screenshotsEnabled,
+                        videosEnabled = state.settings.cameraVideosEnabled || state.settings.screenshotsEnabled,
+                    ),
+                )
             },
             onOpenSettings = {
                 context.startActivity(
@@ -172,7 +186,7 @@ fun AutoProtectScreen(
             }
         }
 
-        // Transfer policy (shared with manual uploads).
+        // Transfer policy (AUTOMATIC work only — never manual uploads).
         Text("Transfer conditions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
             Column(Modifier.padding(12.dp)) {
@@ -180,6 +194,12 @@ fun AutoProtectScreen(
                     state.settings.unmeteredOnly, viewModel::setUnmeteredOnly)
                 PolicyRow("Only while charging", "Saves battery for long transfers.",
                     state.settings.chargingOnly, viewModel::setChargingOnly)
+                Text(
+                    "Applies to automatic protection only. Manual uploads always follow " +
+                        "their own Uploads screen settings.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 
@@ -223,15 +243,18 @@ fun AutoProtectScreen(
 
 @Composable
 private fun PermissionCard(
-    scope: MediaPermissionScope,
+    scopes: Map<app.lamasync.companion.media.MediaCollection, MediaPermissionScope>,
     guidance: String,
     onRequest: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val color = when (scope) {
-        MediaPermissionScope.FULL -> MaterialTheme.colorScheme.primary
-        MediaPermissionScope.PARTIAL -> MaterialTheme.colorScheme.tertiary
-        MediaPermissionScope.NOT_GRANTED -> MaterialTheme.colorScheme.error
+    val anyGranted = scopes.values.any { it != MediaPermissionScope.NOT_GRANTED }
+    val anyFull = scopes.values.any { it == MediaPermissionScope.FULL }
+    val anyDenied = scopes.values.any { it == MediaPermissionScope.NOT_GRANTED }
+    val color = when {
+        anyFull -> MaterialTheme.colorScheme.primary
+        anyGranted -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.error
     }
     Surface(shape = MaterialTheme.shapes.medium, color = color.copy(alpha = 0.12f)) {
         Column(Modifier.padding(12.dp)) {
@@ -240,18 +263,24 @@ private fun PermissionCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(
-                    when (scope) {
-                        MediaPermissionScope.FULL -> "Media access: full"
-                        MediaPermissionScope.PARTIAL -> "Media access: selected photos"
-                        MediaPermissionScope.NOT_GRANTED -> "Media access: not granted"
-                    },
-                    fontWeight = FontWeight.SemiBold,
-                    color = color,
-                )
-                if (scope != MediaPermissionScope.FULL) {
+                Column {
+                    Text(
+                        "Media access",
+                        fontWeight = FontWeight.SemiBold,
+                        color = color,
+                    )
+                    Text(
+                        when {
+                            anyFull && !anyDenied -> "Full access to photos and videos"
+                            else -> "Photos: ${scopes[MediaCollection.IMAGES]?.label()} · Videos: ${scopes[MediaCollection.VIDEOS]?.label()}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = color,
+                    )
+                }
+                if (!anyFull || anyDenied) {
                     TextButton(onClick = onRequest) {
-                        Text(if (scope == MediaPermissionScope.PARTIAL) "Grant full access" else "Grant access")
+                        Text(if (anyGranted) "Grant full access" else "Grant access")
                     }
                 }
             }
@@ -260,13 +289,19 @@ private fun PermissionCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (scope != MediaPermissionScope.FULL) {
+            if (anyDenied) {
                 TextButton(onClick = onOpenSettings) {
                     Text("Open App settings")
                 }
             }
         }
     }
+}
+
+private fun MediaPermissionScope.label(): String = when (this) {
+    MediaPermissionScope.FULL -> "full"
+    MediaPermissionScope.PARTIAL -> "selected"
+    MediaPermissionScope.NOT_GRANTED -> "not granted"
 }
 
 @Composable

@@ -1,15 +1,12 @@
 package app.lamasync.companion.work
 
-import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import androidx.work.ForegroundInfo
 import app.lamasync.companion.R
 import app.lamasync.companion.ui.MainActivity
@@ -17,39 +14,41 @@ import app.lamasync.companion.ui.MainActivity
 /**
  * LAMA-296 stage 2 — foreground promotion for long transfers.
  *
- * Official guidance (Android 15/SDK 35, data-transfer options): WorkManager
- * work that runs longer than ~10 minutes is rescheduled by the system; a
- * transfer worker should promote to a FOREGROUND SERVICE worker so the OS
- * keeps the process alive for the transfer's duration. This helper:
+ * Official guidance (Android 15/SDK 35, long-running worker contract):
+ * WorkManager work that runs longer than ~10 minutes is rescheduled by the
+ * system; a transfer worker promotes to a FOREGROUND SERVICE worker with the
+ * `dataSync` type so the OS keeps the process alive for the transfer.
  *
- *  - creates the notification channel once;
- *  - on API 33+ shows the foreground notification ONLY when
- *    POST_NOTIFICATIONS is granted (no permission → degrade gracefully: the
- *    durable per-chunk offsets mean a rescheduled worker simply resumes);
- *  - returns null when foreground is not possible right now (permission
- *    missing, background-start restrictions, release exceptions) and the
- *    caller continues as a plain worker.
+ * P1 premise correction: POST_NOTIFICATIONS being DENIED does NOT prevent a
+ * foreground service from being started. Android still runs the service and
+ * surfaces it (Task Manager / running-services UI) even when the
+ * notification is absent from the drawer, so a denied notification
+ * permission must never degrade long transfers to ordinary WorkManager.
+ * Only pre-Q platforms lack the foreground-service worker API.
  *
- * The app NEVER claims unrestricted background execution: without the
- * notification permission, or when the platform refuses background FGS
- * starts, transfers still progress chunk-by-chunk, resumably, on every
- * constrained worker pass.
+ * This helper creates the notification channel once, builds the typed
+ * ForegroundInfo, and returns null when the platform genuinely cannot host
+ * it. When the OS refuses a background FGS start, the worker degrades
+ * gracefully (durable per-chunk offsets keep progress) and reports the
+ * degraded state through its progress data — it never claims an unrestricted
+ * background guarantee it does not have.
  */
 object TransferForeground {
 
     const val CHANNEL_ID = "lamasync-transfers"
     const val NOTIFICATION_ID = 41
 
-    /** True when the platform would accept a foreground notification. */
-    fun canShowForeground(context: Context, sdkInt: Int = Build.VERSION.SDK_INT): Boolean {
-        if (sdkInt >= Build.VERSION_CODES.TIRAMISU) {
-            return ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-        }
-        return true
-    }
+    /**
+     * Pure long-run decision — fully JVM-testable. True whenever the
+     * platform supports foreground-service workers (API 26+); notification
+     * permission is deliberately NOT a precondition (P1).
+     */
+    fun foregroundAllowed(sdkInt: Int): Boolean =
+        sdkInt >= Build.VERSION_CODES.O
+
+    /** True when the platform would accept a foreground service worker. */
+    fun canShowForeground(context: Context, sdkInt: Int = Build.VERSION.SDK_INT): Boolean =
+        foregroundAllowed(sdkInt)
 
     /**
      * Build the ForegroundInfo, or null when foreground is not possible.
@@ -63,7 +62,6 @@ object TransferForeground {
         progress: Int = 0,
     ): ForegroundInfo? {
         return try {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
             if (!canShowForeground(context)) return null
             ensureChannel(context)
             val openIntent = PendingIntent.getActivity(
@@ -81,7 +79,17 @@ object TransferForeground {
                 .setContentIntent(openIntent)
                 .setProgress(100, progress, indeterminate)
                 .build()
-            ForegroundInfo(NOTIFICATION_ID, notification)
+            // Long-running worker contract: declare the dataSync service type
+            // (required on API 34+; manifest declares the same type).
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ForegroundInfo(
+                    NOTIFICATION_ID,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                )
+            } else {
+                ForegroundInfo(NOTIFICATION_ID, notification)
+            }
         } catch (e: Exception) {
             null
         }

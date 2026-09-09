@@ -280,7 +280,7 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
             if (stagedCount > 0) {
-                UploadWorkScheduler.scheduleUploads(context, policyStore.load())
+                UploadWorkScheduler.scheduleUploads(context, policyStore.load(), UploadWorkScheduler.UploadItemKind.MANUAL)
             }
             _ui.update { it.copy(busy = false) }
             if (stagedCount > 0) {
@@ -299,7 +299,7 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
                 updatedAtEpochMillis = System.currentTimeMillis(),
             ),
         )
-        UploadWorkScheduler.scheduleUploads(context, policyStore.load())
+        UploadWorkScheduler.scheduleUploads(context, policyStore.load(), UploadWorkScheduler.UploadItemKind.MANUAL)
     }
 
     /**
@@ -327,7 +327,7 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
         )
         // Force a reconciliation pass. KEEP can lose this request when the
         // existing worker is between its final cancellation scan and success.
-        UploadWorkScheduler.scheduleCancellationReconciliation(context, policyStore.load())
+        UploadWorkScheduler.scheduleCancellationReconciliation(context, policyStore.load(), UploadWorkScheduler.UploadItemKind.MANUAL)
         viewModelScope.launch {
             // 2) Cancel remotely before deleting staging (best-effort; the
             // worker also re-syncs offline cancellations on its next run).
@@ -357,16 +357,21 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
                         finalizedAtEpochMillis = it.finalizedAt,
                     )
                 }
-                store.update(
-                    item.copy(
-                        status = UploadStatus.DONE,
-                        serverStatus = "finalized",
-                        receipt = receipt,
-                        uploadedBytes = serverResult.bytesReceived,
-                        serverBytesReceived = serverResult.bytesReceived,
-                        error = null,
-                        updatedAtEpochMillis = System.currentTimeMillis(),
-                    ),
+                val done = item.copy(
+                    status = UploadStatus.DONE,
+                    serverStatus = "finalized",
+                    receipt = receipt,
+                    uploadedBytes = serverResult.bytesReceived,
+                    serverBytesReceived = serverResult.bytesReceived,
+                    error = null,
+                    updatedAtEpochMillis = System.currentTimeMillis(),
+                )
+                store.update(done)
+                // A cancel that lost the race to finalize is a durable
+                // completion: keep the automatic media registry honest too.
+                app.lamasync.companion.media.MediaProtectionEngine.reconcileCompleted(
+                    app.lamasync.companion.media.MediaProtectionStore.getInstance(context),
+                    done,
                 )
             }
         }

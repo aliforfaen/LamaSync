@@ -45,12 +45,24 @@ class MediaProtectionEngine(
     suspend fun discover(
         library: MediaCursorLibrary,
         settings: AutoProtectSettings,
-        observedScope: MediaPermissionScope,
+        scopeByCollection: Map<MediaCollection, MediaPermissionScope>,
     ): DiscoverySummary {
         val snapshot = recordStore.load()
         val cursors = snapshot.cursors.associateBy { MediaDiscoveryEngine.CursorKey(it.collection, it.volume) }
         val records = snapshot.records.associateBy { it.identityKey }
-        val outcome = MediaDiscoveryEngine(library).scan(settings, cursors, records, observedScope)
+        val outcome = MediaDiscoveryEngine(library).scan(
+            settings,
+            cursors,
+            records,
+            scopeByCollection,
+            onPage = { commit ->
+                recordStore.commitScanPage(
+                    settings = snapshot.settings,
+                    cursorUpdates = listOf(commit.cursor),
+                    recordUpdates = commit.newRecords,
+                )
+            },
+        )
 
         // Apply records + cursors + scan meta in ONE durable commit.
         val mergedRecords = records.toMutableMap()
@@ -65,16 +77,19 @@ class MediaProtectionEngine(
             }
         }
         outcome.newRecords.forEach { mergedRecords[it.identityKey] = it }
+        val anyAccessible = scopeByCollection.values.any { it != MediaPermissionScope.NOT_GRANTED }
+        val anyPartial = scopeByCollection.values.any { it == MediaPermissionScope.PARTIAL }
         val scanStatus = when {
-            observedScope == MediaPermissionScope.NOT_GRANTED -> ScanStatus.NOT_GRANTED
-            observedScope == MediaPermissionScope.PARTIAL -> ScanStatus.PARTIAL
+            !anyAccessible -> ScanStatus.NOT_GRANTED
             outcome.interrupted -> ScanStatus.INTERRUPTED
+            anyPartial -> ScanStatus.PARTIAL
             else -> ScanStatus.OK
         }
         val nextSettings = settings.copy(
             lastScanAtEpochMillis = now(),
             lastScanStatus = scanStatus,
-            lastScanScope = observedScope,
+            lastScanScope = scopeByCollection.values.firstOrNull { it != MediaPermissionScope.NOT_GRANTED }
+                ?: MediaPermissionScope.NOT_GRANTED,
             updatedAtEpochMillis = now(),
         )
         recordStore.commitScanPage(
@@ -130,6 +145,17 @@ class MediaProtectionEngine(
                     updatedAtEpochMillis = now(),
                 )
             }
+        } else if (destState.clearCachedDestination) {
+            // Fresh MISSING or revocation: the cached destination is no longer
+            // authoritative and must stop showing as Server-approved.
+            recordStore.updateSettings {
+                it.copy(
+                    cameraDestinationId = null,
+                    cameraDestinationLabel = null,
+                    cameraDestinationRelPath = null,
+                    updatedAtEpochMillis = now(),
+                )
+            }
         }
         val snapshot = recordStore.load()
 
@@ -139,10 +165,14 @@ class MediaProtectionEngine(
         val updates = mutableListOf<MediaRecord>()
 
         for (record in snapshot.records) {
-            if (record.status != MediaRecordStatus.DISCOVERED &&
-                record.status != MediaRecordStatus.FAILED &&
-                record.status != MediaRecordStatus.UNREADABLE
-            ) {
+            if (record.status == MediaRecordStatus.STAGED) {
+                val item = record.queueItemId?.let { qid -> queueStore.load().items.firstOrNull { it.id == qid } }
+                if (item != null && item.status == UploadStatus.DONE && item.receipt != null) {
+                    updates += record.copy(status = MediaRecordStatus.PROTECTED, sha256 = item.sha256, receiptPath = item.receipt?.finalRelPath, protectedAtEpochMillis = item.receipt?.finalizedAtEpochMillis ?: now(), error = null, updatedAtEpochMillis = now())
+                }
+                continue
+            }
+            if (record.status != MediaRecordStatus.DISCOVERED && record.status != MediaRecordStatus.FAILED && record.status != MediaRecordStatus.UNREADABLE) {
                 continue
             }
             if (effective == null) {
@@ -208,13 +238,12 @@ class MediaProtectionEngine(
             is DestinationsResult.Ok -> {
                 val camera = CameraDestinationResolver.pickCamera(result.destinations)
                 if (camera != null) {
-                    DestinationResolution.Ready(
-                        camera,
-                        DestinationState.READY,
-                        settings,
-                    )
+                    DestinationResolution.Ready(camera, DestinationState.READY, settings)
                 } else {
-                    DestinationResolution.Missing(DestinationState.MISSING, settings)
+                    // Fresh authoritative list says no Camera inbox: the cached
+                    // id/label/relPath is stale and must not keep showing a
+                    // Server-approved path the server no longer approves.
+                    DestinationResolution.Missing(DestinationState.MISSING, settings, clearCachedDestination = true)
                 }
             }
             is DestinationsResult.NetworkFailure -> {
@@ -234,7 +263,9 @@ class MediaProtectionEngine(
                 }
             }
             is DestinationsResult.AuthFailure -> {
-                DestinationResolution.Missing(DestinationState.REVOKED, settings)
+                // Revocation is authoritative: the cached Camera inbox is no
+                // longer granted to this device.
+                DestinationResolution.Missing(DestinationState.REVOKED, settings, clearCachedDestination = true)
             }
         }
     }
@@ -345,6 +376,35 @@ class MediaProtectionEngine(
     }
 
     companion object {
+        /**
+         * P0-1: once an automatic upload item is durably DONE, reconcile the
+         * media registry: the record becomes PROTECTED with the receipt path
+         * and protection time (idempotent — re-calling is a no-op). Static so
+         * the transfer worker and the cancel-race path can use it without
+         * constructing a full engine. Handles versioned collision names: the
+         * receipt's finalRelPath already carries the published name.
+         */
+        fun reconcileCompleted(recordStore: MediaProtectionStore, item: UploadQueueItem): Boolean {
+            val identity = item.mediaIdentity ?: return false
+            val receipt = item.receipt ?: return false
+            val record = recordStore.recordFor(identity) ?: return false
+            if (record.status == MediaRecordStatus.PROTECTED) return true
+            recordStore.updateRecords(
+                listOf(
+                    record.copy(
+                        status = MediaRecordStatus.PROTECTED,
+                        queueItemId = item.id,
+                        sha256 = item.sha256,
+                        receiptPath = receipt.finalRelPath,
+                        protectedAtEpochMillis = receipt.finalizedAtEpochMillis,
+                        error = null,
+                        updatedAtEpochMillis = System.currentTimeMillis(),
+                    ),
+                ),
+            )
+            return true
+        }
+
         fun sourceLabel(source: AutoSource): String = when (source) {
             AutoSource.CAMERA_PHOTOS -> "Camera photos"
             AutoSource.CAMERA_VIDEOS -> "Camera videos"
@@ -445,6 +505,13 @@ sealed interface DestinationResolution {
     /** How the destination resolution should be reported. */
     val state: DestinationState
 
+    /** True when the CACHED destination must be cleared from settings: the
+     *  fresh list is authoritative and no longer contains a Camera inbox, or
+     *  upload authority was revoked. Only network unreachability retains the
+     *  cached fallback. */
+    val clearCachedDestination: Boolean
+        get() = false
+
     /** A destination is usable right now (fresh or last-known cached). */
     data class Ready(
         override val destination: MobileUploadDestinationDto,
@@ -457,6 +524,7 @@ sealed interface DestinationResolution {
         override val state: DestinationState,
         val settings: AutoProtectSettings,
         override val destination: MobileUploadDestinationDto? = null,
+        override val clearCachedDestination: Boolean = false,
     ) : DestinationResolution
 }
 
@@ -557,7 +625,9 @@ object AutoWaitingReasons {
         AutoWaitReason.PERMISSION_DENIED ->
             "Media access is needed to protect your camera. Grant access in the setup panel."
         AutoWaitReason.PERMISSION_PARTIAL ->
-            "Only the photos and videos you selected are being protected. Grant full access for the whole camera roll."
+            "Only part of your media is accessible — a photo or video permission is missing, or " +
+                "only selected items are allowed. Grant full access in App settings to protect " +
+                "the whole camera roll."
         AutoWaitReason.NO_CAMERA_DESTINATION ->
             "An administrator must assign a “Camera” inbox in Admin → Android devices."
         AutoWaitReason.DESTINATION_REVOKED ->

@@ -141,4 +141,39 @@ object UploadNaming {
     }
 
     const val MAX_KEY = 128
+
+    /** The suffix a versioned name carries (` (n)` before the extension). */
+    private val VERSION_SUFFIX = Regex(" \\(\\d+\\)$")
+
+    /** The `#v` prefix of a derived idempotency key. */
+    const val VERSIONED_KEY_PREFIX = "#v"
+
+    /**
+     * The item's IMMUTABLE base display name: any versioned ` (n)` suffix
+     * already applied by an earlier attempt is stripped, so every attempt in
+     * a series (including one resumed after a restart) derives from the same
+     * base and produces `name (2)`, `name (3)`… — never nested
+     * `name (2) (2).jpg`.
+     */
+    fun baseDisplayName(displayName: String): String {
+        val dot = displayName.lastIndexOf('.')
+        val stem = if (dot > 0) displayName.substring(0, dot) else displayName
+        val ext = if (dot > 0) displayName.substring(dot) else ""
+        return stem.replace(VERSION_SUFFIX, "") + ext
+    }
+
+    /** The IMMUTABLE base idempotency key: any `#v<n>` attempt suffix from an
+     *  earlier attempt is stripped, so keys derive as `base#v1`, `base#v2`…
+     *  across restarts — never `base#v1#v1`. */
+    fun baseIdempotencyKey(idempotencyKey: String): String =
+        idempotencyKey.substringBefore(VERSIONED_KEY_PREFIX)
+
+    /** Bounded versioned-name retries per AUTOMATIC item. The bound is
+     *  GLOBAL per item (persisted via [UploadQueueItem.autoNameAttempt]),
+     *  not per worker run: a restart resumes at the same attempt count. */
+    const val MAX_ATTEMPTS = 20
+
+    /** True when an automatic item may still retry under a versioned name. */
+    fun canRetry(mediaIdentity: String?, attempt: Int): Boolean =
+        mediaIdentity != null && attempt < MAX_ATTEMPTS
 }

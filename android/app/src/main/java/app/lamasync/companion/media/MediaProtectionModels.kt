@@ -86,6 +86,7 @@ data class MediaRecord(
     val mimeType: String? = null,
     val relativePath: String? = null,
     val dateAddedSeconds: Long = 0L,
+    val dateModifiedSeconds: Long? = null,
     val dateTakenMillis: Long? = null,
     val sha256: String? = null,
     val status: MediaRecordStatus = MediaRecordStatus.DISCOVERED,

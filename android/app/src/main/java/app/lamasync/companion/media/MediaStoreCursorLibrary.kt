@@ -67,6 +67,9 @@ data class MediaRow(
     val relativePath: String?,
     val dataPath: String?,
     val dateAddedSeconds: Long,
+    /** Last-modified time (seconds since epoch) — a practical revision
+     *  signal alongside size, so a same-size edit is detectable (P0-add). */
+    val dateModifiedSeconds: Long? = null,
     val dateTakenMillis: Long?,
 )
 
@@ -193,6 +196,11 @@ class MediaStoreCursorLibrary(
                 val mimeIdx = c.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
                 val addedIdx = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
                 val takenIdx = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN)
+                val modIdx = if (sdkInt >= Build.VERSION_CODES.Q) {
+                    c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                } else {
+                    -1
+                }
                 val relPathIdx = if (sdkInt >= Build.VERSION_CODES.Q) {
                     c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
                 } else {
@@ -209,6 +217,7 @@ class MediaStoreCursorLibrary(
                     val mime = if (mimeIdx >= 0 && !c.isNull(mimeIdx)) c.getString(mimeIdx) else null
                     val added = c.getLong(addedIdx)
                     val taken = if (takenIdx >= 0 && !c.isNull(takenIdx)) c.getLong(takenIdx) else null
+                    val mod = if (modIdx >= 0 && !c.isNull(modIdx)) c.getLong(modIdx) else null
                     val rel = if (relPathIdx >= 0 && !c.isNull(relPathIdx)) c.getString(relPathIdx) else null
                     val data = if (dataIdx >= 0 && !c.isNull(dataIdx)) c.getString(dataIdx) else null
                     add(
@@ -221,6 +230,7 @@ class MediaStoreCursorLibrary(
                             relativePath = rel,
                             dataPath = data,
                             dateAddedSeconds = added,
+                            dateModifiedSeconds = mod,
                             dateTakenMillis = taken,
                         ),
                     )
@@ -245,7 +255,10 @@ class MediaStoreCursorLibrary(
         add(MediaStore.MediaColumns.MIME_TYPE)
         add(MediaStore.MediaColumns.DATE_ADDED)
         add(MediaStore.MediaColumns.DATE_TAKEN)
-        if (sdk >= Build.VERSION_CODES.Q) add(MediaStore.MediaColumns.RELATIVE_PATH)
+        if (sdk >= Build.VERSION_CODES.Q) {
+            add(MediaStore.MediaColumns.RELATIVE_PATH)
+            add(MediaStore.MediaColumns.DATE_MODIFIED)
+        }
         if (sdk < Build.VERSION_CODES.Q) add(MediaStore.MediaColumns.DATA)
     }.toTypedArray()
 

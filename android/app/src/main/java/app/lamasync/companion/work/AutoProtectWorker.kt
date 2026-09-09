@@ -5,12 +5,13 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import app.lamasync.companion.data.KeystoreCredentialVault
 import app.lamasync.companion.data.RegistrationStoreImpl
-import app.lamasync.companion.data.UploadPolicyStore
+import app.lamasync.companion.data.UploadPolicy
 import app.lamasync.companion.media.AutoWaitReason
 import app.lamasync.companion.media.AutoWaitingReasons
 import app.lamasync.companion.media.ContentResolverByteStager
 import app.lamasync.companion.media.DestinationsResult
 import app.lamasync.companion.media.DestinationState
+import app.lamasync.companion.media.MediaCollection
 import app.lamasync.companion.media.MediaPermissionScope
 import app.lamasync.companion.media.MediaPermissions
 import app.lamasync.companion.media.MediaProtectionEngine
@@ -74,20 +75,34 @@ class AutoProtectWorker(
             return Result.success()
         }
 
-        // --- live permission scope (never trusted from storage) ---
-        val scope = MediaPermissions.current(context)
-        if (scope == MediaPermissionScope.NOT_GRANTED) {
+        // --- live per-collection permission scope (never trusted from
+        // storage; P0-3: authority is per collection, not global) ---
+        val scopes = MediaPermissions.currentScopes(context)
+        val needsImages = settings.cameraPhotosEnabled || settings.screenshotsEnabled
+        val needsVideos = settings.cameraVideosEnabled || settings.screenshotsEnabled
+        val accessible = buildList {
+            if (needsImages) scopes[MediaCollection.IMAGES]?.let { add(it) }
+            if (needsVideos) scopes[MediaCollection.VIDEOS]?.let { add(it) }
+        }.filter { it != MediaPermissionScope.NOT_GRANTED }
+        if (accessible.isEmpty()) {
             recordStore.updateSettings {
                 it.copy(
                     lastWaitingReason = AutoWaitReason.PERMISSION_DENIED,
                     waitingReasonUpdatedAtEpochMillis = now,
                     lastScanStatus = app.lamasync.companion.media.ScanStatus.NOT_GRANTED,
                     lastScanAtEpochMillis = now,
-                    lastScanScope = scope,
+                    lastScanScope = MediaPermissionScope.NOT_GRANTED,
                     updatedAtEpochMillis = now,
                 )
             }
             return Result.success()
+        }
+        // Honest reported scope: PARTIAL when ANY needed collection is
+        // selected-photos-only or fully denied, even if others are FULL.
+        val reportedScope = when {
+            accessible.size < (if (needsImages) 1 else 0) + (if (needsVideos) 1 else 0) ||
+                accessible.any { it == MediaPermissionScope.PARTIAL } -> MediaPermissionScope.PARTIAL
+            else -> MediaPermissionScope.FULL
         }
 
         // --- discovery (local; needs no network) ---
@@ -98,7 +113,7 @@ class AutoProtectWorker(
             stager = ContentResolverByteStager(context),
         )
         val discovery = try {
-            engine.discover(library, settings, scope)
+            engine.discover(library, settings, scopes)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -154,7 +169,7 @@ class AutoProtectWorker(
         val reason = AutoWaitingReasons.derive(
             registrationPresent = true,
             nativePresent = true,
-            scope = scope,
+            scope = reportedScope,
             destinationState = protect.destinationState,
             pendingCount = pendingCount,
         )
@@ -168,22 +183,31 @@ class AutoProtectWorker(
                 lastScanStatus = if (discovery.interrupted) {
                     app.lamasync.companion.media.ScanStatus.INTERRUPTED
                 } else {
-                    when (scope) {
+                    when (reportedScope) {
                         MediaPermissionScope.PARTIAL -> app.lamasync.companion.media.ScanStatus.PARTIAL
                         else -> app.lamasync.companion.media.ScanStatus.OK
                     }
                 },
                 lastScanAtEpochMillis = now,
-                lastScanScope = scope,
+                lastScanScope = reportedScope,
                 lastSuccessfulProtectionEpochMillis = latestProtection,
                 updatedAtEpochMillis = now,
             )
         }
 
         // --- schedule the constrained drainer if anything is pending ---
-        if (app.lamasync.companion.data.UploadQueueStore.getInstance(context).pendingItems().isNotEmpty()) {
-            val policyStore = UploadPolicyStore(context)
-            UploadWorkScheduler.scheduleUploads(context, policyStore.load())
+        // Automatic items drain under the AUTOMATIC transfer policy (the
+        // Auto Protect screen's own conditions) — never the manual one.
+        if (app.lamasync.companion.data.UploadQueueStore.getInstance(context)
+                .pendingItems().any { it.mediaIdentity != null }
+        ) {
+            UploadWorkScheduler.scheduleAutoUploads(
+                context,
+                UploadPolicy(
+                    unmeteredOnly = recordStore.load().settings.unmeteredOnly,
+                    chargingOnly = recordStore.load().settings.chargingOnly,
+                ),
+            )
         }
 
         return Result.success()
