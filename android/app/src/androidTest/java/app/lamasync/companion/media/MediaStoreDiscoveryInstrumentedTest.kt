@@ -148,7 +148,7 @@ class MediaStoreDiscoveryInstrumentedTest {
         val lib = MediaStoreCursorLibrary(app, Build.VERSION.SDK_INT)
         val cursors = recStore.load().cursors.associateBy { MediaDiscoveryEngine.CursorKey(it.collection, it.volume) }
         val records = recStore.load().records.associateBy { it.identityKey }
-        MediaDiscoveryEngine(lib).scan(settings, cursors, records, scope, pageSize)
+        MediaDiscoveryEngine(lib).scan(settings, cursors, records, MediaCollection.entries.associateWith { scope }, pageSize)
     }
 
     @Test
@@ -187,7 +187,7 @@ class MediaStoreDiscoveryInstrumentedTest {
     }
 
     @Test
-    fun repeatedScansAreIdempotentAndDeletionBecomesLocalOnly() {
+    fun repeatedScansAreIdempotentAndDeletionOfAnUnprotectedRowIsALoss() {
         Assume.assumeTrue(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
         val photoUri = insertImage("DCIM/Camera", "stage2-idem-${System.currentTimeMillis()}.jpg", 120_000)
         insertedPhoto += photoUri
@@ -208,15 +208,23 @@ class MediaStoreDiscoveryInstrumentedTest {
         val second = discovered(recStore, settings(existing = true), MediaPermissionScope.FULL)
         assertEquals("no duplicate record on a repeated scan", 0, second.newRecords.count { it.identityKey == identity })
 
-        // Delete the local row (photo removed from the gallery) → LOCALLY_DELETED.
+        // Delete the local row BEFORE the media was ever staged/protected:
+        // this must be reported as a LOSS (UNREADABLE, action required),
+        // never as LOCALLY_DELETED — a not-yet-protected row must not
+        // advance "protected through".
         app.contentResolver.delete(photoUri, null, null)
         val third = discovered(recStore, settings(existing = true), MediaPermissionScope.FULL)
         assertTrue(
-            "deletion detected locally only",
-            third.deletedIdentities.contains(identity),
+            "a never-protected row is never claimed deleted",
+            !third.deletedIdentities.contains(identity),
+        )
+        assertEquals(
+            "deletion before staging is an honest loss",
+            MediaRecordStatus.UNREADABLE,
+            third.newRecords.first { it.identityKey == identity }.status,
         )
         // Nothing was enqueued by discovery itself (queuing is the staging
-        // phase), and nothing claims protection for the deleted row.
+        // phase), and nothing claims protection for the lost row.
         assertTrue(queue.load().items.isEmpty())
     }
 

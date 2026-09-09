@@ -16,6 +16,7 @@ import app.lamasync.companion.data.UploadReceipt
 import app.lamasync.companion.data.UploadStatus
 import app.lamasync.companion.data.UploadTransferEngine
 import app.lamasync.companion.media.AutoProtectSettings
+import app.lamasync.companion.media.MediaCollection
 import app.lamasync.companion.media.DestinationsResult
 import app.lamasync.companion.media.MediaPermissionScope
 import app.lamasync.companion.media.MediaProtectionEngine
@@ -207,7 +208,7 @@ class VerticalAutoProtectTest {
         val summary = engine.discover(
             MediaStoreCursorLibrary(app),
             settings,
-            MediaPermissionScope.FULL,
+            MediaCollection.entries.associateWith { MediaPermissionScope.FULL },
         )
         val ourNew = recordStore.load().records.filter {
             it.displayName == photoName || it.displayName == videoName
@@ -242,28 +243,20 @@ class VerticalAutoProtectTest {
                 outcome is UploadTransferEngine.TransferOutcome.Completed,
             )
             val receipt = (outcome as UploadTransferEngine.TransferOutcome.Completed).receipt
-            queue.update(
-                item.copy(
-                    status = UploadStatus.DONE,
-                    receipt = receipt,
-                    serverStatus = "finalized",
-                    uploadedBytes = receipt.sizeBytes,
-                    serverBytesReceived = receipt.sizeBytes,
-                    updatedAtEpochMillis = System.currentTimeMillis(),
-                ),
+            val done = item.copy(
+                status = UploadStatus.DONE,
+                receipt = receipt,
+                serverStatus = "finalized",
+                uploadedBytes = receipt.sizeBytes,
+                serverBytesReceived = receipt.sizeBytes,
+                updatedAtEpochMillis = System.currentTimeMillis(),
             )
-            // Mirror receipt into the protection registry (worker behavior).
-            recordStore.updateRecords(
-                listOfNotNull(
-                    recordStore.recordFor(item.mediaIdentity!!)?.copy(
-                        status = MediaRecordStatus.PROTECTED,
-                        queueItemId = item.id,
-                        sha256 = item.sha256,
-                        receiptPath = receipt.finalRelPath,
-                        protectedAtEpochMillis = receipt.finalizedAtEpochMillis,
-                        updatedAtEpochMillis = System.currentTimeMillis(),
-                    ),
-                ),
+            queue.update(done)
+            // Mirror receipt into the protection registry through the EXACT
+            // completion reconcile the transfer worker now performs (P0-1).
+            assertTrue(
+                "registry reconciled",
+                MediaProtectionEngine.reconcileCompleted(recordStore, done),
             )
         }
 
@@ -294,7 +287,7 @@ class VerticalAutoProtectTest {
         val dup = engine.discover(
             MediaStoreCursorLibrary(app),
             recordStore.load().settings,
-            MediaPermissionScope.FULL,
+            MediaCollection.entries.associateWith { MediaPermissionScope.FULL },
         )
         val ourCountAfter = recordStore.load().records.count {
             it.displayName == photoName || it.displayName == videoName
@@ -323,7 +316,7 @@ class VerticalAutoProtectTest {
         engine.discover(
             MediaStoreCursorLibrary(app),
             recordStore.load().settings,
-            MediaPermissionScope.FULL,
+            MediaCollection.entries.associateWith { MediaPermissionScope.FULL },
         )
         assertEquals(
             "local deletion recorded for the photo identity",
