@@ -86,7 +86,7 @@ class MediaStoreCursorLibrary(
     private val contentResolver: ContentResolver = context.contentResolver
 
     override suspend fun volumes(collection: MediaCollection): List<String> {
-        val names = if (sdkInt >= Build.VERSION_CODES.Q) {
+        val names = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.getExternalVolumeNames(_context).filter { it.startsWith("external_") }
         } else {
             setOf(VOLUME_PRIMARY)
@@ -97,8 +97,11 @@ class MediaStoreCursorLibrary(
     override suspend fun newestKey(collection: MediaCollection, volume: String): PageKey? {
         val uri = uriFor(collection, volume)
         val projection = arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATE_ADDED)
-        val sort = "${MediaStore.MediaColumns.DATE_ADDED} DESC, ${MediaStore.MediaColumns._ID} DESC LIMIT 1"
-        return contentResolver.query(uri, projection, null, null, sort)?.use { c ->
+        val args = android.os.Bundle().apply {
+            putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, "${MediaStore.MediaColumns.DATE_ADDED} DESC, ${MediaStore.MediaColumns._ID} DESC")
+            putInt(ContentResolver.QUERY_ARG_LIMIT, 1)
+        }
+        return contentResolver.query(uri, projection, args, null)?.use { c ->
             if (c.moveToFirst()) {
                 PageKey(
                     dateAdded = c.getLong(c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)),
@@ -126,8 +129,14 @@ class MediaStoreCursorLibrary(
         } else {
             arrayOf(before.dateAdded.toString(), before.dateAdded.toString(), before.mediaId.toString())
         }
-        val sort = "${MediaStore.MediaColumns.DATE_ADDED} DESC, ${MediaStore.MediaColumns._ID} DESC LIMIT ${limit.coerceIn(1, 1000)}"
-        return queryRows(collection, volume, selection, args, sort)
+        val queryArgs = android.os.Bundle().apply {
+            putString(
+                ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC, ${MediaStore.MediaColumns._ID} DESC",
+            )
+            putInt(ContentResolver.QUERY_ARG_LIMIT, limit.coerceIn(1, 1000))
+        }
+        return queryRows(collection, volume, selection, args, queryArgs)
     }
 
     override suspend fun knownRows(
@@ -168,11 +177,15 @@ class MediaStoreCursorLibrary(
         volume: String,
         selection: String?,
         args: Array<String>?,
-        sort: String,
+        queryArgs: android.os.Bundle,
     ): List<MediaRow> {
         val uri = uriFor(collection, volume)
         val projection = projectionFor(sdkInt)
-        return contentResolver.query(uri, projection, selection, args, sort)?.use { c ->
+        if (selection != null) {
+            queryArgs.putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+            args?.let { queryArgs.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, it) }
+        }
+        return contentResolver.query(uri, projection, queryArgs, null)?.use { c ->
             buildList {
                 val idIdx = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
                 val nameIdx = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)

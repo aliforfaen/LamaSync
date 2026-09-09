@@ -354,28 +354,27 @@ class MediaProtectionEngine(
 }
 
 /** Deterministic queue identity per content revision — idempotent across
- *  scans, restarts and retries; a changed revision gets a new hash suffix. */
+ *  scans, restarts and retries; a changed revision gets a new hash suffix.
+ *
+ * Server contract (mobile-uploads.ts): idempotency keys must match
+ * `^[A-Za-z0-9._-]+$` and be 8..128 chars — the keys below comply. */
 object AutoQueueKeys {
     private fun volumeHash(identityKey: String): String {
         val volume = identityKey.substringAfter('@', "")
         return Integer.toHexString(volume.hashCode())
     }
 
-    fun queueItemId(identityKey: String, sha256: String): String {
-        val sha12 = sha256.take(12)
+    private fun base(identityKey: String, sha256: String): String {
+        val source = identityKey.substringBefore(':', "")
         val id = identityKey.substringAfter(':', "").substringBefore('@')
-        val vol = volumeHash(identityKey)
-        val src = identityKey.substringBefore(':', "")
-        return "autoq:$src:$id@$vol:$sha12"
+        return "$source-${id}-${volumeHash(identityKey)}-${sha256.take(12)}"
     }
 
-    fun idempotencyKey(identityKey: String, sha256: String): String {
-        val sha12 = sha256.take(12)
-        val id = identityKey.substringAfter(':', "").substringBefore('@')
-        val vol = volumeHash(identityKey)
-        val src = identityKey.substringBefore(':', "")
-        return "autop:$src:$id@$vol:$sha12"
-    }
+    fun queueItemId(identityKey: String, sha256: String): String =
+        ("autoq-" + base(identityKey, sha256)).take(128)
+
+    fun idempotencyKey(identityKey: String, sha256: String): String =
+        ("autop-" + base(identityKey, sha256)).take(128)
 }
 
 /** Bounded staging seam. */

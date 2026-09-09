@@ -54,10 +54,12 @@ object AutoProtectWorkScheduler {
 
     /**
      * Policy/source change: REPLACE the prompted discovery work so the next
-     * run carries the NEW configuration (stage-1 R6 pattern). The periodic
-     * reconciliation is kept (its constraints never encode policy).
+     * run carries the NEW configuration (stage-1 R6 pattern). Disabling every
+     * source cancels both lanes. The periodic reconciliation is kept when
+     * sources remain enabled (its constraints never encode policy).
      */
     fun rescheduleAfterConfigChange(context: Context) {
+        ensurePeriodic(context)
         if (!sourcesEnabled(context)) {
             WorkManager.getInstance(context).cancelUniqueWork(DISCOVERY_WORK_NAME)
             return
@@ -67,7 +69,6 @@ object AutoProtectWorkScheduler {
             ExistingWorkPolicy.REPLACE,
             discoveryRequest(),
         )
-        ensurePeriodic(context)
     }
 
     /** (Re)create the periodic reconciliation with the CURRENT cadence. */
