@@ -18,6 +18,14 @@ import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
 import { getRemoteName } from "./rclone.ts";
 import { materialiseGitignoreFilter } from "./gitignore.ts";
 import { expandHomePath } from "./config.ts";
+import {
+  BoundedTail,
+  consumeLines,
+  countersFromStats,
+  parseJsonLogLineSignal,
+  statsPhase,
+  type SyncProgressReporter,
+} from "./live-progress.ts";
 
 export interface ExecuteOptions {
   assignment: FolderAssignment;
@@ -28,10 +36,38 @@ export interface ExecuteOptions {
   configPath: string;
   dryRun?: boolean;
   signal?: AbortSignal;
+  // LAMA-327: live non-terminal progress sink for rclone runs. Optional and
+  // additive; when present the executor reports daemon lifecycle and parsed
+  // rclone phase transitions through it. Progress failures never block the
+  // run (the reporter itself is non-blocking and swallows errors).
+  progress?: SyncProgressReporter;
 }
 
 interface TransferStats {
   files: number; bytes: number; errors: number; checks: number; transfers: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+interface RcloneStatsLine {
+  transfers?: unknown;
+  bytes?: unknown;
+  checks?: unknown;
+  errors?: unknown;
+}
+
+function isRcloneStatsLine(value: unknown): value is RcloneStatsLine {
+  return isRecord(value);
+}
+
+interface RcloneLogLine {
+  stats?: RcloneStatsLine;
+}
+
+function isRcloneLogLine(value: unknown): value is RcloneLogLine {
+  return isRecord(value) && (value.stats === undefined || isRcloneStatsLine(value.stats));
 }
 
 /**
@@ -781,7 +817,7 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         }
       }
       try {
-        runResult = await runCommand(command, timeoutSec, opts.signal);
+        runResult = await runCommand(command, timeoutSec, opts.signal, opts.progress);
       } catch (err) {
         return report(hostId, folder.id, folder.type, "failed", start, { summary: `executor error: ${err instanceof Error ? err.message : String(err)}`, details: { attempt, error: String(err) } });
       }
@@ -792,7 +828,7 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           console.warn(`[executor] folder=${folder.id} bisync state corrupted; archived=${corrupted}; retrying with --resync`);
           mkdirSync(sd, { recursive: true });
           if (!command.includes("--resync")) command.push("--resync");
-          runResult = await runCommand(command, timeoutSec, opts.signal);
+          runResult = await runCommand(command, timeoutSec, opts.signal, opts.progress);
           isRecovery = true;
         } catch (err) {
           return report(hostId, folder.id, folder.type, "failed", start, { summary: `bisync recovery failed: ${err instanceof Error ? err.message : String(err)}`, details: { attempt, phase: "recovery", error: String(err) } });
@@ -815,6 +851,11 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
       if (!retryable || attempt === maxAttempts) break;
       const delayMs = 30_000 * 2 ** (attempt - 1);
       console.warn(`[executor] folder=${folder.id} transient failure attempt=${attempt}/${maxAttempts}; retry in ${delayMs / 1000}s`);
+      // LAMA-327: surface the retry wait on the live progress surface.
+      opts.progress?.report({
+        phase: "retrying",
+        detail: `transient failure; retry ${attempt + 1}/${maxAttempts} in ${Math.round(delayMs / 1000)}s`,
+      });
       try { await client.reportOperation(report(hostId, folder.id, folder.type, "retry", start, { summary: `${folder.type} retry ${attempt + 1}/${maxAttempts} exit=${runResult.exitCode}`, details: { attempt, next: attempt + 1, maxAttempts, delayMs, exitCode: runResult.exitCode, exitCategory, retryable: true, timedOut: runResult.timedOut, stderrTail: runResult.stderrTail } })); } catch { /* ignore */ }
       await Bun.sleep(delayMs);
     }
@@ -1008,7 +1049,24 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
   return command;
 }
 
- async function runCommand(command: string[], timeoutSec: number, signal?: AbortSignal): Promise<CommandResult> {
+/**
+ * Spawn one rclone process and stream BOTH pipes line-by-line (LAMA-327),
+ * preserving the LAMA-247 #12 contract: `--use-json-log` lines are fed
+ * through `accumulateRcloneJsonLog` exactly once per stream so cumulative
+ * stats stay intact, while memory stays bounded (only the last
+ * `TAIL_CAP` chars of each stream are retained for `stdoutTail` /
+ * `stderrTail`). Every complete line also flows through the phase parser:
+ * recognised rclone INFO boundaries move the live phase forward, periodic
+ * `stats` blocks update counters (and detect the checking tail), and
+ * per-file transfer messages flip to `transferring`. Unknown lines leave
+ * the reported phase untouched.
+ */
+ async function runCommand(
+  command: string[],
+  timeoutSec: number,
+  signal?: AbortSignal,
+  progress?: SyncProgressReporter,
+): Promise<CommandResult> {
   const t0 = Date.now();
   const proc = Bun.spawn(["rclone", ...command], { stdout: "pipe", stderr: "pipe" });
   let timedOut = false;
@@ -1032,22 +1090,61 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
     files: 0, bytes: 0, errors: 0, checks: 0, transfers: 0,
     wouldCopy: [], wouldDelete: [], wouldMkdir: [],
   };
-  const [stdoutText, stderrText] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+  const stdoutTail = new BoundedTail();
+  const stderrTail = new BoundedTail();
+  let reportedWorking = false;
+
+  // LAMA-327: one line handler per stream. Lines are fed to the existing
+  // accumulator (LAMA-247 #12 — modern rclone writes the JSON log to
+  // stderr, older writers used stdout; both streams are consumed), the
+  // bounded tails, and the live-progress parser. The parser never throws.
+  const handleLine = (stream: "stdout" | "stderr") => (line: string): void => {
+    if (stream === "stdout") stdoutTail.append(`${line}\n`);
+    else stderrTail.append(`${line}\n`);
+    accumulateRcloneJsonLog(`${line}\n`, acc);
+    // Honest generic state while rclone runs with no recognisable signal
+    // (reported once per invocation — the reporter coalesces anyway).
+    if (!reportedWorking) {
+      progress?.report({ phase: "working", detail: "rclone running — awaiting phase output" });
+      reportedWorking = true;
+    }
+    if (!line.startsWith("{")) return;
+    let obj: RcloneLogLine | null = null;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (!isRcloneLogLine(parsed)) return;
+      obj = parsed;
+    } catch {
+      // Malformed JSON line — keep current phase, stay honest.
+      return;
+    }
+    const signal = parseJsonLogLineSignal(line);
+    if (signal?.phase) {
+      progress?.report({ phase: signal.phase, detail: signal.detail });
+    }
+    if (obj?.stats) {
+      const counters = countersFromStats(obj.stats);
+      const phase = statsPhase(obj.stats);
+      // The first stats block after a quiet enumerate may show 0/0 — that
+      // is honest "still working", not a phase to shout about.
+      if (phase) progress?.report({ phase, ...counters });
+      else progress?.report({ ...counters });
+    }
+  };
+
+  // Consume both pipes in parallel, feeding every line exactly once.
+  await Promise.all([
+    consumeLines(proc.stdout, handleLine("stdout")),
+    consumeLines(proc.stderr, handleLine("stderr")),
   ]);
-  // LAMA-247 #12: rclone >= 1.63 writes --use-json-log lines to STDERR;
-  // older writers used stdout. Feed both so per-file/stats counters are not
-  // silently zeroed on modern rclone (the "0 transfers, 0 B" misreport).
-  accumulateRcloneJsonLog(stdoutText, acc);
-  accumulateRcloneJsonLog(stderrText, acc);
+
   const { wouldCopy, wouldDelete, wouldMkdir, ...stats } = acc;
   const exitCode = await proc.exited;
   clearTimeout(timer);
   if (signal) {
     signal.removeEventListener("abort", onAbort);
   }
-  return { exitCode, timedOut, aborted, abortReason, stats, stdoutTail: tail(stdoutText, 2000), stderrTail: tail(stderrText, 2000), durationMs: Date.now() - t0, wouldCopy, wouldDelete, wouldMkdir };
+  return { exitCode, timedOut, aborted, abortReason, stats, stdoutTail: stdoutTail.tail(), stderrTail: stderrTail.tail(), durationMs: Date.now() - t0, wouldCopy, wouldDelete, wouldMkdir };
 }
 
 // ---------------------------------------------------------------------------

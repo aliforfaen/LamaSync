@@ -31,6 +31,7 @@ import {
   withinUpdateCooldown,
 } from "./update-check.ts";
 import { captureAppSnapshot, executeAssignment, executeResticRestore, isPauseActive } from "./executor.ts";
+import { createSyncProgressReporter } from "./live-progress.ts";
 import { Scheduler } from "./scheduler.ts";
 import {
   buildSocketState,
@@ -685,6 +686,35 @@ async function main(): Promise<void> {
 
   const runMutex = new KeyedMutex();
 
+  // LAMA-327: deterministic-crypto run id for the live progress registry.
+  // Keyed per run so concurrent runs on one host (different folders / apps)
+  // and retries within one run stay distinguishable.
+  const newRunId = (): string => crypto.randomUUID();
+
+  // LAMA-327: whether this run participates in the live progress surface.
+  // rclone-driven operations only (sync / mount / backup) and NOT the
+  // restic-backed paths (they have no `--use-json-log` stream). Dotfile,
+  // git, and app-capture runs keep their immutable operation_log row and
+  // stay off the live surface — the live registry is for long rclone runs.
+  const usesLiveProgress = (folder: Folder, assignment: FolderAssignment): boolean => {
+    // restic-backed backup/dotfile runs have no `--use-json-log` stream —
+    // keep them off the live surface (checked before type narrowing).
+    if (
+      (folder.type === "backup" || folder.type === "dotfile") &&
+      Boolean(assignment.resticRepository && assignment.resticPassword)
+    ) {
+      return false;
+    }
+    if (
+      folder.type !== "sync" &&
+      folder.type !== "mount" &&
+      folder.type !== "backup"
+    ) {
+      return false;
+    }
+    return true;
+  };
+
   // LAMA-308: the run body, extracted so runOnce can serialize concurrent
   // runs for the same folder through the in-process keyed mutex. Covers lock
   // acquisition through executeAssignment + reporting, so two claimed
@@ -698,6 +728,23 @@ async function main(): Promise<void> {
     opts: { dryRun?: boolean; triggerOrigin?: TriggerOrigin } | undefined,
     attachOrigin: (report: OperationReport) => OperationReport,
   ): Promise<OperationReport | null> => {
+    // LAMA-327: live progress for this run. Created before lock acquisition so
+    // the "queued → lock" lifecycle is visible, and finished (terminal) on
+    // every exit path — including lock deferral and executor throws — so the
+    // server registry never keeps a stale entry.
+    const progress = usesLiveProgress(folder, assignment)
+      ? createSyncProgressReporter({
+          client,
+          hostId,
+          hostname: hostConfig.host.hostname ?? null,
+          folderId: folder.id,
+          folderName: folder.name,
+          operation: effectiveFolder.type,
+          runId: newRunId(),
+          startedAt: Date.now(),
+        })
+      : null;
+    progress?.report({ phase: "queued", detail: "waiting for destination lock" });
     // LAMA-294: the lock identity is the canonical destination/repository
     // key (host-scoped for ordinary backups), so distinct hosts with the
     // same folder no longer contend unless they intentionally share a
@@ -722,9 +769,11 @@ async function main(): Promise<void> {
       // failed backup: no transfer was started, so it must not surface as a
       // permanent failure (LAMA-294 goal 4-5).
       await reportOperation(attachOrigin(skipReport));
+      progress?.finish("failed", skipReport.summary ?? "deferred — lock unavailable");
       return attachOrigin(skipReport);
     }
     const lock = lockResult.handle!;
+    progress?.report({ phase: "lock", detail: "destination lock acquired" });
 
     const abortController = new AbortController();
     const heartbeatTimer = setInterval(() => {
@@ -748,6 +797,7 @@ async function main(): Promise<void> {
         configPath,
         signal: abortController.signal,
         dryRun: opts?.dryRun === true,
+        progress: progress ?? undefined,
       });
       console.log(
         `[run] folder=${folder.name} type=${effectiveFolder.type} status=${report.status} summary=${report.summary ?? ""}`,
@@ -760,12 +810,24 @@ async function main(): Promise<void> {
         report.summary ?? undefined,
         lock,
       );
+      // LAMA-327: terminal live progress. `conflict` / `recovery` are
+      // completed runs (the sync ran to a conclusion); `success` and
+      // `recovery` map to success, `conflict` reports success with the
+      // summary as detail — the immutable operation_log row stays the
+      // authoritative verdict.
+      if (progress) {
+        progress.finish(
+          report.status === "failed" ? "failed" : "success",
+          report.summary ?? (report.status === "failed" ? "sync failed" : "sync completed"),
+        );
+      }
       const originReport = attachOrigin(report);
       await reportOperation(originReport);
       return originReport;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[run] executor threw: ${msg}`);
+      progress?.finish("failed", `executor threw: ${msg}`);
       await releaseLock(client, folder.id, hostId, "failed", msg, lock);
       const errReport: OperationReport = {
         hostId,

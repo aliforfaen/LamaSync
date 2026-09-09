@@ -40,6 +40,8 @@ import type {
   ServerDeployJob,
   StorageReport,
   FolderSize,
+  LiveSyncProgress,
+  LiveSyncProgressList,
   BrowseRef,
   BrowseJob,
   BrowsePrefixSizeResult,
@@ -893,6 +895,10 @@ export const api = {
       `/operations?hostId=${encodeURIComponent(hostId)}&limit=${limit}`,
     ),
   listLocks: () => apiGet<LockInfo[]>("/operations/locks"),
+  // LAMA-327: hydration read for the Running-now surface — every active
+  // non-terminal live sync run, newest first.
+  listSyncProgress: () =>
+    apiGet<LiveSyncProgressList>("/sync-progress").then((r) => r.runs),
   listConflicts: (status = "pending") =>
     apiGet<Conflict[]>(`/conflicts?status=${encodeURIComponent(status)}`),
   resolveConflict: (id: string, resolution: "local" | "remote" | "both") =>

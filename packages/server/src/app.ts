@@ -21,6 +21,7 @@ import { foldersRoutes } from "./routes/folders.ts";
 import { appsRoutes } from "./routes/apps.ts";
 import { retentionRoutes } from "./routes/retention.ts";
 import { reportRoutes } from "./routes/report.ts";
+import { syncProgressRoutes } from "./routes/sync-progress.ts";
 import { sharesRoutes } from "./routes/shares.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { resticRoutes } from "./routes/restic.ts";
@@ -150,6 +151,11 @@ export function createServerApp() {
                 "LAMA-301 production server deploy agent jobs (peek/claim/progress/complete)",
             },
             {
+              name: "Sync Progress",
+              description:
+                "LAMA-327 live non-terminal rclone sync phases (in-memory registry + WebSocket events; never written to operation_log)",
+            },
+            {
               name: "Shares",
               description: "NFS/SMB share catalog",
             },
@@ -181,6 +187,7 @@ export function createServerApp() {
     .use(appsRoutes)
     .use(retentionRoutes)
     .use(reportRoutes)
+    .use(syncProgressRoutes)
     .use(sharesRoutes)
     .use(adminRoutes)
     .use(resticRoutes)
