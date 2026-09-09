@@ -173,6 +173,14 @@ distributable binary build.
 
 ## Active follow-ups
 
+0. **LAMA-296 stage 2 — real-device soak.** Automatic camera protection is
+   emulator-verified (see
+   [`report-296-stage-2-auto-protection.md`](report-296-stage-2-auto-protection.md));
+   the remaining evidence is a one-day real-phone run (Doze/battery,
+   overnight scheduling, existing-history import at scale, OEM camera
+   paths, a real partial-access selection, and a server restart mid-
+   transfer).
+
 1. **LAMA-315 — path classification and recommendation UX.** The design
    handoff is written: [`handoff-315-path-classification.md`](
    handoff-315-path-classification.md) audits the current capture-spec model
