@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -9,7 +10,6 @@ import {
   SERVER_SCHEMA,
   MIGRATIONS,
 } from "./index.ts";
-import type { Database } from "./index.ts";
 
 describe("initDb", () => {
   test("applies schema and creates expected tables", () => {
@@ -62,6 +62,48 @@ describe("initDb", () => {
     } finally {
       // tmpdir is OS-managed
     }
+  });
+
+  test("opens a pre-LAMA-296 database before creating the dedupe index", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "lamasync-core-dedupe-migration-"));
+    const path = join(tmp, "test.db");
+
+    // Production reached LAMA-296 with operation_log already present but
+    // without dedupe_key. SERVER_SCHEMA must not reference the new column
+    // before MIGRATIONS has had a chance to add it.
+    const legacy = new Database(path, { create: true });
+    legacy.exec(`
+      CREATE TABLE operation_log (
+        id TEXT PRIMARY KEY,
+        host_id TEXT,
+        timestamp INTEGER NOT NULL
+      );
+      INSERT INTO operation_log (id, host_id, timestamp)
+        VALUES ('op-legacy', 'host-a', 1);
+    `);
+    legacy.close();
+
+    const migrated = initDb(path);
+    expect(
+      migrated
+        .query<{ name: string }, []>(
+          "SELECT name FROM pragma_table_info('operation_log') WHERE name = 'dedupe_key'",
+        )
+        .get()?.name,
+    ).toBe("dedupe_key");
+    expect(
+      migrated
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_operation_log_dedupe_key'",
+        )
+        .get()?.name,
+    ).toBe("idx_operation_log_dedupe_key");
+    expect(
+      migrated
+        .query<{ id: string }, []>("SELECT id FROM operation_log WHERE id = 'op-legacy'")
+        .get()?.id,
+    ).toBe("op-legacy");
+    migrated.close();
   });
 
   test("legacy s3_* drops are gated behind dropLegacyS3Columns (LAMA-222 P0-3)", () => {

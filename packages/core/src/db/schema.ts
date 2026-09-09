@@ -369,8 +369,9 @@ CREATE TABLE IF NOT EXISTS schedule_state (
 );
 CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
     ON operation_log(host_id, timestamp);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_log_dedupe_key
-    ON operation_log(dedupe_key) WHERE dedupe_key IS NOT NULL;
+-- idx_operation_log_dedupe_key is created by MIGRATIONS after dedupe_key has
+-- been added to pre-LAMA-296 databases. Keeping it in this initial schema
+-- batch makes SQLite abort before the ALTER TABLE migration can run.
 CREATE INDEX IF NOT EXISTS idx_dotfile_versions_manifest_ts
     ON dotfile_versions(manifest_id, timestamp);
 
