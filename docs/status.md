@@ -251,8 +251,8 @@ checksum-mismatch negative). APK sha256
 `0891fe3302f749b7401660b592e4646be614ebf1c548f21724c346497f9d264a`.
 
 LAMA-296 stage-2 baseline (this worktree): repo gates green (`bun install`,
-`bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` **1589 pass / 9 skip /
-0 fail**, strict skill drift OK, `bun run build`), Android `assembleDebug` +
+`bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` **1580 pass / 9 skip /
+0 fail (1589 tests)**, strict skill drift OK, `bun run build`), Android `assembleDebug` +
 `lintDebug` 0 errors, `testDebugUnitTest` **148/148**, and the instrumented
 suite — **53/53 on the API-35 `lamadb-test` AVD with the disposable HTTPS
 vertical** (phase-1 enrollment A–D, stage-1 manual uploads incl. >64 MiB,

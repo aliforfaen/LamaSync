@@ -128,7 +128,7 @@ Repo gates (all green):
 - `bun install` — no changes (250 packages).
 - `bun x tsc --noEmit` — clean.
 - `bun run build:web-ui` — built, inlined.
-- `bun test` — **1589 pass / 9 skip / 0 fail** (130 files).
+- `bun test` — **1580 pass / 9 skip / 0 fail** (1589 tests across 130 files).
 - `bun run scripts/check-skill-drift.ts --strict` — OK (148 API rows, 149
   server routes, 70 CLI commands).
 - `bun run build` — daemon/server/tui dist binaries built.
