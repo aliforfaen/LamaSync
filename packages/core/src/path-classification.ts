@@ -107,13 +107,22 @@ function segmentIs(segment: string, target: string): boolean {
 }
 
 /**
- * The read-only catalog, ordered most-specific first. The first matching rule
- * wins; adding a rule here is a pure data change and every suggestion remains
- * deterministic. Only well-anchored patterns are listed — no substring
- * guesses; `*log`/`*vscdb` recurrences are validated as full path segments.
+ * Two-tier catalog precedence — explicit, specificity/safety-correct:
+ *
+ * 1. `LEAF_OVERRIDES` (evaluated first) — exact-leaf / exact-file rules that
+ *    deliberately outrank every broader parent-directory rule in `RULES`.
+ *    A secret leaf must never be swallowed by the directory it lives in:
+ *    `~/.cache/project/.env` and `~/.config/nvim/.env` stay `secrets`
+ *    (conspicuous, never silently classed as cache/portable config), and the
+ *    `~/.ssh/known_hosts` machine-identity file keeps its own class inside the
+ *    secrets `~/.ssh` tree. Only precise patterns belong here — any rule in
+ *    this tier wins against the entire catalog, and order within the tier
+ *    still matters (known_hosts exception sits first).
+ * 2. `RULES` — the ordered catalog for everything else, most-specific first.
+ *    Only well-anchored patterns are listed — no substring guesses;
+ *    `*log`/`*vscdb` recurrences are validated as full path segments.
  */
-const RULES: ClassifyRule[] = [
-  // --- high: exact, well-known paths (≈0.9) ---
+const LEAF_OVERRIDES: ClassifyRule[] = [
   {
     id: "machine-state-ssh-known-hosts",
     level: "high",
@@ -122,6 +131,23 @@ const RULES: ClassifyRule[] = [
     match: (p) => isExact(p, "~/.ssh/known_hosts"),
     why: "exact well-known machine-identity file `~/.ssh/known_hosts`",
   },
+  {
+    id: "secrets-env-file",
+    level: "low",
+    classification: "secrets",
+    label: CLASS_LABEL.secrets,
+    match: (_p, _segments, leaf) => leaf === ".env",
+    why: "environment file `.env` — may embed credentials; confirm before keeping",
+  },
+];
+
+/**
+ * The read-only catalog (tier 2), ordered most-specific first. The first
+ * matching rule wins after `LEAF_OVERRIDES`; adding a rule here is a pure
+ * data change and every suggestion remains deterministic.
+ */
+const RULES: ClassifyRule[] = [
+  // --- high: exact, well-known paths (≈0.9) ---
   {
     id: "cache-home-cache-dir",
     level: "high",
@@ -332,29 +358,26 @@ const RULES: ClassifyRule[] = [
       segments.some((s, i) => s.toLowerCase() === "appdata" && (segments[i + 1] ?? "").toLowerCase() === "local" && (segments[i + 2] ?? "").toLowerCase() === "temp"),
     why: "regenerable per-user temp tree `AppData/Local/Temp`",
   },
-
-  // --- low: weak heuristics (≈0.3), always surfaced for confirmation ---
-  {
-    id: "secrets-env-file",
-    level: "low",
-    classification: "secrets",
-    label: CLASS_LABEL.secrets,
-    match: (_p, _segments, leaf) => leaf === ".env",
-    why: "environment file `.env` — may embed credentials; confirm before keeping",
-  },
 ];
+
+/** Combined evaluation order — leaf overrides first, then the catalog.
+ *  Hoisted so per-path classify calls don't reallocate the array. */
+const RULES_IN_ORDER: ClassifyRule[] = [...LEAF_OVERRIDES, ...RULES];
 
 /**
  * Classify one configured path. Pure + deterministic + stateless; returns
  * null when no rule matches (the path stays visibly `unknown` — never
  * guessed). Matching is conservative: exact paths, directory-aware prefixes,
- * or full path segments — never bare substrings.
+ * or full path segments — never bare substrings. Specificity is safe by
+ * construction: `LEAF_OVERRIDES` (precise secret-leaf / exact-file rules like
+ * `.env` and `known_hosts`) are evaluated before the broader catalog so a
+ * parent-directory rule can never shadow a more specific leaf.
  */
 export function classifyPath(input: string): PathSuggestion | null {
   const segments = splitSegments(input);
   const leaf = leafOf(segments);
   const path = normalize(input);
-  for (const rule of RULES) {
+  for (const rule of RULES_IN_ORDER) {
     if (rule.match(path, segments, leaf)) {
       return {
         path: input,
@@ -369,7 +392,8 @@ export function classifyPath(input: string): PathSuggestion | null {
   return null;
 }
 
-/** Read-only introspection for docs/tests: the ordered rule ids. */
+/** Read-only introspection for docs/tests: the ordered rule ids — tier-1
+ *  leaf overrides first, then the catalog, exactly in evaluation order. */
 export function classificationRuleIds(): string[] {
-  return RULES.map((rule) => rule.id);
+  return RULES_IN_ORDER.map((rule) => rule.id);
 }

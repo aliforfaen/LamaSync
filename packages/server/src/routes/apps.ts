@@ -204,40 +204,51 @@ function normalizeCaptureSpec(input: unknown): CaptureSpec | null {
     "custom",
     "unknown",
   ]);
-  const sources = new Set<ClassificationSource>(["default", "suggested", "manual"]);
-  /** LAMA-315: validate classificationSource/confidence and normalize legacy
-   *  absence to the untouched `default` state — never fabricating a class or
-   *  an operator confirmation. `confidence` is only meaningful for
-   *  `suggested` (0..1 and required there); anything else is rejected. */
-  const provenanceOf = (
-    o: Record<string, unknown>,
-  ): { source: ClassificationSource; confidence: number | null } | null => {
-    let source: ClassificationSource = "default";
-    if (o.classificationSource !== undefined && o.classificationSource !== null) {
-      if (
-        typeof o.classificationSource !== "string" ||
-        !sources.has(o.classificationSource as ClassificationSource)
-      ) {
-        return null;
-      }
-      source = o.classificationSource as ClassificationSource;
+/** Type guard: a string is a valid classification source (LAMA-315). */
+function isClassificationSource(value: string): value is ClassificationSource {
+  return value === "default" || value === "suggested" || value === "manual";
+}
+
+/** LAMA-315 provenance/confidence validation for one spec entry.
+ *
+ *  - `classificationSource` must be `default | suggested | manual`;
+ *  - `confidence` must be 0..1 and only present with `suggested`;
+ *  - an entry with no provenance fields at all is a LEGACY row: it is
+ *    normalized by the caller to the untouched `unknown`/`default` shape —
+ *    the migration contract never reinterprets a stored class as a
+ *    confirmation (handoff §Migration rule 2);
+ *  - any explicitly supplied provenance is validated strictly (null result
+ *    rejects the whole spec).
+ */
+function provenanceOf(
+  o: Record<string, unknown>,
+): { source: ClassificationSource; confidence: number | null; legacy: boolean } | null {
+  let source: ClassificationSource = "default";
+  let explicit = false;
+  const rawSource = o.classificationSource;
+  if (rawSource !== undefined && rawSource !== null) {
+    explicit = true;
+    if (typeof rawSource !== "string" || !isClassificationSource(rawSource)) return null;
+    source = rawSource;
+  }
+  let confidence: number | null = null;
+  const rawConfidence = o.confidence;
+  if (rawConfidence !== undefined && rawConfidence !== null) {
+    explicit = true;
+    if (
+      typeof rawConfidence !== "number" ||
+      !Number.isFinite(rawConfidence) ||
+      rawConfidence < 0 ||
+      rawConfidence > 1
+    ) {
+      return null;
     }
-    let confidence: number | null = null;
-    if (o.confidence !== undefined && o.confidence !== null) {
-      if (
-        typeof o.confidence !== "number" ||
-        !Number.isFinite(o.confidence) ||
-        o.confidence < 0 ||
-        o.confidence > 1
-      ) {
-        return null;
-      }
-      confidence = o.confidence;
-    }
-    if (source === "suggested" && confidence === null) return null;
-    if (source !== "suggested" && confidence !== null) return null;
-    return { source, confidence };
-  };
+    confidence = rawConfidence;
+  }
+  if (source === "suggested" && confidence === null) return null;
+  if (source !== "suggested" && confidence !== null) return null;
+  return { source, confidence, legacy: !explicit };
+}
   const bucket = (os: string): CaptureSpecPath[] | null => {
     const arr = pathsRaw[os];
     if (!Array.isArray(arr)) return [];
@@ -272,6 +283,25 @@ function normalizeCaptureSpec(input: unknown): CaptureSpec | null {
         const rationale = typeof o.rationale === "string" ? o.rationale : null;
         const provenance = provenanceOf(o);
         if (provenance === null) return null;
+        if (provenance.legacy) {
+          // Migration contract (handoff §Migration rule 2): an object entry
+          // with no provenance fields is a legacy row — normalize it to the
+          // untouched `unknown`/`default` shape; a stored class (even a
+          // non-unknown one) is never reinterpreted as a confirmation.
+          entries.push({
+            path,
+            classification: "unknown",
+            rationale: null,
+            classificationSource: "default",
+            confidence: null,
+          });
+          continue;
+        }
+        // An explicit `default` claim must agree with the untouched class
+        // `unknown`; `suggested`/`manual` may carry any class (a pending
+        // recommendation or an operator override) — the handoff pins no
+        // further source/class pairing.
+        if (provenance.source === "default" && classification !== "unknown") return null;
         entries.push({
           path,
           classification: classification as PathClassification,

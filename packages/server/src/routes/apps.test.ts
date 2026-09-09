@@ -862,6 +862,10 @@ describe("LAMA-315 — classification annotations round-trip and validation", ()
       { name: "confidence-with-manual", entry: { path: "~/.cache", classification: "cache", classificationSource: "manual", confidence: 0.9 } },
       { name: "confidence-with-default", entry: { path: "~/.cache", classification: "cache", classificationSource: "default", confidence: 0.9 } },
       { name: "confidence-string", entry: { path: "~/.cache", classification: "cache", classificationSource: "suggested", confidence: "0.9" } },
+      // Explicit `default` provenance must agree with the untouched `unknown`
+      // class — default + a stored class claims a confirmation it never had.
+      { name: "default-with-nonunknown-cache", entry: { path: "~/.cache", classification: "cache", classificationSource: "default" } },
+      { name: "default-with-nonunknown-portable", entry: { path: "~/.config/nvim", classification: "portable_config", classificationSource: "default" } },
     ];
     for (const c of cases) {
       const res = await postJson("/api/v1/apps/templates", {
@@ -876,6 +880,56 @@ describe("LAMA-315 — classification annotations round-trip and validation", ()
       paths: pathOf({ paths: { linux: [{ path: "~/.cache", classification: "mystery", classificationSource: "manual" }], macos: [], windows: [] } }),
     });
     expect(badClass.status).toBe(400);
+  });
+
+  test("legacy object entries without provenance normalize to unknown/default", async () => {
+    // Migration contract (handoff §Migration rule 2): an object entry that
+    // carries no classificationSource/confidence is a legacy row — its stored
+    // class (and the rationale for it) is never reinterpreted as a
+    // confirmation; it saves as the untouched unknown/default shape.
+    const res = await postJson("/api/v1/apps/templates", {
+      name: "legacy-objects",
+      paths: pathOf({
+        paths: {
+          linux: [
+            { path: "~/.config/nvim", classification: "portable_config", rationale: "stale class" },
+            { path: "~/.cache", classification: "unknown", rationale: "stale rationale" },
+          ],
+          macos: [],
+          windows: [],
+        },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { paths: { paths: { linux: CaptureSpecPath[] } } };
+    expect(created.paths.paths.linux).toEqual([
+      { path: "~/.config/nvim", classification: "unknown", rationale: null, classificationSource: "default", confidence: null },
+      { path: "~/.cache", classification: "unknown", rationale: null, classificationSource: "default", confidence: null },
+    ]);
+  });
+
+  test("suggested/manual with an unknown class stay accepted (no invented pairing)", async () => {
+    // The handoff pins only default↔unknown and confidence pairing rules;
+    // suggested/manual may carry any valid class, so these round-trip.
+    const res = await postJson("/api/v1/apps/templates", {
+      name: "permissive-pairings",
+      paths: pathOf({
+        paths: {
+          linux: [
+            { path: "~/.cache", classification: "unknown", classificationSource: "suggested", confidence: 0.9, rationale: "pending" },
+            { path: "~/.config/nvim", classification: "unknown", classificationSource: "manual", rationale: "confirmed anyway" },
+          ],
+          macos: [],
+          windows: [],
+        },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { paths: { paths: { linux: CaptureSpecPath[] } } };
+    expect(created.paths.paths.linux).toEqual([
+      { path: "~/.cache", classification: "unknown", rationale: "pending", classificationSource: "suggested", confidence: 0.9 },
+      { path: "~/.config/nvim", classification: "unknown", rationale: "confirmed anyway", classificationSource: "manual", confidence: null },
+    ]);
   });
 
   test("enrollment and snapshot freeze carry the annotations", async () => {
@@ -1015,6 +1069,26 @@ describe("LAMA-315 — read-only classify endpoint", () => {
       results: Array<{ ruleId: string | null }>;
     };
     expect(again.results.map((r) => r.ruleId)).toEqual(body.results.map((r) => r.ruleId));
+  });
+
+  test("REG: nested .env paths classify as low-confidence secrets through the API", async () => {
+    const res = await classify(["~/.config/nvim/.env", "~/.cache/project/.env", "~/.ssh/known_hosts"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      results: Array<{ path: string; classification: string; confidenceLevel: string | null; ruleId: string | null }>;
+    };
+    const byPath = new Map(body.results.map((r) => [r.path, r]));
+    // A secret leaf outranks the config/cache directory it lives in;
+    // known_hosts keeps the machine_state exception inside ~/.ssh.
+    expect(byPath.get("~/.config/nvim/.env")).toMatchObject({
+      path: "~/.config/nvim/.env",
+      classification: "secrets",
+      confidenceLevel: "low",
+      ruleId: "secrets-env-file",
+    });
+    expect(byPath.get("~/.cache/project/.env")?.classification).toBe("secrets");
+    expect(byPath.get("~/.cache/project/.env")?.ruleId).toBe("secrets-env-file");
+    expect(byPath.get("~/.ssh/known_hosts")?.classification).toBe("machine_state");
   });
 
   test("unknown paths are reported as unknown with null explanation — never guessed", async () => {
