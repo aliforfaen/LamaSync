@@ -306,7 +306,10 @@ class UploadTransferEngineTest {
             ): MobileUploadDto = throw ApiFailure.UploadCollision()
         }
         val outcome = UploadTransferEngine(service).transfer(item("c.bin"), native, file, sha(file))
-        assertTrue(outcome is UploadTransferEngine.TransferOutcome.Blocked)
+        assertTrue(
+            "collision must surface as a named Collision outcome so automatic protection can retry",
+            outcome is UploadTransferEngine.TransferOutcome.Collision,
+        )
     }
 
     @Test

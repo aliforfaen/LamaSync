@@ -29,7 +29,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /** Top-level destinations. The QR payload travels only through the ViewModel. */
-enum class Screen { WELCOME, SCANNER, CONFIRM, PROGRESS, MANAGE, CONNECTION, UPLOADS }
+enum class Screen { WELCOME, SCANNER, CONFIRM, PROGRESS, MANAGE, CONNECTION, UPLOADS, AUTO_PROTECT }
 
 /** One-shot user-facing message (shown as a snackbar). */
 data class UiMessage(val text: String, val isError: Boolean = false)
@@ -400,6 +400,15 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun closeUploads() {
+        _ui.update { it.copy(screen = Screen.MANAGE, message = null) }
+    }
+
+    /** Stage 2: automatic camera-protection setup + status surface. */
+    fun openAutoProtect() {
+        _ui.update { it.copy(screen = Screen.AUTO_PROTECT, message = null) }
+    }
+
+    fun closeAutoProtect() {
         _ui.update { it.copy(screen = Screen.MANAGE, message = null) }
     }
 

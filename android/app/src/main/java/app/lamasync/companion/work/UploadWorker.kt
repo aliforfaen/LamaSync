@@ -14,6 +14,7 @@ import app.lamasync.companion.data.UploadQueueStore
 import app.lamasync.companion.data.UploadReceipt
 import app.lamasync.companion.data.UploadStatus
 import app.lamasync.companion.data.UploadTransferEngine
+import app.lamasync.companion.data.UploadNaming
 import app.lamasync.companion.network.HttpUrlConnectionTransport
 import app.lamasync.companion.network.MobileUploadApi
 import java.io.File
@@ -65,6 +66,29 @@ class UploadWorker(
         var transientFailure = false
         var processed = 0
 
+        // Long-transfer promotion (stage 2): the OS reschedules workers that
+        // run past ~10 minutes, so a transfer with pending items promotes to
+        // a foreground service worker when the platform allows (notification
+        // permission granted; no FGS-from-background restriction). Degrades
+        // gracefully — durable per-chunk offsets carry progress either way.
+        var foregroundActive = false
+        val pending = store.pendingItems()
+        if (pending.isNotEmpty()) {
+            val foregroundInfo = TransferForeground.foregroundInfo(
+                context,
+                "Protecting ${pending.size} file${if (pending.size == 1) "" else "s"}",
+            )
+            if (foregroundInfo != null) {
+                try {
+                    setForeground(foregroundInfo)
+                    foregroundActive = true
+                } catch (e: Exception) {
+                    // ForegroundServiceStartNotAllowedException / anything
+                    // else: continue as a plain constrained worker.
+                }
+            }
+        }
+
         for (item in store.pendingItems().toList()) {
             processed += 1
             // Skip items with nothing left to do.
@@ -106,11 +130,12 @@ class UploadWorker(
             setProgress(workDataOf("itemId" to item.id, "status" to "transferring"))
 
             val outcome = try {
-                engine.transfer(
+                transferItem(
+                    engine = engine,
                     item = item,
                     native = native,
-                    stagedFile = staged.file,
-                    stagedSha256 = staged.sha256,
+                    staged = staged,
+                    store = store,
                     onProgress = { updated ->
                         // Cooperative cancellation (R2): if the user's cancel
                         // (or a server-authoritative completion) landed while
@@ -122,6 +147,15 @@ class UploadWorker(
                             throw CancellationException("transfer superseded by durable state")
                         }
                         store.update(updated)
+                        if (foregroundActive) {
+                            val total = updated.sizeBytes ?: 0L
+                            val pct = if (total > 0) (updated.uploadedBytes * 100 / total).toInt() else 0
+                            TransferForeground.updateForeground(
+                                context,
+                                "Uploading ${updated.displayName} — $pct%",
+                                pct,
+                            )
+                        }
                         setProgress(
                             workDataOf(
                                 "itemId" to updated.id,
@@ -163,6 +197,24 @@ class UploadWorker(
                         ),
                     )
                 }
+                is UploadTransferEngine.TransferOutcome.Collision -> {
+                    // Stage-2 automatic items retry under versioned names
+                    // (repeated/edited camera names) inside [transferItem];
+                    // reaching here means the bounded retry series failed.
+                    // Manual items keep the explicit blocked state.
+                    store.update(
+                        item.copy(
+                            status = UploadStatus.BLOCKED,
+                            error = if (item.mediaIdentity != null) {
+                                "The destination already contains several files with this name. " +
+                                    "Remove or rename them, then retry."
+                            } else {
+                                outcome.message + " Rename the file or choose another inbox."
+                            },
+                            updatedAtEpochMillis = System.currentTimeMillis(),
+                        ),
+                    )
+                }
                 is UploadTransferEngine.TransferOutcome.Failed -> {
                     store.update(
                         item.copy(
@@ -188,6 +240,46 @@ class UploadWorker(
         return if (transientFailure && processed > 0) Result.retry() else Result.success()
     }
 
+    /**
+     * One transfer, retrying server name collisions for automatic items
+     * under deterministic versioned names (see [UploadNaming]). Manual
+     * items never enter this path.
+     */
+    private suspend fun transferItem(
+        engine: UploadTransferEngine,
+        item: UploadQueueItem,
+        native: NativeToken,
+        staged: StagedSource,
+        store: UploadQueueStore,
+        onProgress: suspend (UploadQueueItem) -> Unit,
+    ): UploadTransferEngine.TransferOutcome {
+        var current = item
+        var attempts = 0
+        while (true) {
+            val outcome = engine.transfer(current, native, staged.file, staged.sha256, onProgress)
+            if (outcome is UploadTransferEngine.TransferOutcome.Collision &&
+                current.mediaIdentity != null &&
+                attempts < MAX_AUTO_NAME_ATTEMPTS
+            ) {
+                attempts += 1
+                current = current.copy(
+                    displayName = UploadNaming.versionedName(item.displayName, attempts),
+                    idempotencyKey = UploadNaming.derivedKey(item.idempotencyKey, attempts),
+                    autoNameAttempt = attempts,
+                    status = UploadStatus.UPLOADING,
+                    error = null,
+                    updatedAtEpochMillis = System.currentTimeMillis(),
+                )
+                // Persist the attempt so a restart resumes the SAME versioned
+                // upload row instead of creating abandoned staging rows.
+                store.update(current)
+                continue
+            }
+            return outcome
+        }
+    }
+
+    /** Apply the final result of a versioned auto collision retry series. */
     /** Item binds to the current registration identity or is blocked. */
     private fun bindingMatches(item: UploadQueueItem, registration: Registration?): Boolean {
         return registration != null &&
@@ -257,6 +349,11 @@ class UploadWorker(
     }
 
     private data class StagedSource(val file: File, val sha256: String)
+
+    companion object {
+        /** Bounded versioned-name retries per automatic item per run. */
+        private const val MAX_AUTO_NAME_ATTEMPTS = 20
+    }
 }
 
 /**

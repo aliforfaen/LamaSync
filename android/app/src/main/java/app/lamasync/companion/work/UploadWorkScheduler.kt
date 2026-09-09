@@ -75,12 +75,15 @@ object UploadWorkScheduler {
         )
     }
 
-    /** One drainer request carrying the policy's network constraint. */
+    /** One drainer request carrying the policy's network + charging
+     *  constraints (stage 2 adds the charging preference; both transitions
+     *  are REPLACEd on policy change). */
     fun requestFor(policy: UploadPolicy): OneTimeWorkRequest {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(
                 if (policy.unmeteredOnly) NetworkType.UNMETERED else NetworkType.CONNECTED,
             )
+            .setRequiresCharging(policy.chargingOnly)
             .build()
         return OneTimeWorkRequestBuilder<UploadWorker>()
             .setConstraints(constraints)

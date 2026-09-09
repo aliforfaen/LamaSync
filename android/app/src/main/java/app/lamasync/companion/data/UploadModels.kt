@@ -36,6 +36,16 @@ data class UploadQueueItem(
     val idempotencyKey: String,
     /** Client-computed SHA-256 hex of the staged bytes, when known. */
     val sha256: String? = null,
+    /** LAMA-296 stage 2: stable automatic-media identity (when present) so
+     *  receipts link back to the protection registry. Null for manual. */
+    val mediaIdentity: String? = null,
+    /** LAMA-296 stage 2: human source label ("Camera photos", …). */
+    val sourceLabel: String? = null,
+    /** LAMA-296 stage 2: how many versioned-name retries this automatic item
+     *  has already consumed (repeated-name collision handling). Deterministic
+     *  resume: a restart continues at the same attempt instead of creating
+     *  abandoned upload rows. 0 for manual items. */
+    val autoNameAttempt: Int = 0,
     /** Private staging file (filesDir/uploads/) once staged, else null. */
     val stagedFileName: String? = null,
     /** True once the staged bytes were durably retained in app storage. */
@@ -99,4 +109,36 @@ data class UploadQueueSnapshot(
 data class UploadPolicy(
     /** Only transfer on unmetered networks (WorkManager constraint). */
     val unmeteredOnly: Boolean = false,
+    /** Only transfer while charging (stage 2; WorkManager constraint). */
+    val chargingOnly: Boolean = false,
 )
+
+/**
+ * LAMA-296 stage 2 — deterministic versioned-name retries when the server
+ * rejects a final name because a file with that name already exists (e.g. a
+ * camera reset its counters, or an edited file keeps its display name). The
+ * server copy is never overwritten; the retried revision gets `name (n).ext`
+ * and a DERIVED idempotency key (same base, attempt suffix), so retries,
+ * restarts and duplicate scans all converge on ONE upload row per attempt.
+ */
+object UploadNaming {
+    /** ``IMG_0001.jpg`` + attempt 1 → ``IMG_0001 (2).jpg``; attempt 2 → ``IMG_0001 (3).jpg``. */
+    fun versionedName(original: String, attemptIndex: Int): String {
+        val n = attemptIndex + 1
+        val dot = original.lastIndexOf('.')
+        return if (dot > 0) {
+            original.substring(0, dot) + " ($n)" + original.substring(dot)
+        } else {
+            "$original ($n)"
+        }
+    }
+
+    /** Deterministic per-attempt key: `base#v<attempt>` (bounded for the
+     *  server's 128-char idempotency-key limit). */
+    fun derivedKey(baseIdempotencyKey: String, attemptIndex: Int): String {
+        val suffix = "#v$attemptIndex"
+        return baseIdempotencyKey.take(MAX_KEY - suffix.length) + suffix
+    }
+
+    const val MAX_KEY = 128
+}

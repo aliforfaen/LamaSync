@@ -29,17 +29,30 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: SessionViewModel by viewModels()
     private val uploadsViewModel: UploadsViewModel by viewModels()
+    private val autoProtectViewModel: AutoProtectViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewModel.initialize()
         uploadsViewModel.initialize()
+        autoProtectViewModel.initialize()
 
         // Launch/resume check-in only (spec: no background service).
         lifecycle.addObserver(
             LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_RESUME) {
                     viewModel.initialize()
+                }
+            },
+        )
+
+        // Stage 2: prompt discovery when the app surfaces (cheap, unique,
+        // local-only); periodic work is the safety net for missed triggers.
+        lifecycle.addObserver(
+            LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    app.lamasync.companion.work.AutoProtectWorkScheduler.scheduleDiscovery(this)
+                    autoProtectViewModel.refreshScope()
                 }
             },
         )
@@ -122,6 +135,7 @@ class MainActivity : ComponentActivity() {
                                         onOpenConnection = viewModel::openConnectionPanel,
                                         onReconnect = viewModel::reconnectWebSession,
                                         onOpenUploads = viewModel::openUploads,
+                                        onOpenAutoProtect = viewModel::openAutoProtect,
                                     )
                                 }
                             }
@@ -139,6 +153,12 @@ class MainActivity : ComponentActivity() {
                                         onDisconnect = viewModel::disconnect,
                                     )
                                 }
+                            }
+                            Screen.AUTO_PROTECT -> {
+                                AutoProtectScreen(
+                                    viewModel = autoProtectViewModel,
+                                    onBack = viewModel::closeAutoProtect,
+                                )
                             }
                             Screen.UPLOADS -> {
                                 val registration = uiState.registration

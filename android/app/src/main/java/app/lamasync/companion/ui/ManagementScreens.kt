@@ -47,6 +47,7 @@ fun ManagementScreen(
     onOpenConnection: () -> Unit,
     onReconnect: () -> Unit,
     onOpenUploads: () -> Unit,
+    onOpenAutoProtect: () -> Unit,
 ) {
     val context = LocalContext.current
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -97,6 +98,9 @@ fun ManagementScreen(
                 }
                 TextButton(onClick = onOpenUploads) {
                     Text("Uploads")
+                }
+                TextButton(onClick = onOpenAutoProtect) {
+                    Text("Auto")
                 }
             }
         }

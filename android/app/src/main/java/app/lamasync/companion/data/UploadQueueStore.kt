@@ -37,6 +37,20 @@ class PrefsQueueStorage(context: Context) : QueueStorage {
     }
 }
 
+/** [QueueStorage] over an arbitrary prefs file (stage 2 reuses the same
+ *  durable string-key store for auto-protect settings/registry). */
+class NamedQueueStorage(context: Context, prefsName: String) : QueueStorage {
+    private val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+
+    override fun read(key: String): String? = prefs.getString(key, null)
+
+    override fun write(key: String, value: String) {
+        if (!prefs.edit().putString(key, value).commit()) {
+            throw IOException("Could not persist durable state")
+        }
+    }
+}
+
 /**
  * Durable upload queue (SharedPreferences + kotlinx.serialization). This is
  * the source of truth the transfer executor and the UI both read; state

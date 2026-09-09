@@ -34,6 +34,12 @@ class UploadTransferEngine(
         /** Cannot proceed without user action (revocation, collision, unpaired). */
         data class Blocked(val message: String) : TransferOutcome
 
+        /** The server rejected the final NAME (an existing file with that
+         *  name, or a name reserved by a concurrent upload). Automatic
+         *  protection retries under a versioned name; manual uploads surface
+         *  this as a blocked state with rename guidance. */
+        data class Collision(val message: String) : TransferOutcome
+
         /** Failed; [transient] selects worker retry vs terminal failure. */
         data class Failed(val message: String, val transient: Boolean) : TransferOutcome
 
@@ -72,8 +78,8 @@ class UploadTransferEngine(
         } catch (e: CancellationException) {
             throw e
         } catch (e: ApiFailure.UploadCollision) {
-            return TransferOutcome.Blocked(
-                "A file with this name already exists at the destination. Rename the file or choose another inbox.",
+            return TransferOutcome.Collision(
+                "A file with this name already exists at the destination.",
             )
         } catch (e: ApiFailure.DestinationRevoked) {
             return TransferOutcome.Blocked("This destination was revoked by the administrator.")
@@ -166,7 +172,9 @@ class UploadTransferEngine(
                     "The received file did not match its checksum. Cancel this item and re-select the file.",
                 )
             } catch (e: ApiFailure.UploadCollision) {
-                return TransferOutcome.Blocked("A file with this name now exists at the destination. Rename and re-select.")
+                return TransferOutcome.Collision(
+                    "A file with this name now exists at the destination.",
+                )
             } catch (e: ApiFailure.UploadIncomplete) {
                 // Server thought it was incomplete — re-sync and finish the loop.
                 val fresh = try {
