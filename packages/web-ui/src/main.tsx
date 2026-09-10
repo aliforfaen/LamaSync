@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
 import { applyTheme, loadThemeChoice } from "./theme.ts";
 import { consumeShellSignal } from "./shell.ts";
+import { registerServiceWorker } from "./service-worker-registration.ts";
 import "./index.css";
 
 applyTheme(loadThemeChoice());
@@ -12,6 +13,12 @@ applyTheme(loadThemeChoice());
 // companion adds the parameter to the initial document URL only; the value is
 // consumed into session state here and never reaches an API request.
 consumeShellSignal();
+
+// LAMA-329 phase 7: cache the application shell so the app can boot offline.
+// Skipped inside the Android companion (plan decision 9) and outside a
+// production secure context; `service-worker-registration.ts` owns the rule and
+// never throws.
+void registerServiceWorker();
 
 const container = document.getElementById("root");
 if (!container) {

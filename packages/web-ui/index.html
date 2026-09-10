@@ -13,6 +13,24 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <title>LamaSync</title>
+    <meta
+      name="description"
+      content="Manage a personal sync fleet: folders, devices, backups and recovery."
+    />
+    <!-- LAMA-329 phase 7: install identity. The manifest, its icons and the
+         service worker are served from the origin root by
+         packages/server/src/routes/web-ui.ts — the SPA itself is inlined into
+         one document, so there is no asset directory to point at. Note that
+         scripts/inline-web-ui.ts only rewrites Vite's own exact
+         <link rel="stylesheet"> / <script type="module"> tags, so this link
+         survives inlining untouched. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" href="/icons/icon-192.png" />
+    <!-- Toolbar colour per scheme while the app is open. The manifest carries
+         one value (#121310) because it cannot vary; these two override it live
+         so a light-mode browser does not get a dark toolbar. -->
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#121310" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F2EEE5" />
   </head>
   <body>
     <div id="root"></div>

@@ -389,6 +389,25 @@ export function IconMoreFilled(props: SVGProps<SVGSVGElement>) {
   });
 }
 
+// LAMA-329 phase 5: the browser settings destination. Sliders rather than a
+// gear — the marks in this family are solid, and three bars with knobs stay
+// legible at the 20px the rail and the More sheet render them at.
+export function IconSettingsFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <>
+        <rect x="3" y="6" width="18" height="2" rx="1" />
+        <rect x="3" y="11" width="18" height="2" rx="1" />
+        <rect x="3" y="16" width="18" height="2" rx="1" />
+        <circle cx="9" cy="7" r="2.6" />
+        <circle cx="15" cy="12" r="2.6" />
+        <circle cx="8" cy="17" r="2.6" />
+      </>
+    ),
+    ...props,
+  });
+}
+
 // LAMA-263: app-presets gallery (a 2x2 grid). Mirrors the iconBase style.
 export function IconPresets(props: SVGProps<SVGSVGElement>) {
   return iconBase({

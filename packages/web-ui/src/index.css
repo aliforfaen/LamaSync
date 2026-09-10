@@ -4212,3 +4212,137 @@ button.action:disabled {
     min-height: 44px;
   }
 }
+
+/* ===========================================================================
+   LAMA-329 phases 5-7 — browser settings, boot state, connectivity
+   =========================================================================== */
+
+/* --- Phase 6: the boot state ------------------------------------------------ */
+/* `Llama`'s "nap" pose is the slot LAMA-274 reserved for a loading state; the
+   animation is decoration, so it exists only where motion is welcome and the
+   pose itself is always drawn. */
+.boot-card {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  text-align: center;
+}
+
+.boot-llama {
+  color: var(--accent-info);
+}
+
+.boot-status {
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .boot-llama {
+    animation: boot-breathe 2.6s ease-in-out infinite;
+  }
+}
+
+@keyframes boot-breathe {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* --- Phase 7: the connectivity banner ------------------------------------- */
+/* Sits above the page, below the top bar, for every authenticated screen. The
+   state is carried by a word ("Offline", "Live updates paused") as well as a
+   colour, and the sentence underneath says what it means for the data. */
+.connectivity-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-size-sm);
+}
+
+.connectivity-banner--offline {
+  background: var(--accent-critical-bg);
+  color: var(--accent-critical);
+}
+
+.connectivity-banner--reconnecting {
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
+.connectivity-banner strong {
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.connectivity-banner span {
+  color: var(--text-dim);
+}
+
+/* --- Phase 5: the settings page ------------------------------------------- */
+.settings-row {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+
+.settings-row p {
+  margin: 0;
+  max-width: var(--content-max);
+}
+
+.settings-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.settings-choice-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 44px;
+}
+
+/* The preference-ownership table collapses like the phase-4 tables: identity
+   and layer on the first row, the store and the explanation underneath. The
+   store string is the point of the table, so it is shown rather than dropped. */
+@media (max-width: 639px) {
+  .data.data-preferences > tbody > tr > td:nth-child(1),
+  .data.data-preferences > tbody > tr > td:nth-child(2),
+  .data.data-preferences > tbody > tr > td:nth-child(3),
+  .data.data-preferences > tbody > tr > td:nth-child(4) {
+    display: block;
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(3) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    color: var(--text-dim);
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(4) {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+}

@@ -9,6 +9,7 @@ import {
   IconNotificationFilled,
   IconPresetsFilled,
   IconSearchFilled,
+  IconSettingsFilled,
   IconShieldFilled,
   IconStorageFilled,
 } from "./icons.tsx";
@@ -113,6 +114,12 @@ export const GROUPS: NavGroup[] = [
   {
     label: "System",
     items: [
+      {
+        to: "/settings",
+        icon: <IconSettingsFilled />,
+        text: "Settings",
+        keywords: "preferences theme install appearance",
+      },
       { to: "/admin", icon: <IconNotificationFilled />, text: "Admin", keywords: "settings server" },
     ],
   },

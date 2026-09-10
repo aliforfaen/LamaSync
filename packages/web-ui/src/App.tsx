@@ -3,6 +3,8 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Login } from "./components/Login.tsx";
 import { Nav } from "./components/Nav.tsx";
 import { MobileTabBar } from "./components/MobileTabBar.tsx";
+import { BootScreen } from "./components/BootScreen.tsx";
+import { ConnectivityBanner } from "./components/ConnectivityBanner.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { Dashboard } from "./pages/Dashboard.tsx";
 import { Hosts } from "./pages/Hosts.tsx";
@@ -14,6 +16,7 @@ import { AppTemplates } from "./pages/Presets.tsx";
 import { Conflicts } from "./pages/Conflicts.tsx";
 import { Operations } from "./pages/Operations.tsx";
 import { Admin } from "./pages/Admin.tsx";
+import { Settings } from "./pages/Settings.tsx";
 import { DataBrowser } from "./pages/DataBrowser.tsx";
 import { getApiKey, probeSession, UNAUTHORIZED_EVENT } from "./api.ts";
 
@@ -61,13 +64,10 @@ export function App() {
   }, []);
 
   if (boot === "loading") {
-    return (
-      <div className="login-page">
-        <div className="login-card">
-          <p className="muted">Checking session…</p>
-        </div>
-      </div>
-    );
+    // LAMA-329 phase 6: the llama "nap" pose (exported in LAMA-274 with this
+    // slot deliberately reserved) now carries the boot state, with the status
+    // announced through role="status" and the motion reduced-motion gated.
+    return <BootScreen />;
   }
 
   const authed = boot === "authed";
@@ -101,6 +101,9 @@ export function App() {
                 {/* LAMA-270: cmd+k palette — authed sessions only, mounted
                     inside the router so it can use useNavigate(). */}
                 <CommandPalette />
+                {/* LAMA-329 phase 7: one place states whether what is on
+                    screen can still be trusted, for every page. */}
+                <ConnectivityBanner />
                 {/* LAMA-329 phase 3: `<main>` is the page landmark (the shell
                     had none) and the phone tab bar follows it in the DOM so
                     `position: sticky; bottom: 0` can hold it against the
@@ -119,6 +122,7 @@ export function App() {
                   <Route path="/operations" element={<Operations />} />
                   <Route path="/data" element={<DataBrowser />} />
                   <Route path="/admin" element={<Admin />} />
+                  <Route path="/settings" element={<Settings />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                 </main>

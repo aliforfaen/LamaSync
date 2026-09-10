@@ -324,6 +324,26 @@ export async function sessionLogout(): Promise<SessionLogoutResult> {
 export const UNAUTHORIZED_EVENT = "lamasync:unauthorized";
 
 /**
+ * LAMA-329 phase 7: transport-outcome signals for the connectivity banner.
+ *
+ * Only a TRANSPORT failure counts. A 4xx/5xx response means the server is
+ * reachable and answered, which is a different problem and must not make the
+ * UI claim the fleet is unreachable.
+ */
+export const REQUEST_FAILED_EVENT = "lamasync:request-failed";
+export const REQUEST_SUCCEEDED_EVENT = "lamasync:request-succeeded";
+
+export function notifyRequestFailed(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(REQUEST_FAILED_EVENT));
+}
+
+export function notifyRequestSucceeded(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(REQUEST_SUCCEEDED_EVENT));
+}
+
+/**
  * Clear the stored key and any in-memory session and notify the app that
  * the credential is no longer valid. Called on HTTP 401 responses and on WS
  * auth failures so the UI drops back to the login screen instead of showing
@@ -449,7 +469,16 @@ export async function apiFetch<T = unknown>(
     ...init,
     headers,
     credentials: "same-origin",
-  });
+  }).then(
+    (response) => {
+      notifyRequestSucceeded();
+      return response;
+    },
+    (error: unknown) => {
+      notifyRequestFailed();
+      throw error;
+    },
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 401) {

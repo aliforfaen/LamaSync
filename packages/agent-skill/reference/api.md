@@ -429,6 +429,20 @@ spec. The high-level shapes (verbose commentary):
     (how often the server looks for due backends, default `60 * 60 * 1000`).
     Set either to `0` to opt out.
 
+## Web app assets (served from the origin root, not `/api/v1`)
+
+Browser plumbing for the installable web app (LAMA-329 phase 7). These carry
+no bearer auth and no fleet data — the SPA shell they belong to is already
+public at `GET /`. They are routes rather than files because the web UI is
+inlined into one `index.html` by `scripts/inline-web-ui.ts`, which also deletes
+`dist/assets/`, so there is no static-asset directory to serve from.
+
+| Method   | Path                    | Purpose                                                       |
+|----------|-------------------------|---------------------------------------------------------------|
+| GET      | `/manifest.webmanifest` | Web app manifest: install identity, icons, theme colours      |
+| GET      | `/sw.js`                | Service worker: caches the app shell only, never `/api/` data  |
+| GET      | `/icons/:file`          | PWA icon by name (`icon-192.png`, `icon-512.png`, `icon-maskable-512.png`) |
+
 ## See also
 
 - `reference/recipes.md` — common workflows built from both the CLI and
