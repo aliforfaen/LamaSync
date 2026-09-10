@@ -606,6 +606,7 @@ CREATE TABLE IF NOT EXISTS mobile_upload_destinations (
     registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id),
     label           TEXT NOT NULL,               -- admin-chosen label, e.g. "Inbox"
     rel_path        TEXT NOT NULL,               -- validated Mobile/<hostId>/<slug>
+    folder_id       TEXT REFERENCES folders(id), -- null = legacy server-local landing root
     created_at      INTEGER NOT NULL,
     revoked_at      INTEGER,                     -- non-null => uploads fail at finalize
     UNIQUE(registration_id, rel_path)
@@ -628,6 +629,7 @@ CREATE TABLE IF NOT EXISTS mobile_uploads (
     idempotency_key  TEXT NOT NULL,              -- client-generated, unique per registration
     file_name        TEXT NOT NULL,              -- validated single segment
     final_rel_path   TEXT NOT NULL,              -- destination rel_path + file_name
+    target_folder_id TEXT REFERENCES folders(id),-- immutable storage target snapshot
     size_bytes       INTEGER,                    -- client-declared expected size (nullable)
     bytes_received   INTEGER NOT NULL DEFAULT 0, -- durable offset
     sha256           TEXT,                       -- verified digest (pre-publication)
@@ -827,10 +829,12 @@ export const MIGRATIONS: string[] = [
   // Schema lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF
   // NOT EXISTS entries are the idempotent safety net for existing databases
   // ("already exists" is swallowed by initDb's try/catch wrapper).
-  "CREATE TABLE IF NOT EXISTS mobile_upload_destinations (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), label TEXT NOT NULL, rel_path TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER, UNIQUE(registration_id, rel_path))",
+  "CREATE TABLE IF NOT EXISTS mobile_upload_destinations (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), label TEXT NOT NULL, rel_path TEXT NOT NULL, folder_id TEXT REFERENCES folders(id), created_at INTEGER NOT NULL, revoked_at INTEGER, UNIQUE(registration_id, rel_path))",
   "CREATE INDEX IF NOT EXISTS idx_mobile_upload_destinations_registration ON mobile_upload_destinations(registration_id)",
-  "CREATE TABLE IF NOT EXISTS mobile_uploads (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), destination_id TEXT NOT NULL REFERENCES mobile_upload_destinations(id), idempotency_key TEXT NOT NULL, file_name TEXT NOT NULL, final_rel_path TEXT NOT NULL, size_bytes INTEGER, bytes_received INTEGER NOT NULL DEFAULT 0, sha256 TEXT, status TEXT NOT NULL DEFAULT 'created', error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finalized_at INTEGER, UNIQUE(registration_id, idempotency_key))",
+  "CREATE TABLE IF NOT EXISTS mobile_uploads (id TEXT PRIMARY KEY, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), destination_id TEXT NOT NULL REFERENCES mobile_upload_destinations(id), idempotency_key TEXT NOT NULL, file_name TEXT NOT NULL, final_rel_path TEXT NOT NULL, target_folder_id TEXT REFERENCES folders(id), size_bytes INTEGER, bytes_received INTEGER NOT NULL DEFAULT 0, sha256 TEXT, status TEXT NOT NULL DEFAULT 'created', error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finalized_at INTEGER, UNIQUE(registration_id, idempotency_key))",
   "CREATE INDEX IF NOT EXISTS idx_mobile_uploads_registration_status ON mobile_uploads(registration_id, status)",
+  "ALTER TABLE mobile_upload_destinations ADD COLUMN folder_id TEXT REFERENCES folders(id)",
+  "ALTER TABLE mobile_uploads ADD COLUMN target_folder_id TEXT REFERENCES folders(id)",
   // LAMA-296 stage-1 correction (R4): exactly-once mobile_upload operation
   // history. The column is nullable for every other operation; the partial
   // unique index guarantees one dedupe_key can never appear twice. Added via

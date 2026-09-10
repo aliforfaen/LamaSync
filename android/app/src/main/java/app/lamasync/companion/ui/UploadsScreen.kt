@@ -131,7 +131,13 @@ fun UploadsScreen(
                         onRemove = { viewModel.removeItem(item.id) },
                         onOpen = {
                             item.receipt?.let {
-                                onOpenUrl(viewModel.browseUrlFor(pairedRegistration.origin, it.browsePath))
+                                onOpenUrl(
+                                    viewModel.browseUrlFor(
+                                        pairedRegistration.origin,
+                                        it.browsePath,
+                                        it.browseFolderId,
+                                    ),
+                                )
                             }
                         },
                     )

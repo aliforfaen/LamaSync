@@ -47,6 +47,7 @@ import type {
   MobileUploadStatus,
 } from "@lamasync/core";
 import { findRegistrationByHostId, isRowRevoked } from "./mobile-store.ts";
+import { publishMobileFileToFolder, resolveMobileFolderTarget } from "./app-storage.ts";
 
 // ---------------------------------------------------------------------------
 // Configuration (env-driven; documented in docs/development.md + api.md)
@@ -167,6 +168,8 @@ export interface MobileUploadDestinationRow {
   registration_id: string;
   label: string;
   rel_path: string;
+  folder_id: string | null;
+  folder_name?: string | null;
   created_at: number;
   revoked_at: number | null;
 }
@@ -178,6 +181,7 @@ export interface MobileUploadRow {
   idempotency_key: string;
   file_name: string;
   final_rel_path: string;
+  target_folder_id: string | null;
   size_bytes: number | null;
   bytes_received: number;
   sha256: string | null;
@@ -309,6 +313,8 @@ function rowToDestination(row: MobileUploadDestinationRow): MobileUploadDestinat
     registrationId: row.registration_id,
     label: row.label,
     relPath: row.rel_path,
+    folderId: row.folder_id,
+    folderName: row.folder_name ?? null,
     createdAt: row.created_at,
     revokedAt: row.revoked_at,
   };
@@ -317,7 +323,7 @@ function rowToDestination(row: MobileUploadDestinationRow): MobileUploadDestinat
 export function findDestinationById(id: string): MobileUploadDestinationRow | null {
   const row = currentDb()
     .query<MobileUploadDestinationRow, [string]>(
-      "SELECT * FROM mobile_upload_destinations WHERE id = ?",
+      "SELECT d.*, f.name AS folder_name FROM mobile_upload_destinations d LEFT JOIN folders f ON f.id = d.folder_id WHERE d.id = ?",
     )
     .get(id);
   return row ?? null;
@@ -331,12 +337,12 @@ export function listDestinationsForRegistration(
   const rows = includeRevoked
     ? currentDb()
         .query<MobileUploadDestinationRow, [string]>(
-          "SELECT * FROM mobile_upload_destinations WHERE registration_id = ? ORDER BY created_at DESC",
+          "SELECT d.*, f.name AS folder_name FROM mobile_upload_destinations d LEFT JOIN folders f ON f.id = d.folder_id WHERE d.registration_id = ? ORDER BY d.created_at DESC",
         )
         .all(registrationId)
     : currentDb()
         .query<MobileUploadDestinationRow, [string]>(
-          "SELECT * FROM mobile_upload_destinations WHERE registration_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
+          "SELECT d.*, f.name AS folder_name FROM mobile_upload_destinations d LEFT JOIN folders f ON f.id = d.folder_id WHERE d.registration_id = ? AND d.revoked_at IS NULL ORDER BY d.created_at DESC",
         )
         .all(registrationId);
   return rows.map(rowToDestination);
@@ -347,6 +353,7 @@ export type CreateDestinationOutcome =
   | { kind: "invalid_label" }
   | { kind: "invalid_slug" }
   | { kind: "duplicate" }
+  | { kind: "invalid_folder" }
   | { kind: "unknown_registration" };
 
 /** Admin creates one destination for a registration. The rel path is always
@@ -356,6 +363,7 @@ export function createMobileUploadDestination(opts: {
   registrationId: string;
   label: string;
   slug?: string | null;
+  folderId?: string | null;
   nowMs?: number;
 }): CreateDestinationOutcome {
   const now = opts.nowMs ?? Date.now();
@@ -378,8 +386,12 @@ export function createMobileUploadDestination(opts: {
   if (!isSafeSegment(opts.registrationId)) return { kind: "unknown_registration" };
   const registration = findRegistrationByHostId(opts.registrationId);
   if (!registration) return { kind: "unknown_registration" };
-  const relPath = `Mobile/${opts.registrationId}/${slug}`;
   const d = currentDb();
+  const folderId = opts.folderId?.trim() || null;
+  if (folderId !== null && resolveMobileFolderTarget(d, folderId) === null) {
+    return { kind: "invalid_folder" };
+  }
+  const relPath = `Mobile/${opts.registrationId}/${slug}`;
   const existing = d
     .query<MobileUploadDestinationRow, [string, string]>(
       "SELECT * FROM mobile_upload_destinations WHERE registration_id = ? AND rel_path = ?",
@@ -388,9 +400,9 @@ export function createMobileUploadDestination(opts: {
   if (existing) return { kind: "duplicate" };
   const id = `mdst-${randomBytes(10).toString("base64url")}`;
   d.run(
-    `INSERT INTO mobile_upload_destinations (id, registration_id, label, rel_path, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
-    [id, opts.registrationId, trimmedLabel, relPath, now],
+    `INSERT INTO mobile_upload_destinations (id, registration_id, label, rel_path, folder_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, opts.registrationId, trimmedLabel, relPath, folderId, now],
   );
   const row = findDestinationById(id);
   return { kind: "ok", destination: rowToDestination(row!) };
@@ -399,6 +411,29 @@ export function createMobileUploadDestination(opts: {
 export type RevokeDestinationOutcome =
   | { kind: "ok"; id: string; revokedAt: number }
   | { kind: "not_found" };
+
+export type UpdateDestinationOutcome =
+  | { kind: "ok"; destination: MobileUploadDestination }
+  | { kind: "not_found" }
+  | { kind: "invalid_folder" };
+
+/** Change where future upload intents publish. Existing intents retain the
+ * target_folder_id snapshot taken at creation and cannot be silently rerouted. */
+export function updateMobileUploadDestinationFolder(
+  registrationId: string,
+  id: string,
+  folderId: string | null,
+): UpdateDestinationOutcome {
+  const row = findDestinationById(id);
+  if (!row || row.registration_id !== registrationId) return { kind: "not_found" };
+  const normalized = folderId?.trim() || null;
+  const d = currentDb();
+  if (normalized !== null && resolveMobileFolderTarget(d, normalized) === null) {
+    return { kind: "invalid_folder" };
+  }
+  d.run("UPDATE mobile_upload_destinations SET folder_id = ? WHERE id = ?", [normalized, id]);
+  return { kind: "ok", destination: rowToDestination(findDestinationById(id)!) };
+}
 
 /** Admin revoke of a destination. Idempotent; re-validated at finalize so an
  *  in-flight upload cannot publish after revocation. Correction R8: a
@@ -468,7 +503,9 @@ export function rowToUpload(row: MobileUploadRow): MobileUpload {
 
 function receiptOf(row: MobileUploadRow): MobileUploadReceipt | null {
   if (row.finalized_at === null || row.sha256 === null) return null;
-  const browseRef: MobileUploadBrowseRef = { kind: "local", path: row.final_rel_path };
+  const browseRef: MobileUploadBrowseRef = row.target_folder_id === null
+    ? { kind: "local", path: row.final_rel_path }
+    : { kind: "folder", folderId: row.target_folder_id, path: row.final_rel_path };
   return {
     uploadId: row.id,
     fileName: row.file_name,
@@ -567,7 +604,7 @@ export function createMobileUpload(opts: {
     )
     .get(opts.registrationId, finalRelPath);
   if (existing) return { kind: "collision" };
-  if (finalExists(finalRelPath)) {
+  if (destination.folder_id === null && finalExists(finalRelPath)) {
     return { kind: "collision" };
   }
 
@@ -576,9 +613,9 @@ export function createMobileUpload(opts: {
     currentDb().run(
       `INSERT INTO mobile_uploads
          (id, registration_id, destination_id, idempotency_key, file_name,
-          final_rel_path, size_bytes, bytes_received, sha256, status,
+          final_rel_path, target_folder_id, size_bytes, bytes_received, sha256, status,
           created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'created', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'created', ?, ?)`,
       [
         id,
         opts.registrationId,
@@ -586,6 +623,7 @@ export function createMobileUpload(opts: {
         opts.idempotencyKey,
         opts.fileName,
         finalRelPath,
+        destination.folder_id,
         opts.sizeBytes,
         // Declared checksum is persisted so finalize can verify against it
         // even across a process restart (verified digest replaces it).
@@ -622,6 +660,16 @@ function withUploadLock<T>(uploadId: string, fn: () => T): T {
   uploadLocks.add(uploadId);
   try {
     return fn();
+  } finally {
+    uploadLocks.delete(uploadId);
+  }
+}
+
+async function withUploadLockAsync<T>(uploadId: string, fn: () => Promise<T>): Promise<T> {
+  if (uploadLocks.has(uploadId)) throw new UploadBusyError();
+  uploadLocks.add(uploadId);
+  try {
+    return await fn();
   } finally {
     uploadLocks.delete(uploadId);
   }
@@ -832,8 +880,8 @@ function insertOperationLogRow(
       : `upload ${row.file_name} failed: ${row.error ?? "unknown error"}`;
   d.run(
     `INSERT INTO operation_log (timestamp, host_id, folder_id, operation, status, summary, details, trigger, dedupe_key)
-     VALUES (?, ?, NULL, 'mobile_upload', ?, ?, ?, 'manual', ?)`,
-    [nowMs, row.registration_id, status, summary, JSON.stringify(details), uploadHistoryDedupeKey(row.id)],
+     VALUES (?, ?, ?, 'mobile_upload', ?, ?, ?, 'manual', ?)`,
+    [nowMs, row.registration_id, row.target_folder_id, status, summary, JSON.stringify(details), uploadHistoryDedupeKey(row.id)],
   );
 }
 
@@ -905,15 +953,15 @@ export function reconcileUploadHistory(): number {
  * is re-checked here, immediately before publication, so a revocation that
  * happened mid-transfer prevents publication.
  */
-export function finalizeMobileUpload(opts: {
+export async function finalizeMobileUpload(opts: {
   registrationId: string;
   uploadId: string;
   nowMs?: number;
-}): FinalizeOutcome {
+}): Promise<FinalizeOutcome> {
   const now = opts.nowMs ?? Date.now();
   const d = currentDb();
   try {
-    return withUploadLock(opts.uploadId, () => {
+    return await withUploadLockAsync(opts.uploadId, async () => {
       const row = findUploadById(opts.uploadId);
       if (!row) return { kind: "not_found" };
       if (row.registration_id !== opts.registrationId) return { kind: "unauthorized" };
@@ -1001,6 +1049,37 @@ export function finalizeMobileUpload(opts: {
         now,
         row.id,
       ]);
+      if (row.target_folder_id !== null) {
+        const target = resolveMobileFolderTarget(d, row.target_folder_id);
+        if (target === null) {
+          failUpload(row, "selected storage folder is unavailable", now);
+          return { kind: "verification_error" };
+        }
+        try {
+          await publishMobileFileToFolder(target, stagingPath, row.final_rel_path);
+          const complete = d.transaction(() => {
+            d.run(
+              `UPDATE mobile_uploads SET status = 'finalized', sha256 = ?, bytes_received = ?, finalized_at = ?, updated_at = ? WHERE id = ?`,
+              [digest, row.bytes_received, now, now, row.id],
+            );
+            insertOperationLogRow(
+              d,
+              { ...row, sha256: digest, updated_at: now, finalized_at: now },
+              "success",
+              now,
+            );
+          });
+          complete();
+          removeStaging(row.id);
+          const fresh = findUploadById(row.id)!;
+          const receipt = receiptOf(fresh);
+          if (!receipt) return { kind: "verification_error" };
+          return { kind: "ok", upload: rowToUpload(fresh), receipt };
+        } catch (err) {
+          mapFsError(err, `managed-folder publication failed for ${row.id}`);
+          return { kind: "verification_error" };
+        }
+      }
       const finalPath = finalAbsolutePath(row.final_rel_path);
       try {
         assertInsideRoot(mobileLandingRoot(), finalPath);

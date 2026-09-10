@@ -436,6 +436,61 @@ export class AppStorageError extends Error {
   }
 }
 
+export interface MobileFolderTarget {
+  folderId: string;
+  folderName: string;
+  bucket: string;
+  backend: ResolvedAppBackend;
+}
+
+/** Resolve a managed S3 folder suitable for direct mobile publication. */
+export function resolveMobileFolderTarget(
+  db: Database,
+  folderId: string,
+): MobileFolderTarget | null {
+  const folder = db.query<{
+    id: string;
+    name: string;
+    backend: string | null;
+    backend_id: string | null;
+    s3_bucket: string | null;
+  }, [string]>(
+    "SELECT id, name, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
+  ).get(folderId);
+  if (!folder || folder.backend !== "s3" || !folder.backend_id || !folder.s3_bucket) return null;
+  const backend = resolveAppBackend(db, folder.backend_id);
+  if (!backend || backend.row.kind !== "s3" || backend.s3Config === null) return null;
+  if (!isValidAppBucketName(folder.s3_bucket)) return null;
+  return { folderId: folder.id, folderName: folder.name, bucket: folder.s3_bucket, backend };
+}
+
+/** Copy a verified mobile staging file to its managed S3 folder. The
+ * staging file is deliberately retained until the caller commits the
+ * finalized DB row, making a retry after a process crash safe. */
+export async function publishMobileFileToFolder(
+  target: MobileFolderTarget,
+  stagedPath: string,
+  objectKey: string,
+): Promise<void> {
+  if (!isValidAppObjectKey(objectKey)) throw new AppStorageError("invalid mobile object key");
+  const config = target.backend.s3Config;
+  if (config === null) throw new AppStorageError("s3 backend credentials are incomplete");
+  await withTempRcloneConfig(config, async (configPath) => {
+    const run = await runRclone([
+      "rclone",
+      "copyto",
+      stagedPath,
+      `relay:${target.bucket}/${objectKey}`,
+      "--config",
+      configPath,
+      "--immutable",
+      "--timeout",
+      "120s",
+    ]);
+    if (run.code !== 0) throw new AppStorageError("mobile relay to s3 backend failed");
+  });
+}
+
 /** True when an absolute path is contained within (or equals) a root. */
 function containedIn(root: string, candidate: string): boolean {
   const rel = relative(resolve(root), resolve(candidate));

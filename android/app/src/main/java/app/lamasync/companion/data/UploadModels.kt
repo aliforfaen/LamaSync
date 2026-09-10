@@ -93,6 +93,7 @@ data class UploadReceipt(
     val fileName: String,
     val finalRelPath: String,
     val browsePath: String,
+    val browseFolderId: String? = null,
     val sizeBytes: Long,
     val sha256: String,
     val finalizedAtEpochMillis: Long,

@@ -352,6 +352,7 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
                         fileName = it.fileName,
                         finalRelPath = it.finalRelPath,
                         browsePath = it.browseRef?.path ?: it.finalRelPath,
+                        browseFolderId = it.browseRef?.folderId,
                         sizeBytes = it.sizeBytes,
                         sha256 = it.sha256,
                         finalizedAtEpochMillis = it.finalizedAt,
@@ -408,9 +409,13 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** Browse/open URL for a completed receipt (embedded web UI Data Browser). */
-    fun browseUrlFor(origin: String, browsePath: String): String {
+    fun browseUrlFor(origin: String, browsePath: String, folderId: String? = null): String {
         val encoded = android.net.Uri.encode(browsePath)
-        return "$origin/#/data?kind=local&path=$encoded"
+        return if (folderId == null) {
+            "$origin/#/data?kind=local&path=$encoded"
+        } else {
+            "$origin/#/data?kind=s3&folderId=${android.net.Uri.encode(folderId)}&path=$encoded"
+        }
     }
 
     private fun displayNameFor(uri: Uri, fallback: String): String {

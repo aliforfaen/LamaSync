@@ -211,6 +211,7 @@ class UploadTransferEngine(
                 fileName = finalizeResult.fileName,
                 finalRelPath = finalizeResult.finalRelPath,
                 browsePath = finalizeResult.browseRef?.path ?: finalizeResult.finalRelPath,
+                browseFolderId = finalizeResult.browseRef?.folderId,
                 sizeBytes = finalizeResult.sizeBytes,
                 sha256 = finalizeResult.sha256,
                 finalizedAtEpochMillis = finalizeResult.finalizedAt,

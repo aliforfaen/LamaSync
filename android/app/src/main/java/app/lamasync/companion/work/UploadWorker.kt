@@ -448,6 +448,7 @@ internal suspend fun syncServerCancellations(
                     fileName = it.fileName,
                     finalRelPath = it.finalRelPath,
                     browsePath = it.browseRef?.path ?: it.finalRelPath,
+                    browseFolderId = it.browseRef?.folderId,
                     sizeBytes = it.sizeBytes,
                     sha256 = it.sha256,
                     finalizedAtEpochMillis = it.finalizedAt,

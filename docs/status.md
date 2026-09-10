@@ -199,6 +199,9 @@ distributable binary build.
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
+5. **Android web-viewer refresh gesture.** Add pull-to-refresh to the
+   companion's embedded management WebView. This is a convenience follow-up,
+   not a blocker for automatic protection or managed-folder uploads.
 
 ## Known limitations
 

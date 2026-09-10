@@ -58,6 +58,8 @@ const {
   mobileChunkSizeBytes,
 } = await import("../mobile-uploads.ts");
 const { mobileUploadRoutes } = await import("./mobile-uploads.ts");
+const { __setRcloneExecForTest } = await import("../app-storage.ts");
+const { encryptSecret } = await import("../crypto.ts");
 const { __setDb: __setOpsDb, operationsRoutes } = await import("./operations.ts");
 
 const ORIGINAL_ORIGIN = process.env.LAMASYNC_ORIGIN;
@@ -278,6 +280,7 @@ beforeEach(() => {
   __setStagedUsageForTests(0, true);
   __setStagingWriteErrorForTests(null);
   __setOperationLogInsertErrorForTests(null);
+  __setRcloneExecForTest(null);
   const admin = insertManagedApiKey({ name: "ops", kind: "admin", hostId: null });
   adminToken = admin.token;
   app = new Elysia()
@@ -296,6 +299,7 @@ afterEach(() => {
   __setStagedUsageForTests(0, true);
   __setStagingWriteErrorForTests(null);
   __setOperationLogInsertErrorForTests(null);
+  __setRcloneExecForTest(null);
   try {
     db?.close();
   } catch {
@@ -315,6 +319,50 @@ afterEach(() => {
 });
 
 describe("destinations", () => {
+  test("admin selects a managed S3 folder and uploads publish only to that folder", async () => {
+    const backendId = "backend-phone";
+    const folderId = "folder-phone";
+    db.run(
+      `INSERT INTO backends (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
+       VALUES (?, 'phone', 's3', 'b2', 'https://s3.eu-central-003.backblazeb2.com', 'eu-central-003', 'key-id', ?, ?)`,
+      [backendId, encryptSecret("secret-key"), Date.now()],
+    );
+    db.run(
+      `INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket, created_at)
+       VALUES (?, 'Phone', 'backup', 's3', ?, 'lamasync-phone', ?)`,
+      [folderId, backendId, Date.now()],
+    );
+    const device = await seedDeviceViaExchange();
+    const createRes = await app.handle(
+      req(`/api/v1/mobile/registrations/${device.hostId}/destinations`, {
+        method: "POST",
+        headers: bearer(adminToken),
+        body: JSON.stringify({ label: "Camera", folderId }),
+      }),
+    );
+    expect(createRes.status).toBe(201);
+    const destination = ((await createRes.json()) as { destination: MobileUploadDestination }).destination;
+    expect(destination.folderId).toBe(folderId);
+    expect(destination.folderName).toBe("Phone");
+
+    const calls: string[][] = [];
+    __setRcloneExecForTest(async (argv) => {
+      calls.push(argv);
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const data = new TextEncoder().encode("phone-photo");
+    const upload = await uploadBytes(device.nativeToken, destination.id, "photo.jpg", "phone-photo", data);
+    const result = await finalize(device.nativeToken, upload.id);
+    expect(result.status).toBe(200);
+    expect(result.body.receipt?.browseRef).toEqual({
+      kind: "folder",
+      folderId,
+      path: `Mobile/${device.hostId}/Camera/photo.jpg`,
+    });
+    expect(calls[0]).toContain(`relay:lamasync-phone/Mobile/${device.hostId}/Camera/photo.jpg`);
+    expect(existsSync(landingPath(`Mobile/${device.hostId}/Camera/photo.jpg`))).toBe(false);
+  });
+
   test("registrations have zero upload access until an operator assigns one", async () => {
     const device = await seedDeviceViaExchange();
     const res = await app.handle(req("/api/v1/mobile/destinations", { headers: bearer(device.nativeToken) }));

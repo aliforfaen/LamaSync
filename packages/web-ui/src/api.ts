@@ -55,6 +55,7 @@ import type {
   MobileUploadDestination,
   MobileUploadDestinationCreateRequest,
   MobileUploadDestinationCreateResponse,
+  MobileUploadDestinationUpdateRequest,
   MobileUploadDestinationRevokeResponse,
   MobileWebSessionLogoutResponse,
   PauseMode,
@@ -633,6 +634,14 @@ export const api = {
       `/mobile/registrations/${encodeURIComponent(hostId)}/destinations`,
       req,
     ),
+  updateMobileRegistrationDestination: (
+    hostId: string,
+    id: string,
+    req: MobileUploadDestinationUpdateRequest,
+  ) => apiPatch<MobileUploadDestinationCreateResponse>(
+    `/mobile/registrations/${encodeURIComponent(hostId)}/destinations/${encodeURIComponent(id)}`,
+    req,
+  ),
   revokeMobileRegistrationDestination: (hostId: string, id: string) =>
     apiPost<MobileUploadDestinationRevokeResponse>(
       `/mobile/registrations/${encodeURIComponent(hostId)}/destinations/${encodeURIComponent(id)}/revoke`,

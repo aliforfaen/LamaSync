@@ -1385,6 +1385,10 @@ export interface MobileUploadDestination {
   /** Validated server-computed path relative to the mobile landing root,
    *  e.g. `Mobile/mob-abc123/Inbox`. */
   relPath: string;
+  /** Managed S3 folder receiving final objects; null uses legacy local storage. */
+  folderId?: string | null;
+  /** Current folder label for administration; null for local storage. */
+  folderName?: string | null;
   /** Epoch-ms creation instant. */
   createdAt: number;
   /** Epoch-ms revocation instant, or null while active. */
@@ -1399,10 +1403,16 @@ export interface MobileUploadDestinationCreateRequest {
   label: string;
   /** Optional path segment; defaults to the sanitized label. */
   slug?: string;
+  /** Managed S3 folder to use as the sole final destination; null/omitted is local. */
+  folderId?: string | null;
 }
 
 export interface MobileUploadDestinationCreateResponse {
   destination: MobileUploadDestination;
+}
+
+export interface MobileUploadDestinationUpdateRequest {
+  folderId: string | null;
 }
 
 export interface MobileUploadDestinationRevokeResponse {
@@ -1424,9 +1434,10 @@ export type MobileUploadStatus =
 
 /** Browse-ref the completed file is visible under (existing local browser). */
 export interface MobileUploadBrowseRef {
-  kind: "local";
+  kind: "local" | "folder";
   /** Path relative to the browse/backup root, e.g. `Mobile/<hostId>/Inbox/f.pdf`. */
   path: string;
+  folderId?: string;
 }
 
 /** Persisted, retry-safe completion receipt (returned again by finalize). */
