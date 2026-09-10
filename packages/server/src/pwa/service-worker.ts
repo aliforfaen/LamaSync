@@ -16,8 +16,16 @@
  * so a test can assert the never-cache rule against exactly what ships.
  */
 
+/**
+ * Namespace shared by every cache this worker owns. Activation only prunes
+ * caches inside it: this origin may host other applications (and other
+ * workers) whose caches are none of our business, so deleting every name but
+ * the current one would be an unrelated data loss.
+ */
+export const SERVICE_WORKER_CACHE_PREFIX = "lamasync-shell-";
+
 /** Bump to invalidate every client's cache after a shell change. */
-export const SERVICE_WORKER_CACHE_NAME = "lamasync-shell-v1";
+export const SERVICE_WORKER_CACHE_NAME = `${SERVICE_WORKER_CACHE_PREFIX}v1`;
 
 /** Paths precached on install. Root paths only — this is the shell. */
 export const SERVICE_WORKER_SHELL_PATHS = [
@@ -36,6 +44,7 @@ export const SERVICE_WORKER_SOURCE = `// LamaSync service worker (LAMA-329 phase
 // cache after sign-out or a permission change.
 
 const CACHE = ${JSON.stringify(SERVICE_WORKER_CACHE_NAME)};
+const CACHE_PREFIX = ${JSON.stringify(SERVICE_WORKER_CACHE_PREFIX)};
 const SHELL = ${JSON.stringify(SERVICE_WORKER_SHELL_PATHS)};
 
 self.addEventListener("install", (event) => {
@@ -63,7 +72,14 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const names = await caches.keys();
-      await Promise.all(names.filter((name) => name !== CACHE).map((name) => caches.delete(name)));
+      // Only our own superseded shell caches. Cache Storage is origin-wide and
+      // shared with any other app on this origin; deleting a name we did not
+      // create would be unrelated data loss.
+      await Promise.all(
+        names
+          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE)
+          .map((name) => caches.delete(name)),
+      );
       await self.clients.claim();
     })(),
   );

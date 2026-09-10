@@ -269,7 +269,7 @@ function isSessionAuthInfo(value: unknown): value is AuthMeSessionResponse {
 export async function probeSession(): Promise<SessionProbeResult> {
   clearSessionAuth();
   try {
-    const res = await fetch(apiUrl("/auth/me"), {
+    const res = await fetchWithTransportSignal(apiUrl("/auth/me"), {
       method: "GET",
       headers: {},
       credentials: "same-origin",
@@ -453,6 +453,33 @@ function missingCredentialError(): ApiError {
   return new ApiError(401, "no active credential");
 }
 
+/**
+ * `fetch` plus the LAMA-329 transport signals.
+ *
+ * Every request path here resolves its credential and then talks to the
+ * network, so the connectivity banner's "did a request actually fail?" fact has
+ * to be published from all of them — not only from the JSON helper. A resolved
+ * response counts as success whatever its status (a 4xx/5xx means the server
+ * answered and is a different problem); only a transport rejection counts as a
+ * failure. Without this, a failed multipart upload leaves the banner saying
+ * "Live updates paused" instead of "Server unreachable".
+ */
+export async function fetchWithTransportSignal(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  return fetch(input, init).then(
+    (response) => {
+      notifyRequestSucceeded();
+      return response;
+    },
+    (error: unknown) => {
+      notifyRequestFailed();
+      throw error;
+    },
+  );
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   init: RequestInit = {},
@@ -465,20 +492,11 @@ export async function apiFetch<T = unknown>(
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(apiUrl(path), {
+  const res = await fetchWithTransportSignal(apiUrl(path), {
     ...init,
     headers,
     credentials: "same-origin",
-  }).then(
-    (response) => {
-      notifyRequestSucceeded();
-      return response;
-    },
-    (error: unknown) => {
-      notifyRequestFailed();
-      throw error;
-    },
-  );
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 401) {
@@ -583,7 +601,7 @@ async function apiBlob(path: string): Promise<Blob> {
   // Downloads are GETs: session mode authenticates via the cookie and needs
   // no CSRF header (cookie + CSRF only apply to non-safe mutations).
   applyCredential(headers, credential, "GET");
-  const res = await fetch(apiUrl(path), { headers, credentials: "same-origin" });
+  const res = await fetchWithTransportSignal(apiUrl(path), { headers, credentials: "same-origin" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 401) {
@@ -846,7 +864,7 @@ export const api = {
     const headers = new Headers();
     // Multipart: no Content-Type here — the browser sets the boundary.
     applyCredential(headers, credential, "POST");
-    const res = await fetch(
+    const res = await fetchWithTransportSignal(
       `/api/v1/apps/protections/${encodeURIComponent(protectionId)}/snapshots`,
       { method: "POST", headers, body: form, credentials: "same-origin" },
     );
@@ -1019,7 +1037,7 @@ export const api = {
     const headers = new Headers();
     // Multipart: no Content-Type here — the browser sets the boundary.
     applyCredential(headers, credential, "POST");
-    const res = await fetch(
+    const res = await fetchWithTransportSignal(
       `/api/v1/folders/${encodeURIComponent(folderId)}/files`,
       { method: "POST", headers, body: form, credentials: "same-origin" },
     );

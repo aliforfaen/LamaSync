@@ -27,11 +27,20 @@ distributable binary build.
   Android companion, where a cached shell could outlive a server update with no
   way to clear it. Connectivity is now stated honestly: device-offline,
   server-unreachable and live-updates-paused are three different messages, and
-  data is only flagged as possibly stale when a request actually failed. On the
-  native side the adaptive icon gained its `<monochrome>` themed layer and the
+  data is only flagged as possibly stale when a request actually failed. A
+  review pass closed three gaps: `#/settings` now carries the whole browser-only
+  preference set the plan named — density, the reduced-motion override (default
+  system, mirrored onto `<html data-motion>` and honoured by both the CSS gates
+  and `prefersReducedMotion()`), command-palette help, and session sign-out
+  through a shared `sign-out.ts`; every raw request path (`apiBlob`, both
+  multipart uploads, the boot probe) now publishes the same transport outcome as
+  `apiFetch`, so a failed upload can no longer leave the banner saying only
+  "Live updates paused"; and service-worker activation prunes only
+  `lamasync-shell-*` caches instead of every cache on the origin. On the native
+  side the adaptive icon gained its `<monochrome>` themed layer and the
   notification icon became the courier mark at 24dp, with the enrollment
   surface checked at font scale 2.0. See `docs/android-mobile-ux-plan.md` for
-  decisions 10–13 and phase 8 for the verification that still needs a human.
+  decisions 10–16 and phase 8 for the verification that still needs a human.
 - **LAMA-329 (phases 3–4 of 8) — mobile web navigation and the responsive page
   pass.** Below 900px the off-canvas drawer is replaced by two permanent
   surfaces: a compact rail from 640px up and a bottom tab bar with a More sheet
@@ -292,6 +301,13 @@ distributable binary build.
    - **Font scale on the paired managed shell.** 2.0 is verified on the
      enrollment screen; the top app bar, the Settings rows and the tab bar are
      not.
+   - **The new browser preferences.** Density (comfortable/compact) and the
+     reduced-motion override in both directions are unit-tested and the CSS is
+     exercised through the build, but the *look* of compact density at 360 and
+     412px and the override visibly stopping a running animation in a real
+     browser belong to this sweep. The review's fixes are covered by tests: the
+     raw-fetch transport signals, the shared sign-out ordering, and
+     service-worker activation pruning only `lamasync-shell-*`.
 
 ## Known limitations
 
@@ -346,6 +362,22 @@ distributable binary build.
   Code splitting is maintenance work, not a release blocker.
 
 ## Recent verification baseline
+
+LAMA-329 phase 5–7 review pass (this worktree): `bun x tsc --noEmit`,
+`bun run build:web-ui` (still one self-contained `index.html`), `bun test`
+**1540 pass / 0 fail** (+31 over the phase-5–7 baseline), strict skill drift OK
+(160 API rows / 161 server routes / 11 CLI commands; no route, command or flag
+changed). The added coverage is the review itself: the full browser-only control
+set (theme, density, the motion override across system/reduce/full, the
+command-palette help and its open event, install, sign-out) with the two new
+preference-ownership rows; the shared `sign-out.ts` ordering (server
+invalidation before any local clear, and a server that will not confirm the
+logout leaving the session usable); transport-outcome publication from
+`apiBlob`, `uploadAppSnapshot` and `uploadFolderFile` (a transport rejection
+fires `lamasync:request-failed`; a 4xx/5xx fires success, because the server
+answered); and an executed service-worker activation that deletes
+`lamasync-shell-v0` while leaving a foreign cache intact. No Kotlin changed, so
+the Android baseline below still stands.
 
 LAMA-329 phases 5–7 baseline (this worktree): `bun x tsc --noEmit`,
 `bun run build:web-ui` (still one self-contained `index.html`), `bun test`

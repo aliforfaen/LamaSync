@@ -116,6 +116,23 @@ interface ScoredCommand {
   score: number;
 }
 
+/**
+ * LAMA-329 phase 5: the palette is reachable from the Settings help too.
+ *
+ * Settings asks for it with this event instead of synthesising a keyboard chord
+ * — one explicit request and one listener, so the help text and the palette
+ * cannot disagree about which key opens it.
+ */
+export const COMMAND_PALETTE_EVENT = "lamasync:open-command-palette";
+
+/** Shown verbatim in the Settings help so the label cannot drift. */
+export const COMMAND_PALETTE_SHORTCUT = "Ctrl/⌘ + K";
+
+export function requestCommandPalette(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(COMMAND_PALETTE_EVENT));
+}
+
 export function CommandPalette() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -208,8 +225,15 @@ export function CommandPalette() {
           break;
       }
     }
+    function onOpenRequest() {
+      setOpen(true);
+    }
     window.addEventListener("keydown", onKeyDown, { capture: true });
-    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+    window.addEventListener(COMMAND_PALETTE_EVENT, onOpenRequest);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+      window.removeEventListener(COMMAND_PALETTE_EVENT, onOpenRequest);
+    };
   }, [navigate]);
 
   // Focus the input on open (fresh query + selection); hand focus back to

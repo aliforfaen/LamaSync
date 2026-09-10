@@ -13,6 +13,16 @@
    Warm-homelab register: comfortable sizes win over density except inside
    dense tables/logs. */
 
+/* Motion contract (LAMA-329 phase 5). The system preference is the default and
+   `motion.ts` writes an explicit override to `<html data-motion>`:
+     system (or absent) → `prefers-reduced-motion` decides
+     reduce            → motion suppressed
+     full              → motion allowed even when the system asks for reduce
+   Every motion gate therefore has two spellings — the system media query with
+   `:not([data-motion])`, and the explicit attribute. `@keyframes` are kept
+   unconditional and global: a keyframes rule inside a media query would leave
+   an explicit `full` override without a definition. */
+
 :root,
 [data-theme="dark"] {
   /* Cozy nocturnal workshop palette: graphite, espresso, moss, and clay. */
@@ -1058,9 +1068,13 @@ a.action:hover {
    (colour hover transitions above are exempt: they animate colour, not
    position). */
 @media (prefers-reduced-motion: no-preference) {
-  button.action:active {
+  html:not([data-motion="reduce"]) button.action:active {
     transform: translateY(1px);
   }
+}
+/* Explicit override: `full` restores the press shift on a reduce system. */
+html[data-motion="full"] button.action:active {
+  transform: translateY(1px);
 }
 
 button.action.primary {
@@ -1480,8 +1494,9 @@ button.action:disabled {
   padding: var(--space-2) 0;
 }
 @media (prefers-reduced-motion: reduce) {
-  .skel::after { animation: none; }
+  html:not([data-motion="full"]) .skel::after { animation: none; }
 }
+html[data-motion="reduce"] .skel::after { animation: none; }
 
 /* --- Host list / detail (LAMA-198) ---
    LAMA-272: the host table became a device-card grid (Tailscale-like
@@ -1685,9 +1700,12 @@ button.action:disabled {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .host-status-dot {
+  html:not([data-motion="full"]) .host-status-dot {
     animation: none;
   }
+}
+html[data-motion="reduce"] .host-status-dot {
+  animation: none;
 }
 
 /* "Last backup 2h ago" — omitted entirely when no backup was found. */
@@ -2475,9 +2493,12 @@ button.action:disabled {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .estate-core {
+  html:not([data-motion="full"]) .estate-core {
     animation: none;
   }
+}
+html[data-motion="reduce"] .estate-core {
+  animation: none;
 }
 
 /* LAMA-265: the hopping-llama glyph slot (EmptyState `glyph="llama"`).
@@ -2493,9 +2514,12 @@ button.action:disabled {
   color: var(--estate-accent);
 }
 @media (prefers-reduced-motion: no-preference) {
-  .estate-glyph--llama .estate-llama {
+  html:not([data-motion="reduce"]) .estate-glyph--llama .estate-llama {
     animation: llama-hop 2.4s ease-in-out infinite;
   }
+}
+html[data-motion="full"] .estate-glyph--llama .estate-llama {
+  animation: llama-hop 2.4s ease-in-out infinite;
 }
 @keyframes llama-hop {
   0%,
@@ -2702,12 +2726,18 @@ button.action:disabled {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .palette-backdrop {
+  html:not([data-motion="reduce"]) .palette-backdrop {
     animation: palette-fade 120ms ease-out;
   }
-  .palette {
+  html:not([data-motion="reduce"]) .palette {
     animation: palette-pop 140ms ease-out;
   }
+}
+html[data-motion="full"] .palette-backdrop {
+  animation: palette-fade 120ms ease-out;
+}
+html[data-motion="full"] .palette {
+  animation: palette-pop 140ms ease-out;
 }
 
 @keyframes palette-fade {
@@ -3123,22 +3153,28 @@ button.action:disabled {
   border-radius: 1px;
   opacity: 0;
 }
+/* Keyframes stay outside the media query so the explicit `full` override below
+   still has a definition when the system prefers reduced motion. */
+@keyframes confetti-fly {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(0deg) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy)))
+      rotate(var(--rot)) scale(var(--scale));
+  }
+}
 @media (prefers-reduced-motion: no-preference) {
-  .confetti-bit {
+  html:not([data-motion="reduce"]) .confetti-bit {
     animation: confetti-fly 1.2s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
     animation-delay: var(--delay);
   }
-  @keyframes confetti-fly {
-    0% {
-      opacity: 1;
-      transform: translate(-50%, -50%) rotate(0deg) scale(1);
-    }
-    100% {
-      opacity: 0;
-      transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy)))
-        rotate(var(--rot)) scale(var(--scale));
-    }
-  }
+}
+html[data-motion="full"] .confetti-bit {
+  animation: confetti-fly 1.2s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+  animation-delay: var(--delay);
 }
 
 /* Reduced-motion fallback: a short, quiet confirmation line instead of the
@@ -3610,9 +3646,11 @@ button.action:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .signal-tile { transition: none; }
-  .signal-tile:hover { transform: none; }
+  html:not([data-motion="full"]) .signal-tile { transition: none; }
+  html:not([data-motion="full"]) .signal-tile:hover { transform: none; }
 }
+html[data-motion="reduce"] .signal-tile { transition: none; }
+html[data-motion="reduce"] .signal-tile:hover { transform: none; }
 
 /* ===========================================================================
    LAMA-329 phase 3 — responsive navigation shell
@@ -3843,15 +3881,23 @@ button.action:disabled {
   }
 
   @media (prefers-reduced-motion: no-preference) {
-    .mobile-sheet {
+    html:not([data-motion="reduce"]) .mobile-sheet {
       animation: mobile-sheet-in 0.18s ease-out;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .mobile-sheet {
+    html:not([data-motion="full"]) .mobile-sheet {
       animation: none;
     }
+  }
+
+  html[data-motion="full"] .mobile-sheet {
+    animation: mobile-sheet-in 0.18s ease-out;
+  }
+
+  html[data-motion="reduce"] .mobile-sheet {
+    animation: none;
   }
 }
 
@@ -4237,9 +4283,12 @@ button.action:disabled {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .boot-llama {
+  html:not([data-motion="reduce"]) .boot-llama {
     animation: boot-breathe 2.6s ease-in-out infinite;
   }
+}
+html[data-motion="full"] .boot-llama {
+  animation: boot-breathe 2.6s ease-in-out infinite;
 }
 
 @keyframes boot-breathe {
@@ -4288,6 +4337,37 @@ button.action:disabled {
   color: var(--text-dim);
 }
 
+/* --- Phase 5: browser density -------------------------------------------- */
+/* Comfortable is the default and is what the rest of this file encodes. Compact
+   tightens the recurring surfaces — page gutters, section rhythm, table cells
+   and device cards — without changing type size, because shrinking text is not
+   what an operator reading a fleet should get from "denser". */
+html[data-density="compact"] .page {
+  padding: var(--space-3);
+}
+
+html[data-density="compact"] .page-header {
+  margin-bottom: var(--space-3);
+}
+
+html[data-density="compact"] .section {
+  margin-bottom: var(--space-4);
+}
+
+html[data-density="compact"] table.data th,
+html[data-density="compact"] table.data td {
+  padding: var(--space-1) var(--space-2);
+}
+
+html[data-density="compact"] .host-card {
+  padding: var(--space-2) var(--space-3);
+  gap: var(--space-2);
+}
+
+html[data-density="compact"] .settings-row {
+  gap: var(--space-1-5);
+}
+
 /* --- Phase 5: the settings page ------------------------------------------- */
 .settings-row {
   display: grid;
@@ -4311,6 +4391,20 @@ button.action:disabled {
   align-items: center;
   gap: var(--space-1);
   min-height: 44px;
+}
+
+/* The command-palette shortcut, shown inline in the Settings help. Monospace
+   because it is a literal chord to type, matching the mono-is-machine-data
+   rule rather than decorating prose. */
+.settings-row kbd {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 /* The preference-ownership table collapses like the phase-4 tables: identity

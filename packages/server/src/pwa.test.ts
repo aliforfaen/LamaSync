@@ -14,6 +14,7 @@ import { PWA_ICONS } from "./pwa-icons.generated.ts";
 import { webAppManifest, PWA_THEME_COLOR } from "./pwa/manifest.ts";
 import {
   SERVICE_WORKER_CACHE_NAME,
+  SERVICE_WORKER_CACHE_PREFIX,
   SERVICE_WORKER_SHELL_PATHS,
   SERVICE_WORKER_SOURCE,
 } from "./pwa/service-worker.ts";
@@ -105,6 +106,63 @@ describe("GET /sw.js", () => {
   test("precaches the shell so the app can boot offline, and nothing more", () => {
     expect([...SERVICE_WORKER_SHELL_PATHS]).toContain("/");
     expect(SERVICE_WORKER_SHELL_PATHS.length).toBeLessThanOrEqual(6);
+  });
+
+  test("activation prunes only its own shell caches, not the whole origin", async () => {
+    // Cache Storage is origin-wide. A worker that deletes every name but its
+    // own would erase caches owned by another app or another worker on the
+    // same origin, which is unrelated data loss. Run the shipped source against
+    // a controlled Cache Storage stub rather than asserting on its text, so the
+    // filter is exercised as written.
+    const deleted: string[] = [];
+    type WorkerEvent = { waitUntil: (work: Promise<unknown>) => void };
+    type WorkerListener = (event: WorkerEvent) => void;
+    const listeners = new Map<string, WorkerListener>();
+    const selfStub = {
+      addEventListener: (type: string, listener: WorkerListener) => {
+        listeners.set(type, listener);
+      },
+      skipWaiting: async () => undefined,
+      clients: { claim: async () => undefined },
+      location: { origin: "http://localhost" },
+    };
+    const cachesStub = {
+      keys: async () => [
+        SERVICE_WORKER_CACHE_NAME,
+        `${SERVICE_WORKER_CACHE_PREFIX}v0`,
+        "some-other-app-cache",
+        "workbox-precache-v2",
+      ],
+      delete: async (name: string) => {
+        deleted.push(name);
+        return true;
+      },
+      open: async () => ({ put: async () => undefined }),
+      match: async () => undefined,
+    };
+    const run = new Function(
+      "self",
+      "caches",
+      "fetch",
+      "Response",
+      "URL",
+      SERVICE_WORKER_SOURCE,
+    );
+    run(
+      selfStub,
+      cachesStub,
+      async () => new Response("", { status: 200 }),
+      Response,
+      URL,
+    );
+
+    let activation: Promise<unknown> | null = null;
+    listeners.get("activate")?.({ waitUntil: (work) => { activation = work; } });
+    expect(activation).not.toBeNull();
+    await activation;
+
+    // The superseded shell cache goes; every foreign name survives.
+    expect(deleted).toEqual([`${SERVICE_WORKER_CACHE_PREFIX}v0`]);
   });
 
   test("degrades honestly when a navigation is uncached and the network is down", () => {

@@ -86,13 +86,20 @@ audit and a blank page.
   System so it is one tap from the More sheet and covered by the nav partition
   and route-coverage tests. It owns only what the browser can change: the theme
   choice (a radio group rather than the rail's cycle button, because three
-  states need to be visible at once), the install affordance, the current
-  connection state, and the preference-ownership table.
+  states need to be visible at once), **density** (comfortable/compact), the
+  **reduced-motion override** (system/reduce/full, defaulting to the system
+  preference), **command-palette help** with a button that opens the palette
+  through `lamasync:open-command-palette`, the install affordance, the current
+  connection state, and **session sign-out** (the same `sign-out.ts`
+  implementation the rail and More sheet use, so the LAMA-296 server-first
+  ordering exists once). It also renders the preference-ownership table.
   `packages/web-ui/src/preferences.ts` is that table as data — one row per
   preference with its owning store, its layer and where to change it — rendered
   where the question actually comes up and held to invariants by a test. The
   point is the two pairs that look like one setting and are not: browser theme
   vs device appearance, and manual-upload limits vs camera-protection limits.
+  Density and motion are separate stores (`density.ts`, `motion.ts`), mirrored
+  onto `<html data-density>` / `<html data-motion>` before first paint.
 - **Phase 6 — brand assets and the boot state.** The adaptive icon gained its
   `<monochrome>` layer for Android 13 themed icons, derived from the
   foreground's own alpha on the same 108dp canvas so it aligns exactly. The
@@ -170,10 +177,12 @@ Decisions taken during implementation that change the written plan:
    this was verified in a real browser rather than reasoned about — a browser
    tab registers with scope `/`, the embedded shell registers nothing.
 10. **The browser settings route deliberately does not mirror device settings.**
-    `#/settings` owns the theme choice, the install affordance, connection state
-    and the preference-ownership table. Pull-to-refresh, the camera-protection
-    limits and device appearance stay in the companion: two controls for one
-    value is how a setting starts "not sticking".
+    `#/settings` owns the browser-only layer: the theme choice, density, the
+    reduced-motion override, command-palette help, the install affordance,
+    connection state, session sign-out and the preference-ownership table.
+    Pull-to-refresh, the camera-protection limits and device appearance stay in
+    the companion: two controls for one value is how a setting starts "not
+    sticking".
 11. **PWA assets ship as a generated module of base64 icons.** The server has no
     runtime asset directory — the SPA is inlined into one `index.html` and the
     inliner deletes `dist/assets/` — so icon bytes have to travel inside the
@@ -194,6 +203,25 @@ Decisions taken during implementation that change the written plan:
     companion.** `import.meta.env.PROD` gates it because the Vite dev server has
     no `/sw.js`, and a failed registration there would be noise that hides the
     real gate.
+14. **Motion gates are written twice, on purpose.** The system
+    `prefers-reduced-motion` media query stays the default, and the explicit
+    override is a second spelling gated on `<html data-motion>`. A CSS media
+    query cannot be unlocked by an attribute, so "allow motion even though the
+    system asks for reduce" needs a rule outside the query; conversely the
+    system-reduce rules had to become `html:not([data-motion="full"]) …` or
+    they would cancel an explicit `full`. `@keyframes` were hoisted out of their
+    media queries for the same reason: a conditional keyframes rule would leave
+    the override with nothing to run. `motion.ts` resolves the choice, so the
+    CSS gates and `prefersReducedMotion()` cannot disagree.
+15. **Density tightens surfaces, not type.** The token contract says comfortable
+    sizes win over density except inside dense tables, so `compact` only reduces
+    page gutters, section rhythm, table-cell padding and device-card padding.
+    Shrinking type would trade legibility for a preference nobody asked for, and
+    changing root tokens would have rippled into the native palette mirror.
+16. **Activation prunes only `lamasync-shell-*` caches.** Cache Storage is
+    origin-wide: deleting every name but the current one would erase caches
+    belonging to another app or worker on the same origin. The worker now owns a
+    name prefix and deletes only its own superseded shell caches.
 
 ### Phase 8 — what is verified and what still needs a human
 

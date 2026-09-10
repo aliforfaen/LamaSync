@@ -38,6 +38,18 @@ describe("preference ownership", () => {
     expect(upload?.owner).not.toBe(camera?.owner);
   });
 
+  it("keeps density and the motion override in the browser layer", () => {
+    const density = PREFERENCES.find((preference) => preference.id === "web-density");
+    const motion = PREFERENCES.find((preference) => preference.id === "web-motion");
+    expect(density?.scope).toBe("web");
+    expect(motion?.scope).toBe("web");
+    // Two preferences, two stores: sharing one key is how they would fight.
+    expect(density?.owner).not.toBe(motion?.owner);
+    // "Override" without a stated default is a setting nobody can predict, and
+    // the plan requires the default to be the system preference.
+    expect(motion?.notes.toLowerCase()).toContain("defaults to the system preference");
+  });
+
   it("documents the shell cache as shell-only", () => {
     const cache = PREFERENCES.find((preference) => preference.id === "shell-cache");
     expect(cache?.scope).toBe("web");

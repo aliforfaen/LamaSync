@@ -2,11 +2,19 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
 import { applyTheme, loadThemeChoice } from "./theme.ts";
+import { applyDensity, loadDensityChoice } from "./density.ts";
+import { applyMotion, loadMotionChoice } from "./motion.ts";
 import { consumeShellSignal } from "./shell.ts";
 import { registerServiceWorker } from "./service-worker-registration.ts";
 import "./index.css";
 
 applyTheme(loadThemeChoice());
+
+// LAMA-329 phase 5: density and the reduced-motion override are mirrored onto
+// <html> before the first paint, so neither flashes the default and then
+// corrects itself.
+applyDensity(loadDensityChoice());
+applyMotion(loadMotionChoice());
 
 // LAMA-329: resolve and persist the embedded-shell signal before the first
 // paint, so styles can branch on <html data-shell> without a flash. The

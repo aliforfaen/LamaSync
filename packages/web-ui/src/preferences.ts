@@ -38,12 +38,30 @@ export const PREFERENCES: PreferenceOwner[] = [
       "One value per browser profile. The embedded Android shell has its own appearance setting, so the two can differ on purpose.",
   },
   {
+    id: "web-density",
+    label: "Density (this browser)",
+    owner: 'localStorage "lamasync-density"',
+    scope: "web",
+    editedIn: "Settings → Density and motion",
+    notes:
+      "Comfortable is the default. Compact tightens spacing, not type size, so it cannot make fleet data unreadable.",
+  },
+  {
+    id: "web-motion",
+    label: "Reduced-motion override",
+    owner: 'localStorage "lamasync-motion"',
+    scope: "web",
+    editedIn: "Settings → Density and motion",
+    notes:
+      "Defaults to the system preference; the override can force reduce or full either way. Mirrored onto <html data-motion> and read by both the CSS motion gates and prefersReducedMotion().",
+  },
+  {
     id: "api-key",
     label: "API key / session",
     owner:
       'sessionStorage "lamasync_api_key", localStorage "lamasync_api_key_persist" when "remember me" is on',
     scope: "web",
-    editedIn: "Sign in",
+    editedIn: "Sign in; signed out from Settings → Session, the rail and the More sheet",
     notes:
       "Never sent anywhere but the API. Session mode instead uses the server-issued HttpOnly cookie below.",
   },
@@ -52,7 +70,7 @@ export const PREFERENCES: PreferenceOwner[] = [
     label: "Web session cookie",
     owner: "Server-issued HttpOnly cookie for the enrolled origin",
     scope: "server",
-    editedIn: "Sign out (server-side invalidation), mobile enrollment",
+    editedIn: "Settings → Session, the rail and the More sheet; mobile enrollment",
     notes:
       "Cannot be cleared from JavaScript, which is why sign-out invalidates it on the server first and only then clears local state (LAMA-296).",
   },

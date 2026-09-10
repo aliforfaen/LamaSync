@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { clearApiKey, getAuthMode, sessionLogout } from "../api.ts";
 import {
   applyTheme,
   loadThemeChoice,
   saveThemeChoice,
   type ThemeChoice,
 } from "../theme.ts";
+import { performSignOut, SIGN_OUT_FAILED_MESSAGE } from "../sign-out.ts";
 
 const ORDER: ThemeChoice[] = ["dark", "light", "system"];
 const LABELS: Record<ThemeChoice, string> = {
@@ -26,10 +26,9 @@ export interface ShellActionsProps {
  * Below 640px the rail is replaced by the bottom tab bar, so these controls
  * lose their home. They move into the phone's More sheet instead, which means
  * two surfaces render them at once (one of them always `display: none`). One
- * component owns them so the pair cannot drift: sign-out in particular is
- * load-bearing — LAMA-296 requires the server-side session invalidation to run
- * before any local clear, and a second copy would be a place to get that
- * wrong.
+ * component owns them so the pair cannot drift — and sign-out itself now lives
+ * in `../sign-out.ts`, shared with the Settings page, because the LAMA-296
+ * server-first ordering is not something a second copy should be trusted with.
  */
 export function ShellActions({ variant }: ShellActionsProps) {
   const [theme, setTheme] = useState<ThemeChoice>(() => loadThemeChoice());
@@ -44,19 +43,10 @@ export function ShellActions({ variant }: ShellActionsProps) {
 
   async function signOut() {
     setSignOutError(null);
-    if (getAuthMode() === "session") {
-      // LAMA-296: cookie sessions can't be cleared client-side (HttpOnly),
-      // so sign-out MUST invalidate the session server-side first — a local
-      // clear alone would log straight back in on reload.
-      const result = await sessionLogout();
-      if (result === "failed") {
-        setSignOutError(
-          "Couldn't sign out — the server didn't confirm. The session is still active; try again when connected.",
-        );
-        return;
-      }
-    } else {
-      clearApiKey();
+    const result = await performSignOut();
+    if (result === "failed") {
+      setSignOutError(SIGN_OUT_FAILED_MESSAGE);
+      return;
     }
     window.location.hash = "#/login";
     window.location.reload();
