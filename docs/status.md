@@ -290,11 +290,15 @@ LAMA-329 phases 1–2 baseline (this worktree): repo gates green
 fail**, strict skill drift OK), Android `assembleDebug` + `lintDebug` 0 errors
 with no new warnings, `testDebugUnitTest` **208/208** (20 of them added for
 this change, including a guard that fails if the Compose palette drifts from
-the web design tokens), and the full instrumented suite — **63/63 on the API 35
-`lamadb-test` AVD** (10 added here; the four HTTPS-vertical tests skip cleanly
-without a live server). The emulator run was driven with `adb -s`, never AGP
-device selection, because two of the new instrumented classes clear device
-credentials and must not run against a paired phone.
+the web design tokens), and the full instrumented suite — **66/66 on the API 35
+`lamadb-test` AVD** (13 added here; the four HTTPS-vertical tests skip cleanly
+without a live server). The added device coverage includes the paired shell
+itself (seeded through the real vault and registration store, so the top app
+bar, the nav graph, the WebView host and back navigation are all exercised) and
+the pull-to-refresh gate against a real `SwipeRefreshLayout` and `WebView`. The
+emulator run was driven with `adb -s`, never AGP device selection, because
+several instrumented classes clear device credentials and must not run against
+a paired phone.
 
 After the LAMA-324/325 review pass: `bun x tsc --noEmit`,
 `bun run build:web-ui`, `bun test` (1447 pass), strict skill drift, and the
