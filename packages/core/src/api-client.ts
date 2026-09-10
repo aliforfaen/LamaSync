@@ -10,6 +10,7 @@ import type {
   ConflictResolution,
   Folder,
   FolderAssignment,
+  FolderWithAssignments,
   FolderFileUploadResponse,
   HealthReport,
   HealthResponse,
@@ -326,8 +327,10 @@ export class LamaSyncApiClient {
   }
 
   // Folders
-  listFolders(): Promise<Folder[]> {
-    return this.request<Folder[]>("GET", "/api/v1/folders");
+  // LAMA-328: each entry carries its `assignments`, so callers no longer need
+  // one `/:id/assignments` request per folder.
+  listFolders(): Promise<FolderWithAssignments[]> {
+    return this.request<FolderWithAssignments[]>("GET", "/api/v1/folders");
   }
 
   createFolder(body: Omit<Folder, "id">): Promise<Folder> {
@@ -912,6 +915,16 @@ export class LamaSyncApiClient {
       "GET",
       `/api/v1/folders/${encodeURIComponent(folderId)}/size${qs}`,
     );
+  }
+
+  /**
+   * LAMA-328: bulk last-known sizes for every folder. Never measures on the
+   * request — unknown/stale folders come back with `refreshing: true`.
+   * `refresh: true` re-measures every S3 folder in the background.
+   */
+  getFolderSizes(refresh = false): Promise<Record<string, FolderSize>> {
+    const qs = refresh ? "?refresh=1" : "";
+    return this.request<Record<string, FolderSize>>("GET", `/api/v1/folders/sizes${qs}`);
   }
 
   // Conflicts

@@ -985,12 +985,27 @@ export interface StorageReport {
 // on daemon hosts) and return bytes: null (P1-7). S3 folders are measured per
 // destination prefix (`stats:<bucket>/<prefix>` via LAMA-304), so a folder
 // reports only its own prefixes, never the whole shared bucket.
+//
+// LAMA-328: reads are stale-while-revalidate. `measuredAt` is when `bytes` were
+// really measured (null when nothing has ever been measured, or when the folder
+// is not measurable server-side), while `stale`/`refreshing` describe the read
+// itself: stale bytes are last-known, not current, and a bounded background
+// refresh is scheduled or running for them.
 export interface FolderSize {
   folderId: string;
   bytes: number | null;
   objectCount: number | null;
   error: string | null;
-  measuredAt: number;
+  measuredAt: number | null;
+  stale?: boolean;
+  refreshing?: boolean;
+}
+
+// LAMA-328: `GET /folders` carries each folder's assignments so the Folders
+// page no longer issues one request per folder (the N+1 reported in LAMA-328).
+// `GET /folders/:id/assignments` still returns the same rows for one folder.
+export interface FolderWithAssignments extends Folder {
+  assignments: FolderAssignment[];
 }
 
 // LAMA-226: Data Browser write operations. Jobs are created when an op
