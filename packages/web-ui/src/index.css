@@ -1192,6 +1192,14 @@ table.data tbody tr:last-child td {
   color: var(--text-muted);
 }
 
+/* LAMA-328: a folder size that is stale or being refreshed — visible, but
+   clearly not presented as a current measurement. */
+.size-stale {
+  color: var(--warning, var(--text-muted));
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
 button.action,
 a.action {
   background: var(--surface-elevated);

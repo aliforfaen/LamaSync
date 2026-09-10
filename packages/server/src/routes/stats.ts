@@ -32,20 +32,51 @@ export const statsRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/stats/storage/history",
-    async () => {
+    ({ query, set }) => {
       // LAMA-269: per-backend size time series for the growth sparkline.
       // Backends with no measured folder sizes are simply absent.
-      const backends = getStorageHistory(activeDb);
+      // LAMA-328: the payload is bounded — a 90-day window by default, with one
+      // point per backend per UTC day unless `granularity=raw` is asked for.
+      const days = parseHistoryDays(query.days, set);
+      if (days instanceof Error) return { error: days.message };
+      const granularity = query.granularity ?? "day";
+      if (granularity !== "day" && granularity !== "raw") {
+        set.status = 400;
+        return { error: `granularity must be 'day' or 'raw' (got '${granularity}')` };
+      }
+      const backends = getStorageHistory(activeDb, { days, granularity });
       return { backends };
     },
     {
+      query: t.Object({
+        days: t.Optional(t.String()),
+        granularity: t.Optional(t.String()),
+      }),
       detail: {
-        summary: "Per-backend size time series for the growth sparkline (LAMA-269)",
+        summary: "Per-backend size time series for the growth sparkline (bounded, LAMA-269/328)",
         tags: ["Stats"],
         responses: {
-          200: { description: "Map of backendId -> chronological {measuredAt, bytes}[]" },
+          200: {
+            description:
+              "Map of backendId -> chronological {measuredAt, bytes}[]. `days` (default 90, max 3650) bounds the window and `granularity=day|raw` (default day) bounds the point count.",
+          },
+          400: { description: "Invalid days/granularity" },
           401: { description: "Unauthorized" },
         },
       },
     },
   );
+
+/** `days` for the history query: absent is fine, anything non-numeric is a 400. */
+function parseHistoryDays(
+  raw: string | undefined,
+  set: { status?: number | string },
+): number | undefined | Error {
+  if (raw === undefined || raw === "") return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    set.status = 400;
+    return new Error(`days must be a positive integer (got '${raw}')`);
+  }
+  return parsed;
+}

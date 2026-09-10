@@ -4,12 +4,15 @@ Read this after `AGENTS.md` when entering a coding worktree.
 
 ## Current work
 
-LAMA-316's app-backup data contract, LAMA-324 storage destinations, LAMA-325
-retention, and the LAMA-302 real-worktree soak are complete. The next product
-work is LAMA-315 path classification (design handoff ready in
-`docs/handoff-315-path-classification.md`; implement its stage 1), the separate
-safe application setup/restore executor, and the LAMA-321 trash-retention
-follow-up.
+LAMA-328 (storage/folder page performance: persisted stale-while-revalidate
+sizes, embedded folder assignments, bounded storage history, progressive
+Storage-destinations rendering) is implemented on `lama-328-persisted-swr-stats`
+and green on all repo gates. LAMA-316's app-backup data contract, LAMA-324
+storage destinations, LAMA-325 retention, and the LAMA-302 real-worktree soak
+are complete. The next product work is LAMA-315 path classification (design
+handoff ready in `docs/handoff-315-path-classification.md`; implement its stage
+1), the separate safe application setup/restore executor, and the LAMA-321
+trash-retention follow-up.
 See [status.md](status.md) and the assigned Multica issue for scope; do not use
 archived handoffs as a current specification.
 

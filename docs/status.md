@@ -1,6 +1,6 @@
 # Status & work queue — LamaSync
 
-Updated 2026-09-08. This is the current state, not an append-only changelog.
+Updated 2026-09-10. This is the current state, not an append-only changelog.
 Older release notes and completed work are in
 [`archive/status-2026-08-through-2026-09-03.md`](archive/status-2026-08-through-2026-09-03.md).
 
@@ -13,6 +13,22 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-328 — storage and folder pages: persisted stale-while-revalidate
+  sizes.** Folder sizes are no longer measured on a page visit. The latest
+  persisted `size_history` row answers immediately (cold server restarts
+  included), with explicit `measuredAt` / `stale` / `refreshing` metadata, and
+  stale or invalidated values schedule a bounded background refresh: at most
+  one per folder (dedupe), two overall, one per backend. `refresh=true` is the
+  explicit "measure now" path. `GET /folders` now embeds each folder's
+  assignments (the folder page's N+1 per-folder assignment requests are gone)
+  and `GET /folders/sizes` never measures on the request — unknown folders come
+  back as `refreshing` and are filled in behind it. `/stats/storage/history` is
+  bounded (90-day default window, one point per backend per UTC day,
+  `days`/`granularity` overridable). The Storage destinations page renders its
+  configured list as soon as `/backends` resolves and loads every statistic
+  independently, so a slow or failed auxiliary panel neither holds back nor
+  erases the destination list. Browser capture with 18 folders: 4 API requests
+  (was 3 + 2 per folder).
 - **LAMA-324 — app backup storage destinations (server-relay).** Each
   application protection can select an s3/local/nfs backend destination
   (restic rejected); the server stages every daemon tarball outside browse
@@ -166,6 +182,11 @@ distributable binary build.
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
+5. **size_history retention.** LAMA-328 bounds the history *read* (window +
+   daily downsampling) but nothing prunes the table: `size_history` still grows
+   one row per folder and per backend on every successful measurement. Add a
+   prune to the existing daily maintenance pass (`pruneOperationLog` in
+   `packages/server/src/index.ts`) once a retention horizon is agreed.
 
 ## Known limitations
 
@@ -189,6 +210,16 @@ distributable binary build.
   Code splitting is maintenance work, not a release blocker.
 
 ## Recent verification baseline
+
+After LAMA-328: `bun x tsc --noEmit`, `bun run build:web-ui`, `bun test`
+(1543 pass), strict skill drift, and the full distributable build passed. The
+stale-while-revalidate read path is covered by hermetic route tests (cold-start
+persisted read, refresh dedupe, refresh concurrency bound, failure fallback,
+bulk response shape, bounded history) plus a local browser network capture with
+18 folders and 4 destinations. No production deployment was performed, and the
+success path after a *real* large S3 measurement was exercised only against
+unreachable test endpoints (the failure path), so the first warm value on a
+production bucket is still unverified end to end.
 
 After the LAMA-324/325 review pass: `bun x tsc --noEmit`,
 `bun run build:web-ui`, `bun test` (1447 pass), strict skill drift, and the

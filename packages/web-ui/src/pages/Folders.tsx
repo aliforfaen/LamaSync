@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Link, useLocation } from "react-router-dom";
-import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
+import type { Backend, Folder, FolderAssignment, FolderBackend, FolderSize, Host } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
@@ -22,9 +22,54 @@ import {
   ROLE_HINTS,
 } from "../concepts.ts";
 
-interface FolderWithAssignments {
+interface FolderListItem {
   folder: Folder;
   assignments: FolderAssignment[];
+}
+
+// LAMA-328: what the Size column shows for one folder. `stale` marks last-known
+// bytes that are past the freshness window and `refreshing` marks a measurement
+// in flight, so the cell never implies a stale number is current.
+interface SizeCell {
+  text: string;
+  bytes?: number | null;
+  error?: boolean;
+  stale?: boolean;
+  refreshing?: boolean;
+  measuredAt?: number | null;
+}
+
+function toSizeCell(size: FolderSize | undefined): SizeCell {
+  if (size === undefined) return { text: "—" };
+  return {
+    text:
+      size.bytes === null
+        ? size.refreshing === true
+          ? "measuring…"
+          : "n/a"
+        : formatBytes(size.bytes),
+    bytes: size.bytes,
+    error: size.error !== null,
+    stale: size.stale === true,
+    refreshing: size.refreshing === true,
+    measuredAt: size.measuredAt,
+  };
+}
+
+/** Tooltip for a Size cell: never let last-known bytes read as current. */
+function sizeTitle(size: SizeCell): string | undefined {
+  if (size.bytes === null || size.bytes === undefined) {
+    return size.error
+      ? "size unavailable (not measurable server-side, or the backend is unreachable)"
+      : undefined;
+  }
+  const measured =
+    size.measuredAt === null || size.measuredAt === undefined
+      ? "never measured"
+      : `measured ${formatTimeAgo(size.measuredAt)}`;
+  if (size.error) return `${measured} — the last refresh failed`;
+  if (size.stale) return `${measured} — refreshing in the background`;
+  return measured;
 }
 
 // LAMA-297: a group of folders in the grouped list (Shared / per-host /
@@ -33,7 +78,7 @@ interface FolderGroup {
   key: string;
   label: string;
   subtitle?: string;
-  items: FolderWithAssignments[];
+  items: FolderListItem[];
 }
 
 type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
@@ -186,11 +231,13 @@ function folderVerification(folder: Folder, backends: Backend[]): { label: strin
 export function Folders() {
   const location = useLocation();
   const backupMode = location.pathname === "/backups";
-  const [items, setItems] = useState<FolderWithAssignments[] | null>(null);
+  const [items, setItems] = useState<FolderListItem[] | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [backends, setBackends] = useState<Backend[]>([]);
-  // LAMA-224: last-known working-set size per folder (server-cached 15 min).
-  const [sizes, setSizes] = useState<Record<string, { text: string; error?: boolean }>>({});
+  // LAMA-224: last-known working-set size per folder. LAMA-328: one bulk read
+  // (never a per-folder request) that never waits on remote rclone work.
+  const [sizes, setSizes] = useState<Record<string, SizeCell>>({});
+  const [sizesBusy, setSizesBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<FolderForm>(DEFAULT_FORM);
@@ -233,38 +280,62 @@ export function Folders() {
         api.listHosts(),
         api.listBackends().catch(() => [] as Backend[]),
       ]);
-      const withAssignments = await Promise.all(
-        folders.map(async (folder) => ({
-          folder,
-          assignments: await api.listAssignments(folder.id),
-        })),
-      );
-      setItems(withAssignments);
+      // LAMA-328: assignments ride along with the folder list, so the page no
+      // longer issues one request per folder just to render a row.
+      setItems(folders.map((folder) => ({ folder, assignments: folder.assignments })));
       setHosts(hostList);
       setBackends(backendList);
-      // LAMA-224 P1-7: per-folder sizes are sequential, not parallel —
-      // a fleet with many S3 folders used to spawn N concurrent rclone
-      // processes against the same bucket. Individual failures (or the
-      // non-S3 'not measurable server-side' response) show "n/a".
-      for (const folder of folders) {
-        try {
-          const size = await api.folderSize(folder.id);
-          setSizes((prev) => ({
-            ...prev,
-            [folder.id]: {
-              text: formatBytes(size.bytes),
-              error: Boolean(size.error),
-            },
-          }));
-        } catch {
-          setSizes((prev) => ({
-            ...prev,
-            [folder.id]: { text: "n/a", error: true },
-          }));
-        }
-      }
+      await loadSizes();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * LAMA-328: one bulk size read for every folder. The server never measures on
+   * this request, so rows render immediately: cold folders come back as
+   * "measuring…" while a bounded background refresh does the rclone work.
+   * `refresh` is the explicit "Refresh sizes" action.
+   */
+  async function loadSizes(refresh = false) {
+    try {
+      const bulk = await api.folderSizes(refresh);
+      setSizes((prev) => {
+        const next: Record<string, SizeCell> = {};
+        for (const [folderId, size] of Object.entries(bulk)) next[folderId] = toSizeCell(size);
+        return Object.keys(next).length === 0 ? prev : next;
+      });
+    } catch {
+      // Sizes are auxiliary: a failed read leaves the rows (and the page)
+      // intact instead of surfacing an error the user cannot act on.
+    }
+  }
+
+  // LAMA-328: while measurements are in flight, look again a few times so
+  // background refreshes land without a manual reload. Bounded so a permanently
+  // unreachable backend cannot turn this into a polling loop.
+  const sizePollRef = useRef(0);
+  useEffect(() => {
+    const pending = Object.values(sizes).some((s) => s.refreshing === true);
+    if (!pending) {
+      sizePollRef.current = 0;
+      return;
+    }
+    if (sizePollRef.current >= 5) return;
+    const timer = setTimeout(() => {
+      sizePollRef.current += 1;
+      void loadSizes();
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [sizes]);
+
+  async function refreshSizes() {
+    setSizesBusy(true);
+    try {
+      sizePollRef.current = 0;
+      await loadSizes(true);
+    } finally {
+      setSizesBusy(false);
     }
   }
 
@@ -284,9 +355,9 @@ export function Folders() {
   // single host section (assigned to only that host), under "Shared"
   // (assigned to more than one host), or under "Not set up" (no device).
   const groups = (() => {
-    const shared: FolderWithAssignments[] = [];
-    const unassigned: FolderWithAssignments[] = [];
-    const perHost = new Map<string, FolderWithAssignments[]>();
+    const shared: FolderListItem[] = [];
+    const unassigned: FolderListItem[] = [];
+    const perHost = new Map<string, FolderListItem[]>();
     for (const item of filteredItems) {
       const uniqueHosts = [...new Set(item.assignments.map((a) => a.hostId))];
       if (uniqueHosts.length === 0) {
@@ -919,6 +990,15 @@ export function Folders() {
         </label>
         <button
           type="button"
+          className="action"
+          disabled={sizesBusy}
+          title="Ask the server to re-measure folder sizes in the background"
+          onClick={() => void refreshSizes()}
+        >
+          {sizesBusy ? "Refreshing…" : "Refresh sizes"}
+        </button>
+        <button
+          type="button"
           className="action primary"
           onClick={openNewFolder}
         >
@@ -1045,8 +1125,16 @@ export function Folders() {
                 </td>
                 <td className="muted">
                   {size ? (
-                    <span title={size.error ? "size unavailable (unreachable backend)" : undefined}>
+                    <span title={sizeTitle(size)}>
                       {size.text}
+                      {/* Only a *value* can be stale or refreshing here —
+                          "measuring…" and "n/a" already say it. */}
+                      {size.stale && size.bytes !== null ? (
+                        <span className="size-stale"> · stale</span>
+                      ) : null}
+                      {size.refreshing && !size.stale && size.bytes !== null ? (
+                        <span className="size-stale"> · refreshing</span>
+                      ) : null}
                     </span>
                   ) : (
                     "…"

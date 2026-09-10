@@ -325,6 +325,36 @@ describe("GET /api/v1/folders — s3 credentials stay off the folder (LAMA-178, 
     expect(JSON.stringify(body)).not.toContain("KEY");
   });
 
+  test("GET /folders embeds assignments instead of requiring a request per folder (LAMA-328)", async () => {
+    const id = await createS3Folder();
+    db.run("INSERT INTO hosts (id, hostname) VALUES ('host-embed', 'embed-host')");
+    const assignRes = await postJson(`/api/v1/folders/${id}/assign`, {
+      hostId: "host-embed",
+      role: "both",
+      localPath: "/local/embed",
+    });
+    expect([200, 201]).toContain(assignRes.status);
+
+    const res = await app.handle(request("/api/v1/folders"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{
+      id: string;
+      assignments: Array<{ hostId: string; localPath: string }>;
+    }>;
+    const folder = body.find((f) => f.id === id);
+    expect(folder?.assignments).toHaveLength(1);
+    expect(folder?.assignments[0]?.hostId).toBe("host-embed");
+    expect(folder?.assignments[0]?.localPath).toBe("/local/embed");
+
+    // A folder with no assignments carries an empty array, never undefined.
+    const other = body.find((f) => f.id !== id);
+    if (other) expect(other.assignments).toEqual([]);
+
+    // The embedded rows match the per-folder route exactly.
+    const single = await app.handle(request(`/api/v1/folders/${id}/assignments`));
+    expect(await single.json()).toEqual(folder?.assignments);
+  });
+
   test("GET /folders/:id returns the backend reference, not credentials", async () => {
     const id = await createS3Folder();
     const res = await app.handle(request(`/api/v1/folders/${id}`));

@@ -36,12 +36,18 @@ const {
   getStorageHistory,
   folderDestinationPrefixes,
   __setSizeMeasurer,
+  __refreshState,
+  __drainFolderRefreshes,
+  __folderCacheSize,
 } = (await import("../stats.ts")) as unknown as {
   __resetStatsCaches: () => void;
   recordSizeHistory: (db: Database, folder: Folder, size: FolderSize) => void;
-  getStorageHistory: (db: Database) => Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
+  getStorageHistory: (db: Database, options?: { days?: number; granularity?: "day" | "raw" }) => Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
   folderDestinationPrefixes: (db: Database, folder: Folder) => string[];
   __setSizeMeasurer: (measurer: SizeMeasurer | null) => void;
+  __refreshState: () => { active: number; queued: number; scheduled: number };
+  __drainFolderRefreshes: () => Promise<void>;
+  __folderCacheSize: () => number;
 };
 
 let db: Database;
@@ -87,7 +93,10 @@ beforeEach(() => {
   app = new Elysia().use(getAuthPlugin()).use(statsRoutes).use(foldersRoutes);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // LAMA-328: finish any scheduled background refresh before the database it
+  // is measuring against goes away.
+  await __drainFolderRefreshes();
   db.close();
   // LAMA-224 P1-7: the previous afterEach tried to rm a literal prefix
   // path (`/tmp/lamasync-stats-`) which never matched the unique random
@@ -215,6 +224,11 @@ describe("GET /api/v1/folders/:id/size", () => {
 });
 
 describe("LAMA-269: size history + storage donut/sparkline data", () => {
+  // LAMA-328: history is now served through a bounded window, so these tests
+  // anchor on real (recent) timestamps instead of epoch milliseconds.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const NOW = Date.now();
+
   function folderObj(id: string, backendId: string | null): Folder {
     return { id, name: id, type: "backup", backend: "s3", backendId, s3Bucket: "b" };
   }
@@ -233,29 +247,29 @@ describe("LAMA-269: size history + storage donut/sparkline data", () => {
     // Two measurements at different times; the backend snapshot reflects
     // the destination's running total (f1 measured first, then f2 added).
     recordSizeHistory(db, folderObj("f1", "b1"), {
-      folderId: "f1", bytes: 100, objectCount: 5, error: null, measuredAt: 1000,
+      folderId: "f1", bytes: 100, objectCount: 5, error: null, measuredAt: NOW - 2 * DAY_MS,
     });
     recordSizeHistory(db, folderObj("f2", "b1"), {
-      folderId: "f2", bytes: 200, objectCount: 8, error: null, measuredAt: 2000,
+      folderId: "f2", bytes: 200, objectCount: 8, error: null, measuredAt: NOW - DAY_MS,
     });
     const history = getStorageHistory(db);
     expect(history["b1"]).toEqual([
-      { measuredAt: 1000, bytes: 100 },
-      { measuredAt: 2000, bytes: 300 },
+      { measuredAt: NOW - 2 * DAY_MS, bytes: 100 },
+      { measuredAt: NOW - DAY_MS, bytes: 300 },
     ]);
   });
 
   test("backend aggregate tracks the latest per-folder size over time", () => {
     seedFolder("f1", "b1");
     recordSizeHistory(db, folderObj("f1", "b1"), {
-      folderId: "f1", bytes: 100, objectCount: 1, error: null, measuredAt: 1000,
+      folderId: "f1", bytes: 100, objectCount: 1, error: null, measuredAt: NOW - 2 * DAY_MS,
     });
     recordSizeHistory(db, folderObj("f1", "b1"), {
-      folderId: "f1", bytes: 150, objectCount: 2, error: null, measuredAt: 2000,
+      folderId: "f1", bytes: 150, objectCount: 2, error: null, measuredAt: NOW - DAY_MS,
     });
     expect(getStorageHistory(db)["b1"]).toEqual([
-      { measuredAt: 1000, bytes: 100 },
-      { measuredAt: 2000, bytes: 150 },
+      { measuredAt: NOW - 2 * DAY_MS, bytes: 100 },
+      { measuredAt: NOW - DAY_MS, bytes: 150 },
     ]);
   });
 
@@ -263,7 +277,7 @@ describe("LAMA-269: size history + storage donut/sparkline data", () => {
     seedFolder("f1", "b1");
     recordSizeHistory(db, folderObj("f1", "b1"), {
       folderId: "f1", bytes: null, objectCount: null,
-      error: "not measurable server-side", measuredAt: 1000,
+      error: "not measurable server-side", measuredAt: NOW,
     });
     expect(getStorageHistory(db)).toEqual({});
   });
@@ -271,14 +285,14 @@ describe("LAMA-269: size history + storage donut/sparkline data", () => {
   test("GET /stats/storage/history returns a per-backend time series", async () => {
     const backendId = insertS3BackendWithFolder();
     recordSizeHistory(db, folderObj("folder-s3", backendId), {
-      folderId: "folder-s3", bytes: 42, objectCount: 3, error: null, measuredAt: 5000,
+      folderId: "folder-s3", bytes: 42, objectCount: 3, error: null, measuredAt: NOW,
     });
     const res = await app.handle(request("/api/v1/stats/storage/history"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       backends: Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
     };
-    expect(body.backends[backendId]).toEqual([{ measuredAt: 5000, bytes: 42 }]);
+    expect(body.backends[backendId]).toEqual([{ measuredAt: NOW, bytes: 42 }]);
   });
 
   test("GET /folders/sizes returns a map; non-S3 folders are bytes:null", async () => {
@@ -442,5 +456,278 @@ describe("GET /api/v1/folders/:id/size per-prefix (LAMA-304)", () => {
     expect(targets).toEqual(["stats:cold-archive-bucket/shared/media"]);
     expect(body.bytes).toBe(500);
     expect(body.objectCount).toBe(9);
+  });
+});
+
+// LAMA-328: the folder-size read path is stale-while-revalidate. These tests
+// pin the observable contract: a cold server answers from persisted history, at
+// most one refresh runs per folder, refresh work is bounded globally and per
+// backend, a failed refresh keeps the last known bytes, and an explicit
+// refresh measures on the request.
+describe("LAMA-328: stale-while-revalidate folder sizes", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  /** Gated measurer: counts calls and blocks until released. */
+  function gatedMeasurer(): {
+    calls: () => number;
+    release: () => void;
+  } {
+    let calls = 0;
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Safety: a failing assertion must not leave a refresh blocked forever.
+    const timer = setTimeout(release, 2000);
+    __setSizeMeasurer(async () => {
+      calls += 1;
+      await gate;
+      return { bytes: 1000, objectCount: 3, error: null };
+    });
+    return {
+      calls: () => calls,
+      release: () => {
+        clearTimeout(timer);
+        release();
+      },
+    };
+  }
+
+  /** A persisted successful measurement, as a restarting server would find it. */
+  function persistSize(folderId: string, bytes: number, measuredAt: number): void {
+    db.run(
+      "INSERT INTO size_history (scope, ref_id, bytes, object_count, measured_at) VALUES ('folder', ?, ?, 1, ?)",
+      [folderId, bytes, measuredAt],
+    );
+  }
+
+  function insertBackendWithFolder(folderId: string, label: string): string {
+    const backendId = crypto.randomUUID();
+    db.run(
+      `INSERT INTO backends (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
+       VALUES (?, ?, 's3', 'other', 's3.example.com', 'us-east-1', 'K', ?, ?)`,
+      [backendId, label, encryptSecret("S"), Date.now()],
+    );
+    db.run(
+      "INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket) VALUES (?, ?, 'backup', 's3', ?, 'bucket')",
+      [folderId, label, backendId],
+    );
+    return backendId;
+  }
+
+  function sizeOf(res: Response): Promise<FolderSize> {
+    return res.json() as Promise<FolderSize>;
+  }
+
+  test("a cold server serves the persisted measurement without measuring", async () => {
+    insertBackendWithFolder("folder-cold", "cold");
+    insertAssignments("folder-cold", [{ id: "c1", hostId: "host-a" }]);
+    const measuredAt = Date.now() - DAY_MS;
+    persistSize("folder-cold", 4096, measuredAt);
+    const measurer = gatedMeasurer();
+
+    const body = await sizeOf(await app.handle(request("/api/v1/folders/folder-cold/size")));
+    // Returned while the measurement is still blocked: no request-path rclone.
+    expect(body.bytes).toBe(4096);
+    expect(body.measuredAt).toBe(measuredAt);
+    expect(body.stale).toBe(true);
+    expect(body.refreshing).toBe(true);
+    // The persisted row seeded the in-memory cache, so a restart re-learns it.
+    expect(__folderCacheSize()).toBe(1);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+    expect(measurer.calls()).toBe(1);
+
+    const after = await sizeOf(await app.handle(request("/api/v1/folders/folder-cold/size")));
+    expect(after.bytes).toBe(1000);
+    expect(after.stale).toBe(false);
+    expect(after.refreshing).toBe(false);
+    // Serving the fresh cache must not have scheduled more work.
+    expect(measurer.calls()).toBe(1);
+  });
+
+  test("two reads of one stale folder share a single background refresh", async () => {
+    insertBackendWithFolder("folder-dedupe", "dedupe");
+    insertAssignments("folder-dedupe", [{ id: "d1", hostId: "host-a" }]);
+    persistSize("folder-dedupe", 10, Date.now() - 2 * DAY_MS);
+    const measurer = gatedMeasurer();
+
+    const [first, second] = await Promise.all([
+      app.handle(request("/api/v1/folders/folder-dedupe/size")),
+      app.handle(request("/api/v1/folders/folder-dedupe/size")),
+    ]);
+    expect((await sizeOf(first)).bytes).toBe(10);
+    expect((await sizeOf(second)).bytes).toBe(10);
+    expect(measurer.calls()).toBe(1);
+    expect(__refreshState().scheduled).toBe(1);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+    expect(__refreshState()).toEqual({ active: 0, queued: 0, scheduled: 0 });
+  });
+
+  test("the bulk surface never blocks and bounds refreshes globally and per backend", async () => {
+    for (const n of ["a", "b", "c"]) {
+      insertBackendWithFolder(`folder-${n}`, `backend-${n}`);
+      insertAssignments(`folder-${n}`, [{ id: `as-${n}`, hostId: "host-a" }]);
+    }
+    db.run(
+      "INSERT INTO folders (id, name, type, backend) VALUES ('local-1', 'localdoc', 'sync', 'sftp')",
+    );
+    const measurer = gatedMeasurer();
+
+    const res = await app.handle(request("/api/v1/folders/sizes"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, FolderSize>;
+    // Unknown folders are reported as refreshing with no fabricated measurement
+    // (the response is built while every measurement is still blocked).
+    expect(body["folder-a"]).toEqual({
+      folderId: "folder-a",
+      bytes: null,
+      objectCount: null,
+      error: null,
+      measuredAt: null,
+      stale: true,
+      refreshing: true,
+    });
+    // Non-S3 folders stay a typed null and never get a refresh.
+    expect(body["local-1"]).toEqual({
+      folderId: "local-1",
+      bytes: null,
+      objectCount: null,
+      error: "not measurable server-side",
+      measuredAt: null,
+      stale: false,
+      refreshing: false,
+    });
+    // Two refreshes run (global bound), the third waits, and the per-backend
+    // bound keeps a single bucket from filling both slots.
+    expect(__refreshState().active).toBe(2);
+    expect(__refreshState().queued).toBe(1);
+    expect(measurer.calls()).toBe(2);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+    expect(__refreshState()).toEqual({ active: 0, queued: 0, scheduled: 0 });
+  });
+
+  test("a failed refresh keeps the last known bytes and reports the error", async () => {
+    insertBackendWithFolder("folder-fail", "fail");
+    insertAssignments("folder-fail", [{ id: "f1", hostId: "host-a" }]);
+    persistSize("folder-fail", 2048, Date.now() - 2 * DAY_MS);
+    __setSizeMeasurer(async () => ({ bytes: 0, objectCount: null, error: "S3 unavailable" }));
+
+    const first = await sizeOf(await app.handle(request("/api/v1/folders/folder-fail/size")));
+    expect(first.bytes).toBe(2048);
+    expect(first.error).toBeNull();
+
+    await __drainFolderRefreshes();
+    const second = await sizeOf(await app.handle(request("/api/v1/folders/folder-fail/size")));
+    expect(second.bytes).toBe(2048);
+    expect(second.error).toBe("S3 unavailable");
+    expect(second.stale).toBe(true);
+    // The failed attempt was the refresh: it is not retried on every read.
+    expect(second.refreshing).toBe(false);
+    expect(__refreshState().scheduled).toBe(0);
+
+    const rows = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM size_history WHERE scope = 'folder'")
+      .get();
+    expect(rows?.c).toBe(1);
+  });
+
+  test("a first-ever failure reports no measurement time and persists nothing", async () => {
+    insertBackendWithFolder("folder-never", "never");
+    insertAssignments("folder-never", [{ id: "n1", hostId: "host-a" }]);
+    __setSizeMeasurer(async () => ({ bytes: 0, objectCount: null, error: "unreachable" }));
+
+    const body = await sizeOf(
+      await app.handle(request("/api/v1/folders/folder-never/size?refresh=true")),
+    );
+    expect(body.bytes).toBeNull();
+    expect(body.measuredAt).toBeNull();
+    expect(body.error).toBe("unreachable");
+    expect(body.stale).toBe(true);
+    const rows = db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM size_history").get();
+    expect(rows?.c).toBe(0);
+  });
+
+  test("refresh=true measures on the request instead of serving persisted bytes", async () => {
+    insertBackendWithFolder("folder-force", "force");
+    insertAssignments("folder-force", [{ id: "x1", hostId: "host-a" }]);
+    persistSize("folder-force", 4096, Date.now() - 2 * DAY_MS);
+    __setSizeMeasurer(async () => ({ bytes: 777, objectCount: 2, error: null }));
+
+    const body = await sizeOf(
+      await app.handle(request("/api/v1/folders/folder-force/size?refresh=true")),
+    );
+    expect(body.bytes).toBe(777);
+    expect(body.stale).toBe(false);
+    expect(body.refreshing).toBe(false);
+    expect(__refreshState().scheduled).toBe(0);
+    const rows = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM size_history WHERE scope = 'folder'")
+      .get();
+    expect(rows?.c).toBe(2);
+  });
+
+  test("refresh=true on the bulk surface schedules work without blocking", async () => {
+    insertBackendWithFolder("folder-bulk-force", "bulk-force");
+    insertAssignments("folder-bulk-force", [{ id: "b1", hostId: "host-a" }]);
+    persistSize("folder-bulk-force", 32, Date.now() - 2 * DAY_MS);
+    const measurer = gatedMeasurer();
+
+    const body = (await (
+      await app.handle(request("/api/v1/folders/sizes?refresh=true"))
+    ).json()) as Record<string, FolderSize>;
+    // Known bytes are still reported, flagged as refreshing.
+    expect(body["folder-bulk-force"].bytes).toBe(32);
+    expect(body["folder-bulk-force"].refreshing).toBe(true);
+    expect(__refreshState().scheduled).toBe(1);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+    expect(measurer.calls()).toBe(1);
+  });
+
+  test("storage history is bounded by window and daily downsampling", async () => {
+    const backendId = insertBackendWithFolder("folder-window", "window");
+    const now = Date.now();
+    const startOfToday = Math.floor(now / DAY_MS) * DAY_MS;
+    const point = (measuredAt: number, bytes: number): void => {
+      db.run(
+        "INSERT INTO size_history (scope, ref_id, bytes, object_count, measured_at) VALUES ('backend', ?, ?, 1, ?)",
+        [backendId, bytes, measuredAt],
+      );
+    };
+    point(Math.min(startOfToday + 1000, now - 1), 9); // earlier the same UTC day
+    point(now, 10);
+    point(now - 3 * DAY_MS, 8);
+    point(now - 200 * DAY_MS, 7);
+
+    const res = await app.handle(request("/api/v1/stats/storage/history"));
+    const body = (await res.json()) as {
+      backends: Record<string, Array<{ measuredAt: number; bytes: number }>>;
+    };
+    expect(body.backends[backendId]).toEqual([
+      { measuredAt: now - 3 * DAY_MS, bytes: 8 },
+      { measuredAt: now, bytes: 10 },
+    ]);
+
+    const raw = await app.handle(
+      request("/api/v1/stats/storage/history?days=400&granularity=raw"),
+    );
+    const rawBody = (await raw.json()) as {
+      backends: Record<string, Array<{ measuredAt: number; bytes: number }>>;
+    };
+    expect(rawBody.backends[backendId].map((p) => p.bytes)).toEqual([7, 8, 9, 10]);
+
+    const badDays = await app.handle(request("/api/v1/stats/storage/history?days=0"));
+    expect(badDays.status).toBe(400);
+    const badGranularity = await app.handle(
+      request("/api/v1/stats/storage/history?granularity=hour"),
+    );
+    expect(badGranularity.status).toBe(400);
   });
 });

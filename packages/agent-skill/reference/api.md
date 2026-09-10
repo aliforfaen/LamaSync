@@ -102,7 +102,7 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/server-deploys/:id/progress`             | Deploy agent: stage/output update (scrubbed + capped server-side) — deploy credential only |
 | POST     | `/server-deploys/:id/complete`             | Deploy agent: terminal success/failure — deploy credential only |
 | GET      | `/release/latest`                          | Latest GitHub release info (proxy)               |
-| GET      | `/folders`                                 | List folders                                     |
+| GET      | `/folders`                                 | List folders, each entry carrying its `assignments` (LAMA-328) |
 | POST     | `/folders`                                 | Create folder                                    |
 | GET      | `/folders/:id`                             | Read one folder                                  |
 | PUT      | `/folders/:id`                             | Update folder (PATCH-style partial also OK)      |
@@ -114,8 +114,8 @@ All paths are under `/api/v1/` unless noted.
 | PUT      | `/assignments/:id`                         | Intentional 405 — assignments are addressed by folder+host; use `/folders/:folderId/assign/:hostId` |
 | PATCH    | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
 | DELETE   | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |
-| GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only; 15-min cache) |
-| GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only; 15-min cache) |
+| GET      | `/folders/:id/size`                        | Last-known working-set size (S3 only). Stale-while-revalidate: returns last known bytes with `measuredAt`/`stale`/`refreshing` immediately and refreshes in the background; `?refresh=true` measures on the request (LAMA-328) |
+| GET      | `/folders/sizes`                           | Bulk last-known working-set sizes for all folders (S3 only). Never measures on the request — unknown/stale folders come back `refreshing: true`; `?refresh=true` schedules a bounded background re-measurement of every S3 folder (LAMA-328) |
 | GET      | `/folders/:id/snapshots`             | Folder-scoped restic snapshot history for the time-travel slider; empty for non-restic folders (LAMA-259) |
 | GET      | `/folders/:id/snapshots/:snapshotId/files?path=...&limit=...&hostId=...` | Files inside a restic snapshot at a given path (`BrowseResponse` with `backend: "restic-snapshot"`); 409 for non-restic folders (LAMA-259). Optional `hostId` honors a per-host `resticRepository`/`resticPassword` assignment override (LAMA-259 follow-up) — when set, that host's repo+password reach `restic ls`; absent or unknown hosts fall through to the folder/backend-level default. The no-hostId path is unchanged (backward-compatible). |
 | POST     | `/folders/:id/files`             | Upload a file into a folder's destination backend (multipart `file`, optional `path` subdir). Synchronous, ≤ 100 MB cap (`LAMASYNC_FOLDER_FILE_MAX_BYTES`); 409 for non-writable backends (sftp/restic) (LAMA-260) |
@@ -219,7 +219,7 @@ All paths are under `/api/v1/` unless noted.
 | GET      | `/browse/size`                             | Read the cached size of one folder-relative prefix (LAMA-321) |
 | GET      | `/browse/jobs`                             | Recent browse jobs (write ops + size)             |
 | GET      | `/stats/storage`                           | Storage report (5-min cache)                     |
-| GET      | `/stats/storage/history`                   | Per-backend size time series for the growth sparkline (LAMA-269) |
+| GET      | `/stats/storage/history`                   | Per-backend size time series for the growth sparkline (LAMA-269). Bounded: `?days=N` (default 90, max 3650) and `?granularity=day|raw` (default `day` = one point per backend per UTC day); invalid values are a 400 (LAMA-328) |
 | GET      | `/restic/snapshots`                        | List restic snapshots                            |
 | POST     | `/restic/snapshots`                        | Daemon reports a new snapshot                    |
 | GET      | `/restic/restore`                          | List restore jobs                                |
