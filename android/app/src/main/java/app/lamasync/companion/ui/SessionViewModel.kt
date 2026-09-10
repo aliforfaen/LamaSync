@@ -28,8 +28,32 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/** Top-level destinations. The QR payload travels only through the ViewModel. */
-enum class Screen { WELCOME, SCANNER, CONFIRM, PROGRESS, MANAGE, CONNECTION, UPLOADS, AUTO_PROTECT }
+/**
+ * Enrollment-flow and shell gate. The post-enrollment destinations are NOT
+ * listed here any more (LAMA-329): the Navigation Compose back stack owns the
+ * current destination, and [UiState.requestedDestination] carries the one-shot
+ * programmatic entry requests (share intake, upload receipts). Keeping the
+ * current destination in both places would be two sources of truth for the
+ * same fact.
+ *
+ * [MANAGE] therefore means "the managed shell is active", not "the WebView
+ * destination is selected".
+ */
+enum class Screen { WELCOME, SCANNER, CONFIRM, PROGRESS, MANAGE }
+
+/**
+ * Post-enrollment destinations (LAMA-329). Declared once so the nav graph, the
+ * top app bar's title/back contract and the programmatic entry points cannot
+ * drift apart.
+ */
+enum class Destination(val route: String, val title: String) {
+    MANAGE("manage", "LamaSync"),
+    UPLOADS("uploads", "Uploads"),
+    CAMERA_PROTECTION("camera-protection", "Camera protection"),
+    SETTINGS("settings", "Settings"),
+    CONNECTION("connection", "Connection"),
+    ABOUT("about", "About"),
+}
 
 /** One-shot user-facing message (shown as a snackbar). */
 data class UiMessage(val text: String, val isError: Boolean = false)
@@ -73,6 +97,13 @@ data class UiState(
     val webSessionConnected: Boolean = false,
     /** Target URL for the embedded web UI (stage 1: upload receipt browse). */
     val webNavUrl: String? = null,
+    /**
+     * One-shot request to open a post-enrollment destination (share intake,
+     * upload receipt). The shell consumes it on arrival and never re-asserts
+     * it, so a later user-initiated back navigation is never fought by a stale
+     * request. Same idiom as [webNavUrl].
+     */
+    val requestedDestination: Destination? = null,
     /**
      * True while a disconnect's local cleanup is still unconfirmed (R2). The
      * WELCOME screen shows the failure and a retry action; the origin(s)
@@ -141,6 +172,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 pendingEnrollment = pending,
                 credentialLost = registration != null && !snapshot.hasUsableNativeCredential,
                 webSessionConnected = snapshot.hasSessionCookie,
+                requestedDestination = null,
                 cleanupUnconfirmed = snapshot.cleanupPendingOrigins.isNotEmpty(),
                 cleanupOrigins = snapshot.cleanupPendingOrigins,
                 cleanupRemoteSucceeded = null, // remote outcome of an earlier launch is not retained
@@ -328,6 +360,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 candidate = null,
                 pendingResume = false,
                 pendingEnrollment = null,
+                requestedDestination = null,
                 busy = false,
                 progressLabel = null,
                 credentialLost = false,
@@ -387,29 +420,44 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun openConnectionPanel() {
-        _ui.update { it.copy(screen = Screen.CONNECTION, message = null) }
+        navigateTo(Destination.CONNECTION)
     }
 
-    fun closeConnectionPanel() {
-        _ui.update { it.copy(screen = Screen.MANAGE, message = null) }
-    }
-
-    /** Stage 1: the upload queue screen (native surface for manual uploads). */
+    /** Stage 1: the upload queue screen (native surface for manual uploads).
+     *  Also the share-intake entry point, which must work while UNPAIRED (R5)
+     *  — activating the shell is enough, because an unpaired shell starts on
+     *  the uploads destination and renders its onboarding block. */
     fun openUploads() {
-        _ui.update { it.copy(screen = Screen.UPLOADS, message = null) }
-    }
-
-    fun closeUploads() {
-        _ui.update { it.copy(screen = Screen.MANAGE, message = null) }
+        navigateTo(Destination.UPLOADS)
     }
 
     /** Stage 2: automatic camera-protection setup + status surface. */
     fun openAutoProtect() {
-        _ui.update { it.copy(screen = Screen.AUTO_PROTECT, message = null) }
+        navigateTo(Destination.CAMERA_PROTECTION)
     }
 
-    fun closeAutoProtect() {
-        _ui.update { it.copy(screen = Screen.MANAGE, message = null) }
+    fun openSettings() {
+        navigateTo(Destination.SETTINGS)
+    }
+
+    fun openAbout() {
+        navigateTo(Destination.ABOUT)
+    }
+
+    /**
+     * Activates the managed shell on [destination]. Deliberately does not move
+     * the back stack itself: the shell performs the navigation once, then calls
+     * [consumeDestination].
+     */
+    fun navigateTo(destination: Destination) {
+        _ui.update {
+            it.copy(screen = Screen.MANAGE, requestedDestination = destination, message = null)
+        }
+    }
+
+    /** Consumes a [UiState.requestedDestination] once the shell has honoured it. */
+    fun consumeDestination() {
+        _ui.update { it.copy(requestedDestination = null) }
     }
 
     /** Back/home target for surfaces reachable while UNPAIRED (share-intent
@@ -417,7 +465,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
      *  so an unpaired uploads surface must return to the renderable
      *  WELCOME screen instead (R5). */
     fun showWelcome() {
-        _ui.update { it.copy(screen = Screen.WELCOME, message = null) }
+        _ui.update {
+            it.copy(screen = Screen.WELCOME, requestedDestination = null, message = null)
+        }
     }
 
     /** Navigate the embedded web UI (receipts' open-in-web path). */
@@ -509,6 +559,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                     candidate = null,
                     pendingResume = false,
                     webSessionConnected = false,
+                    requestedDestination = null,
                     checkInOk = null,
                     lastCheckInLabel = null,
                     cleanupUnconfirmed = localIncomplete,

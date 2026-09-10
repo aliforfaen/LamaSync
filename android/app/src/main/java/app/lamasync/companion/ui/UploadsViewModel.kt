@@ -398,7 +398,20 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setUnmeteredOnly(value: Boolean) {
-        val policy = policyStore.load().copy(unmeteredOnly = value)
+        updatePolicy { it.copy(unmeteredOnly = value) }
+    }
+
+    /**
+     * LAMA-329 — the charging constraint was already enforced for manual
+     * uploads (UploadWorkScheduler sets `setRequiresCharging` from the stored
+     * policy) but had no way to be turned on. Settings owns the switch.
+     */
+    fun setChargingOnly(value: Boolean) {
+        updatePolicy { it.copy(chargingOnly = value) }
+    }
+
+    private fun updatePolicy(transform: (UploadPolicy) -> UploadPolicy) {
+        val policy = transform(policyStore.load())
         policyStore.save(policy)
         _ui.update { it.copy(policy = policy) }
         UploadWorkScheduler.rescheduleWithPolicy(

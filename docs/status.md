@@ -13,6 +13,43 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-329 (phases 1–2 of 8) — native shell foundations and information
+  architecture.** The Compose shell is now edge-to-edge, themed from the web
+  UI's own design tokens, and owns a real navigation back stack.
+  *Foundations:* `enableEdgeToEdge()`, backgrounds painted behind the system
+  bars with every target and row padded inside `WindowInsets.safeDrawing`
+  (system bars + cutout + IME), a light/dark Material 3 scheme derived token
+  for token from `packages/web-ui/src/index.css` (Material You colouring is an
+  explicit opt-in, off by default so the shell and the embedded SPA cannot
+  disagree about the brand), and a window background that follows the
+  *resolved* theme rather than the system one. *Shell:* the text-button strip
+  is replaced by a Material 3 top app bar carrying the host, a
+  connection-state dot **with a label** (never colour-only), a reload action, a
+  live reconnect action and an overflow menu (Uploads, Camera protection,
+  Settings, Open in browser). *Navigation:* `androidx.navigation` owns the
+  post-enrollment destinations (Manage, Uploads, Camera protection, Settings,
+  Connection, About) with a real back stack and predictive back
+  (`enableOnBackInvokedCallback`); the enrollment flow deliberately keeps its
+  existing ViewModel state machine, whose resume-from-EXCHANGED and
+  unconfirmed-cleanup invariants are unchanged. Android back walks WebView
+  history first and only then unwinds the back stack. *Settings:* a native
+  Settings screen (Appearance, Transfers, Camera protection, Notifications,
+  Browser experience, Connection, About, disconnect) in which every switch
+  writes through the store that already owned that fact — no second source of
+  truth — plus a browser-only `Appearance`/`Browser experience`
+  `ShellPreferencesStore`. Pull-to-refresh is implemented with
+  `SwipeRefreshLayout.setOnChildScrollUpCallback`, which is the only way to
+  honour "never fire while the page is scrolled away from top" around a
+  WebView. The embedded SPA receives a non-secret display-mode signal
+  (`?lamasyncShell=android`, consumed once into session state, presentation
+  only, never an authorization input). *Not yet implemented (phases 3–8):* the
+  mobile web navigation rewrite, the per-page responsive pass, the browser
+  `/settings` route, the vector adaptive icon and PWA/manifest asset exports,
+  the service worker, and the screenshot evidence set. PWA assets are agreed
+  to arrive as new server asset routes, because the SPA is served as one
+  inlined HTML string with no static-asset route today. See
+  [`android-mobile-ux-plan.md`](android-mobile-ux-plan.md).
+
 - **LAMA-324 — app backup storage destinations (server-relay).** Each
   application protection can select an s3/local/nfs backend destination
   (restic rejected); the server stages every daemon tarball outside browse
@@ -199,9 +236,17 @@ distributable binary build.
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
-5. **Android web-viewer refresh gesture.** Add pull-to-refresh to the
-   companion's embedded management WebView. This is a convenience follow-up,
-   not a blocker for automatic protection or managed-folder uploads.
+5. **LAMA-329 phases 3–8 — mobile web navigation, responsive pass, PWA and
+   asset/motion work.** Phase 3 derives the compact destinations from the
+   existing `GROUPS` source (bottom bar + More sheet below 600px, compact rail
+   600–899px); phase 4 is the per-page responsive pass; phase 5 is the
+   browser-only `/settings` route; phase 6 vectorises the launcher mark and
+   adds the adaptive/monochrome/PWA/notification exports plus
+   reduced-motion-gated llama motion; phase 7 is the manifest, theme colours,
+   install affordance, safe areas and an asset-only service worker, delivered
+   through new server asset routes; phase 8 is the screenshot evidence set at
+   360x800, 412x915, 600x960, 768x1024 and desktop. Phases 1–2 (native shell
+   foundations and information architecture) shipped in this worktree.
 
 ## Known limitations
 
@@ -228,10 +273,28 @@ distributable binary build.
   the fleet today; qualify their archive tooling before onboarding either
   platform for application capture.
 - Application restore is inspect/download-only until the setup executor lands.
+- Navigating away from the Android companion's management surface (to Uploads,
+  Camera protection, Settings or Connection) disposes the WebView, so returning
+  to it reloads the page. This is the pre-existing behaviour — the WebView was
+  always owned by a composable branch — and the 12-hour cookie session survives
+  in the app-wide cookie jar, so there is no re-login; the visible cost is a
+  load. Preserving the live page across native navigation needs the WebView to
+  live outside the nav graph and is deferred with LAMA-329 phases 3–8.
 - The web UI emits a production bundle warning at roughly 727 kB minified.
   Code splitting is maintenance work, not a release blocker.
 
 ## Recent verification baseline
+
+LAMA-329 phases 1–2 baseline (this worktree): repo gates green
+(`bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` — **1457 pass / 0
+fail**, strict skill drift OK), Android `assembleDebug` + `lintDebug` 0 errors
+with no new warnings, `testDebugUnitTest` **208/208** (20 of them added for
+this change, including a guard that fails if the Compose palette drifts from
+the web design tokens), and the full instrumented suite — **63/63 on the API 35
+`lamadb-test` AVD** (10 added here; the four HTTPS-vertical tests skip cleanly
+without a live server). The emulator run was driven with `adb -s`, never AGP
+device selection, because two of the new instrumented classes clear device
+credentials and must not run against a paired phone.
 
 After the LAMA-324/325 review pass: `bun x tsc --noEmit`,
 `bun run build:web-ui`, `bun test` (1447 pass), strict skill drift, and the

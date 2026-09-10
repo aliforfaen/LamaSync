@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- LamaSync launcher/adaptive-icon background. -->
     <color name="ic_launcher_background">#14302B</color>
+
+    <!-- LAMA-329 — the "canvas" surface token, mirrored from
+         packages/web-ui/src/index.css. Only used as the pre-first-frame window
+         background; MainActivity re-applies the exact value once the app's own
+         appearance preference is known (see the SideEffect there), so a user
+         who overrides the system theme does not see a wrong-coloured frame. -->
+    <color name="lamasync_canvas">#F2EEE5</color>
+    <color name="lamasync_canvas_dark">#121310</color>
 </resources>

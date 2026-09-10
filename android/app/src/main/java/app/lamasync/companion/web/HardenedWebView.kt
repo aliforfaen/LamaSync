@@ -34,6 +34,13 @@ object HardenedWebView {
         fun onBlockedNavigation(url: String)
         fun onBlockedSsl(url: String)
         fun onPageTitle(title: String?)
+
+        /**
+         * Page/history state the hosting shell needs: whether back can walk the
+         * WebView's own history, and whether a load is in flight. Fired from
+         * `onPageStarted`, `onPageFinished` and `doUpdateVisitedHistory`.
+         */
+        fun onWebStateChanged(canGoBack: Boolean, loading: Boolean)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -76,6 +83,21 @@ object HardenedWebView {
         }
 
         webView.webViewClient = object : WebViewClient() {
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                listener.onWebStateChanged(view?.canGoBack() == true, loading = true)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                listener.onWebStateChanged(view?.canGoBack() == true, loading = false)
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                listener.onWebStateChanged(view?.canGoBack() == true, loading = false)
+            }
 
             override fun shouldOverrideUrlLoading(
                 view: WebView?,

@@ -1,41 +1,43 @@
 package app.lamasync.companion.ui
 
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.core.graphics.drawable.toDrawable
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import app.lamasync.companion.BuildConfig
+import app.lamasync.companion.ui.theme.LamaSyncPalette
 import app.lamasync.companion.ui.theme.LamaSyncTheme
+import app.lamasync.companion.ui.theme.isLamaSyncDark
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: SessionViewModel by viewModels()
     private val uploadsViewModel: UploadsViewModel by viewModels()
     private val autoProtectViewModel: AutoProtectViewModel by viewModels()
+    private val shellViewModel: ShellPreferencesViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        viewModel.initialize()
-        uploadsViewModel.initialize()
-        autoProtectViewModel.initialize()
+        initializeViewModels()
+
+        // LAMA-329: Android 15 (target SDK 35) enforces edge-to-edge. Opting in
+        // explicitly keeps the behaviour identical on older releases, and lets
+        // the framework pick the right system-bar icon appearance for the
+        // resolved theme instead of forcing it per API level.
+        enableEdgeToEdge()
 
         // Launch/resume check-in only (spec: no background service).
         lifecycle.addObserver(
@@ -58,23 +60,23 @@ class MainActivity : ComponentActivity() {
         )
 
         setContent {
-            LamaSyncTheme {
-                val uiState by viewModel.ui.collectAsStateWithLifecycle()
-                val uploadsState by uploadsViewModel.ui.collectAsStateWithLifecycle()
-                val snackbarHostState = SnackbarHostState()
+            val preferences by shellViewModel.preferences.collectAsStateWithLifecycle()
+            val dark = isLamaSyncDark(preferences)
 
-                LaunchedEffect(uiState.message, uploadsState.message) {
-                    uiState.message?.let {
-                        snackbarHostState.showSnackbar(it.text)
-                        viewModel.dismissMessage()
-                    }
-                    uploadsState.message?.let {
-                        snackbarHostState.showSnackbar(it)
-                        uploadsViewModel.dismissMessage()
-                    }
-                }
+            // The window background and the system-bar icon appearance must
+            // match the RESOLVED theme, not the system's: a user who chose
+            // "Always dark" on a light phone would otherwise get dark-on-dark
+            // status-bar icons and one frame of the wrong canvas on cold start.
+            SideEffect {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT) { dark },
+                    navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT) { dark },
+                )
+                val canvas = if (dark) LamaSyncPalette.Dark.canvas else LamaSyncPalette.Light.canvas
+                window.setBackgroundDrawable(canvas.toArgb().toDrawable())
+            }
 
-                // LAMA-296 stage 1: document selection (ACTION_OPEN_DOCUMENT).
+            LamaSyncTheme(preferences = preferences) {
                 val pickLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.StartActivityForResult(),
                 ) { result ->
@@ -100,94 +102,13 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
-                    Box(Modifier.fillMaxSize().padding(padding)) {
-                        when (uiState.screen) {
-                            Screen.WELCOME -> WelcomeScreen(
-                                state = uiState,
-                                onScan = viewModel::onLaunchFromWelcome,
-                                onReset = viewModel::disconnect,
-                                onResumePending = viewModel::resumePendingEnrollment,
-                                onRetryCleanup = viewModel::retryCleanup,
-                            )
-                            Screen.SCANNER -> ScannerScreen(
-                                onQrScanned = viewModel::onQrScanned,
-                                onBack = viewModel::onScannerBack,
-                            )
-                            Screen.CONFIRM -> ConfirmScreen(
-                                state = uiState,
-                                onConfirm = viewModel::confirmEnrollment,
-                                onBack = viewModel::onConfirmBack,
-                                onRetry = viewModel::retryEnrollment,
-                            )
-                            Screen.PROGRESS -> {
-                                BackHandler { /* enrollment in progress */ }
-                                ProgressScreen(uiState.progressLabel ?: "Enrolling…")
-                            }
-                            Screen.MANAGE -> {
-                                val registration = uiState.registration
-                                if (registration != null) {
-                                    ManagementScreen(
-                                        registration = registration,
-                                        webSessionConnected = uiState.webSessionConnected,
-                                        navUrl = uiState.webNavUrl,
-                                        onNavUrlConsumed = viewModel::consumeNavUrl,
-                                        onOpenConnection = viewModel::openConnectionPanel,
-                                        onReconnect = viewModel::reconnectWebSession,
-                                        onOpenUploads = viewModel::openUploads,
-                                        onOpenAutoProtect = viewModel::openAutoProtect,
-                                    )
-                                }
-                            }
-                            Screen.CONNECTION -> {
-                                val registration = uiState.registration
-                                if (registration != null) {
-                                    ConnectionScreen(
-                                        registration = registration,
-                                        appVersion = BuildConfig.VERSION_NAME,
-                                        lastCheckInLabel = uiState.lastCheckInLabel,
-                                        checkInOk = uiState.checkInOk,
-                                        busy = uiState.busy,
-                                        onBack = viewModel::closeConnectionPanel,
-                                        onReconnect = viewModel::reconnectWebSession,
-                                        onDisconnect = viewModel::disconnect,
-                                    )
-                                }
-                            }
-                            Screen.AUTO_PROTECT -> {
-                                AutoProtectScreen(
-                                    viewModel = autoProtectViewModel,
-                                    onBack = viewModel::closeAutoProtect,
-                                )
-                            }
-                            Screen.UPLOADS -> {
-                                val registration = uiState.registration
-                                // R5: mount the uploads surface even when
-                                // unpaired (a share intent landed while the
-                                // device is not paired / credential-lost) —
-                                // it renders an onboarding/error block instead
-                                // of an empty screen.
-                                UploadsScreen(
-                                    viewModel = uploadsViewModel,
-                                    pairedRegistration = registration,
-                                    onBack = {
-                                        if (registration != null) {
-                                            viewModel.closeUploads()
-                                        } else {
-                                            viewModel.showWelcome()
-                                        }
-                                    },
-                                    onPairNow = viewModel::onLaunchFromWelcome,
-                                    onOpenUrl = { url ->
-                                        viewModel.navigateWebTo(url)
-                                        viewModel.closeUploads()
-                                    },
-                                    onOpenDocumentPicker = openDocumentPicker,
-                                )
-                            }
-                        }
-                    }
-                }
+                LamaSyncApp(
+                    sessionViewModel = viewModel,
+                    uploadsViewModel = uploadsViewModel,
+                    autoProtectViewModel = autoProtectViewModel,
+                    shellViewModel = shellViewModel,
+                    openDocumentPicker = openDocumentPicker,
+                )
             }
         }
 
@@ -199,6 +120,13 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShareIntent(intent)
+    }
+
+    private fun initializeViewModels() {
+        viewModel.initialize()
+        uploadsViewModel.initialize()
+        autoProtectViewModel.initialize()
+        shellViewModel.initialize()
     }
 
     /**
@@ -213,8 +141,7 @@ class MainActivity : ComponentActivity() {
         if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
         val uris = shareUrisOf(intent)
         if (uris.isEmpty()) return
-        viewModel.initialize()
-        uploadsViewModel.initialize()
+        initializeViewModels()
         uploadsViewModel.acceptShare(uris, intent.flags)
         // Surface the queue (and any intake failure) immediately — whether or
         // not the device is paired yet (unpaired intake fails explicitly in

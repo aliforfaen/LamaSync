@@ -1,10 +1,67 @@
 # LamaSync Android + mobile web UX plan
 
-Status: design/research handoff for Luna. The approved courier identity,
-theme-specific web-header marks, and Android launcher foreground are already
-integrated in the `android-stage-2` worktree; the broader UX implementation has
-not started.
+Status: phases 1–2 implemented; phases 3–8 (mobile web navigation, responsive
+pass, browser `/settings`, brand/motion assets, PWA, screenshot evidence) remain
+to implement.
 Date: 2026-09-10
+
+## Implementation status (updated on completion of phases 1–2)
+
+Shipped, in the `android-stage-2` worktree:
+
+- **Phase 1 — foundations.** `enableEdgeToEdge()`; backgrounds extend behind the
+  system bars while every target and row stays inside `WindowInsets.safeDrawing`;
+  a light/dark Material 3 scheme derived token-for-token from
+  `packages/web-ui/src/index.css` (see `ui/theme/Palette.kt`, guarded by
+  `PaletteMirrorsWebTokensTest`); Material You colouring as an explicit opt-in,
+  off by default; the window background follows the *resolved* theme. The
+  text-button strip became a Material 3 top app bar with the host, a
+  connection-state dot **and label**, reload, a live reconnect action and the
+  overflow menu. Android back walks WebView history first, then unwinds the
+  back stack, with predictive back enabled via
+  `android:enableOnBackInvokedCallback`.
+- **Phase 1 — display-mode signal.** The companion appends
+  `?lamasyncShell=android` to the initial document URL
+  (`web/WebShellSignal.kt`); `packages/web-ui/src/shell.ts` consumes it once
+  into `sessionStorage` and mirrors it onto `<html data-shell>`. It is
+  presentation-only and is never read by an authorization path.
+- **Phase 2 — native information architecture.** `androidx.navigation` owns
+  Manage, Uploads, Camera protection, Settings, Connection and About with a real
+  back stack. The enrollment flow keeps its existing `SessionViewModel` state
+  machine on purpose: its resume-from-EXCHANGED and unconfirmed-cleanup
+  invariants are load-bearing and are not re-expressed as navigation.
+- **Phase 2 — Settings.** Appearance, Transfers, Camera protection,
+  Notifications, Browser experience, Connection, About and the destructive
+  disconnect. Every switch writes through the store that already owned that
+  fact.
+- Pull-to-refresh, which the plan listed under the native shell, is implemented
+  with `SwipeRefreshLayout.setOnChildScrollUpCallback` — Compose's
+  `Modifier.pullToRefresh` is nested-scroll driven and an `AndroidView` host
+  dispatches no nested scroll, so it cannot express the "never fire while the
+  page is scrolled away from top" gate around a WebView.
+
+Decisions taken during implementation that change the written plan:
+
+1. **Transfers is labelled "manual uploads".** The app has two independent
+   transfer policies — `UploadPolicyStore` for manual uploads and
+   `AutoProtectSettings.unmeteredOnly`/`chargingOnly` for automatic camera
+   protection. One unlabelled pair of switches would claim a device-wide policy
+   the app does not have, so the group is labelled and the camera policy keeps
+   its own controls on the Camera protection screen, which the group links to.
+   Unifying the two stores is a separate, behaviour-changing decision.
+2. **Notifications has no stored preference.** The only real state is the
+   platform's, so the row reports it and opens the system page that owns it
+   rather than adding a setting that could drift.
+3. **`windowLayoutInDisplayCutoutMode` is not set.** It needs API 27, and the
+   night and version resource qualifiers do not combine as one would hope
+   (night mode outranks the version qualifier, so `values-v27` alone is lost in
+   dark mode). Content is kept clear of cutouts by `safeDrawing` padding, which
+   is the actual requirement.
+4. **PWA assets will arrive as server asset routes.** The SPA is built by
+   `scripts/inline-web-ui.ts` into a single `index.html` served from `GET /`,
+   with no static-asset route, so a manifest, its 192/512 icons and a service
+   worker cannot be files today. The agreed approach is new server routes
+   serving assets embedded in the binary.
 
 ## Outcome
 

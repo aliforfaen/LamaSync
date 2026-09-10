@@ -53,7 +53,6 @@ import java.util.Date
 @Composable
 fun AutoProtectScreen(
     viewModel: AutoProtectViewModel,
-    onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val state by viewModel.ui.collectAsStateWithLifecycle()
@@ -87,25 +86,12 @@ fun AutoProtectScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column {
-                Text(
-                    "Automatic protection",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    "Camera media back up automatically when conditions allow.",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            TextButton(onClick = onBack) { Text("Back") }
-        }
+        // LAMA-329: the title and the back affordance moved to the app bar.
+        Text(
+            "Camera media back up automatically when conditions allow.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         // Request the runtime permissions in ONE dialog, limited to what the
         // enabled sources need (P0-3: request only required permissions).

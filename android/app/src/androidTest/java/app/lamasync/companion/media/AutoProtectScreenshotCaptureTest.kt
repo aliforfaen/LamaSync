@@ -48,7 +48,7 @@ class AutoProtectScreenshotCaptureTest {
         viewModel.initialize()
         composeRule.setContent {
             LamaSyncTheme {
-                AutoProtectScreen(viewModel = viewModel, onBack = {})
+                AutoProtectScreen(viewModel = viewModel)
             }
         }
         composeRule.waitForIdle()
