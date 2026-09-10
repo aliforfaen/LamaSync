@@ -1,8 +1,15 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Link, useLocation } from "react-router-dom";
-import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
+import type {
+  Backend,
+  Folder,
+  FolderAssignment,
+  FolderAssignmentSummary,
+  FolderBackend,
+  Host,
+} from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
@@ -16,15 +23,21 @@ import { ConfirmDialog } from "../components/Modal.tsx";
 import { RetentionPanel } from "../components/RetentionPanel.tsx";
 import { showVerifiedBadge } from "../backup-health.ts";
 import { formatTimeAgo } from "../relative-time.ts";
+// LAMA-328: size-cell formatting + freshness rules live in a pure, tested module.
+import { sizeSuffix, sizeTitle, toSizeCell, type SizeCell } from "../folder-size.ts";
 import {
   BACKEND_KIND_HINTS,
   FOLDER_TYPE_HINTS,
   ROLE_HINTS,
 } from "../concepts.ts";
 
-interface FolderWithAssignments {
+interface FolderListItem {
   folder: Folder;
-  assignments: FolderAssignment[];
+  // LAMA-328 review: the list carries secret-free summaries — no
+  // resticPassword. The editor gets a full row contract through PATCH
+  // round-trips; a summary is assignable to it (the omitted field is
+  // optional and never read here).
+  assignments: FolderAssignmentSummary[];
 }
 
 // LAMA-297: a group of folders in the grouped list (Shared / per-host /
@@ -33,7 +46,7 @@ interface FolderGroup {
   key: string;
   label: string;
   subtitle?: string;
-  items: FolderWithAssignments[];
+  items: FolderListItem[];
 }
 
 type FolderType = "sync" | "mount" | "backup" | "dotfile" | "git";
@@ -89,21 +102,6 @@ function isFolderType(value: string): value is FolderType {
 
 function isFolderBackend(value: string): value is FolderBackend {
   return FOLDER_BACKENDS.includes(value as FolderBackend);
-}
-
-/** Human-readable byte count for the Size column (LAMA-224). */
-function formatBytes(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "n/a";
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KiB", "MiB", "GiB", "TiB", "PiB"];
-  let value = bytes;
-  let unit = "B";
-  for (const u of units) {
-    if (value < 1024) break;
-    value /= 1024;
-    unit = u;
-  }
-  return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
 function folderToForm(folder: Folder): FolderForm {
@@ -186,11 +184,13 @@ function folderVerification(folder: Folder, backends: Backend[]): { label: strin
 export function Folders() {
   const location = useLocation();
   const backupMode = location.pathname === "/backups";
-  const [items, setItems] = useState<FolderWithAssignments[] | null>(null);
+  const [items, setItems] = useState<FolderListItem[] | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [backends, setBackends] = useState<Backend[]>([]);
-  // LAMA-224: last-known working-set size per folder (server-cached 15 min).
-  const [sizes, setSizes] = useState<Record<string, { text: string; error?: boolean }>>({});
+  // LAMA-224: last-known working-set size per folder. LAMA-328: one bulk read
+  // (never a per-folder request) that never waits on remote rclone work.
+  const [sizes, setSizes] = useState<Record<string, SizeCell>>({});
+  const [sizesBusy, setSizesBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<FolderForm>(DEFAULT_FORM);
@@ -233,38 +233,62 @@ export function Folders() {
         api.listHosts(),
         api.listBackends().catch(() => [] as Backend[]),
       ]);
-      const withAssignments = await Promise.all(
-        folders.map(async (folder) => ({
-          folder,
-          assignments: await api.listAssignments(folder.id),
-        })),
-      );
-      setItems(withAssignments);
+      // LAMA-328: assignments ride along with the folder list, so the page no
+      // longer issues one request per folder just to render a row.
+      setItems(folders.map((folder) => ({ folder, assignments: folder.assignments })));
       setHosts(hostList);
       setBackends(backendList);
-      // LAMA-224 P1-7: per-folder sizes are sequential, not parallel —
-      // a fleet with many S3 folders used to spawn N concurrent rclone
-      // processes against the same bucket. Individual failures (or the
-      // non-S3 'not measurable server-side' response) show "n/a".
-      for (const folder of folders) {
-        try {
-          const size = await api.folderSize(folder.id);
-          setSizes((prev) => ({
-            ...prev,
-            [folder.id]: {
-              text: formatBytes(size.bytes),
-              error: Boolean(size.error),
-            },
-          }));
-        } catch {
-          setSizes((prev) => ({
-            ...prev,
-            [folder.id]: { text: "n/a", error: true },
-          }));
-        }
-      }
+      await loadSizes();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * LAMA-328: one bulk size read for every folder. The server never measures on
+   * this request, so rows render immediately: cold folders come back as
+   * "measuring…" while a bounded background refresh does the rclone work.
+   * `refresh` is the explicit "Refresh sizes" action.
+   */
+  async function loadSizes(refresh = false) {
+    try {
+      const bulk = await api.folderSizes(refresh);
+      setSizes((prev) => {
+        const next: Record<string, SizeCell> = {};
+        for (const [folderId, size] of Object.entries(bulk)) next[folderId] = toSizeCell(size);
+        return Object.keys(next).length === 0 ? prev : next;
+      });
+    } catch {
+      // Sizes are auxiliary: a failed read leaves the rows (and the page)
+      // intact instead of surfacing an error the user cannot act on.
+    }
+  }
+
+  // LAMA-328: while measurements are in flight, look again a few times so
+  // background refreshes land without a manual reload. Bounded (12 × 5s) so a
+  // permanently unreachable backend cannot turn this into a polling loop.
+  const sizePollRef = useRef(0);
+  useEffect(() => {
+    const pending = Object.values(sizes).some((s) => s.refreshing === true);
+    if (!pending) {
+      sizePollRef.current = 0;
+      return;
+    }
+    if (sizePollRef.current >= 12) return;
+    const timer = setTimeout(() => {
+      sizePollRef.current += 1;
+      void loadSizes();
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [sizes]);
+
+  async function refreshSizes() {
+    setSizesBusy(true);
+    try {
+      sizePollRef.current = 0;
+      await loadSizes(true);
+    } finally {
+      setSizesBusy(false);
     }
   }
 
@@ -284,9 +308,9 @@ export function Folders() {
   // single host section (assigned to only that host), under "Shared"
   // (assigned to more than one host), or under "Not set up" (no device).
   const groups = (() => {
-    const shared: FolderWithAssignments[] = [];
-    const unassigned: FolderWithAssignments[] = [];
-    const perHost = new Map<string, FolderWithAssignments[]>();
+    const shared: FolderListItem[] = [];
+    const unassigned: FolderListItem[] = [];
+    const perHost = new Map<string, FolderListItem[]>();
     for (const item of filteredItems) {
       const uniqueHosts = [...new Set(item.assignments.map((a) => a.hostId))];
       if (uniqueHosts.length === 0) {
@@ -419,7 +443,7 @@ export function Folders() {
     }
   }
 
-  function beginAssign(folder: Folder, assignments: FolderAssignment[]) {
+  function beginAssign(folder: Folder, assignments: FolderAssignmentSummary[]) {
     setShowForm(false);
     setEditingId(null);
     setEditingAssignment(null);
@@ -919,6 +943,15 @@ export function Folders() {
         </label>
         <button
           type="button"
+          className="action"
+          disabled={sizesBusy}
+          title="Ask the server to re-measure folder sizes in the background"
+          onClick={() => void refreshSizes()}
+        >
+          {sizesBusy ? "Refreshing…" : "Refresh sizes"}
+        </button>
+        <button
+          type="button"
           className="action primary"
           onClick={openNewFolder}
         >
@@ -1045,8 +1078,11 @@ export function Folders() {
                 </td>
                 <td className="muted">
                   {size ? (
-                    <span title={size.error ? "size unavailable (unreachable backend)" : undefined}>
+                    <span title={sizeTitle(size)}>
                       {size.text}
+                      {sizeSuffix(size) !== null ? (
+                        <span className="size-stale"> · {sizeSuffix(size)}</span>
+                      ) : null}
                     </span>
                   ) : (
                     "…"

@@ -3,6 +3,7 @@ import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { OperationSentenceView } from "../components/OperationSentence.tsx";
 import { InlineError } from "../components/InlineError.tsx";
+import { RunningNowPanel } from "../components/RunningNowPanel.tsx";
 import { useSearchParams } from "react-router-dom";
 import type { Backend, Folder, Host, LockInfo, OperationLog, OperationStatus } from "@lamasync/core";
 import { api } from "../api.ts";
@@ -199,6 +200,9 @@ export function Operations() {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
+
+      {/* LAMA-327: live non-terminal rclone sync phases — hydration + WS. */}
+      <RunningNowPanel />
 
       <section className="section">
         <h2>Active locks</h2>

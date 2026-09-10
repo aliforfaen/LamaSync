@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Elysia } from "elysia";
 import { Database } from "bun:sqlite";
 import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
+import type { CaptureSpecPath } from "@lamasync/core";
 
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "apps-test-key";
 process.env.LAMASYNC_BACKUP_DIR = process.env.LAMASYNC_BACKUP_DIR ?? "/tmp/lamasync-apps-test";
@@ -167,11 +168,29 @@ describe("apps enroll (LAMA-316)", () => {
     const prot = (await enroll.json()) as {
       id: string;
       templateRevision: number;
-      captureSpec: { paths: { linux: { path: string; classification: string; rationale: string | null }[] } };
+      captureSpec: {
+        paths: {
+          linux: {
+            path: string;
+            classification: string;
+            rationale: string | null;
+            classificationSource: string;
+            confidence: number | null;
+          }[];
+        };
+      };
     };
     expect(prot.templateRevision).toBe(1);
+    // LAMA-315: normalizeCaptureSpec stamps the untouched `default` provenance
+    // so the template row (and therefore the enrolled copy) is self-describing.
     expect(prot.captureSpec.paths.linux).toEqual([
-      { path: "~/.config/nvim", classification: "unknown", rationale: null },
+      {
+        path: "~/.config/nvim",
+        classification: "unknown",
+        rationale: null,
+        classificationSource: "default",
+        confidence: null,
+      },
     ]);
 
     // Template update bumps revision but the protection must not change.
@@ -732,5 +751,386 @@ describe("apps upload bounding + destination hardening (LAMA-324 review)", () =>
       )
       .get(prot.id);
     expect(row?.backend_id).toBeNull();
+  });
+});
+
+describe("LAMA-315 — classification annotations round-trip and validation", () => {
+  function pathOf(body: Record<string, unknown>): Record<string, unknown> {
+    return {
+      paths: body.paths,
+      excludes: [],
+      notes: null,
+    };
+  }
+
+  test("create/get/update round-trip classificationSource + confidence", async () => {
+    const res = await postJson("/api/v1/apps/templates", {
+      name: "classified",
+      origin: "custom",
+      paths: {
+        paths: {
+          linux: [
+            {
+              path: "~/.cache",
+              classification: "cache",
+              classificationSource: "suggested",
+              confidence: 0.9,
+              rationale: "Detected as cache: well-known cache directory `~/.cache`.",
+            },
+          ],
+          macos: [],
+          windows: [],
+        },
+        excludes: [],
+        notes: "pending recommendation kept",
+      },
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as {
+      id: string;
+      paths: { paths: { linux: CaptureSpecPath[] } };
+    };
+    expect(created.paths.paths.linux[0]).toEqual({
+      path: "~/.cache",
+      classification: "cache",
+      rationale: "Detected as cache: well-known cache directory `~/.cache`.",
+      classificationSource: "suggested",
+      confidence: 0.9,
+    });
+
+    const got = await app.handle(
+      new Request(`http://localhost/api/v1/apps/templates/${created.id}`, { headers: authHeaders() }),
+    );
+    const read = (await got.json()) as { paths: { paths: { linux: CaptureSpecPath[] } } };
+    expect(read.paths.paths.linux[0].classificationSource).toBe("suggested");
+    expect(read.paths.paths.linux[0].confidence).toBe(0.9);
+
+    // Operator confirms: manual drops confidence, keeps rationale.
+    const upd = await putJson(`/api/v1/apps/templates/${created.id}`, {
+      paths: {
+        paths: {
+          linux: [
+            {
+              path: "~/.cache",
+              classification: "cache",
+              classificationSource: "manual",
+              rationale: "operator confirmed",
+            },
+          ],
+          macos: [],
+          windows: [],
+        },
+        excludes: [],
+        notes: null,
+      },
+    });
+    expect(upd.status).toBe(200);
+    const updated = (await upd.json()) as { paths: { paths: { linux: CaptureSpecPath[] } } };
+    expect(updated.paths.paths.linux[0]).toEqual({
+      path: "~/.cache",
+      classification: "cache",
+      rationale: "operator confirmed",
+      classificationSource: "manual",
+      confidence: null,
+    });
+  });
+
+  test("legacy string[] template normalizes to unknown/default", async () => {
+    const res = await postJson("/api/v1/apps/templates", {
+      name: "legacy-raw",
+      paths: ["~/.config/nvim", "~/.zshrc"],
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { id: string; paths: { paths: { linux: CaptureSpecPath[]; macos: CaptureSpecPath[]; windows: CaptureSpecPath[] } } };
+    const linux = created.paths.paths.linux ?? [];
+    expect(linux).toHaveLength(2);
+    for (const entry of linux) {
+      expect(entry.classification).toBe("unknown");
+      expect(entry.classificationSource).toBe("default");
+      expect(entry.confidence).toBeNull();
+    }
+    expect(created.paths.paths.macos).toEqual([]);
+    expect(created.paths.paths.windows).toEqual([]);
+  });
+
+  test("rejects invalid provenance: bad source, out-of-range/mismatched confidence", async () => {
+    const cases: Array<{ name: string; entry: Record<string, unknown> }> = [
+      { name: "unknown-source", entry: { path: "~/.cache", classification: "cache", classificationSource: "auto" } },
+      { name: "confidence-too-high", entry: { path: "~/.cache", classification: "cache", classificationSource: "suggested", confidence: 1.5 } },
+      { name: "confidence-negative", entry: { path: "~/.cache", classification: "cache", classificationSource: "suggested", confidence: -0.1 } },
+      { name: "suggested-without-confidence", entry: { path: "~/.cache", classification: "cache", classificationSource: "suggested" } },
+      { name: "confidence-with-manual", entry: { path: "~/.cache", classification: "cache", classificationSource: "manual", confidence: 0.9 } },
+      { name: "confidence-with-default", entry: { path: "~/.cache", classification: "cache", classificationSource: "default", confidence: 0.9 } },
+      { name: "confidence-string", entry: { path: "~/.cache", classification: "cache", classificationSource: "suggested", confidence: "0.9" } },
+      // Explicit `default` provenance must agree with the untouched `unknown`
+      // class — default + a stored class claims a confirmation it never had.
+      { name: "default-with-nonunknown-cache", entry: { path: "~/.cache", classification: "cache", classificationSource: "default" } },
+      { name: "default-with-nonunknown-portable", entry: { path: "~/.config/nvim", classification: "portable_config", classificationSource: "default" } },
+    ];
+    for (const c of cases) {
+      const res = await postJson("/api/v1/apps/templates", {
+        name: `bad-${c.name}`,
+        paths: pathOf({ paths: { linux: [c.entry], macos: [], windows: [] } }),
+      });
+      expect(res.status, c.name).toBe(400);
+    }
+    // Unknown classification is still rejected (existing rule).
+    const badClass = await postJson("/api/v1/apps/templates", {
+      name: "bad-class",
+      paths: pathOf({ paths: { linux: [{ path: "~/.cache", classification: "mystery", classificationSource: "manual" }], macos: [], windows: [] } }),
+    });
+    expect(badClass.status).toBe(400);
+  });
+
+  test("legacy object entries without provenance normalize to unknown/default", async () => {
+    // Migration contract (handoff §Migration rule 2): an object entry that
+    // carries no classificationSource/confidence is a legacy row — its stored
+    // class (and the rationale for it) is never reinterpreted as a
+    // confirmation; it saves as the untouched unknown/default shape.
+    const res = await postJson("/api/v1/apps/templates", {
+      name: "legacy-objects",
+      paths: pathOf({
+        paths: {
+          linux: [
+            { path: "~/.config/nvim", classification: "portable_config", rationale: "stale class" },
+            { path: "~/.cache", classification: "unknown", rationale: "stale rationale" },
+          ],
+          macos: [],
+          windows: [],
+        },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { paths: { paths: { linux: CaptureSpecPath[] } } };
+    expect(created.paths.paths.linux).toEqual([
+      { path: "~/.config/nvim", classification: "unknown", rationale: null, classificationSource: "default", confidence: null },
+      { path: "~/.cache", classification: "unknown", rationale: null, classificationSource: "default", confidence: null },
+    ]);
+  });
+
+  test("suggested/manual with an unknown class stay accepted (no invented pairing)", async () => {
+    // The handoff pins only default↔unknown and confidence pairing rules;
+    // suggested/manual may carry any valid class, so these round-trip.
+    const res = await postJson("/api/v1/apps/templates", {
+      name: "permissive-pairings",
+      paths: pathOf({
+        paths: {
+          linux: [
+            { path: "~/.cache", classification: "unknown", classificationSource: "suggested", confidence: 0.9, rationale: "pending" },
+            { path: "~/.config/nvim", classification: "unknown", classificationSource: "manual", rationale: "confirmed anyway" },
+          ],
+          macos: [],
+          windows: [],
+        },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { paths: { paths: { linux: CaptureSpecPath[] } } };
+    expect(created.paths.paths.linux).toEqual([
+      { path: "~/.cache", classification: "unknown", rationale: "pending", classificationSource: "suggested", confidence: 0.9 },
+      { path: "~/.config/nvim", classification: "unknown", rationale: "confirmed anyway", classificationSource: "manual", confidence: null },
+    ]);
+  });
+
+  test("enrollment and snapshot freeze carry the annotations", async () => {
+    const res = await postJson("/api/v1/apps/templates", {
+      name: "annotated",
+      origin: "custom",
+      paths: {
+        paths: {
+          linux: [
+            { path: "~/.config/nvim", classification: "portable_config", classificationSource: "manual", rationale: "confirmed" },
+            { path: "~/.cache", classification: "cache", classificationSource: "suggested", confidence: 0.9, rationale: "suggested cache" },
+          ],
+          macos: [],
+          windows: [],
+        },
+        excludes: [],
+        notes: null,
+      },
+    });
+    expect(res.status).toBe(201);
+    const template = (await res.json()) as { id: string };
+
+    const enroll = await postJson("/api/v1/apps/protections", { templateId: template.id, hostId: "host-a" });
+    expect(enroll.status).toBe(201);
+    const prot = (await enroll.json()) as { id: string; captureSpec: { paths: { linux: CaptureSpecPath[] } } };
+    const frozen = prot.captureSpec.paths.linux;
+    expect(frozen.find((p) => p.path === "~/.config/nvim")).toMatchObject({
+      classification: "portable_config",
+      classificationSource: "manual",
+    });
+    expect(frozen.find((p) => p.path === "~/.cache")).toMatchObject({
+      classification: "cache",
+      classificationSource: "suggested",
+      confidence: 0.9,
+    });
+
+    const file = new File(["annotated-snapshot"], "snap.tar.gz", { type: "application/gzip" });
+    const form = new FormData();
+    form.append("tarball", file, "snap.tar.gz");
+    const upload = await app.handle(
+      new Request(`http://localhost/api/v1/apps/protections/${prot.id}/snapshots`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: form,
+      }),
+    );
+    expect(upload.status).toBe(201);
+    const snap = (await upload.json()) as {
+      capturedSpec: { paths: { linux: CaptureSpecPath[] } };
+    };
+    // Snapshot captured_spec freezes the annotations + archive mapping.
+    const captured = snap.capturedSpec.paths.linux;
+    expect(captured.find((p) => p.path === "~/.config/nvim")).toMatchObject({
+      classification: "portable_config",
+      classificationSource: "manual",
+      archivePath: "home/.config/nvim",
+    });
+    expect(captured.find((p) => p.path === "~/.cache")).toMatchObject({
+      classification: "cache",
+      classificationSource: "suggested",
+      confidence: 0.9,
+      archivePath: "home/.cache",
+    });
+  });
+
+  test("snapshot captured_spec normalizes legacy protection specs to default", async () => {
+    // A protection whose frozen capture_spec predates LAMA-315 (no source /
+    // confidence fields, inserted directly into the DB) freezes a snapshot
+    // with the untouched `default` provenance — history is not reinterpreted.
+    templateId = await createTemplate();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    const prot = (await enroll.json()) as { id: string };
+    db.run(
+      `UPDATE application_protections SET capture_spec = ? WHERE id = ?`,
+      [
+        JSON.stringify({
+          paths: { linux: [{ path: "~/.config/nvim", classification: "unknown", rationale: null }], macos: [], windows: [] },
+          excludes: [],
+          notes: null,
+        }),
+        prot.id,
+      ],
+    );
+    const file = new File(["legacy-snapshot"], "snap.tar.gz", { type: "application/gzip" });
+    const form = new FormData();
+    form.append("tarball", file, "snap.tar.gz");
+    const upload = await app.handle(
+      new Request(`http://localhost/api/v1/apps/protections/${prot.id}/snapshots`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: form,
+      }),
+    );
+    expect(upload.status).toBe(201);
+    const snap = (await upload.json()) as { capturedSpec: { paths: { linux: CaptureSpecPath[] } } };
+    expect(snap.capturedSpec.paths.linux[0]).toMatchObject({
+      path: "~/.config/nvim",
+      classification: "unknown",
+      classificationSource: "default",
+      confidence: null,
+    });
+  });
+});
+
+describe("LAMA-315 — read-only classify endpoint", () => {
+  async function classify(paths: string[]): Promise<Response> {
+    return postJson("/api/v1/apps/classify", { paths });
+  }
+
+  test("returns deterministic suggestions with explanation + confidence for known paths", async () => {
+    const res = await classify(["~/.cache", "~/.ssh", "~/.config/nvim"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      results: Array<{
+        path: string;
+        classification: string;
+        confidence: number | null;
+        confidenceLevel: string | null;
+        rationale: string | null;
+        ruleId: string | null;
+      }>;
+    };
+    const byPath = new Map(body.results.map((r) => [r.path, r]));
+    expect(byPath.get("~/.cache")).toMatchObject({
+      classification: "cache",
+      confidenceLevel: "high",
+      confidence: 0.9,
+    });
+    expect(byPath.get("~/.ssh")?.classification).toBe("secrets");
+    expect(byPath.get("~/.config/nvim")?.classification).toBe("portable_config");
+    for (const result of body.results) {
+      expect(result.rationale).toContain("Detected as");
+      expect(result.ruleId).toBeTruthy();
+    }
+    // Determinism: same input, same output.
+    const again = (await (await classify(["~/.cache", "~/.ssh", "~/.config/nvim"])).json()) as {
+      results: Array<{ ruleId: string | null }>;
+    };
+    expect(again.results.map((r) => r.ruleId)).toEqual(body.results.map((r) => r.ruleId));
+  });
+
+  test("REG: nested .env paths classify as low-confidence secrets through the API", async () => {
+    const res = await classify(["~/.config/nvim/.env", "~/.cache/project/.env", "~/.ssh/known_hosts"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      results: Array<{ path: string; classification: string; confidenceLevel: string | null; ruleId: string | null }>;
+    };
+    const byPath = new Map(body.results.map((r) => [r.path, r]));
+    // A secret leaf outranks the config/cache directory it lives in;
+    // known_hosts keeps the machine_state exception inside ~/.ssh.
+    expect(byPath.get("~/.config/nvim/.env")).toMatchObject({
+      path: "~/.config/nvim/.env",
+      classification: "secrets",
+      confidenceLevel: "low",
+      ruleId: "secrets-env-file",
+    });
+    expect(byPath.get("~/.cache/project/.env")?.classification).toBe("secrets");
+    expect(byPath.get("~/.cache/project/.env")?.ruleId).toBe("secrets-env-file");
+    expect(byPath.get("~/.ssh/known_hosts")?.classification).toBe("machine_state");
+  });
+
+  test("unknown paths are reported as unknown with null explanation — never guessed", async () => {
+    const res = await classify(["~/projects/notes.txt"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      results: Array<{
+        path: string;
+        classification: string;
+        confidence: number | null;
+        confidenceLevel: string | null;
+        rationale: string | null;
+        ruleId: string | null;
+      }>;
+    };
+    expect(body.results[0]).toEqual({
+      path: "~/projects/notes.txt",
+      classification: "unknown",
+      confidence: null,
+      confidenceLevel: null,
+      rationale: null,
+      ruleId: null,
+    });
+  });
+
+  test("rejects empty path lists, empty strings, and oversized batches", async () => {
+    expect((await classify([])).status).toBe(400);
+    expect((await classify([""])).status).toBe(400);
+    expect((await classify(["/"] )).status).toBe(200); // "/" is a valid configured path
+    const huge = Array.from({ length: 501 }, (_, i) => `~/.config/app${i}`);
+    expect((await classify(huge)).status).toBe(400);
+    expect((await classify(["~/.config/" + "x".repeat(4097)])).status).toBe(400);
+  });
+
+  test("requires admin (401 without a valid credential)", async () => {
+    const res = await app.handle(
+      new Request("http://localhost/api/v1/apps/classify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: ["~/.cache"] }),
+      }),
+    );
+    expect(res.status).toBe(401);
   });
 });

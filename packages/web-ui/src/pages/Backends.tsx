@@ -113,6 +113,11 @@ function validateForm(form: FormState): string | null {
   return null;
 }
 
+// LAMA-328: auxiliary statistics (folder composition, sizes, history, report,
+// drills) load independently of the destination list; this is what a failure of
+// one of them says. The list itself must never be held back or erased by it.
+const AUX_ERROR = "Some details couldn't load — showing what we have.";
+
 export function Backends() {
   const [items, setItems] = useState<BackendRow[] | null>(null);
   // LAMA-269: data for the per-destination donut + growth sparkline.
@@ -159,44 +164,37 @@ export function Backends() {
   const formRef = useRef<HTMLElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
 
+  // LAMA-328: the configured-destination list is this page's core data, so it
+  // renders as soon as `/backends` resolves. Every statistic (folder
+  // composition, sizes, history, storage report, drill history) is loaded
+  // independently as an auxiliary panel: none of them can hold back the list,
+  // and a slow or failed one only sets `auxError`.
+  const loadAuxiliary = useCallback((): void => {
+    const failAux = (): void => setAuxError(AUX_ERROR);
+    void api.listFolders().then(setFolders).catch(failAux);
+    void api.folderSizes().then(setFolderSizes).catch(failAux);
+    void api
+      .storageHistory()
+      .then((history) => setStorageHistory(history.backends))
+      .catch(failAux);
+    void api.storageReport().then(setStorageReport).catch(failAux);
+    void api
+      .listHealthDrills(10)
+      .then((drillHistory) => setDrills(drillHistory.drills))
+      .catch(failAux);
+  }, []);
+
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
     setAuxError(null);
     try {
-      const [backendList, folderList, sizes, history, report, drillHistory] =
-        await Promise.all([
-          api.listBackends(),
-          api.listFolders().catch(() => {
-            setAuxError("Some details couldn't load — showing what we have.");
-            return [] as Folder[];
-          }),
-          api.folderSizes().catch(() => {
-            setAuxError("Some details couldn't load — showing what we have.");
-            return {} as Record<string, FolderSize>;
-          }),
-          api.storageHistory().catch(() => {
-            setAuxError("Some details couldn't load — showing what we have.");
-            return { backends: {} };
-          }),
-          api.storageReport().catch(() => {
-            setAuxError("Some details couldn't load — showing what we have.");
-            return null;
-          }),
-          api.listHealthDrills(10).catch(() => {
-            setAuxError("Some details couldn't load — showing what we have.");
-            return { drills: [] };
-          }),
-        ]);
-      setItems(backendList);
-      setFolders(folderList);
-      setFolderSizes(sizes);
-      setStorageHistory(history.backends);
-      setStorageReport(report);
-      setDrills(drillHistory.drills);
+      setItems(await api.listBackends());
     } catch (err) {
       setError(errorText(err));
+      return;
     }
-  }, []);
+    loadAuxiliary();
+  }, [loadAuxiliary]);
 
   useEffect(() => {
     void refresh();

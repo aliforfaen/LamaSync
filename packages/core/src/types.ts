@@ -356,8 +356,10 @@ export interface FolderAssignment {
 // contract). This replaces the dotfile-manifest/profile/version model above.
 // ---------------------------------------------------------------------------
 
-/** LAMA-315 hook: stable path taxonomy. This delivery only stamps every path
- *  as "unknown" and exposes the field; no recommendation/exclusion logic. */
+/** LAMA-315: stable path taxonomy. Classifications are suggestions for
+ *  planning/review — nothing consumes a class to change capture or exclusion.
+ *  `unknown` is "not yet classified" and stays visibly unknown; `custom` is
+ *  an operator's explicit assignment. */
 export type PathClassification =
   | "portable_config"
   | "machine_state"
@@ -366,11 +368,25 @@ export type PathClassification =
   | "custom"
   | "unknown";
 
+/** LAMA-315: provenance of a path's `classification` value.
+ *  - `default`    untouched initial state — always `unknown`.
+ *  - `suggested`  placed by the deterministic recommender, not yet
+ *                 operator-confirmed. Carries the matching `confidence`.
+ *  - `manual`     operator override/confirmation — the only source that
+ *                 locks a recommendation in; confidence is dropped. */
+export type ClassificationSource = "default" | "suggested" | "manual";
+
 /** A single classified path entry inside a capture spec. */
 export interface CaptureSpecPath {
   path: string;
   classification: PathClassification;
   rationale?: string | null;
+  /** LAMA-315: provenance of `classification`; absent/null reads as
+   *  `"default"` on the wire (legacy entries round-trip as unknown/default). */
+  classificationSource?: ClassificationSource | null;
+  /** 0..1 — present only when `classificationSource === "suggested"`.
+   *  Dropped/ignored for `manual`; null for `default`. */
+  confidence?: number | null;
   /** Snapshot-only deterministic archive member root. Never client supplied. */
   archivePath?: string | null;
 }
@@ -755,6 +771,89 @@ export interface LegacyRootPruneResult {
   errors: string[];
 }
 
+// -------------------------------------------------------------------------
+// LAMA-327 — live rclone sync phases (non-terminal, in-memory, WS-delivered)
+// -------------------------------------------------------------------------
+
+/**
+ * Live phase of one daemon rclone run. Phases are driven by REAL rclone
+ * `--use-json-log` INFO messages and daemon lifecycle milestones — never
+ * invented progress. `enumerating` is the honest generic for bisync's
+ * `Building Path1 and Path2 listings` (it lists BOTH sides in one phase and
+ * the daemon cannot attribute one side); `enumerating_local` /
+ * `enumerating_remote` exist in the contract for future single-side ops.
+ * `working` is the honest fallback while rclone runs without emitting a
+ * recognisable phase signal (e.g. a one-way `copy` planning a large
+ * remote listing emits no INFO phase message before the first transfer).
+ * `success` / `failed` are terminal: the server removes the registry entry
+ * right after broadcasting the terminal event, so clients drop the row.
+ */
+export type LiveSyncPhase =
+  | "queued" // run requested, waiting for the in-process/destination lock
+  | "lock" // destination lock acquired
+  | "preparing" // building command, filters, pre-hooks, disk checks
+  | "enumerating" // bisync building both path listings (long on first runs)
+  | "enumerating_local"
+  | "enumerating_remote"
+  | "reconciling" // comparing listings / building the change plan
+  | "transferring" // copying/uploading with counters
+  | "checking" // verifying files (checks counter advancing, no transfers)
+  | "finalizing" // listing / state-db updates at the end of a run
+  | "retrying" // transient failure; waiting before the next attempt
+  | "working" // rclone running, no recognisable phase signal yet
+  | "success" // terminal — entry removed after broadcast
+  | "failed"; // terminal — entry removed after broadcast
+
+/**
+ * Daemon→server body of `POST /api/v1/sync-progress`. Deliberately narrow:
+ * no credentials, no rclone argv, no raw config, and no server-owned fields
+ * (`updatedAt` / `elapsedMs` are computed by the server). `detail` is a
+ * single bounded line derived from rclone's own message text.
+ */
+export interface LiveSyncProgressUpdate {
+  runId: string;
+  hostId: string;
+  /** Display label — the daemon's last known hostname (server trusted). */
+  hostname?: string | null;
+  folderId?: string | null;
+  folderName?: string | null;
+  /** Folder type driving the run (`sync` / `backup` / `mount` / ...). */
+  operation: string;
+  phase: LiveSyncPhase;
+  /** Epoch ms the run started — anchor for elapsed-time ticking. */
+  startedAt: number;
+  /** Epoch ms the current phase started. */
+  phaseStartedAt: number;
+  transfers?: number | null;
+  bytes?: number | null;
+  checks?: number | null;
+  errors?: number | null;
+  files?: number | null;
+  /** Bounded one-line detail — never credentials, argv, or raw config. */
+  detail?: string | null;
+}
+
+/**
+ * Full wire shape of a live sync run as broadcast on the `sync_progress`
+ * WebSocket event and returned by the admin hydration read
+ * (`GET /api/v1/sync-progress`). `updatedAt` / `elapsedMs` are always
+ * refreshed by the server at broadcast/read time so reconnecting clients
+ * see a live elapsed value even when only counters are throttled.
+ */
+export interface LiveSyncProgress extends Omit<LiveSyncProgressUpdate, "detail"> {
+  /** Epoch ms of the last server-side update/broadcast. */
+  updatedAt: number;
+  /** Server-computed: `updatedAt - startedAt` (live elapsed). */
+  elapsedMs: number | null;
+  detail?: string | null;
+}
+
+/** Wire body of `GET /api/v1/sync-progress` (hydration for reconnecting
+ *  admin/reconnecting clients). Active non-terminal runs only. */
+export interface LiveSyncProgressList {
+  runs: LiveSyncProgress[];
+}
+
 // WebSocket event payload broadcast on /api/v1/ws
 export type WSEvent =
   | { kind: "operation"; entry: OperationLog }
@@ -773,7 +872,11 @@ export type WSEvent =
   // LAMA-301: server-deploy job state change (pending/running/succeeded/
   // failed). Broadcast so the Admin card can reconnect after the expected
   // server restart mid-deploy.
-  | { kind: "server_deploy"; job: ServerDeployJob };
+  | { kind: "server_deploy"; job: ServerDeployJob }
+  // LAMA-327: live non-terminal rclone sync phase. Sent on phase transitions
+  // and throttled counter snapshots; a terminal phase (success/failed) is
+  // broadcast once and then the entry is removed from the server registry.
+  | { kind: "sync_progress"; progress: LiveSyncProgress };
 
 export interface PruneResult {
   deleted: number;
@@ -882,12 +985,34 @@ export interface StorageReport {
 // on daemon hosts) and return bytes: null (P1-7). S3 folders are measured per
 // destination prefix (`stats:<bucket>/<prefix>` via LAMA-304), so a folder
 // reports only its own prefixes, never the whole shared bucket.
+//
+// LAMA-328: reads are stale-while-revalidate. `measuredAt` is when `bytes` were
+// really measured (null when nothing has ever been measured, or when the folder
+// is not measurable server-side), while `stale`/`refreshing` describe the read
+// itself: stale bytes are last-known, not current, and a bounded background
+// refresh is scheduled or running for them.
 export interface FolderSize {
   folderId: string;
   bytes: number | null;
   objectCount: number | null;
   error: string | null;
-  measuredAt: number;
+  measuredAt: number | null;
+  stale?: boolean;
+  refreshing?: boolean;
+}
+
+// LAMA-328: `GET /folders` carries each folder's assignments so the Folders
+// page no longer issues one request per folder (the N+1 reported in LAMA-328).
+// The embedded rows are summaries, not full assignments: a list read has no
+// use for the restic repository password, and stamping it into every list
+// response broadened plaintext-secret exposure across Dashboard/Folders/etc.
+// (LAMA-328 review). `GET /folders/:id/assignments` and the daemon's
+// `GET /config/:hostId` still return full `FolderAssignment` rows — those are
+// the dedicated surfaces that actually need the override secret.
+export type FolderAssignmentSummary = Omit<FolderAssignment, "resticPassword">;
+
+export interface FolderWithAssignments extends Folder {
+  assignments: FolderAssignmentSummary[];
 }
 
 // LAMA-226: Data Browser write operations. Jobs are created when an op

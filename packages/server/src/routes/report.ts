@@ -71,7 +71,7 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
     // drop the cached storage report and the folder's size entry.
     if (operation === "sync" || operation === "backup" || operation === "dotfile") {
       invalidateStorageReport();
-      if (folderId) invalidateFolderSize(folderId);
+      if (folderId) invalidateFolderSize(activeDb, folderId);
     }
 
     if (folderId) {

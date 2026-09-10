@@ -2,7 +2,14 @@ import { Elysia, t } from "elysia";
 import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
-import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderSize, FolderType } from "@lamasync/core";
+import type {
+  AssignmentMode,
+  Folder,
+  FolderAssignment,
+  FolderAssignmentSummary,
+  FolderBackend,
+  FolderType,
+} from "@lamasync/core";
 import {
   normalizeAssignmentMode,
   normalizeDestination,
@@ -15,7 +22,7 @@ import {
   bumpConfigRevision,
   bumpConfigRevisionForFolder,
 } from "../config-revision.ts";
-import { getFolderSize } from "../stats.ts";
+import { getFolderSize, getFolderSizesBulk, notMeasurableFolderSize } from "../stats.ts";
 import { deviceMayAccessHost, principalOf } from "../auth.ts";
 
 const FOLDER_TYPES: FolderType[] = ["sync", "mount", "backup", "dotfile", "git"];
@@ -197,6 +204,14 @@ function rowToFolder(r: FolderRow): Folder {
   };
 }
 
+// LAMA-328: shared column list so the embedded assignments in `GET /folders`
+// and the per-folder `/folders/:id/assignments` route cannot drift apart.
+const ASSIGNMENT_COLUMNS = `id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
+                  mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
+                  timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
+                  cache_profile, cache_max_size, restic_repository, restic_password,
+                  watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore`;
+
 function rowToAssignment(r: AssignmentRow): FolderAssignment {
   return {
     id: r.id,
@@ -235,6 +250,15 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
   };
 }
 
+// LAMA-328 review: list surfaces must not stamp the restic repository password
+// into every response. The dedicated surfaces that need the secret — the
+// daemon's `GET /config/:hostId` and the per-folder assignments route (which
+// backs the editor) — keep full rows via `rowToAssignment`.
+function rowToAssignmentSummary(r: AssignmentRow): FolderAssignmentSummary {
+  const { resticPassword: _secret, ...summary } = rowToAssignment(r);
+  return summary;
+}
+
 export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/folders",
@@ -244,14 +268,33 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket FROM folders ORDER BY created_at DESC",
         )
         .all();
-      return rows.map(rowToFolder);
+      const folders = rows.map(rowToFolder);
+      // LAMA-328: every folder's assignments come back with the list, in one
+      // query, so the Folders page no longer issues one request per folder.
+      // Same admin-scoped surface as `/folders/:id/assignments` (device and
+      // mobile principals cannot reach either route — see auth.ts allowlists).
+      // LAMA-328 review: the embedded rows are summaries — the restic
+      // repository password stays off the list wire (nobody consumes a secret
+      // from a folder list); the per-folder route keeps it.
+      const byFolder = new Map<string, FolderAssignmentSummary[]>();
+      for (const row of db
+        .query<AssignmentRow, []>(`SELECT ${ASSIGNMENT_COLUMNS} FROM folder_assignments`)
+        .all()) {
+        const list = byFolder.get(row.folder_id) ?? [];
+        list.push(rowToAssignmentSummary(row));
+        byFolder.set(row.folder_id, list);
+      }
+      return folders.map((folder) => ({
+        ...folder,
+        assignments: byFolder.get(folder.id) ?? [],
+      }));
     },
     {
       detail: {
-        summary: "List all folders",
+        summary: "List all folders, each with its assignments (LAMA-328)",
         tags: ["Folders"],
         responses: {
-          200: { description: "Folder list" },
+          200: { description: "Folder list, each entry carrying `assignments`" },
           401: { description: "Unauthorized" },
         },
       },
@@ -437,12 +480,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       }
       const rows = db
         .query<AssignmentRow, [string]>(
-          `SELECT id, folder_id, host_id, role, local_path, remote_name, destination, sync_expr, enabled,
-                  mode, conflict_strategy, pre_sync_cmd, post_sync_cmd, ignore_path, mount_ignore_path,
-                  timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
-                  cache_profile, cache_max_size, restic_repository, restic_password,
-                  watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore
-           FROM folder_assignments WHERE folder_id = ?`,
+          `SELECT ${ASSIGNMENT_COLUMNS} FROM folder_assignments WHERE folder_id = ?`,
         )
         .all(params.id);
       return rows.map(rowToAssignment);
@@ -462,7 +500,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/folders/:id/size",
-    async ({ params, set }) => {
+    async ({ params, query, set }) => {
       const row = db
         .query<FolderRow, [string]>(
           "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket FROM folders WHERE id = ?",
@@ -479,27 +517,26 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       // always returns ENOENT in real deployments and showed a dash on
       // the Folders Size column for every non-S3 row. The endpoint now
       // returns a typed null for non-S3 folders; the UI renders "n/a".
-      if (folder.backend !== "s3") {
-        return {
-          folderId: folder.id,
-          bytes: null,
-          objectCount: null,
-          error: "not measurable server-side",
-          measuredAt: Date.now(),
-        };
-      }
-      const size = await getFolderSize(db, folder, false);
-      return size;
+      if (folder.backend !== "s3") return notMeasurableFolderSize(folder.id);
+      // LAMA-328: `refresh=true` is the explicit "I need a current number"
+      // path and measures on this request. Without it the read is
+      // stale-while-revalidate: last known bytes now, bounded background
+      // refresh (see stats.ts).
+      const refresh = query.refresh === "1" || query.refresh === "true";
+      return getFolderSize(db, folder, refresh);
     },
     {
       params: t.Object({ id: t.String() }),
+      query: t.Object({
+        refresh: t.Optional(t.String()),
+      }),
       detail: {
-        summary: "Last-known working-set size for an S3 folder (cached 15 min)",
+        summary: "Last-known working-set size for an S3 folder (stale-while-revalidate)",
         tags: ["Folders"],
         responses: {
           200: {
             description:
-              "Folder size; non-S3 folders return {bytes:null, error:'not measurable server-side'}",
+              "Folder size with `measuredAt`, `stale`, and `refreshing`; non-S3 folders return {bytes:null, error:'not measurable server-side'}. Pass refresh=true to measure now.",
           },
           404: { description: "Not found" },
           401: { description: "Unauthorized" },
@@ -509,29 +546,35 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   )
   .get(
     "/folders/sizes",
-    async () => {
+    async ({ query }) => {
       // LAMA-269: bulk last-known working-set sizes for every folder, used
       // by the storage donut to compose a destination from its folders.
-      // Each call measures (or serves the 15-min cache for) S3 folders only;
-      // non-S3 folders return a typed null the UI renders as "n/a".
+      // LAMA-328: this surface never measures on the request — known values
+      // come from memory or persisted history and everything else is measured
+      // in the background with bounded concurrency, so visiting a page with
+      // many S3 folders cannot spawn a sequential rclone chain (or a storm).
+      // `refresh=true` asks for a background re-measurement of every S3 folder
+      // (the "Refresh sizes" action) and still returns immediately.
+      const refresh = query.refresh === "1" || query.refresh === "true";
       const rows = db
         .query<FolderRow, []>(
           "SELECT id, name, type, created_at, encrypted, crypt_password, git_provider, git_remote, backend, backend_id, s3_bucket FROM folders",
         )
         .all();
-      const out: Record<string, FolderSize> = {};
-      for (const row of rows) {
-        const folder = rowToFolder(row);
-        out[folder.id] = await getFolderSize(db, folder, false);
-      }
-      return out;
+      return getFolderSizesBulk(db, rows.map(rowToFolder), { refresh });
     },
     {
+      query: t.Object({
+        refresh: t.Optional(t.String()),
+      }),
       detail: {
-        summary: "Bulk last-known working-set sizes for all folders (S3 only; 15-min cache)",
+        summary: "Bulk last-known working-set sizes for all folders (S3 only; never measures on the request)",
         tags: ["Folders"],
         responses: {
-          200: { description: "Map of folderId -> FolderSize; non-S3 folders have bytes:null" },
+          200: {
+            description:
+              "Map of folderId -> FolderSize (with measuredAt/stale/refreshing); non-S3 folders have bytes:null. refresh=true schedules background re-measurement.",
+          },
           401: { description: "Unauthorized" },
         },
       },
@@ -708,6 +751,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         );
       }
       db.run("DELETE FROM folder_assignments WHERE folder_id = ?", [params.id]);
+      // LAMA-328 review: the durable size-invalidation watermark has no FK to
+      // folders; drop it with the folder so it cannot linger orphaned.
+      db.run("DELETE FROM folder_size_invalidations WHERE folder_id = ?", [params.id]);
       const result = db.run("DELETE FROM folders WHERE id = ?", [params.id]);
       if (result.changes === 0) {
         set.status = 404;
