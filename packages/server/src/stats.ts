@@ -87,12 +87,23 @@ interface CachedFolderSize {
 }
 
 /**
- * Folders invalidated by a mutation, mapped to the time of the newest one. This
- * is deliberately separate from `folderCache`: an invalidation must survive a
- * server restart (or a folder nothing has read yet), and it must not be erased
- * by a measurement that had already started when it arrived.
+ * Folders invalidated by a mutation, mapped to the time of the newest one.
+ * This is the warm-process fast path; the durable record is the
+ * `folder_size_invalidations` watermark below (an invalidation must survive a
+ * server restart — or reach a folder nothing has read yet — and it must not be
+ * erased by a measurement that had already started when it arrived).
  */
 const invalidatedFolders = new Map<string, number>();
+
+/** The durable invalidation watermark for a folder, or null when none. */
+function readSizeInvalidation(db: Database, folderId: string): number | null {
+  const row = db
+    .query<{ invalidated_at: number }, [string]>(
+      "SELECT invalidated_at FROM folder_size_invalidations WHERE folder_id = ?",
+    )
+    .get(folderId);
+  return row?.invalidated_at ?? null;
+}
 
 // Bounds on background refresh work, so repeated page visits cannot create an
 // rclone process storm: at most one refresh per folder (dedupe), two overall,
@@ -107,6 +118,10 @@ interface RefreshWaiter {
 
 const refreshWaiters: RefreshWaiter[] = [];
 const refreshScheduled = new Set<string>();
+/** The in-flight task per scheduled folder, so an explicit `refresh=true` read
+ *  can wait on (and thereby share) the same measurement instead of spawning a
+ *  second concurrent one (LAMA-328 review finding 3). */
+const folderRefreshTasks = new Map<string, Promise<void>>();
 const refreshesInFlight = new Set<Promise<void>>();
 let activeRefreshes = 0;
 const activeRefreshesByBackend = new Map<string, number>();
@@ -150,14 +165,19 @@ function acquireRefreshSlot(backendKey: string): Promise<void> {
 }
 
 /**
- * Schedule one background measurement for `folder`. At most one runs per folder
- * at a time, and the semaphore above bounds the fleet-wide cost. Failures are
- * swallowed here on purpose: a background refresh must never surface as a
- * request error, and the next read reports what actually happened.
+ * Begin (or join) one background measurement for `folder`, honoring the
+ * fleet-wide bounds: at most one per folder (dedupe), two overall, and one per
+ * backend (a single slow bucket cannot occupy every slot). Returns the task
+ * promise so a caller that genuinely needs the fresh value (the explicit
+ * `refresh=true` route) can await the same measurement everyone else shares;
+ * background callers ignore it. Returns null for non-S3 folders (never
+ * measurable server-side). Failures are swallowed here on purpose: a
+ * background refresh must never surface as a request error, and the next read
+ * reports what actually happened.
  */
-function scheduleFolderRefresh(db: Database, folder: Folder): void {
-  if (folder.backend !== "s3") return;
-  if (refreshScheduled.has(folder.id)) return;
+function beginFolderRefresh(db: Database, folder: Folder): Promise<void> | null {
+  if (folder.backend !== "s3") return null;
+  if (refreshScheduled.has(folder.id)) return folderRefreshTasks.get(folder.id) ?? null;
   refreshScheduled.add(folder.id);
   const backendKey = folder.backendId ?? "unassigned-backend";
   const task = (async () => {
@@ -169,10 +189,18 @@ function scheduleFolderRefresh(db: Database, folder: Folder): void {
     } finally {
       releaseRefreshSlot(backendKey);
       refreshScheduled.delete(folder.id);
+      folderRefreshTasks.delete(folder.id);
     }
   })();
+  folderRefreshTasks.set(folder.id, task);
   refreshesInFlight.add(task);
   void task.finally(() => refreshesInFlight.delete(task));
+  return task;
+}
+
+/** Fire-and-forget scheduling, as used by the stale-while-revalidate reads. */
+function scheduleFolderRefresh(db: Database, folder: Folder): void {
+  void beginFolderRefresh(db, folder);
 }
 
 /**
@@ -189,6 +217,11 @@ function persistedFolderSize(db: Database, folderId: string): CachedFolderSize |
     )
     .get(folderId);
   if (!row) return null;
+  // LAMA-328 review: a persisted measurement is only current if no mutation
+  // invalidated it afterwards. The watermark is durable across restarts, so
+  // this check is what keeps a recent size_history row from being served as
+  // fresh after a browse write + restart.
+  const invalidatedAt = readSizeInvalidation(db, folderId);
   return {
     value: {
       folderId,
@@ -200,7 +233,9 @@ function persistedFolderSize(db: Database, folderId: string): CachedFolderSize |
     // served as fresh (no pointless refresh), an older one as stale.
     checkedAt: row.measured_at,
     error: null,
-    invalidated: false,
+    // `>=` on purpose, matching `measureFolderSize`: an invalidation stamped in
+    // the same millisecond as the measurement is treated as newer.
+    invalidated: invalidatedAt !== null && invalidatedAt >= row.measured_at,
   };
 }
 
@@ -466,6 +501,20 @@ export async function getFolderSize(
   folder: Folder,
   refresh = false,
 ): Promise<FolderSize> {
+  if (folder.backend !== "s3") return notMeasurableFolderSize(folder.id);
+  // LAMA-328 review: an explicit refresh goes through the same bounded
+  // scheduler as every background refresh — one measurement per folder at a
+  // time, one per backend, two overall — instead of spawning an unbounded
+  // rclone per concurrent request. Concurrent callers await the shared task,
+  // so overlapping calls deduplicate rather than multiply the work.
+  if (refresh) {
+    await beginFolderRefresh(db, folder);
+    // The awaited refresh populated the cache; read what it produced. If a
+    // mutation landed during the measurement, this read schedules the follow-up
+    // refresh and says so (`refreshing: true`) — same contract as any other
+    // stale-while-revalidate read.
+    return readFolderSize(db, folder, { refresh: false, allowMeasureOnRequest: false });
+  }
   return readFolderSize(db, folder, { refresh, allowMeasureOnRequest: true });
 }
 
@@ -587,9 +636,22 @@ async function measureFolderSize(db: Database, folder: Folder): Promise<FolderSi
       };
   // `>=` on purpose: an invalidation that lands in the same millisecond the
   // measurement started is treated as newer, which costs at most one extra
-  // refresh and never reports post-mutation state as current.
-  const invalidatedDuringMeasure = (invalidatedFolders.get(folder.id) ?? 0) >= startedAt;
+  // refresh and never reports post-mutation state as current. Both records
+  // count: the warm in-memory stamp and the durable watermark (a restart
+  // clears the former but not the latter).
+  const latestInvalidation = Math.max(
+    invalidatedFolders.get(folder.id) ?? 0,
+    readSizeInvalidation(db, folder.id) ?? 0,
+  );
+  const invalidatedDuringMeasure = latestInvalidation >= startedAt;
   if (!invalidatedDuringMeasure) invalidatedFolders.delete(folder.id);
+  // LAMA-328 review: the durable watermark is superseded only by a successful
+  // measurement that began after the invalidation. A failed attempt leaves the
+  // watermark in place — after a restart the in-memory error state is gone,
+  // and the persisted bytes must still be served as stale.
+  if (measured.error === null && !invalidatedDuringMeasure) {
+    db.run("DELETE FROM folder_size_invalidations WHERE folder_id = ?", [folder.id]);
+  }
   const entry: CachedFolderSize = {
     value,
     checkedAt: now,
@@ -640,11 +702,22 @@ async function measureS3Folder(
  * The timestamp is what lets a refresh that was already running when the
  * mutation landed stay marked as invalid, instead of overwriting it (see
  * `measureFolderSize`).
+ *
+ * LAMA-328 review: the stamp is also written to the durable
+ * `folder_size_invalidations` watermark so it survives a server restart — a
+ * recent persisted `size_history` value must never be served as fresh after a
+ * mutation, no matter when the process last saw the folder.
  */
-export function invalidateFolderSize(folderId: string): void {
-  invalidatedFolders.set(folderId, Date.now());
+export function invalidateFolderSize(db: Database, folderId: string): void {
+  const now = Date.now();
+  invalidatedFolders.set(folderId, now);
   const cached = folderCache.get(folderId);
   if (cached !== undefined) cached.invalidated = true;
+  db.run(
+    `INSERT INTO folder_size_invalidations (folder_id, invalidated_at) VALUES (?, ?)
+     ON CONFLICT(folder_id) DO UPDATE SET invalidated_at = excluded.invalidated_at`,
+    [folderId, now],
+  );
 }
 
 // --- LAMA-269: size time series for the storage donut + growth sparkline ---
