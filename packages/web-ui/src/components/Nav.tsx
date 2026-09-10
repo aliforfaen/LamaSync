@@ -1,12 +1,4 @@
 import { NavLink } from "react-router-dom";
-import { useEffect, useState } from "react";
-import { clearApiKey, getAuthMode, sessionLogout } from "../api.ts";
-import {
-  applyTheme,
-  loadThemeChoice,
-  saveThemeChoice,
-  type ThemeChoice,
-} from "../theme.ts";
 import {
   IconActivityFilled,
   IconConflictFilled,
@@ -21,13 +13,7 @@ import {
   IconStorageFilled,
 } from "./icons.tsx";
 import { BrandLockup } from "./BrandLockup.tsx";
-
-const ORDER: ThemeChoice[] = ["dark", "light", "system"];
-const LABELS: Record<ThemeChoice, string> = {
-  dark: "Dark",
-  light: "Light",
-  system: "System",
-};
+import { ShellActions } from "./ShellActions.tsx";
 
 export interface NavItem {
   to: string;
@@ -37,6 +23,13 @@ export interface NavItem {
   /** User-facing synonyms matched by the LAMA-270 command palette only;
    *  the rendered rail ignores this field. */
   keywords?: string;
+  /**
+   * LAMA-329 phase 3: reachable in ONE tap from the phone's bottom tab bar.
+   * Everything else is two taps (More, then the destination). The bottom bar
+   * is a fixed four slots, so this flag — not a second hand-maintained list —
+   * decides the split, and `quickItems()`/`moreGroups()` keep it honest.
+   */
+  quick?: boolean;
 }
 
 export interface NavGroup {
@@ -51,24 +44,55 @@ export interface NavGroup {
  *   /hosts → Devices · /folders → Managed folders · /backends → Storage
  *   destinations · /apps/templates → App templates · /apps/backups → App
  *   backups · /operations → Activity.
+ *
+ * LAMA-329 phase 3 extends that single-source rule to the phone: the bottom
+ * tab bar and More sheet are derived from this list rather than declared
+ * separately, so a new destination is added in exactly one place.
  */
 export const GROUPS: NavGroup[] = [
   {
     label: "Overview",
-    items: [{ to: "/", icon: <IconHomeFilled />, text: "Dashboard", end: true, keywords: "home overview" }],
+    items: [
+      {
+        to: "/",
+        icon: <IconHomeFilled />,
+        text: "Dashboard",
+        end: true,
+        keywords: "home overview",
+        quick: true,
+      },
+    ],
   },
   {
     label: "Sync",
     items: [
-      { to: "/hosts", icon: <IconHostFilled />, text: "Devices", keywords: "hosts fleet machines pair" },
-      { to: "/folders", icon: <IconFolderFilled />, text: "Managed folders", keywords: "sync mount folders" },
+      {
+        to: "/hosts",
+        icon: <IconHostFilled />,
+        text: "Devices",
+        keywords: "hosts fleet machines pair",
+        quick: true,
+      },
+      {
+        to: "/folders",
+        icon: <IconFolderFilled />,
+        text: "Managed folders",
+        keywords: "sync mount folders",
+        quick: true,
+      },
       { to: "/conflicts", icon: <IconConflictFilled />, text: "Conflicts", keywords: "merge resolve" },
     ],
   },
   {
     label: "Protection",
     items: [
-      { to: "/backups", icon: <IconShieldFilled />, text: "Backups", keywords: "protected folders backup verification recovery" },
+      {
+        to: "/backups",
+        icon: <IconShieldFilled />,
+        text: "Backups",
+        keywords: "protected folders backup verification recovery",
+        quick: true,
+      },
       { to: "/backends", icon: <IconStorageFilled />, text: "Storage destinations", keywords: "backends storage recovery backups" },
       { to: "/data", icon: <IconSearchFilled />, text: "Browse recovery data", keywords: "browse files snapshots" },
     ],
@@ -94,70 +118,73 @@ export const GROUPS: NavGroup[] = [
   },
 ];
 
+/** Every destination, flattened in rendered order. */
+export function allItems(): NavItem[] {
+  return GROUPS.flatMap((group) => group.items);
+}
+
+/**
+ * The four destinations the phone's bottom tab bar shows. Order follows
+ * GROUPS, so the bar reads the same way the rail does.
+ *
+ * Chosen as the fleet's day-to-day loop: see the state of things (Dashboard),
+ * the two objects a person actually syncs (Devices, Managed folders), and
+ * whether protection ran (Backups). Conflicts, storage destinations, recovery
+ * browsing, apps, Activity and Admin are each one tap further into More.
+ */
+export function quickItems(): NavItem[] {
+  return allItems().filter((item) => item.quick === true);
+}
+
+/**
+ * Everything the phone reaches through the More sheet, with its group labels
+ * intact so the sheet keeps the rail's information architecture. Empty groups
+ * are dropped rather than rendered as a stray heading.
+ */
+export function moreGroups(): NavGroup[] {
+  return GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => item.quick !== true),
+  })).filter((group) => group.items.length > 0);
+}
+
+/**
+ * Whether `pathname` belongs to the destination at `to`.
+ *
+ * Needed because the More control is not a link: it has to light up when the
+ * current route lives inside the sheet. NavLink cannot answer that for a
+ * group of routes, and a naive `startsWith` would make `/hosts` swallow
+ * `/hosts-archive`-style siblings, hence the `to + "/"` boundary.
+ */
+export function routeIsActive(to: string, pathname: string): boolean {
+  if (to === "/") return pathname === "/";
+  return pathname === to || pathname.startsWith(`${to}/`);
+}
+
+/** Whether any More-sheet destination matches the current route. */
+export function moreRoutesActive(pathname: string): boolean {
+  return moreGroups().some((group) =>
+    group.items.some((item) => routeIsActive(item.to, pathname)),
+  );
+}
+
+/**
+ * The grouped rail.
+ *
+ * LAMA-329 phase 3 replaced the below-900px off-canvas drawer with two
+ * permanent surfaces: a compact rail from 640px up, and the bottom tab bar
+ * below that. The drawer is gone deliberately — "always visible" removes a
+ * state (open/closed/backdrop), and with it the class of bug where back
+ * navigation and the drawer disagree about where the user is.
+ */
 export function Nav() {
-  const [theme, setTheme] = useState<ThemeChoice>(loadThemeChoice());
-  // Drawer state for small screens (<900px): the rail becomes off-canvas.
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [signOutError, setSignOutError] = useState<string | null>(null);
-
-  // Close the drawer whenever the route changes so navigation feels done.
-  useEffect(() => {
-    const close = () => setDrawerOpen(false);
-    window.addEventListener("hashchange", close);
-    return () => window.removeEventListener("hashchange", close);
-  }, []);
-
-  function cycleTheme() {
-    const next = ORDER[(ORDER.indexOf(theme) + 1) % ORDER.length];
-    saveThemeChoice(next);
-    applyTheme(next);
-    setTheme(next);
-  }
-
-  async function signOut() {
-    setSignOutError(null);
-    if (getAuthMode() === "session") {
-      // LAMA-296: cookie sessions can't be cleared client-side (HttpOnly),
-      // so sign-out MUST invalidate the session server-side first — a local
-      // clear alone would log straight back in on reload.
-      const result = await sessionLogout();
-      if (result === "failed") {
-        setSignOutError(
-          "Couldn't sign out — the server didn't confirm. The session is still active; try again when connected.",
-        );
-        return;
-      }
-    } else {
-      clearApiKey();
-    }
-    window.location.hash = "#/login";
-    window.location.reload();
-  }
-
   return (
     <>
-      {/* Slim top bar rendered only below 900px (see CSS). */}
+      {/* Brand bar. Only rendered below 640px, where the rail is absent. */}
       <div className="topbar">
-        <button
-          type="button"
-          className="topbar-menu"
-          aria-label={drawerOpen ? "Close navigation" : "Open navigation"}
-          aria-expanded={drawerOpen}
-          onClick={() => setDrawerOpen((open) => !open)}
-        >
-          {drawerOpen ? "✕" : "☰"}
-        </button>
         <BrandLockup />
       </div>
-      {drawerOpen && (
-        <button
-          type="button"
-          className="rail-backdrop"
-          aria-label="Close navigation"
-          onClick={() => setDrawerOpen(false)}
-        />
-      )}
-      <nav className={`rail${drawerOpen ? " rail-open" : ""}`} aria-label="Product navigation">
+      <nav className="rail" aria-label="Product navigation">
         <BrandLockup className="rail-brand" />
         <div className="rail-groups">
           {GROUPS.map((group) => (
@@ -172,24 +199,7 @@ export function Nav() {
           ))}
         </div>
         <div className="rail-footer">
-          <a href="/swagger" target="_blank" rel="noopener noreferrer">
-            API docs ↗
-          </a>
-          <button
-            type="button"
-            className="action theme-toggle"
-            onClick={cycleTheme}
-            aria-label={`Theme: ${LABELS[theme]} (click to cycle)`}
-            title={`Theme: ${LABELS[theme]} — click to switch to ${LABELS[ORDER[(ORDER.indexOf(theme) + 1) % ORDER.length]]}`}
-          >
-            Theme: {LABELS[theme]}
-          </button>
-          {signOutError ? (
-            <span className="muted" role="alert">{signOutError}</span>
-          ) : null}
-          <button type="button" className="action" onClick={() => void signOut()}>
-            Sign out
-          </button>
+          <ShellActions variant="rail" />
         </div>
       </nav>
     </>

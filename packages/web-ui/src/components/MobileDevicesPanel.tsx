@@ -235,7 +235,7 @@ export function MobileDevicesTable({
   return (
     <>
       {listError ? <div className="error">{listError}</div> : null}
-      <table className="data">
+      <table className="data data-list data-mobile-devices">
         <thead>
           <tr>
             <th>Device</th>

@@ -5,7 +5,7 @@ pass, browser `/settings`, brand/motion assets, PWA, screenshot evidence) remain
 to implement.
 Date: 2026-09-10
 
-## Implementation status (updated on completion of phases 1–2)
+## Implementation status (updated on completion of phases 1–4)
 
 Shipped, in the `android-stage-2` worktree:
 
@@ -39,6 +39,48 @@ Shipped, in the `android-stage-2` worktree:
   `Modifier.pullToRefresh` is nested-scroll driven and an `AndroidView` host
   dispatches no nested scroll, so it cannot express the "never fire while the
   page is scrolled away from top" gate around a WebView.
+- **Phase 3 — mobile web navigation.** The rail below 900px is now two permanent
+  surfaces instead of one off-canvas drawer: a **compact rail** from 640px up
+  (`--nav-rail-compact-width`, same 12 destinations, smaller type) and a
+  **bottom tab bar with a More sheet** below that. Four destinations stay in the
+  bar — Dashboard, Devices, Managed folders, Backups — which is the fleet's
+  day-to-day loop; Conflicts, storage destinations, recovery browsing, apps,
+  Activity and Admin are one tap further in. Both sets are derived from
+  `GROUPS` via a `quick` flag, so the phone and the rail cannot drift, and the
+  sheet also carries the shell actions (API docs, theme cycle, sign out) that
+  the hidden rail footer would otherwise have held. `ShellActions` is shared by
+  both surfaces so the LAMA-296 server-side sign-out cannot be got wrong twice.
+- **Phase 3 — safe areas.** The viewport opts into the display cutout
+  (`viewport-fit=cover`) and the shell pads itself with `env(safe-area-inset-*)`
+  exposed as `--safe-*` tokens; `min-height` subtracts the top inset so a
+  notched device does not gain a phantom scroll. In the Android companion these
+  resolve to 0, because the WebView already sits inside the native
+  `safeDrawing` padding, so there is no double padding.
+- **Phase 4 — responsive page pass.** Measured at 360 CSS px against the seeded
+  demo fleet before the pass: `/apps/backups` rendered 670px of content,
+  `/operations` 577px and `/admin` 632px inside a 360px viewport. Every route
+  now measures `scrollWidth == viewport` at 360, 412, 600, 768 and 1280px, and
+  no interactive control on a phone is under 48px tall. The multi-column tables
+  collapse to list rows following the `.data-folders` precedent that already
+  shipped; each keeps its identity, its decisive state and its actions, and
+  drops the columns that the sentence, the expanded row or the detail view
+  still carries. Evidence in `docs/android-mobile-ux-artifacts/`:
+  `mobile-more-sheet-360.png`, `mobile-activity-360.png`,
+  `tablet-compact-rail-768.png`, `desktop-rail-1280.png`.
+
+How those numbers were produced, so the next phase can repeat it instead of
+re-arguing it: run the server against a seeded demo fleet
+(`POST /api/v1/demo/seed`) and the built `dist/index.html`, then for each route
+set `location.hash` and read `document.documentElement.scrollWidth` against
+`clientWidth`, flagging any element whose `getBoundingClientRect().right`
+exceeds the viewport **and** has no clipping or scrolling ancestor. Two false
+positives are worth knowing about, because both look like failures and are not:
+a closed `<details>` keeps laying out its panel (Chrome hides it with
+`content-visibility` on an internal slot, so the panel reports a real width)
+and an `overflow: hidden` ancestor silently clips deliberate ellipsis. Measure
+the built bundle rather than the dev server: while these edits were landing,
+Vite's HMR left a stale module graph, which produced both a false clean
+audit and a blank page.
 
 Decisions taken during implementation that change the written plan:
 
@@ -61,7 +103,41 @@ Decisions taken during implementation that change the written plan:
    `scripts/inline-web-ui.ts` into a single `index.html` served from `GET /`,
    with no static-asset route, so a manifest, its 192/512 icons and a service
    worker cannot be files today. The agreed approach is new server routes
-   serving assets embedded in the binary.
+   serving assets embedded in the binary. Two constraints found while planning
+   it: the inliner **deletes** `dist/assets/`, so PWA assets must be emitted
+   elsewhere and generated into a module at build time to keep the single-binary
+   deployment; and it replaces only Vite's exact `<link rel="stylesheet"
+   crossorigin …>` / `<script type="module" crossorigin …>` strings, so a
+   `<link rel="manifest">` added to `index.html` survives inlining untouched.
+5. **The phone/tablet breakpoint is 640px, not the plan's 600px.** The
+   stylesheet already treats 640 as the phone line in five places (the
+   dashboard's one-up, the Activity row reflow, the foldered data table). A
+   600px nav cutoff would create a 600–639px band with phone-shaped content and
+   tablet navigation.
+6. **The off-canvas drawer is retired, not restyled.** Below 900px the nav is
+   always visible. That removes an open/closed/backdrop state — and with it the
+   class of bug where the drawer and back navigation disagree about where the
+   user is. The consequence, accepted deliberately: from 640–899px the compact
+   rail takes a permanent ~136px column.
+7. **Tab taps keep pushing history entries.** Every destination is still a
+   `NavLink`, exactly as the rail was. Switching tabs with `replace` would have
+   been a silent change to the back contract: browser back would stop walking
+   pages, and Android back inside the companion — which drives
+   `WebView.goBack` over this same history — would start exiting the app
+   instead. Deterministic, and unchanged from the drawer's behaviour.
+8. **The table safety net covers the whole sub-900px shell, not just the
+   phone.** Fixed table layout plus wrapping cells applies at `max-width:
+   899px`. This is not padding: measured at 768px against the demo fleet, the
+   new compact rail took `/backends` from 812px to 948px of scroll width and
+   pushed `/admin` (772px) and `/apps/backups` (810px) into overflow purely by
+   appearing. Below 900px the navigation is no longer a desktop sidebar, so it
+   is the point at which tables must respect their column.
+9. **The service worker will be gated on the shell signal.** When phase 7 adds
+   one it should register only when `data-shell !== "android"`. An installed
+   service worker caching the app shell inside the embedded WebView is a
+   footgun: the native shell reloads that surface on every return, so a stale
+   SPA could outlive a server update with no user-visible way to clear it.
+   Phase 1 built exactly the signal needed to gate it.
 
 ## Outcome
 

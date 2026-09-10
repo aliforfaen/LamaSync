@@ -373,6 +373,22 @@ export function IconSearch(props: SVGProps<SVGSVGElement>) {
   });
 }
 
+// LAMA-329 phase 3: the phone's bottom tab bar keeps four destinations and
+// folds the rest into a More sheet, so it needs its own overflow affordance.
+// Filled family, matching the rail's item icons.
+export function IconMoreFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <>
+        <circle cx="5" cy="12" r="1.9" />
+        <circle cx="12" cy="12" r="1.9" />
+        <circle cx="19" cy="12" r="1.9" />
+      </>
+    ),
+    ...props,
+  });
+}
+
 // LAMA-263: app-presets gallery (a 2x2 grid). Mirrors the iconBase style.
 export function IconPresets(props: SVGProps<SVGSVGElement>) {
   return iconBase({

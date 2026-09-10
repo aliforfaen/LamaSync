@@ -13,6 +13,22 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-329 (phases 3–4 of 8) — mobile web navigation and the responsive page
+  pass.** Below 900px the off-canvas drawer is replaced by two permanent
+  surfaces: a compact rail from 640px up and a bottom tab bar with a More sheet
+  below it. Four destinations stay in the bar (Dashboard, Devices, Managed
+  folders, Backups) and the rest are one tap further in, with both sets derived
+  from `GROUPS` so the phone and the rail cannot drift; the sheet also carries
+  the shell actions (API docs, theme, sign out) the hidden rail footer held.
+  Tab taps deliberately keep pushing history, so browser back and Android back
+  behave exactly as they did with the drawer. The page pass fixed the three
+  routes that scrolled sideways at 360px (`/apps/backups` 670px, `/operations`
+  577px, `/admin` 632px of content in a 360px viewport) by collapsing
+  multi-column tables to list rows, and a sub-900px table safety net keeps any
+  other table from pushing the page out. Safe-area insets are wired for the
+  bottom bar (`viewport-fit=cover` + `--safe-*`). See
+  `docs/android-mobile-ux-plan.md` for the measured before/after numbers and for
+  decisions 5–9, which record where this departs from the written plan.
 - **LAMA-329 (phases 1–2 of 8) — native shell foundations and information
   architecture.** The Compose shell is now edge-to-edge, themed from the web
   UI's own design tokens, and owns a real navigation back stack.
@@ -236,7 +252,10 @@ distributable binary build.
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
-5. **LAMA-329 phases 3–8 — mobile web navigation, responsive pass, PWA and
+5. **LAMA-329 phases 5–8 — browser settings route, brand assets and motion,
+   browser comforts (manifest, install, service worker) and the full evidence
+   sweep.** Phases 3–4 (mobile web navigation and the responsive page pass)
+   shipped; see **Recently shipped**.
    asset/motion work.** Phase 3 derives the compact destinations from the
    existing `GROUPS` source (bottom bar + More sheet below 600px, compact rail
    600–899px); phase 4 is the per-page responsive pass; phase 5 is the
@@ -279,11 +298,31 @@ distributable binary build.
   always owned by a composable branch — and the 12-hour cookie session survives
   in the app-wide cookie jar, so there is no re-login; the visible cost is a
   load. Preserving the live page across native navigation needs the WebView to
-  live outside the nav graph and is deferred with LAMA-329 phases 3–8.
+  live outside the nav graph and is deferred with LAMA-329 phases 5–8.
+- `/backends` needs ~980px of table width, so at a 900–1000px viewport (desktop
+  rail, no sub-900px safety net) the Storage destinations page still scrolls
+  sideways by up to 80px. This predates LAMA-329 — it measures the same with
+  the new rail suppressed — and is outside the phone gate this batch enforced.
+  Fixing it means deciding which of the seven storage columns is expendable at
+  that width, which is a desktop information-architecture call, not a phone
+  one.
 - The web UI emits a production bundle warning at roughly 727 kB minified.
   Code splitting is maintenance work, not a release blocker.
 
 ## Recent verification baseline
+
+LAMA-329 phases 3–4 baseline (this worktree): `bun x tsc --noEmit`,
+`bun run build:web-ui` (the inliner still produces a single self-contained
+`index.html`), `bun test` **1475 pass / 0 fail** (18 added for the mobile nav,
+including a partition test that proves every destination is reachable in one or
+two actions and a route-coverage test that fails if a nav destination has no
+`<Route>` — both verified by mutation), and strict skill drift OK (no route,
+CLI command or flag changed, so the reference is untouched). The responsive
+work was measured in the browser against the seeded demo fleet rather than
+reviewed by eye: all 11 routes report `scrollWidth == viewport` at 360, 412,
+600, 768 and 1280px, the tab bar and the rail are mutually exclusive at every
+width, and no interactive control on a phone is under 48px. One pre-existing
+failure remains outside that band and is listed under Known limitations.
 
 LAMA-329 phases 1–2 baseline (this worktree): repo gates green
 (`bun x tsc --noEmit`, `bun run build:web-ui`, `bun test` — **1457 pass / 0
@@ -298,7 +337,8 @@ bar, the nav graph, the WebView host and back navigation are all exercised) and
 the pull-to-refresh gate against a real `SwipeRefreshLayout` and `WebView`. The
 emulator run was driven with `adb -s`, never AGP device selection, because
 several instrumented classes clear device credentials and must not run against
-a paired phone.
+a paired phone. Phases 3–4 changed no Kotlin at all, so this Android baseline
+still stands and was re-confirmed rather than re-derived.
 
 After the LAMA-324/325 review pass: `bun x tsc --noEmit`,
 `bun run build:web-ui`, `bun test` (1447 pass), strict skill drift, and the

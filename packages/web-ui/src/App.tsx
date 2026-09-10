@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Login } from "./components/Login.tsx";
 import { Nav } from "./components/Nav.tsx";
+import { MobileTabBar } from "./components/MobileTabBar.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { Dashboard } from "./pages/Dashboard.tsx";
 import { Hosts } from "./pages/Hosts.tsx";
@@ -100,7 +101,12 @@ export function App() {
                 {/* LAMA-270: cmd+k palette — authed sessions only, mounted
                     inside the router so it can use useNavigate(). */}
                 <CommandPalette />
-                <Routes>
+                {/* LAMA-329 phase 3: `<main>` is the page landmark (the shell
+                    had none) and the phone tab bar follows it in the DOM so
+                    `position: sticky; bottom: 0` can hold it against the
+                    viewport bottom. */}
+                <main className="app-main">
+                  <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/hosts" element={<Hosts />} />
                   <Route path="/hosts/:hostId" element={<HostDetail />} />
@@ -114,7 +120,9 @@ export function App() {
                   <Route path="/data" element={<DataBrowser />} />
                   <Route path="/admin" element={<Admin />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
-                </Routes>
+                  </Routes>
+                </main>
+                <MobileTabBar />
               </div>
             ) : (
               <Navigate to="/login" replace />

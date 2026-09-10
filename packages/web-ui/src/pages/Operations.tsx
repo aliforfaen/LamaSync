@@ -213,7 +213,7 @@ export function Operations() {
         ) : locks.length === 0 ? (
           <div className="empty-row">No active folder locks</div>
         ) : (
-          <table className="data">
+          <table className="data data-list data-locks">
             <thead>
               <tr>
                 <th>Folder</th>
@@ -251,7 +251,7 @@ export function Operations() {
         />
       ) : (
       <>
-      <table className="data">
+      <table className="data data-list data-activity">
         <thead>
           <tr>
             <th>Time</th>
