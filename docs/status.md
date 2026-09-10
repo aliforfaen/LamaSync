@@ -187,6 +187,11 @@ distributable binary build.
    one row per folder and per backend on every successful measurement. Add a
    prune to the existing daily maintenance pass (`pruneOperationLog` in
    `packages/server/src/index.ts`) once a retention horizon is agreed.
+6. **Unbounded rclone on the single-folder size route.** The LAMA-328
+   concurrency bounds cover background refreshes; `GET /folders/:id/size`
+   (and `?refresh=true`, an admin call the UI no longer makes) still measures on
+   the request with no fleet-wide cap. Add the same semaphore if an external
+   caller starts using it.
 
 ## Known limitations
 
@@ -211,11 +216,14 @@ distributable binary build.
 
 ## Recent verification baseline
 
-After LAMA-328: `bun x tsc --noEmit`, `bun run build:web-ui`, `bun test`
-(1543 pass), strict skill drift, and the full distributable build passed. The
+After LAMA-328 (including its review pass): `bun x tsc --noEmit`,
+`bun run build:web-ui`, `bun test` (1560 pass), strict skill drift, and the full
+distributable build passed. The
 stale-while-revalidate read path is covered by hermetic route tests (cold-start
-persisted read, refresh dedupe, refresh concurrency bound, failure fallback,
-bulk response shape, bounded history) plus a local browser network capture with
+persisted read, TTL-fresh persisted read, refresh dedupe, in-flight visibility,
+global + per-backend concurrency bounds, invalidation with a cold cache and
+during a measurement, failure fallback, bulk response shape, bounded history,
+same-millisecond aggregate) plus a local browser network capture with
 18 folders and 4 destinations. No production deployment was performed, and the
 success path after a *real* large S3 measurement was exercised only against
 unreachable test endpoints (the failure path), so the first warm value on a
