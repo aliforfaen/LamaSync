@@ -39,6 +39,7 @@ const {
   __refreshState,
   __drainFolderRefreshes,
   __folderCacheSize,
+  invalidateFolderSize,
 } = (await import("../stats.ts")) as unknown as {
   __resetStatsCaches: () => void;
   recordSizeHistory: (db: Database, folder: Folder, size: FolderSize) => void;
@@ -48,6 +49,7 @@ const {
   __refreshState: () => { active: number; queued: number; scheduled: number };
   __drainFolderRefreshes: () => Promise<void>;
   __folderCacheSize: () => number;
+  invalidateFolderSize: (folderId: string) => void;
 };
 
 let db: Database;
@@ -689,6 +691,138 @@ describe("LAMA-328: stale-while-revalidate folder sizes", () => {
     measurer.release();
     await __drainFolderRefreshes();
     expect(measurer.calls()).toBe(1);
+  });
+
+  test("every read reports an in-flight refresh until it lands", async () => {
+    insertBackendWithFolder("folder-inflight", "inflight");
+    insertAssignments("folder-inflight", [{ id: "i1", hostId: "host-a" }]);
+    persistSize("folder-inflight", 512, Date.now() - 2 * DAY_MS);
+    const measurer = gatedMeasurer();
+
+    const first = await sizeOf(await app.handle(request("/api/v1/folders/folder-inflight/size")));
+    const second = await sizeOf(await app.handle(request("/api/v1/folders/folder-inflight/size")));
+    expect(first.refreshing).toBe(true);
+    // The refresh is still gated, so the second read must not claim it finished
+    // — a polling caller would stop and never render the new value.
+    expect(second.refreshing).toBe(true);
+    expect(second.stale).toBe(true);
+    expect(second.bytes).toBe(512);
+    expect(__refreshState().scheduled).toBe(1);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+    const third = await sizeOf(await app.handle(request("/api/v1/folders/folder-inflight/size")));
+    expect(third.bytes).toBe(1000);
+    expect(third.refreshing).toBe(false);
+    expect(third.stale).toBe(false);
+  });
+
+  test("a persisted measurement inside the TTL is served as current, not re-measured", async () => {
+    insertBackendWithFolder("folder-fresh", "fresh");
+    insertAssignments("folder-fresh", [{ id: "fr1", hostId: "host-a" }]);
+    const measuredAt = Date.now() - 60_000;
+    persistSize("folder-fresh", 777, measuredAt);
+    let calls = 0;
+    __setSizeMeasurer(async () => {
+      calls += 1;
+      return { bytes: 1, objectCount: 1, error: null };
+    });
+
+    const body = await sizeOf(await app.handle(request("/api/v1/folders/folder-fresh/size")));
+    expect(body.bytes).toBe(777);
+    expect(body.measuredAt).toBe(measuredAt);
+    expect(body.stale).toBe(false);
+    expect(body.refreshing).toBe(false);
+    // A restart must not re-measure every folder that already has a fresh row.
+    expect(__refreshState().scheduled).toBe(0);
+    expect(calls).toBe(0);
+  });
+
+  test("a mutation invalidates persisted bytes even with a cold cache", async () => {
+    insertBackendWithFolder("folder-inval", "inval");
+    insertAssignments("folder-inval", [{ id: "iv1", hostId: "host-a" }]);
+    persistSize("folder-inval", 100, Date.now() - 60_000); // inside the TTL
+    const measurer = gatedMeasurer();
+
+    // A browse/report write after a restart: nothing is in memory, so the
+    // invalidation has to outlive the cache to mean anything.
+    invalidateFolderSize("folder-inval");
+    const body = await sizeOf(await app.handle(request("/api/v1/folders/folder-inval/size")));
+    expect(body.bytes).toBe(100); // still answered immediately
+    expect(body.stale).toBe(true); // but never presented as current
+    expect(body.refreshing).toBe(true);
+    expect(__refreshState().scheduled).toBe(1);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+  });
+
+  test("a mutation during a measurement keeps the result marked not-current", async () => {
+    insertBackendWithFolder("folder-race", "race");
+    insertAssignments("folder-race", [{ id: "rc1", hostId: "host-a" }]);
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const timer = setTimeout(() => release(), 2000);
+    __setSizeMeasurer(async () => {
+      await gate;
+      return { bytes: 4096, objectCount: 1, error: null };
+    });
+
+    const inflight = app.handle(request("/api/v1/folders/folder-race/size?refresh=true"));
+    // A write lands while rclone is still running: its result predates the write.
+    invalidateFolderSize("folder-race");
+    release();
+    clearTimeout(timer);
+
+    const body = await sizeOf(await inflight);
+    expect(body.bytes).toBe(4096);
+    expect(body.stale).toBe(true);
+    // The next read asks for a refresh of its own.
+    const next = await sizeOf(await app.handle(request("/api/v1/folders/folder-race/size")));
+    expect(next.refreshing).toBe(true);
+  });
+
+  test("refreshes for one backend are serialized", async () => {
+    const backendId = insertBackendWithFolder("folder-same-a", "same-backend");
+    db.run(
+      "INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket) VALUES ('folder-same-b', 'same-b', 'backup', 's3', ?, 'bucket')",
+      [backendId],
+    );
+    insertAssignments("folder-same-a", [{ id: "sa1", hostId: "host-a" }]);
+    insertAssignments("folder-same-b", [{ id: "sb1", hostId: "host-b" }]);
+    const measurer = gatedMeasurer();
+
+    const res = await app.handle(request("/api/v1/folders/sizes"));
+    expect(res.status).toBe(200);
+    // Both folders share a backend, so the per-backend limit (one) is what
+    // binds here — the global limit of two is never reached.
+    expect(__refreshState().active).toBe(1);
+    expect(__refreshState().queued).toBe(1);
+    expect(measurer.calls()).toBe(1);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+    expect(__refreshState()).toEqual({ active: 0, queued: 0, scheduled: 0 });
+  });
+
+  test("a folder measured twice in one millisecond counts once per backend", () => {
+    const backendId = insertBackendWithFolder("folder-dupms", "dupms");
+    const folder: Folder = {
+      id: "folder-dupms",
+      name: "dupms",
+      type: "backup",
+      backend: "s3",
+      backendId,
+      s3Bucket: "bucket",
+    };
+    const measuredAt = Date.now() - 60_000;
+    // Two measurements of the same folder at the same timestamp (a forced
+    // refresh overlapping a background one) must not double the destination.
+    recordSizeHistory(db, folder, { folderId: folder.id, bytes: 300, objectCount: 3, error: null, measuredAt });
+    recordSizeHistory(db, folder, { folderId: folder.id, bytes: 300, objectCount: 3, error: null, measuredAt });
+    expect(getStorageHistory(db)[backendId]).toEqual([{ measuredAt, bytes: 300 }]);
   });
 
   test("storage history is bounded by window and daily downsampling", async () => {
