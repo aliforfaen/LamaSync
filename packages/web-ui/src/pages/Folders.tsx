@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Link, useLocation } from "react-router-dom";
-import type { Backend, Folder, FolderAssignment, FolderBackend, FolderSize, Host } from "@lamasync/core";
+import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
@@ -16,6 +16,8 @@ import { ConfirmDialog } from "../components/Modal.tsx";
 import { RetentionPanel } from "../components/RetentionPanel.tsx";
 import { showVerifiedBadge } from "../backup-health.ts";
 import { formatTimeAgo } from "../relative-time.ts";
+// LAMA-328: size-cell formatting + freshness rules live in a pure, tested module.
+import { sizeSuffix, sizeTitle, toSizeCell, type SizeCell } from "../folder-size.ts";
 import {
   BACKEND_KIND_HINTS,
   FOLDER_TYPE_HINTS,
@@ -25,51 +27,6 @@ import {
 interface FolderListItem {
   folder: Folder;
   assignments: FolderAssignment[];
-}
-
-// LAMA-328: what the Size column shows for one folder. `stale` marks last-known
-// bytes that are past the freshness window and `refreshing` marks a measurement
-// in flight, so the cell never implies a stale number is current.
-interface SizeCell {
-  text: string;
-  bytes?: number | null;
-  error?: boolean;
-  stale?: boolean;
-  refreshing?: boolean;
-  measuredAt?: number | null;
-}
-
-function toSizeCell(size: FolderSize | undefined): SizeCell {
-  if (size === undefined) return { text: "—" };
-  return {
-    text:
-      size.bytes === null
-        ? size.refreshing === true
-          ? "measuring…"
-          : "n/a"
-        : formatBytes(size.bytes),
-    bytes: size.bytes,
-    error: size.error !== null,
-    stale: size.stale === true,
-    refreshing: size.refreshing === true,
-    measuredAt: size.measuredAt,
-  };
-}
-
-/** Tooltip for a Size cell: never let last-known bytes read as current. */
-function sizeTitle(size: SizeCell): string | undefined {
-  if (size.bytes === null || size.bytes === undefined) {
-    return size.error
-      ? "size unavailable (not measurable server-side, or the backend is unreachable)"
-      : undefined;
-  }
-  const measured =
-    size.measuredAt === null || size.measuredAt === undefined
-      ? "never measured"
-      : `measured ${formatTimeAgo(size.measuredAt)}`;
-  if (size.error) return `${measured} — the last refresh failed`;
-  if (size.stale) return `${measured} — refreshing in the background`;
-  return measured;
 }
 
 // LAMA-297: a group of folders in the grouped list (Shared / per-host /
@@ -134,21 +91,6 @@ function isFolderType(value: string): value is FolderType {
 
 function isFolderBackend(value: string): value is FolderBackend {
   return FOLDER_BACKENDS.includes(value as FolderBackend);
-}
-
-/** Human-readable byte count for the Size column (LAMA-224). */
-function formatBytes(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "n/a";
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KiB", "MiB", "GiB", "TiB", "PiB"];
-  let value = bytes;
-  let unit = "B";
-  for (const u of units) {
-    if (value < 1024) break;
-    value /= 1024;
-    unit = u;
-  }
-  return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
 function folderToForm(folder: Folder): FolderForm {
@@ -312,8 +254,8 @@ export function Folders() {
   }
 
   // LAMA-328: while measurements are in flight, look again a few times so
-  // background refreshes land without a manual reload. Bounded so a permanently
-  // unreachable backend cannot turn this into a polling loop.
+  // background refreshes land without a manual reload. Bounded (12 × 5s) so a
+  // permanently unreachable backend cannot turn this into a polling loop.
   const sizePollRef = useRef(0);
   useEffect(() => {
     const pending = Object.values(sizes).some((s) => s.refreshing === true);
@@ -321,11 +263,11 @@ export function Folders() {
       sizePollRef.current = 0;
       return;
     }
-    if (sizePollRef.current >= 5) return;
+    if (sizePollRef.current >= 12) return;
     const timer = setTimeout(() => {
       sizePollRef.current += 1;
       void loadSizes();
-    }, 4000);
+    }, 5000);
     return () => clearTimeout(timer);
   }, [sizes]);
 
@@ -1127,13 +1069,8 @@ export function Folders() {
                   {size ? (
                     <span title={sizeTitle(size)}>
                       {size.text}
-                      {/* Only a *value* can be stale or refreshing here —
-                          "measuring…" and "n/a" already say it. */}
-                      {size.stale && size.bytes !== null ? (
-                        <span className="size-stale"> · stale</span>
-                      ) : null}
-                      {size.refreshing && !size.stale && size.bytes !== null ? (
-                        <span className="size-stale"> · refreshing</span>
+                      {sizeSuffix(size) !== null ? (
+                        <span className="size-stale"> · {sizeSuffix(size)}</span>
                       ) : null}
                     </span>
                   ) : (

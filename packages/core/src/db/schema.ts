@@ -420,6 +420,11 @@ CREATE TABLE IF NOT EXISTS size_history (
 );
 CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope
     ON size_history(ref_id, scope, measured_at);
+-- LAMA-328: the bounded history read filters on scope and orders by
+-- (ref_id, measured_at); the leading scope column lets that query walk the
+-- index instead of scanning and sorting the whole table.
+CREATE INDEX IF NOT EXISTS idx_size_history_scope_ref
+    ON size_history(scope, ref_id, measured_at);
 
 -- LAMA-273: pause / slow mode. One row per scope ('global' or one per
 -- host_id). The PK is the scope for global rows and the hostId for host
@@ -729,6 +734,8 @@ export const MIGRATIONS: string[] = [
   // LAMA-269: size time series for the storage donut + growth sparkline.
   "CREATE TABLE IF NOT EXISTS size_history (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, ref_id TEXT NOT NULL, bytes INTEGER, object_count INTEGER, measured_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_size_history_ref_scope ON size_history(ref_id, scope, measured_at)",
+  // LAMA-328: index for the bounded history read (scope filter + ref_id/measured_at order).
+  "CREATE INDEX IF NOT EXISTS idx_size_history_scope_ref ON size_history(scope, ref_id, measured_at)",
   // LAMA-273: pause / slow mode toggle. PK is the scope for the global row
   // and the hostId for per-host rows so a single UPSERT replaces prior
   // state. The schema lives in SERVER_SCHEMA for fresh DBs; the CREATE

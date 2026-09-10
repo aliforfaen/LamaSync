@@ -18,6 +18,12 @@ import type { Folder } from "@lamasync/core";
 const REPORT_TTL_MS = 5 * 60 * 1000;
 const FOLDER_TTL_MS = 15 * 60 * 1000;
 const RCLONE_TIMEOUT = "10s";
+/** Wall-clock cap on a single rclone invocation. `--timeout` bounds rclone's own
+ *  transfer/idle waits, not a wedged process: without a hard kill a hung child
+ *  would hold a refresh slot (and its folder's dedupe entry) for the lifetime of
+ *  the process (LAMA-328 review finding 6). */
+const RCLONE_KILL_MS = 15_000;
+const RCLONE_SIGKILL_AFTER_MS = 2_000;
 interface SizeMeasure {
   bytes: number;
   objectCount: number | null;
@@ -79,6 +85,14 @@ interface CachedFolderSize {
   /** A mutation invalidated these bytes: refresh before calling them current. */
   invalidated: boolean;
 }
+
+/**
+ * Folders invalidated by a mutation, mapped to the time of the newest one. This
+ * is deliberately separate from `folderCache`: an invalidation must survive a
+ * server restart (or a folder nothing has read yet), and it must not be erased
+ * by a measurement that had already started when it arrived.
+ */
+const invalidatedFolders = new Map<string, number>();
 
 // Bounds on background refresh work, so repeated page visits cannot create an
 // rclone process storm: at most one refresh per folder (dedupe), two overall,
@@ -199,10 +213,16 @@ function folderFreshness(
   return {
     ...entry.value,
     error: entry.error,
-    // No measurement time is a permanent "stale": nothing known to serve as
-    // current.
-    stale: entry.value.measuredAt === null || now - entry.value.measuredAt >= FOLDER_TTL_MS,
-    refreshing,
+    // "Not current" covers both reasons: the bytes aged past the TTL, or a
+    // mutation invalidated them before the refresh landed.
+    stale:
+      entry.invalidated ||
+      entry.value.measuredAt === null ||
+      now - entry.value.measuredAt >= FOLDER_TTL_MS,
+    // Any queued or running refresh for this folder is reported from every
+    // read, so a polling caller does not conclude the work finished (LAMA-328
+    // review finding 1: the warm-cache branch used to answer `false`).
+    refreshing: refreshing || refreshScheduled.has(entry.value.folderId),
   };
 }
 
@@ -249,11 +269,29 @@ async function rcloneSize(configText: string, target: string): Promise<SizeMeasu
       ["rclone", "size", "--json", target, "--config", configPath, "--timeout", RCLONE_TIMEOUT],
       { stdout: "pipe", stderr: "pipe" },
     );
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+    // A wedged rclone must never outlive this call: SIGTERM at the deadline,
+    // then SIGKILL if it ignores that.
+    const killTimer = setTimeout(() => proc.kill(), RCLONE_KILL_MS);
+    const sigkillTimer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // Already gone — `exited` resolves on its own.
+      }
+    }, RCLONE_KILL_MS + RCLONE_SIGKILL_AFTER_MS);
+    let stdout: string;
+    let stderr: string;
+    let code: number;
+    try {
+      [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+    } finally {
+      clearTimeout(killTimer);
+      clearTimeout(sigkillTimer);
+    }
     if (code !== 0) {
       const detail = stderr.trim().split("\n").pop() ?? "rclone size failed";
       return { bytes: 0, objectCount: null, error: detail };
@@ -484,6 +522,7 @@ async function readFolderSize(
     !options.refresh &&
     cached !== undefined &&
     !cached.invalidated &&
+    !invalidatedFolders.has(folder.id) &&
     now - cached.checkedAt < FOLDER_TTL_MS
   ) {
     return folderFreshness(cached, now, false);
@@ -492,14 +531,16 @@ async function readFolderSize(
   if (!options.refresh) {
     const known = cached ?? persistedFolderSize(db, folder.id);
     if (known !== null) {
-      // Reaching here means the entry is not fresh: either its bytes aged past
-      // the TTL or a mutation invalidated them. Serve what we have and refresh
-      // behind the request. Stamping `checkedAt` now also rate-limits a broken
-      // backend to one attempt per TTL window instead of one per request.
-      const entry: CachedFolderSize = { ...known, checkedAt: now };
+      // Serve what we have and refresh behind the request. `checkedAt` is the
+      // TTL anchor — a persisted row younger than the TTL is genuinely current,
+      // so it is served without a refresh — while `invalidated` marks bytes a
+      // mutation has already made wrong.
+      const invalidated = known.invalidated || invalidatedFolders.has(folder.id);
+      const needsRefresh = invalidated || now - known.checkedAt >= FOLDER_TTL_MS;
+      const entry: CachedFolderSize = { ...known, checkedAt: now, invalidated };
       folderCache.set(folder.id, entry);
-      scheduleFolderRefresh(db, folder);
-      return folderFreshness(entry, now, true);
+      if (needsRefresh) scheduleFolderRefresh(db, folder);
+      return folderFreshness(entry, now, needsRefresh);
     }
   }
 
@@ -527,7 +568,10 @@ async function readFolderSize(
  * it through `error` rather than erasing a value we already published.
  */
 async function measureFolderSize(db: Database, folder: Folder): Promise<FolderSize> {
-  const now = Date.now();
+  // Captured before the measurement: a mutation that lands while rclone runs
+  // must keep the result marked as not current instead of being cleared by it.
+  const startedAt = Date.now();
+  const now = startedAt;
   const previous = folderCache.get(folder.id) ?? persistedFolderSize(db, folder.id);
   const measured = await measureS3Folder(db, folder);
   const keepPrevious =
@@ -541,14 +585,16 @@ async function measureFolderSize(db: Database, folder: Folder): Promise<FolderSi
         // A failed attempt is not a measurement: only a success stamps a time.
         measuredAt: measured.error === null ? now : null,
       };
-  // A failed attempt clears `invalidated`: it *was* the refresh, so the next
-  // read serves the last known bytes with the error attached and waits out the
-  // TTL before trying again.
+  // `>=` on purpose: an invalidation that lands in the same millisecond the
+  // measurement started is treated as newer, which costs at most one extra
+  // refresh and never reports post-mutation state as current.
+  const invalidatedDuringMeasure = (invalidatedFolders.get(folder.id) ?? 0) >= startedAt;
+  if (!invalidatedDuringMeasure) invalidatedFolders.delete(folder.id);
   const entry: CachedFolderSize = {
     value,
     checkedAt: now,
     error: measured.error,
-    invalidated: false,
+    invalidated: invalidatedDuringMeasure,
   };
   folderCache.set(folder.id, entry);
   if (measured.error === null) recordSizeHistory(db, folder, { ...value, error: null });
@@ -586,15 +632,19 @@ async function measureS3Folder(
 }
 
 /**
- * Mark a folder's known size stale after a mutation (sync report, browse
+ * Mark a folder's known size not-current after a mutation (sync report, browse
  * write). The bytes stay available for an immediate non-blocking answer; the
- * next read schedules a refresh instead of making the page wait for one —
- * which is what the previous cache-drop did (LAMA-328).
+ * next read schedules a refresh instead of making the page wait for one — which
+ * is what the previous cache-drop did (LAMA-328).
+ *
+ * The timestamp is what lets a refresh that was already running when the
+ * mutation landed stay marked as invalid, instead of overwriting it (see
+ * `measureFolderSize`).
  */
 export function invalidateFolderSize(folderId: string): void {
+  invalidatedFolders.set(folderId, Date.now());
   const cached = folderCache.get(folderId);
-  if (cached === undefined) return;
-  cached.invalidated = true;
+  if (cached !== undefined) cached.invalidated = true;
 }
 
 // --- LAMA-269: size time series for the storage donut + growth sparkline ---
@@ -637,16 +687,21 @@ export function recordSizeHistory(
   );
   const backendId = folder.backendId;
   if (!backendId) return;
-  // Sum the latest measured size of every folder that points at this backend.
+  // Sum the newest measurement of every folder that points at this backend.
+  // `h.id` picks exactly one row per folder: a folder measured twice in the same
+  // millisecond (a forced refresh overlapping a background one, LAMA-328 review
+  // finding 5) must not be counted twice, and the `(ref_id, scope, measured_at)`
+  // index makes each lookup a seek rather than a scan.
   const agg = db
     .query<{ bytes: number | null; objects: number | null }, [string]>(
       `SELECT SUM(h.bytes) AS bytes, SUM(h.object_count) AS objects
        FROM size_history h
        JOIN folders f ON f.id = h.ref_id
        WHERE h.scope = 'folder' AND f.backend_id = ?
-         AND h.measured_at = (
-           SELECT MAX(measured_at) FROM size_history
+         AND h.id = (
+           SELECT id FROM size_history
            WHERE scope = 'folder' AND ref_id = h.ref_id
+           ORDER BY measured_at DESC, id DESC LIMIT 1
          )`,
     )
     .get(backendId);
@@ -684,8 +739,8 @@ export function getStorageHistory(
   const out: Record<string, SizeHistoryPoint[]> = {};
   for (const r of rows) {
     const points = (out[r.ref_id] ??= []);
-    // Two rows can share a timestamp (a folder and its backend aggregate are
-    // written together); keep one point rather than a duplicated spike.
+    // Two folders on one backend can be measured in the same millisecond; keep
+    // one point rather than a duplicated step in the sparkline.
     if (points.length > 0 && points[points.length - 1].measuredAt === r.measured_at) continue;
     points.push({ measuredAt: r.measured_at, bytes: r.bytes });
   }
@@ -724,6 +779,7 @@ export function __folderCacheSize(): number {
 export function __resetStatsCaches(): void {
   reportCache.clear();
   folderCache.clear();
+  invalidatedFolders.clear();
   sizeMeasurer = null;
 }
 
