@@ -1003,9 +1003,16 @@ export interface FolderSize {
 
 // LAMA-328: `GET /folders` carries each folder's assignments so the Folders
 // page no longer issues one request per folder (the N+1 reported in LAMA-328).
-// `GET /folders/:id/assignments` still returns the same rows for one folder.
+// The embedded rows are summaries, not full assignments: a list read has no
+// use for the restic repository password, and stamping it into every list
+// response broadened plaintext-secret exposure across Dashboard/Folders/etc.
+// (LAMA-328 review). `GET /folders/:id/assignments` and the daemon's
+// `GET /config/:hostId` still return full `FolderAssignment` rows — those are
+// the dedicated surfaces that actually need the override secret.
+export type FolderAssignmentSummary = Omit<FolderAssignment, "resticPassword">;
+
 export interface FolderWithAssignments extends Folder {
-  assignments: FolderAssignment[];
+  assignments: FolderAssignmentSummary[];
 }
 
 // LAMA-226: Data Browser write operations. Jobs are created when an op

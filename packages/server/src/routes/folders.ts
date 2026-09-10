@@ -2,7 +2,14 @@ import { Elysia, t } from "elysia";
 import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
-import type { AssignmentMode, Folder, FolderAssignment, FolderBackend, FolderType } from "@lamasync/core";
+import type {
+  AssignmentMode,
+  Folder,
+  FolderAssignment,
+  FolderAssignmentSummary,
+  FolderBackend,
+  FolderType,
+} from "@lamasync/core";
 import {
   normalizeAssignmentMode,
   normalizeDestination,
@@ -243,6 +250,15 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
   };
 }
 
+// LAMA-328 review: list surfaces must not stamp the restic repository password
+// into every response. The dedicated surfaces that need the secret — the
+// daemon's `GET /config/:hostId` and the per-folder assignments route (which
+// backs the editor) — keep full rows via `rowToAssignment`.
+function rowToAssignmentSummary(r: AssignmentRow): FolderAssignmentSummary {
+  const { resticPassword: _secret, ...summary } = rowToAssignment(r);
+  return summary;
+}
+
 export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .get(
     "/folders",
@@ -257,12 +273,15 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       // query, so the Folders page no longer issues one request per folder.
       // Same admin-scoped surface as `/folders/:id/assignments` (device and
       // mobile principals cannot reach either route — see auth.ts allowlists).
-      const byFolder = new Map<string, FolderAssignment[]>();
+      // LAMA-328 review: the embedded rows are summaries — the restic
+      // repository password stays off the list wire (nobody consumes a secret
+      // from a folder list); the per-folder route keeps it.
+      const byFolder = new Map<string, FolderAssignmentSummary[]>();
       for (const row of db
         .query<AssignmentRow, []>(`SELECT ${ASSIGNMENT_COLUMNS} FROM folder_assignments`)
         .all()) {
         const list = byFolder.get(row.folder_id) ?? [];
-        list.push(rowToAssignment(row));
+        list.push(rowToAssignmentSummary(row));
         byFolder.set(row.folder_id, list);
       }
       return folders.map((folder) => ({
@@ -732,6 +751,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         );
       }
       db.run("DELETE FROM folder_assignments WHERE folder_id = ?", [params.id]);
+      // LAMA-328 review: the durable size-invalidation watermark has no FK to
+      // folders; drop it with the folder so it cannot linger orphaned.
+      db.run("DELETE FROM folder_size_invalidations WHERE folder_id = ?", [params.id]);
       const result = db.run("DELETE FROM folders WHERE id = ?", [params.id]);
       if (result.changes === 0) {
         set.status = 404;

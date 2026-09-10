@@ -67,12 +67,20 @@ export const statsRoutes = new Elysia({ prefix: "/api/v1" })
     },
   );
 
-/** `days` for the history query: absent is fine, anything non-numeric is a 400. */
+/** `days` for the history query: absent is fine; anything that is not a strict
+ *  base-10 positive integer is a 400. `parseInt` used to accept values the
+ *  docs promised to reject (`days=1x`, `days=1.5`); the regex is strict about
+ *  the whole string, and the upper bound is a documented clamp (3650) done in
+ *  `getStorageHistory`, not a 400 (LAMA-328 review finding 3). */
 function parseHistoryDays(
   raw: string | undefined,
   set: { status?: number | string },
 ): number | undefined | Error {
   if (raw === undefined || raw === "") return undefined;
+  if (!/^[0-9]+$/.test(raw)) {
+    set.status = 400;
+    return new Error(`days must be a positive integer (got '${raw}')`);
+  }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
     set.status = 400;

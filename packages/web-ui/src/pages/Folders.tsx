@@ -2,7 +2,14 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Link, useLocation } from "react-router-dom";
-import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
+import type {
+  Backend,
+  Folder,
+  FolderAssignment,
+  FolderAssignmentSummary,
+  FolderBackend,
+  Host,
+} from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateCronExpression } from "../cron.ts";
@@ -26,7 +33,11 @@ import {
 
 interface FolderListItem {
   folder: Folder;
-  assignments: FolderAssignment[];
+  // LAMA-328 review: the list carries secret-free summaries — no
+  // resticPassword. The editor gets a full row contract through PATCH
+  // round-trips; a summary is assignable to it (the omitted field is
+  // optional and never read here).
+  assignments: FolderAssignmentSummary[];
 }
 
 // LAMA-297: a group of folders in the grouped list (Shared / per-host /
@@ -432,7 +443,7 @@ export function Folders() {
     }
   }
 
-  function beginAssign(folder: Folder, assignments: FolderAssignment[]) {
+  function beginAssign(folder: Folder, assignments: FolderAssignmentSummary[]) {
     setShowForm(false);
     setEditingId(null);
     setEditingAssignment(null);

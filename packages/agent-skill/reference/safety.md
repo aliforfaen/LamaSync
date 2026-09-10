@@ -61,7 +61,11 @@ literal value.
 
 The same rule applies to any other credentials: `s3SecretAccessKey`,
 `resticPassword`, `cryptPassword`. They are write-only at the API surface;
-neither the CLI nor the JSON response echoes them back.
+neither the CLI nor the JSON response echoes them back. (Two admin-only
+exceptions exist and must not widen: assignment `resticPassword` round-trips
+on `GET /folders/:id/assignments` and the daemon's `GET /config/:hostId`, the
+surfaces that actually need it; `GET /folders` embeds secret-free
+`FolderAssignmentSummary` rows instead — LAMA-328 review.)
 
 ## 5. Mutations need intent
 

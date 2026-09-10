@@ -7,7 +7,10 @@ Read this after `AGENTS.md` when entering a coding worktree.
 LAMA-328 (storage/folder page performance: persisted stale-while-revalidate
 sizes, embedded folder assignments, bounded storage history, progressive
 Storage-destinations rendering) is implemented on `lama-328-persisted-swr-stats`
-and green on all repo gates. LAMA-316's app-backup data contract, LAMA-324
+and green on all repo gates. The review-fix pass is also on that branch:
+secret-free `FolderAssignmentSummary` embedded rows, a durable
+`folder_size_invalidations` watermark, strict `?days` validation, and the
+single-folder size refresh under the shared scheduler. LAMA-316's app-backup data contract, LAMA-324
 storage destinations, LAMA-325 retention, and the LAMA-302 real-worktree soak
 are complete. The next product work is LAMA-315 path classification (design
 handoff ready in `docs/handoff-315-path-classification.md`; implement its stage

@@ -187,11 +187,12 @@ distributable binary build.
    one row per folder and per backend on every successful measurement. Add a
    prune to the existing daily maintenance pass (`pruneOperationLog` in
    `packages/server/src/index.ts`) once a retention horizon is agreed.
-6. **Unbounded rclone on the single-folder size route.** The LAMA-328
-   concurrency bounds cover background refreshes; `GET /folders/:id/size`
-   (and `?refresh=true`, an admin call the UI no longer makes) still measures on
-   the request with no fleet-wide cap. Add the same semaphore if an external
-   caller starts using it.
+6. ~~**Unbounded rclone on the single-folder size route.**~~ Resolved in the
+   LAMA-328 review-fix pass: `GET /folders/:id/size?refresh=true` now goes
+   through the same bounded scheduler as background refreshes (one
+   measurement per folder, one per backend, two fleet-wide); concurrent
+   explicit calls dedupe onto the shared task. Folder deletion drops the
+   folder's durable `folder_size_invalidations` watermark row with it.
 
 ## Known limitations
 

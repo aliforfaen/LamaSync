@@ -49,7 +49,7 @@ const {
   __refreshState: () => { active: number; queued: number; scheduled: number };
   __drainFolderRefreshes: () => Promise<void>;
   __folderCacheSize: () => number;
-  invalidateFolderSize: (folderId: string) => void;
+  invalidateFolderSize: (db: Database, folderId: string) => void;
 };
 
 let db: Database;
@@ -746,7 +746,7 @@ describe("LAMA-328: stale-while-revalidate folder sizes", () => {
 
     // A browse/report write after a restart: nothing is in memory, so the
     // invalidation has to outlive the cache to mean anything.
-    invalidateFolderSize("folder-inval");
+    invalidateFolderSize(db, "folder-inval");
     const body = await sizeOf(await app.handle(request("/api/v1/folders/folder-inval/size")));
     expect(body.bytes).toBe(100); // still answered immediately
     expect(body.stale).toBe(true); // but never presented as current
@@ -760,28 +760,64 @@ describe("LAMA-328: stale-while-revalidate folder sizes", () => {
   test("a mutation during a measurement keeps the result marked not-current", async () => {
     insertBackendWithFolder("folder-race", "race");
     insertAssignments("folder-race", [{ id: "rc1", hostId: "host-a" }]);
+    // Two gates: the explicit measurement waits on gate 1; any follow-up
+    // refresh it schedules waits on gate 2, so the follow-up cannot race the
+    // next read with an instant success (the response would then legitimately
+    // say "fresh" and the assertion would be timing-dependent).
     let release = (): void => {};
-    const gate = new Promise<void>((resolve) => {
+    const gate1 = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const timer = setTimeout(() => release(), 2000);
+    let releaseFollowup = (): void => {};
+    const gate2 = new Promise<void>((resolve) => {
+      releaseFollowup = resolve;
+    });
+    const timer = setTimeout(() => {
+      release();
+      releaseFollowup();
+    }, 2000);
+    let calls = 0;
     __setSizeMeasurer(async () => {
-      await gate;
+      calls += 1;
+      await (calls === 1 ? gate1 : gate2);
       return { bytes: 4096, objectCount: 1, error: null };
     });
 
     const inflight = app.handle(request("/api/v1/folders/folder-race/size?refresh=true"));
+    // The write must land while the measurement is genuinely running (rclone
+    // gated), not merely scheduled: a mutation that lands before the
+    // measurement starts is superseded by it, one that lands during it is not.
+    await Bun.sleep(20);
     // A write lands while rclone is still running: its result predates the write.
-    invalidateFolderSize("folder-race");
+    invalidateFolderSize(db, "folder-race");
     release();
-    clearTimeout(timer);
 
     const body = await sizeOf(await inflight);
     expect(body.bytes).toBe(4096);
     expect(body.stale).toBe(true);
-    // The next read asks for a refresh of its own.
+    // The explicit read schedules the follow-up refresh for the invalidated
+    // bytes; the next read must report it as in-flight, not as current.
     const next = await sizeOf(await app.handle(request("/api/v1/folders/folder-race/size")));
     expect(next.refreshing).toBe(true);
+    expect(next.stale).toBe(true);
+
+    releaseFollowup();
+    clearTimeout(timer);
+    await __drainFolderRefreshes();
+    // The follow-up began after the write, so its result is genuinely current.
+    // Same-millisecond starts cost one extra refresh by design (the `>=`
+    // convention in `measureFolderSize` never reports post-mutation bytes as
+    // current), so poll until the read settles rather than assuming exactly
+    // one follow-up ran.
+    let done = await sizeOf(await app.handle(request("/api/v1/folders/folder-race/size")));
+    for (let settle = 0; settle < 10 && (done.stale || done.refreshing); settle += 1) {
+      await Bun.sleep(5);
+      await __drainFolderRefreshes();
+      done = await sizeOf(await app.handle(request("/api/v1/folders/folder-race/size")));
+    }
+    expect(done.bytes).toBe(4096);
+    expect(done.stale).toBe(false);
+    expect(done.refreshing).toBe(false);
   });
 
   test("refreshes for one backend are serialized", async () => {
@@ -863,5 +899,170 @@ describe("LAMA-328: stale-while-revalidate folder sizes", () => {
       request("/api/v1/stats/storage/history?granularity=hour"),
     );
     expect(badGranularity.status).toBe(400);
+  });
+
+  test("?days is a strict positive integer; malformed values are a 400", async () => {
+    // parseInt used to accept `1x` (as 1) and `1.5` (as 1); the docs promise a
+    // 400 for invalid values, so the parser is strict about the whole string.
+    for (const bad of ["1x", "1.5", "abc", "0", "-1", "1e3", "+7", "1,000"]) {
+      const res = await app.handle(
+        request(`/api/v1/stats/storage/history?days=${encodeURIComponent(bad)}`),
+      );
+      expect(res.status).toBe(400);
+    }
+    const ok = await app.handle(request("/api/v1/stats/storage/history?days=7"));
+    expect(ok.status).toBe(200);
+    const omitted = await app.handle(request("/api/v1/stats/storage/history"));
+    expect(omitted.status).toBe(200);
+  });
+
+  test("?days above the documented max is clamped to 3650, not rejected", async () => {
+    const backendId = insertS3BackendWithFolder();
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const point = (measuredAt: number, bytes: number): void => {
+      db.run(
+        "INSERT INTO size_history (scope, ref_id, bytes, object_count, measured_at) VALUES ('backend', ?, ?, 1, ?)",
+        [backendId, bytes, measuredAt],
+      );
+    };
+    point(now - 3600 * DAY, 11); // inside the 3650-day clamp
+    point(now - 3660 * DAY, 12); // outside it
+    const res = await app.handle(
+      request("/api/v1/stats/storage/history?days=999999&granularity=raw"),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      backends: Record<string, Array<{ bytes: number }>>;
+    };
+    expect(body.backends[backendId].map((p) => p.bytes)).toEqual([11]);
+  });
+
+  test("an invalidation survives a restart: persisted bytes stay stale until a later measurement supersedes it", async () => {
+    insertBackendWithFolder("folder-restart", "restart");
+    insertAssignments("folder-restart", [{ id: "rs1", hostId: "host-a" }]);
+    const measuredAt = Date.now() - 60_000; // inside the TTL
+    persistSize("folder-restart", 4096, measuredAt);
+    invalidateFolderSize(db, "folder-restart");
+
+    // Simulate a server restart: every in-memory structure is gone; only the
+    // database survives. The persisted measurement is recent, but the durable
+    // watermark is newer — it must be served stale, never fresh.
+    __resetStatsCaches();
+    const measurer = gatedMeasurer();
+    const body = await sizeOf(await app.handle(request("/api/v1/folders/folder-restart/size")));
+    expect(body.bytes).toBe(4096);
+    expect(body.measuredAt).toBe(measuredAt);
+    expect(body.stale).toBe(true);
+    expect(body.refreshing).toBe(true);
+    expect(__refreshState().scheduled).toBe(1);
+
+    measurer.release();
+    await __drainFolderRefreshes();
+    // The successful measurement began after the invalidation, so it supersedes
+    // the watermark: a second restart now serves the fresh bytes without work.
+    __resetStatsCaches();
+    const after = await sizeOf(await app.handle(request("/api/v1/folders/folder-restart/size")));
+    expect(after.bytes).toBe(1000);
+    expect(after.stale).toBe(false);
+    expect(after.refreshing).toBe(false);
+    expect(__refreshState().scheduled).toBe(0);
+    const watermarks = db
+      .query<{ c: number }, []>(
+        "SELECT COUNT(*) AS c FROM folder_size_invalidations WHERE folder_id = 'folder-restart'",
+      )
+      .get();
+    expect(watermarks?.c).toBe(0);
+  });
+
+  test("a failed refresh does not supersede the durable invalidation watermark", async () => {
+    insertBackendWithFolder("folder-fail-inval", "fail-inval");
+    insertAssignments("folder-fail-inval", [{ id: "fi1", hostId: "host-a" }]);
+    persistSize("folder-fail-inval", 128, Date.now() - 60_000);
+    invalidateFolderSize(db, "folder-fail-inval");
+    __setSizeMeasurer(async () => ({ bytes: 0, objectCount: null, error: "boom" }));
+
+    const first = await sizeOf(await app.handle(request("/api/v1/folders/folder-fail-inval/size")));
+    expect(first.bytes).toBe(128);
+    await __drainFolderRefreshes();
+
+    // The attempt began after the invalidation but did not produce current
+    // bytes: the watermark must remain so a restart keeps serving the
+    // persisted value as stale.
+    const watermarks = db
+      .query<{ c: number }, []>(
+        "SELECT COUNT(*) AS c FROM folder_size_invalidations WHERE folder_id = 'folder-fail-inval'",
+      )
+      .get();
+    expect(watermarks?.c).toBe(1);
+
+    __resetStatsCaches();
+    let calls = 0;
+    __setSizeMeasurer(async () => {
+      calls += 1;
+      return { bytes: 5, objectCount: 1, error: null };
+    });
+    const second = await sizeOf(await app.handle(request("/api/v1/folders/folder-fail-inval/size")));
+    expect(second.bytes).toBe(128);
+    expect(second.stale).toBe(true);
+    expect(second.refreshing).toBe(true);
+    await __drainFolderRefreshes();
+    expect(calls).toBe(1);
+  });
+
+  test("concurrent explicit refresh=true calls share one measurement (dedupe)", async () => {
+    insertBackendWithFolder("folder-rr", "rr");
+    insertAssignments("folder-rr", [{ id: "rr1", hostId: "host-a" }]);
+    persistSize("folder-rr", 10, Date.now() - 2 * DAY_MS);
+    const measurer = gatedMeasurer();
+
+    // Five simultaneous explicit refreshes: one measurement runs, the other
+    // four await the same task instead of spawning parallel rclone work.
+    const pending = Array.from({ length: 5 }, () =>
+      app.handle(request("/api/v1/folders/folder-rr/size?refresh=true")),
+    );
+    await Bun.sleep(20);
+    expect(measurer.calls()).toBe(1);
+    expect(__refreshState().scheduled).toBe(1);
+    expect(__refreshState().active).toBe(1);
+
+    measurer.release();
+    const responses = await Promise.all(pending);
+    const bodies = await Promise.all(responses.map(sizeOf));
+    for (const body of bodies) {
+      expect(body.bytes).toBe(1000);
+      expect(body.stale).toBe(false);
+      expect(body.refreshing).toBe(false);
+    }
+    expect(measurer.calls()).toBe(1);
+    expect(__refreshState()).toEqual({ active: 0, queued: 0, scheduled: 0 });
+  });
+
+  test("explicit refreshes still honor the per-backend bound", async () => {
+    insertBackendWithFolder("folder-eb-a", "eb");
+    db.run(
+      "INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket) VALUES ('folder-eb-b', 'eb-b', 'backup', 's3', (SELECT id FROM backends WHERE name = 'eb'), 'bucket')",
+    );
+    insertAssignments("folder-eb-a", [{ id: "eb1", hostId: "host-a" }]);
+    insertAssignments("folder-eb-b", [{ id: "eb2", hostId: "host-b" }]);
+    const measurer = gatedMeasurer();
+
+    const pending = [
+      app.handle(request("/api/v1/folders/folder-eb-a/size?refresh=true")),
+      app.handle(request("/api/v1/folders/folder-eb-b/size?refresh=true")),
+ ];
+    await Bun.sleep(20);
+    // Both explicit refreshes are scheduled, but the shared backend allows
+    // only one measurement at a time — the second waits its turn.
+    expect(__refreshState().scheduled).toBe(2);
+    expect(__refreshState().active).toBe(1);
+    expect(__refreshState().queued).toBe(1);
+    expect(measurer.calls()).toBe(1);
+
+    measurer.release();
+    await Promise.all(pending);
+    await __drainFolderRefreshes();
+    expect(measurer.calls()).toBe(2);
+    expect(__refreshState()).toEqual({ active: 0, queued: 0, scheduled: 0 });
   });
 });
