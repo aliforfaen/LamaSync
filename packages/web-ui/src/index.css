@@ -413,7 +413,7 @@ td.num {
   }
 }
 
-/* LamaSync masthead: the generated pack mark is decorative; the wordmark is
+/* LamaSync masthead: the courier mark is decorative; the wordmark is
    live text so it stays accessible and remains usable if the art changes. */
 .brand-lockup {
   display: inline-flex;
@@ -428,9 +428,9 @@ td.num {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2rem;
-  height: 1.75rem;
-  flex: 0 0 2rem;
+  width: 2.15rem;
+  height: 2.15rem;
+  flex: 0 0 2.15rem;
 }
 
 .brand-mark-image {

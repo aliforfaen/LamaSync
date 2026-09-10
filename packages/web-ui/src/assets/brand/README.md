@@ -1,5 +1,25 @@
 # Lama pack mark
 
+## Courier mark (current product identity)
+
+The full-body courier llama is the current LamaSync application identity. It
+stands front-on with balanced storage panniers and a sync medallion, tying the
+mascot directly to LamaSync's purpose.
+
+| Asset | Use |
+| --- | --- |
+| `lama-courier-color.png` | Source artwork, Android launcher exports, and large brand moments |
+| `lama-courier-dark-moss.png` | One-color `#9ABB70` header mark on dark UI |
+| `lama-courier-light-teal.png` | One-color `#176F68` header mark on light UI |
+
+The one-color files are mechanically derived from the approved source alpha,
+so their geometry is identical. The shared `BrandLockup` uses these variants;
+the product name remains live HTML text. Keep the full figure at least 28px
+tall in product chrome and preserve the transparent padding around the packs.
+
+The older field-pack assets below remain available as historical/supporting
+brand artwork, but are no longer the web-header identity.
+
 This is the primary LamaSync brand mark: a calm, forward-moving llama carrying
 a small field pack. It is intentionally more detailed than the compact llama
 icons, but still reads as a single-colour silhouette.

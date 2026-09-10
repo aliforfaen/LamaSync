@@ -1,8 +1,8 @@
-import darkMossMark from "../assets/brand/lama-pack-dark-moss.png";
-import lightTealMark from "../assets/brand/lama-pack-light-teal.png";
+import darkMossMark from "../assets/brand/lama-courier-dark-moss.png";
+import lightTealMark from "../assets/brand/lama-courier-light-teal.png";
 
 /**
- * The shared LamaSync masthead treatment. The generated pack mark stays
+ * The shared LamaSync masthead treatment. The courier mark stays
  * decorative while the product name remains live text for accessibility,
  * responsive layout, and future localization.
  */
