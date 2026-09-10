@@ -57,3 +57,51 @@ decorative (`alt=""`, `aria-hidden="true"`) as the shared component does.
 This is a finished raster brand asset, not the 16–32px product icon family.
 At those small sizes, use the simple hand-authored SVG silhouettes described
 in `docs/cozy-dashboard-design.md` instead.
+
+## Installable-app exports (LAMA-329 phases 6–7)
+
+`../pwa/` holds the icon set the web app manifest advertises. These are inputs
+to `scripts/gen-pwa-assets.ts`, which embeds them as base64 in the server so the
+compiled binary can serve them without a runtime asset directory.
+
+| File | Manifest entry | Derivation |
+| --- | --- | --- |
+| `pwa/icon-192.png` | `192x192`, `purpose: any` | `lama-courier-color.png` resized, palette-quantised to 256 colours |
+| `pwa/icon-512.png` | `512x512`, `purpose: any` | same |
+| `pwa/icon-maskable-512.png` | `512x512`, `purpose: maskable` | mark at 410px centred on `#14302B` |
+
+The maskable export is padded on purpose: Android masks installed icons to a
+circle/squircle, and the mark must sit inside the centre 80% of the canvas.
+Measured after generating: the mark's furthest pixel is 185px from centre, i.e.
+72% of the half-canvas, inside the limit. The `any` icons are not padded to that
+rule — they are what Chrome shows in the install dialog and app list — so if a
+launcher ever masks one, re-generate them smaller rather than assuming.
+
+### Regenerating
+
+This is a one-off art step and needs ImageMagick and Pillow; neither is a build
+dependency, because the outputs are committed.
+
+```bash
+# PWA icons (from packages/web-ui/src/assets/brand)
+magick lama-courier-color.png -resize 512x512 -colors 256 -strip \
+  -define png:compression-level=9 ../pwa/icon-512.png
+magick lama-courier-color.png -resize 192x192 -colors 256 -strip \
+  -define png:compression-level=9 ../pwa/icon-192.png
+magick lama-courier-color.png -resize 410x410 -background "#14302B" \
+  -gravity center -extent 512x512 -strip \
+  -define png:compression-level=9 ../pwa/icon-maskable-512.png
+```
+
+The Android notification glyph and the adaptive-icon monochrome layer are
+derived from `drawable-*dpi/lama_courier_launcher.png` in the Android resource
+tree: take the alpha channel and fill it white, keeping the mark on the same
+108dp canvas for the monochrome layer so it aligns with the foreground, and
+cropping to the mark's bounding box for the 24dp notification icon so the figure
+fills the status-bar target. Verify the results the way this pass did: render the
+notification at true 24px and magnify it, rather than judging a large version.
+
+One trap worth recording: the art's alpha is already a solid silhouette (the
+body is opaque; transparent regions all connect to the outside), so "fill the
+holes" does nothing measurable. If a hole-filling step reports zero pixels
+added, the condition is inverted — check the count, not the picture.

@@ -13,6 +13,25 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-329 (phases 5–7 of 8) — browser settings, installable web app, brand
+  icon exports.** A browser `#/settings` route owns what only the browser can
+  change (theme, install, connection) and renders the preference-ownership
+  table — the documented answer to "which store owns every preference", held
+  to invariants by a test. The web app is now installable: a manifest, an icon
+  set and an asset-only service worker are served from the origin root by
+  `webUiRoutes` (a service worker's scope and a manifest's `scope` both have to
+  sit where the SPA does, so they cannot live under `/api/v1`), with the icon
+  bytes embedded through a generated module because the SPA is inlined into one
+  document and there is no asset directory at runtime. The worker caches the
+  app shell ONLY — never `/api/` — and registration is skipped inside the
+  Android companion, where a cached shell could outlive a server update with no
+  way to clear it. Connectivity is now stated honestly: device-offline,
+  server-unreachable and live-updates-paused are three different messages, and
+  data is only flagged as possibly stale when a request actually failed. On the
+  native side the adaptive icon gained its `<monochrome>` themed layer and the
+  notification icon became the courier mark at 24dp, with the enrollment
+  surface checked at font scale 2.0. See `docs/android-mobile-ux-plan.md` for
+  decisions 10–13 and phase 8 for the verification that still needs a human.
 - **LAMA-329 (phases 3–4 of 8) — mobile web navigation and the responsive page
   pass.** Below 900px the off-canvas drawer is replaced by two permanent
   surfaces: a compact rail from 640px up and a bottom tab bar with a More sheet
@@ -252,20 +271,27 @@ distributable binary build.
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
-5. **LAMA-329 phases 5–8 — browser settings route, brand assets and motion,
-   browser comforts (manifest, install, service worker) and the full evidence
-   sweep.** Phases 3–4 (mobile web navigation and the responsive page pass)
-   shipped; see **Recently shipped**.
-   asset/motion work.** Phase 3 derives the compact destinations from the
-   existing `GROUPS` source (bottom bar + More sheet below 600px, compact rail
-   600–899px); phase 4 is the per-page responsive pass; phase 5 is the
-   browser-only `/settings` route; phase 6 vectorises the launcher mark and
-   adds the adaptive/monochrome/PWA/notification exports plus
-   reduced-motion-gated llama motion; phase 7 is the manifest, theme colours,
-   install affordance, safe areas and an asset-only service worker, delivered
-   through new server asset routes; phase 8 is the screenshot evidence set at
-   360x800, 412x915, 600x960, 768x1024 and desktop. Phases 1–2 (native shell
-   foundations and information architecture) shipped in this worktree.
+5. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
+   close.** Phases 3–7 shipped; see **Recently shipped**. What remains is
+   verification that needs a human or a device, not more code:
+   - **TalkBack** over the shell and the mobile nav: focus order, the
+     connection indicator's label (it is not colour-only, but that needs
+     hearing), and the More sheet's dialog semantics.
+   - **Gesture vs 3-button navigation** on a device. Under 3-button nav the
+     system bar takes bottom space, which is exactly where the tab bar now
+     lives; the `safeDrawing` insets should handle it, but that is an
+     inference from the API, not an observation.
+   - **Installed-PWA launch**: title, icon, theme colour, scope, and that the
+     installed app starts offline and still refuses to show stale data. The
+     install prompt itself is confirmed (Chrome offered it), launching is not.
+   - **The embedded WebView after the phase-3 nav change.** Tab taps push
+     history, so Android back now walks tabs instead of leaving the app. That
+     is the intended contract and it matches the old drawer's behaviour, but
+     it is reasoned about rather than observed — the vertical harness needs a
+     live HTTPS server.
+   - **Font scale on the paired managed shell.** 2.0 is verified on the
+     enrollment screen; the top app bar, the Settings rows and the tab bar are
+     not.
 
 ## Known limitations
 
@@ -298,18 +324,47 @@ distributable binary build.
   always owned by a composable branch — and the 12-hour cookie session survives
   in the app-wide cookie jar, so there is no re-login; the visible cost is a
   load. Preserving the live page across native navigation needs the WebView to
-  live outside the nav graph and is deferred with LAMA-329 phases 5–8.
+  live outside the nav graph and is deferred with LAMA-329 phase 8.
 - `/backends` needs ~980px of table width, so at a 900–1000px viewport (desktop
   rail, no sub-900px safety net) the Storage destinations page still scrolls
-  sideways by up to 80px. This predates LAMA-329 — it measures the same with
-  the new rail suppressed — and is outside the phone gate this batch enforced.
-  Fixing it means deciding which of the seven storage columns is expendable at
-  that width, which is a desktop information-architecture call, not a phone
-  one.
+  sideways by up to 80px. This predates the LAMA-329 nav work — it measures the
+  same with the new rail suppressed — and is outside the phone gate phases 3–4
+  enforced. Fixing it means deciding which of the seven storage columns is
+  expendable at that width, which is a desktop information-architecture call,
+  not a phone one.
+- The Android notification small icon is a 24dp raster, not a vector. Android's
+  own guidance prefers a vector there; producing one faithfully needs the
+  designer's source SVG, which is not in the repo. The raster is derived from
+  the approved art at five densities and was checked at true 24px against both
+  a dark and a light status bar.
+- `App` in `packages/server/src/app.ts` is typed as `Elysia` rather than
+  `ReturnType<typeof createServerApp>`. The composed type of the plugin chain
+  is at TypeScript's instantiation-depth limit: it type-checked at 158 routes
+  and threw `TS2589` at 161. Nothing consumes the deep type. Adding many more
+  detailed routes may need the app split behind a narrower facade instead.
 - The web UI emits a production bundle warning at roughly 727 kB minified.
   Code splitting is maintenance work, not a release blocker.
 
 ## Recent verification baseline
+
+LAMA-329 phases 5–7 baseline (this worktree): `bun x tsc --noEmit`,
+`bun run build:web-ui` (still one self-contained `index.html`), `bun test`
+**1509 pass / 0 fail** (+34, covering the preference-ownership invariants, the
+three connectivity states, the install gate, the service-worker gates, the boot
+state's llama pose, and the manifest/icon/service-worker routes), strict skill
+drift OK with the three new root routes documented in `reference/api.md`.
+Measured in a real browser against the built bundle: all 12 routes (now
+including `/settings`) report `scrollWidth == viewport` at 360, 412, 600, 768
+and 1280px and in landscape at 800x360 and 915x412; the tab bar and the rail
+stay mutually exclusive; no phone control is under 48px; Chrome fired
+`beforeinstallprompt`, which is Chrome's own install criteria being satisfied;
+and the shell cache contains only shell paths with no `/api/` entries. Stopping
+the server confirmed the designed pairing: the cached shell boots, the banner
+says changes will not be saved, and the Dashboard shows its empty state rather
+than stale numbers. Android `assembleDebug`, `lintDebug` 0 errors, 215 unit
+tests and **66/66 instrumented** — including the upload-cancellation test that
+exercises the changed foreground-service notification — plus a font-scale 2.0
+check on the emulator.
 
 LAMA-329 phases 3–4 baseline (this worktree): `bun x tsc --noEmit`,
 `bun run build:web-ui` (the inliner still produces a single self-contained

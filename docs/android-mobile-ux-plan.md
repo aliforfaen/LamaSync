@@ -5,7 +5,7 @@ pass, browser `/settings`, brand/motion assets, PWA, screenshot evidence) remain
 to implement.
 Date: 2026-09-10
 
-## Implementation status (updated on completion of phases 1–4)
+## Implementation status (updated on completion of phases 1–7)
 
 Shipped, in the `android-stage-2` worktree:
 
@@ -82,6 +82,36 @@ the built bundle rather than the dev server: while these edits were landing,
 Vite's HMR left a stale module graph, which produced both a false clean
 audit and a blank page.
 
+- **Phase 5 — browser settings.** `#/settings`, registered in `GROUPS` under
+  System so it is one tap from the More sheet and covered by the nav partition
+  and route-coverage tests. It owns only what the browser can change: the theme
+  choice (a radio group rather than the rail's cycle button, because three
+  states need to be visible at once), the install affordance, the current
+  connection state, and the preference-ownership table.
+  `packages/web-ui/src/preferences.ts` is that table as data — one row per
+  preference with its owning store, its layer and where to change it — rendered
+  where the question actually comes up and held to invariants by a test. The
+  point is the two pairs that look like one setting and are not: browser theme
+  vs device appearance, and manual-upload limits vs camera-protection limits.
+- **Phase 6 — brand assets and the boot state.** The adaptive icon gained its
+  `<monochrome>` layer for Android 13 themed icons, derived from the
+  foreground's own alpha on the same 108dp canvas so it aligns exactly. The
+  notification small icon replaced a placeholder phone glyph with the courier
+  mark at 24dp across five densities, and the unused placeholder drawable is
+  gone. The llama "nap" pose — exported in LAMA-274 with a loading slot
+  explicitly reserved — now carries the app boot state, announced with
+  `role="status"` and its animation behind `prefers-reduced-motion`.
+- **Phase 7 — installable web app.** `GET /manifest.webmanifest`, `GET /sw.js`
+  and `GET /icons/:file` are served from the origin root by `webUiRoutes`; the
+  manifest declares `scope` and `start_url` as `/` because the SPA is one
+  document with hash routing, so a narrower scope would only break deep links.
+  The service worker caches the app shell and nothing else, and is registered
+  only outside the Android companion and outside dev. Connectivity became
+  honest: `connectivity.ts` separates device-offline, server-unreachable and
+  live-updates-paused, and only marks data as possibly stale when a request
+  actually failed — `apiFetch` publishes transport outcomes, and a 4xx/5xx
+  response deliberately does not count, because the server answered.
+
 Decisions taken during implementation that change the written plan:
 
 1. **Transfers is labelled "manual uploads".** The app has two independent
@@ -132,12 +162,53 @@ Decisions taken during implementation that change the written plan:
    pushed `/admin` (772px) and `/apps/backups` (810px) into overflow purely by
    appearing. Below 900px the navigation is no longer a desktop sidebar, so it
    is the point at which tables must respect their column.
-9. **The service worker will be gated on the shell signal.** When phase 7 adds
-   one it should register only when `data-shell !== "android"`. An installed
-   service worker caching the app shell inside the embedded WebView is a
-   footgun: the native shell reloads that surface on every return, so a stale
-   SPA could outlive a server update with no user-visible way to clear it.
-   Phase 1 built exactly the signal needed to gate it.
+9. **The service worker is gated on the shell signal.** It registers only when
+   `data-shell !== "android"`. An installed worker caching the app shell inside
+   the embedded WebView is a footgun: the native shell reloads that surface on
+   every return, so a stale SPA could outlive a server update with no
+   user-visible way to clear it. Phase 1 built exactly the signal needed, and
+   this was verified in a real browser rather than reasoned about — a browser
+   tab registers with scope `/`, the embedded shell registers nothing.
+10. **The browser settings route deliberately does not mirror device settings.**
+    `#/settings` owns the theme choice, the install affordance, connection state
+    and the preference-ownership table. Pull-to-refresh, the camera-protection
+    limits and device appearance stay in the companion: two controls for one
+    value is how a setting starts "not sticking".
+11. **PWA assets ship as a generated module of base64 icons.** The server has no
+    runtime asset directory — the SPA is inlined into one `index.html` and the
+    inliner deletes `dist/assets/` — so icon bytes have to travel inside the
+    binary. The alternative, Bun's `with { type: "base64" }` import attribute,
+    silently returns a file path on the installed version (1.3.14), so it cannot
+    be relied on. Only the unreviewable bytes are generated; the manifest and
+    the service worker are hand-written source, and a test fails if the module
+    drifts from the PNGs.
+12. **The notification small icon is a raster, not a vector.** Android's
+    guidance prefers a vector there, and the plan's phase 6 says "vectorise the
+    icon concept". A faithful vectorisation needs the designer's source SVG,
+    which is not in the repository; guessing one would be a redesign, not a
+    conversion. What shipped is a 24dp raster derived mechanically from the
+    approved art at five densities. The launcher mark's `lama_courier_launcher`
+    raster is in the same position for the same reason. Supplying the source SVG
+    is the one art input that would close this out.
+13. **The registered service worker is skipped in dev as well as in the
+    companion.** `import.meta.env.PROD` gates it because the Vite dev server has
+    no `/sw.js`, and a failed registration there would be noise that hides the
+    real gate.
+
+### Phase 8 — what is verified and what still needs a human
+
+Verified and recorded in `docs/android-mobile-ux-artifacts/`: layout at 360,
+412, 600, 768, 1280 and both landscape sizes (12 routes each, machine-checked
+for horizontal overflow and for sub-48px phone targets); light and dark; the
+install prompt being offered by Chrome itself; the offline shell boot with its
+honest banner; the launcher mark inside circle, squircle, rounded-square and
+teardrop masks; the notification glyph at true 24px on dark and light status
+bars; and the enrollment surface at font scale 2.0.
+
+Still needs a device or a person, and is listed as open in `docs/status.md`:
+TalkBack over the shell and the mobile nav; gesture vs 3-button navigation;
+launching the installed PWA; Android back inside the embedded WebView after the
+nav change; and font scale 2.0 on the paired managed shell.
 
 ## Outcome
 
@@ -268,6 +339,24 @@ Required icon exports after the concept is vectorized:
   plus separate 192/512 maskable exports with safe-zone validation.
 - Notification icon: one-color white silhouette, transparent background; never
   reuse the full-color launcher asset.
+
+Status as shipped (phases 6–7):
+
+| Export | State |
+| --- | --- |
+| Android adaptive foreground + background colour | Shipped (raster foreground at five densities) |
+| Android `<monochrome>` themed-icon layer | Shipped, derived from the foreground alpha on the same canvas |
+| Legacy mipmap densities | Shipped (`drawable-*dpi/lama_courier_launcher.png`) |
+| PWA 192 + 512 (`any`) and 512 (`maskable`) | Shipped, maskable safe zone measured (mark radius 72% of half-canvas; limit 80%) |
+| Notification white silhouette | Shipped at five densities, checked at true 24px on dark and light status bars |
+| Vectorised concept (source SVG) | **Open** — needs the designer's source; see decision 12 |
+| Favicon SVG + 32px PNG, Apple touch 180px, maskable 192px | **Open** — not required by any gate; add if an iOS or favicon requirement appears |
+
+Regenerating the PNG set is a documented one-off art step, not part of the
+build: see `packages/web-ui/src/assets/brand/README.md`. The base64 embedding
+the server needs IS part of the build and is idempotent —
+`scripts/gen-pwa-assets.ts`, with a test that fails if the generated module
+drifts from the PNGs.
 
 ## Luna implementation sequence
 
