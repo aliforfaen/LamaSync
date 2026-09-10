@@ -97,9 +97,10 @@ class MediaProtectionStore(private val storage: QueueStorage) {
     }
 
     /**
-     * Atomic page commit: persist the settings summary, cursor advances and
-     * record updates in ONE durable write so a process death between
-     * independent calls can never leave a half-applied scan page.
+     * Atomic page commit: persist scan metadata, cursor advances and record
+     * updates in ONE durable write. User-owned configuration is preserved
+     * from the latest snapshot so a long scan cannot revert a concurrent UI
+     * change with the settings object it captured when the scan began.
      */
     fun commitScanPage(
         settings: AutoProtectSettings,
@@ -118,7 +119,16 @@ class MediaProtectionStore(private val storage: QueueStorage) {
                 records.removeAll { it.identityKey == u.identityKey }
                 records += u
             }
-            writeSnapshot(current.copy(settings = settings, cursors = cursors, records = records))
+            val mergedSettings = current.settings.copy(
+                lastScanAtEpochMillis = settings.lastScanAtEpochMillis,
+                lastScanStatus = settings.lastScanStatus,
+                lastScanScope = settings.lastScanScope,
+                updatedAtEpochMillis = maxOf(
+                    current.settings.updatedAtEpochMillis,
+                    settings.updatedAtEpochMillis,
+                ),
+            )
+            writeSnapshot(current.copy(settings = mergedSettings, cursors = cursors, records = records))
         }
     }
 

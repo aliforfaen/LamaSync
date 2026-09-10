@@ -133,10 +133,10 @@ object UploadNaming {
         }
     }
 
-    /** Deterministic per-attempt key: `base#v<attempt>` (bounded for the
+    /** Deterministic per-attempt key: `base.v<attempt>` (bounded for the
      *  server's 128-char idempotency-key limit). */
     fun derivedKey(baseIdempotencyKey: String, attemptIndex: Int): String {
-        val suffix = "#v$attemptIndex"
+        val suffix = ".v$attemptIndex"
         return baseIdempotencyKey.take(MAX_KEY - suffix.length) + suffix
     }
 
@@ -145,8 +145,8 @@ object UploadNaming {
     /** The suffix a versioned name carries (` (n)` before the extension). */
     private val VERSION_SUFFIX = Regex(" \\(\\d+\\)$")
 
-    /** The `#v` prefix of a derived idempotency key. */
-    const val VERSIONED_KEY_PREFIX = "#v"
+    /** The `.v` prefix of a derived idempotency key. */
+    const val VERSIONED_KEY_PREFIX = ".v"
 
     /**
      * The item's IMMUTABLE base display name: any versioned ` (n)` suffix
@@ -162,9 +162,9 @@ object UploadNaming {
         return stem.replace(VERSION_SUFFIX, "") + ext
     }
 
-    /** The IMMUTABLE base idempotency key: any `#v<n>` attempt suffix from an
-     *  earlier attempt is stripped, so keys derive as `base#v1`, `base#v2`…
-     *  across restarts — never `base#v1#v1`. */
+    /** The IMMUTABLE base idempotency key: any `.v<n>` attempt suffix from an
+     *  earlier attempt is stripped, so keys derive as `base.v1`, `base.v2`…
+     *  across restarts — never `base.v1.v1`. */
     fun baseIdempotencyKey(idempotencyKey: String): String =
         idempotencyKey.substringBefore(VERSIONED_KEY_PREFIX)
 

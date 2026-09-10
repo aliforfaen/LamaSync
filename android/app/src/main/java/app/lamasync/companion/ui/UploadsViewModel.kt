@@ -400,7 +400,11 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
         val policy = policyStore.load().copy(unmeteredOnly = value)
         policyStore.save(policy)
         _ui.update { it.copy(policy = policy) }
-        UploadWorkScheduler.rescheduleWithPolicy(context, policy)
+        UploadWorkScheduler.rescheduleWithPolicy(
+            context,
+            policy,
+            UploadWorkScheduler.UploadItemKind.MANUAL,
+        )
     }
 
     /** Browse/open URL for a completed receipt (embedded web UI Data Browser). */

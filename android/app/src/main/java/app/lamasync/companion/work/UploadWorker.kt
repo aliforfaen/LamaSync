@@ -278,7 +278,7 @@ class UploadWorker(
      * immutable base name and idempotency key (captured once, before any
      * retry) plus the PERSISTED [UploadQueueItem.autoNameAttempt] — a restart
      * resumes the same series instead of nesting `name (2) (2).jpg` /
-     * `base#v1#v1`. The attempt bound is global per item (persisted), not per
+     * `base.v1.v1`. The attempt bound is global per item (persisted), not per
      * run. Returns the outcome together with the LATEST item so the caller
      * applies the final state to the durable current fields.
      */
@@ -298,7 +298,7 @@ class UploadWorker(
         // Immutable base for the whole series — derived ONCE from the item as
         // loaded from the durable store, so every attempt (including one
         // resumed after a restart) produces `base (2)`, `base (3)`… and
-        // `base#v1`, `base#v2`… instead of nesting versions.
+        // `base.v1`, `base.v2`… instead of nesting versions.
         val baseName = UploadNaming.baseDisplayName(item.displayName)
         val baseKey = UploadNaming.baseIdempotencyKey(item.idempotencyKey)
         var current = item

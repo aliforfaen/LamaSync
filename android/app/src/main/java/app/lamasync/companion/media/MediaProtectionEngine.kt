@@ -388,7 +388,25 @@ class MediaProtectionEngine(
             val identity = item.mediaIdentity ?: return false
             val receipt = item.receipt ?: return false
             val record = recordStore.recordFor(identity) ?: return false
-            if (record.status == MediaRecordStatus.PROTECTED) return true
+            if (record.status == MediaRecordStatus.PROTECTED && record.queueItemId == item.id) return true
+
+            // A newer content revision may have replaced this identity while
+            // the older staged upload was still in flight. Its completion is
+            // valid provenance, but must not mark the newer bytes PROTECTED.
+            if (record.queueItemId != item.id) {
+                val priorPaths = (listOf(receipt.finalRelPath) + record.previousProtectedPaths)
+                    .distinct()
+                    .take(20)
+                recordStore.updateRecords(
+                    listOf(
+                        record.copy(
+                            previousProtectedPaths = priorPaths,
+                            updatedAtEpochMillis = System.currentTimeMillis(),
+                        ),
+                    ),
+                )
+                return true
+            }
             recordStore.updateRecords(
                 listOf(
                     record.copy(

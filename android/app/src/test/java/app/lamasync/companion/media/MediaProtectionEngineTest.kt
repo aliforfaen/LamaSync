@@ -369,8 +369,16 @@ class MediaProtectionEngineTest {
         val queue = UploadQueueStore(MemoryQueueStorage())
         val store = MediaProtectionStore(MemoryRecordStorage())
         val rec = record(1L)
-        store.updateRecords(listOf(rec))
         val item = doneItem(rec)
+        store.updateRecords(
+            listOf(
+                rec.copy(
+                    status = MediaRecordStatus.STAGED,
+                    queueItemId = item.id,
+                    sha256 = item.sha256,
+                ),
+            ),
+        )
         assertTrue(MediaProtectionEngine.reconcileCompleted(store, item))
         val first = store.recordFor(rec.identityKey)!!
         // Second call: no change.
@@ -380,6 +388,33 @@ class MediaProtectionEngineTest {
         assertFalse(
             MediaProtectionEngine.reconcileCompleted(store, item.copy(mediaIdentity = null)),
         )
+    }
+
+    @Test
+    fun olderRevisionCompletionCannotProtectNewerDiscoveredBytes() = runTest {
+        val store = MediaProtectionStore(MemoryRecordStorage())
+        val old = record(1L).copy(
+            status = MediaRecordStatus.STAGED,
+            queueItemId = AutoQueueKeys.queueItemId(record(1L).identityKey, "a".repeat(64)),
+            sha256 = "a".repeat(64),
+        )
+        val oldDone = doneItem(old)
+        val newer = old.copy(
+            sizeBytes = 2_000L,
+            status = MediaRecordStatus.DISCOVERED,
+            queueItemId = null,
+            sha256 = null,
+        )
+        store.updateRecords(listOf(newer))
+
+        assertTrue(MediaProtectionEngine.reconcileCompleted(store, oldDone))
+
+        val current = store.recordFor(newer.identityKey)!!
+        assertEquals(MediaRecordStatus.DISCOVERED, current.status)
+        assertNull(current.queueItemId)
+        assertNull(current.receiptPath)
+        assertTrue(current.previousProtectedPaths.contains(oldDone.receipt!!.finalRelPath))
+        assertEquals(0L, MediaCoverage.of(listOf(current)).contiguousProtectedCount)
     }
 
     // ---- P1: destination cache is cleared when authority disappears ----

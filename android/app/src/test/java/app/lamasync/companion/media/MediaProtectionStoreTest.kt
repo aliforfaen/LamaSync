@@ -54,6 +54,7 @@ class MediaProtectionStoreTest {
             watermarkId = 7L,
         )
         val settings = AutoProtectSettings(cameraPhotosEnabled = true).copy(lastScanStatus = ScanStatus.OK)
+        s.updateSettings { it.copy(cameraPhotosEnabled = true) }
         s.commitScanPage(settings, listOf(cursor), listOf(record))
 
         val snap = s.load()
@@ -62,6 +63,41 @@ class MediaProtectionStoreTest {
         val c = snap.cursors.single()
         assertEquals(7L, c.watermarkDateAdded)
         assertTrue(snap.settings.cameraPhotosEnabled)
+    }
+
+    @Test
+    fun staleScanCommitPreservesLatestUserConfiguration() {
+        val s = store()
+        val staleAtScanStart = AutoProtectSettings(
+            cameraPhotosEnabled = true,
+            unmeteredOnly = false,
+            updatedAtEpochMillis = 10L,
+        )
+        s.updateSettings {
+            it.copy(
+                cameraPhotosEnabled = false,
+                cameraVideosEnabled = true,
+                unmeteredOnly = true,
+                updatedAtEpochMillis = 20L,
+            )
+        }
+
+        s.commitScanPage(
+            staleAtScanStart.copy(
+                lastScanAtEpochMillis = 30L,
+                lastScanStatus = ScanStatus.INTERRUPTED,
+                updatedAtEpochMillis = 30L,
+            ),
+            emptyList(),
+            emptyList(),
+        )
+
+        val settings = s.load().settings
+        assertFalse(settings.cameraPhotosEnabled)
+        assertTrue(settings.cameraVideosEnabled)
+        assertTrue(settings.unmeteredOnly)
+        assertEquals(30L, settings.lastScanAtEpochMillis)
+        assertEquals(ScanStatus.INTERRUPTED, settings.lastScanStatus)
     }
 
     @Test

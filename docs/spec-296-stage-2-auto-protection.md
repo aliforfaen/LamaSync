@@ -170,9 +170,9 @@ process-wide mutation lock, mirroring the stage-1 `UploadQueueStore` pattern.
   until removed; removing it re-arms protection on the next scan.
 - Collision handling (repeated names): if the server rejects `create` with a
   collision (409), the worker retries under `base (n).ext` names with derived
-  `base#v(n)` keys — derived from the item's IMMUTABLE base name/key plus the
+  `base.v(n)` keys — derived from the item's IMMUTABLE base name/key plus the
   PERSISTED `autoNameAttempt`, so a restart resumes the same series instead
-  of nesting `name (2) (2).jpg` / `base#v1#v1`; the attempt bound (20) is
+  of nesting `name (2) (2).jpg` / `base.v1.v1`; the attempt bound (20) is
   global per item (persisted), not per worker run. The server copy is never
   overwritten. Manual uploads keep stage-1 behavior (explicit blocked state
   with rename guidance).

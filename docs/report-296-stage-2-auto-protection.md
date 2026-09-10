@@ -140,7 +140,7 @@ and `docs/296-stage-2-artifacts/`.
   a server 409; the series derives from the item's immutable base name/key
   plus the persisted `autoNameAttempt`, so each attempt converges on one
   upload row across restarts (never nested `name (2) (2).jpg` /
-  `base#v1#v1`), and the 20-attempt bound is global per item.
+  `base.v1.v1`), and the 20-attempt bound is global per item.
 - Once an auto item is durably DONE, the worker reconciles the registry
   (`MediaProtectionEngine.reconcileCompleted`): the record becomes
   PROTECTED with receiptPath/protectedAt — coverage and "last successful
@@ -261,7 +261,7 @@ with focused regressions; docs above are corrected to match actual behavior.
   result" doc comment in `UploadWorker` was removed.
 
 Correction-round validation (actual results, this worktree):
-- JVM `testDebugUnitTest` — **186/186** (was 148; +38 focused regressions:
+- JVM `testDebugUnitTest` — **188/188** (was 148; +40 focused regressions:
   discovery/deletion/permission matrices, same-size edits, EXISTING_HISTORY
   incremental + transition insertion, per-page commit + interrupted resume,
   STAGED→PROTECTED + restart + coverage advancement, destination cache,

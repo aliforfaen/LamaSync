@@ -26,8 +26,9 @@ import kotlinx.coroutines.CancellationException
  *    from there — it is never silently marked satisfied (P0-2).
  *  - changed content on a known identity is a new revision (re-stage +
  *    re-protect), never a silent skip. The revision signal is
- *    size OR date-modified, and the staging step adds a content SHA, so a
- *    same-size edit is caught even when date-modified is unchanged (P0-add).
+ *    size OR date-modified; staging then gives each detected revision an
+ *    exact content SHA. Providers that expose neither metadata change cannot
+ *    be detected without re-reading every media item (documented limit).
  *  - interrupted scans persist a page cursor after every COMPLETED page
  *    (process-death resume without skipping files).
  *

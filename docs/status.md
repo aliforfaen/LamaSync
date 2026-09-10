@@ -269,7 +269,7 @@ LAMA-296 stage-2 correction baseline (this worktree, review round):
 repo gates green (`bun x tsc --noEmit`, `bun run build:web-ui`, `bun test`
 **1580 pass / 9 skip / 0 fail**, strict skill drift OK, `bun run build`),
 Android `assembleDebug` OK + `lintDebug` **0 errors (55 warnings)**,
-`testDebugUnitTest` **186/186**, and the instrumented suite — **55 tests /
+`testDebugUnitTest` **188/188**, and the instrumented suite — **55 tests /
 0 failures / 2 in-class skips** on the API-35 `lamadb-test` AVD **with the
 disposable HTTPS vertical** (phase-1 enrollment A–D, stage-1 manual verticals,
 stage-2 auto-protect vertical incl. the real completion-reconcile path); the
