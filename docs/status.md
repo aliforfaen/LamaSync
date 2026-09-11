@@ -415,6 +415,24 @@ distributable binary build.
 
 ## Recent verification baseline
 
+LAMA-334 feedback pass (this worktree): `bun x tsc --noEmit`, `bun run
+build:web-ui` (still one self-contained `index.html`), `bun test` **1557 pass /
+0 fail** (+17), strict skill drift OK (160 API rows / 161 server routes / 11 CLI
+commands — no route, command or flag changed). Android `assembleDebug` OK,
+`lintDebug` **0 errors (62 warnings**, all pre-existing version-availability
+noise) and `testDebugUnitTest` **242/242** (+12: the pull-gate arming rules at
+nine view heights, the refresh terminal states, `serverIdentity`, and the
+gallery folder semantics). Narrow-width evidence measured against the built
+bundle and a seeded demo fleet at 360x800: all seven sampled routes report
+`scrollWidth == clientWidth == 360`, the collapsed host-folder and access-key
+tables render as stacked labelled rows (screenshots in
+`docs/android-mobile-ux-artifacts/`), and no visible cell is both narrower than
+70px and more than three times its own width tall. **Not run in this pass:** the
+instrumented suite (the `lamadb-test` AVD's system image is not installed on
+this host, and the only attached device is the operator's paired phone, which
+the instrumented classes must not touch) and the physical-phone look at the new
+native surfaces.
+
 LAMA-329 phase 5–7 review pass (this worktree): `bun x tsc --noEmit`,
 `bun run build:web-ui` (still one self-contained `index.html`), `bun test`
 **1540 pass / 0 fail** (+31 over the phase-5–7 baseline), strict skill drift OK

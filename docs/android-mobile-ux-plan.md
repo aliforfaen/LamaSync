@@ -310,10 +310,22 @@ honest banner; the launcher mark inside circle, squircle, rounded-square and
 teardrop masks; the notification glyph at true 24px on dark and light status
 bars; and the enrollment surface at font scale 2.0.
 
+Added by the LAMA-334 pass, measured the same way (built bundle + seeded demo
+fleet, 360x800 at DPR 2): every route reports `scrollWidth == clientWidth ==
+360`, and the collapsed tables were checked cell by cell rather than by eye —
+`lama334-host-folders-collapsed-360.png` (seven desktop columns rendering as
+name+action / badge / path / labelled schedule+role / three actions) and
+`lama334-admin-keys-collapsed-360.png` (eight columns with labelled Created,
+Last used and Fingerprint rows). The narrowest *visible* cell on the device
+tables is 61px and no cell is both under 70px wide and more than three times
+its own width tall — the character-per-line failure mode — on any route.
+
 Still needs a device or a person, and is listed as open in `docs/status.md`:
 TalkBack over the shell and the mobile nav; gesture vs 3-button navigation;
 launching the installed PWA; Android back inside the embedded WebView after the
-nav change; and font scale 2.0 on the paired managed shell.
+nav change; font scale 2.0 on the paired managed shell; and — added by LAMA-334
+— the native aspects of the feedback pass (the pull gesture's feel, the gallery
+folder list under font scale 2.0, and the new header at phone width).
 
 ## Outcome
 
