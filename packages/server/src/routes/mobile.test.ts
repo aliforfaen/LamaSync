@@ -54,6 +54,8 @@ const { __setDb: __setFoldersDb, foldersRoutes } = await import("./folders.ts");
 const { __setDb: __setConfigDb, configRoutes } = await import("./config.ts");
 const { __setDb: __setKeysDb, apiKeysRoutes } = await import("./api-keys.ts");
 const { __setDb: __setAppsDb, appsRoutes } = await import("./apps.ts");
+const { __setDb: __setConflictsDb, conflictsRoutes } = await import("./conflicts.ts");
+const { __setDb: __setResticDb, resticRoutes } = await import("./restic.ts");
 const { __setDb: __setConfigRevisionDb } = await import("../config-revision.ts");
 const { __setCachedLatestVersionForTests } = await import("../release-cache.ts");
 
@@ -105,6 +107,8 @@ beforeEach(() => {
   __setConfigDb(db);
   __setKeysDb(db);
   __setAppsDb(db);
+  __setConflictsDb(db);
+  __setResticDb(db);
   __setConfigRevisionDb(db);
   __setCachedLatestVersionForTests("test-9.9.9");
   __resetMobileRateLimits();
@@ -117,6 +121,8 @@ beforeEach(() => {
     .use(configRoutes)
     .use(apiKeysRoutes)
     .use(appsRoutes)
+    .use(conflictsRoutes)
+    .use(resticRoutes)
     .use(mobileRoutes);
 });
 
@@ -752,6 +758,17 @@ describe("POST /mobile/web-session + cookie REST", () => {
       req("/api/v1/hosts", { headers: { Cookie: `__Host-lamasync-mobile=${cookie}` } }),
     );
     expect(hosts.status).toBe(200);
+    // Dashboard list queries intentionally omit hostId. An admin web session
+    // must have the same fleet-wide access as an admin bearer, not be treated
+    // like a daemon-bound device key.
+    const conflicts = await app.handle(
+      req("/api/v1/conflicts", { headers: { Cookie: `__Host-lamasync-mobile=${cookie}` } }),
+    );
+    expect(conflicts.status).toBe(200);
+    const snapshots = await app.handle(
+      req("/api/v1/restic/snapshots", { headers: { Cookie: `__Host-lamasync-mobile=${cookie}` } }),
+    );
+    expect(snapshots.status).toBe(200);
     // Logout: CSRF-protected mutation, clears the cookie, kills the session.
     const logout = await app.handle(
       req("/api/v1/mobile/web-session/logout", {

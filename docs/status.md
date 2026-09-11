@@ -320,10 +320,17 @@ distributable binary build.
    client fix removes only stored bearers when the companion opens its
    embedded document, then lets the existing cookie-only `/auth/me` probe
    establish session mode; it neither changes server precedence nor exposes a
-   credential. Targeted web tests, TypeScript, and the production web build
-   pass. Before closing, validate the re-pair flow on a disposable HTTPS
-   vertical and on the physical device, and separately improve the native
-   cookie-presence indicator so it does not claim verified fleet authority.
+   credential. A real-device inspection then found the remaining server-side
+   defect: the valid admin cookie reaches `/auth/me` and `/hosts`, but the
+   dashboard's unscoped `/conflicts` and `/restic/snapshots` list requests
+   were incorrectly denied by `deviceMayAccessHost` because they omit
+   `hostId`. Admin web sessions must have fleet-wide access just like admin
+   bearers; the gate now allows them while keeping non-admin sessions and
+   device/native credentials confined. Full tests, TypeScript, production web
+   build, and strict drift pass. Deploy this server fix, then confirm the
+   physical dashboard no longer reports Forbidden; separately improve the
+   native cookie-presence indicator so it does not claim verified fleet
+   authority.
 
 ## Known limitations
 
