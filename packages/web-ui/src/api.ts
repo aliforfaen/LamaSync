@@ -152,6 +152,27 @@ export function clearApiKey(): void {
   localStorage.removeItem(API_KEY_PERSIST_STORAGE);
 }
 
+/**
+ * The Android companion's WebView shares DOM storage with earlier visits to
+ * the same fleet origin. A legacy browser bearer there would otherwise win
+ * over the companion's freshly bootstrapped cookie: the server correctly
+ * treats an explicit bearer as authoritative and returns 403 for a
+ * device-scoped key instead of falling back to the cookie.
+ *
+ * This is local credential hygiene, not an authorization signal. The caller
+ * has already selected the embedded document; clearing a stored bearer grants
+ * nothing, never touches the HttpOnly cookie, and never sends a value to the
+ * server. A normal browser document retains its existing bearer behaviour.
+ */
+export function clearStoredBearerForEmbeddedShell(): void {
+  try {
+    clearApiKey();
+  } catch {
+    // Storage may be disabled by the embedding WebView. In that case there is
+    // no reliable legacy bearer to use, and session discovery remains safe.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // LAMA-296 — SPA auth modes.
 //

@@ -312,13 +312,18 @@ distributable binary build.
    fresh re-pair.** On the physical device, the embedded management UI returns
    `Forbidden` for fleet data while the native shell reports `Connected`. The
    operator signed out, removed the registration from LamaSync, and paired
-   again with a fresh QR; the failure persists. The current native indicator
-   only observes cookie presence, so it can claim Connected without proving
-   fleet-admin authority. Start with the reproduction and acceptance criteria
-   in LAMA-332: inspect the real `/auth/me` and fleet-route statuses without
-   exposing credentials, validate a fresh admin enrollment on HTTPS, and make
-   the connection state/recovery honest without weakening the no-bridge or
-   cookie/CSRF boundaries.
+   again with a fresh QR; the failure persists. Root cause found: the embedded
+   SPA allowed an origin-scoped legacy bearer in WebView DOM storage to take
+   precedence over the freshly bootstrapped cookie. The server correctly
+   treats an explicit bearer as authoritative and rejects a device-scoped key
+   from fleet routes with 403 rather than falling back to the cookie. The
+   client fix removes only stored bearers when the companion opens its
+   embedded document, then lets the existing cookie-only `/auth/me` probe
+   establish session mode; it neither changes server precedence nor exposes a
+   credential. Targeted web tests, TypeScript, and the production web build
+   pass. Before closing, validate the re-pair flow on a disposable HTTPS
+   vertical and on the physical device, and separately improve the native
+   cookie-presence indicator so it does not claim verified fleet authority.
 
 ## Known limitations
 
