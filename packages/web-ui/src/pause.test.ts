@@ -109,8 +109,18 @@ describe("formatUntilClock", () => {
 // The old control's label was always "Pause…", so a paused fleet and a running
 // fleet looked identical, and the resume path was a separate banner.
 describe("pauseControlState (LAMA-334)", () => {
-  const window: PauseState = { mode: "pause", until: "2026-08-25T15:00:00Z", bwlimit: null };
-  const slow: PauseState = { mode: "slow", until: "2026-08-25T15:00:00Z", bwlimit: "1M" };
+  const window: PauseState = {
+    scope: "global",
+    mode: "pause",
+    until: "2026-08-25T15:00:00Z",
+    bwlimit: null,
+  };
+  const slow: PauseState = {
+    scope: "global",
+    mode: "slow",
+    until: "2026-08-25T15:00:00Z",
+    bwlimit: "1M",
+  };
 
   it("offers pause while syncing runs", () => {
     const s = pauseControlState({ state: null, busy: false });
