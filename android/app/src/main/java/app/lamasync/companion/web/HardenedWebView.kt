@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -41,6 +42,17 @@ object HardenedWebView {
          * `onPageStarted`, `onPageFinished` and `doUpdateVisitedHistory`.
          */
         fun onWebStateChanged(canGoBack: Boolean, loading: Boolean)
+
+        /**
+         * LAMA-334: a MAIN-FRAME load failed (offline, unreachable host, a
+         * refused connection). The WebView shows its own error page; the shell
+         * needs this to retire a refresh indicator that would otherwise wait
+         * for a `onPageFinished` that a hard failure may never deliver.
+         *
+         * Defaulted to a no-op so listeners that do not care about load
+         * failures do not have to spell one out.
+         */
+        fun onLoadFailed(url: String, description: String?) = Unit
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -97,6 +109,21 @@ object HardenedWebView {
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
                 listener.onWebStateChanged(view?.canGoBack() == true, loading = false)
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?,
+            ) {
+                super.onReceivedError(view, request, error)
+                // Sub-resource failures are not page failures: a blocked icon
+                // must not be reported as "the page did not load".
+                if (request?.isForMainFrame != true) return
+                listener.onLoadFailed(
+                    url = request.url?.toString() ?: "",
+                    description = error?.description?.toString(),
+                )
             }
 
             override fun shouldOverrideUrlLoading(

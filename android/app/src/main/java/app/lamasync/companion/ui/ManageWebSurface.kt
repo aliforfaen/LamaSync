@@ -16,10 +16,29 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.platform.LocalContext
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import app.lamasync.companion.BuildConfig
 import app.lamasync.companion.web.HardenedWebView
 import app.lamasync.companion.web.WebShellSignal
+import kotlinx.coroutines.delay
+
+/**
+ * How long a requested reload may stay on screen before the indicator is
+ * retired. The SPA is one inlined document, so a reload that has not completed
+ * in this long is either a stalled connection or a load that will never report
+ * back — the top-bar reload action stays available as the retry path.
+ */
+internal const val REFRESH_TIMEOUT_MS = 20_000L
+
+/**
+ * How a refresh ended. Surfaced to the shell so a stalled or failed reload is
+ * announced instead of silently leaving a spinner (LAMA-334 item 2).
+ */
+sealed interface RefreshOutcome {
+    data object Loaded : RefreshOutcome
+    data class Failed(val detail: String?) : RefreshOutcome
+    data object TimedOut : RefreshOutcome
+    data object Cancelled : RefreshOutcome
+}
 
 /**
  * LAMA-329 — the WebView's shared handle.
@@ -29,12 +48,19 @@ import app.lamasync.companion.web.WebShellSignal
  * object is the single, explicitly-scoped channel between them: it holds no
  * credentials and exposes only history/reload operations, so the security
  * boundary of [HardenedWebView] is unchanged.
+ *
+ * LAMA-334 item 2: the refresh indicator is a STATE, not a View property. It is
+ * raised by [reload] and lowered by exactly one terminal event — the load
+ * finishing, a main-frame load failure, the [REFRESH_TIMEOUT_MS] watchdog, or
+ * [cancelRefresh]. The View container mirrors this state
+ * ([SwipeRefreshLayout.isRefreshing]), so the spinner cannot outlive the
+ * gesture that started it.
  */
 @Stable
 class ManageWebState {
 
     internal var webView: WebView? = null
-    internal var swipeRefresh: SwipeRefreshLayout? = null
+    internal var swipeRefresh: PullToRefreshLayout? = null
 
     /** Whether the WebView has history to walk before back leaves the shell. */
     var canGoBack by mutableStateOf(false)
@@ -48,10 +74,28 @@ class ManageWebState {
     var refreshing by mutableStateOf(false)
         private set
 
+    /** Increments per requested refresh; the watchdog keys off it. */
+    var refreshGeneration by mutableStateOf(0)
+        private set
+
+    /** How the last refresh ended, until the shell consumes it. */
+    var refreshOutcome by mutableStateOf<RefreshOutcome?>(null)
+        private set
+
     internal fun onWebStateChanged(canGoBack: Boolean, loading: Boolean) {
         this.canGoBack = canGoBack
         this.loading = loading
-        if (!loading) refreshing = false
+        if (!loading) endRefresh(RefreshOutcome.Loaded)
+    }
+
+    /**
+     * A main-frame load failure (offline, DNS, TLS refusal past the keystore
+     * check). The WebView shows its own error page; the shell stops claiming a
+     * refresh is in progress and says so.
+     */
+    internal fun onLoadFailed(detail: String?) {
+        loading = false
+        endRefresh(RefreshOutcome.Failed(detail))
     }
 
     /** Walks the WebView's own history. Returns false when there is none. */
@@ -64,7 +108,35 @@ class ManageWebState {
 
     internal fun reload() {
         refreshing = true
+        refreshOutcome = null
+        refreshGeneration += 1
+        // A null view is a one-frame window before the AndroidView factory
+        // runs; the load that follows (`onPageStarted` → `onPageFinished`) or
+        // the watchdog retires the indicator either way.
         webView?.reload()
+    }
+
+    /** The watchdog fired: stop waiting, keep the page. */
+    internal fun refreshTimedOut() {
+        if (refreshing) endRefresh(RefreshOutcome.TimedOut)
+    }
+
+    /** The surface is going away while a refresh was pending. */
+    internal fun cancelRefresh() {
+        if (refreshing) endRefresh(RefreshOutcome.Cancelled)
+    }
+
+    /** One-shot read of the last outcome. */
+    fun consumeRefreshOutcome(): RefreshOutcome? {
+        val outcome = refreshOutcome
+        refreshOutcome = null
+        return outcome
+    }
+
+    private fun endRefresh(outcome: RefreshOutcome) {
+        if (!refreshing) return
+        refreshing = false
+        refreshOutcome = outcome
     }
 
     internal fun clear() {
@@ -73,6 +145,8 @@ class ManageWebState {
         canGoBack = false
         loading = false
         refreshing = false
+        // Deliberately keep refreshOutcome: a refresh that ends exactly as the
+        // surface is released still deserves its message.
     }
 }
 
@@ -85,35 +159,19 @@ fun rememberManageWebState(): ManageWebState = remember { ManageWebState() }
  *
  * A WebView scrolls ITSELF (its document scroll is the view's own scroll), so
  * `scrollY` is the page position — including inside a nested scroller, where it
- * stays 0 and the gesture is therefore allowed. It is never negative.
+ * stays 0 and the gesture is therefore allowed by THIS half of the gate. It is
+ * never negative. The overlay half of the gate lives in [PullToRefreshLayout].
  */
 internal fun webViewAtScrollTop(webView: WebView): Boolean = webView.scrollY <= 0
-
-/**
- * Wires [webView] into this pull-to-refresh container exactly as the Manage
- * destination does.
- *
- * Extracted so the acceptance gate ("pull-to-refresh cannot fire while a nested
- * page is scrolled away from top") can be tested against a real
- * `SwipeRefreshLayout` and a real `WebView`, rather than only reasoned about.
- */
-internal fun SwipeRefreshLayout.bindToWebView(webView: WebView, onRefresh: () -> Unit) {
-    addView(webView)
-    setOnChildScrollUpCallback { _, _ -> !webViewAtScrollTop(webView) }
-    setOnRefreshListener(onRefresh)
-}
 
 /**
  * The management surface: the hardened WebView on the enrolled origin, inside a
  * pull-to-refresh container.
  *
- * Pull-to-refresh deliberately uses the View-based `SwipeRefreshLayout` rather
+ * Pull-to-refresh deliberately uses the View-based [PullToRefreshLayout] rather
  * than Compose's `Modifier.pullToRefresh`: the latter is driven by nested
  * scroll, and an `AndroidView` host does not dispatch nested scroll, so the
- * gesture would never fire. `setOnChildScrollUpCallback` is also the supported
- * way to honour the acceptance gate that a pull can never start while the page
- * is scrolled away from the top — which a nested-scroll-only implementation
- * cannot express for a WebView.
+ * gesture would never fire.
  */
 @Composable
 fun ManageWebSurface(
@@ -147,6 +205,9 @@ fun ManageWebSurface(
 
             override fun onWebStateChanged(canGoBack: Boolean, loading: Boolean) =
                 state.onWebStateChanged(canGoBack, loading)
+
+            override fun onLoadFailed(url: String, description: String?) =
+                state.onLoadFailed(description)
         }
     }
 
@@ -158,9 +219,7 @@ fun ManageWebSurface(
                 debugAllowWebContentsDebugging = BuildConfig.DEBUG,
                 listener = listener,
             )
-            val refresh = SwipeRefreshLayout(ctx).apply {
-                // The acceptance gate: never start a pull while the page is
-                // scrolled away from the top, including inside a nested page.
+            val refresh = PullToRefreshLayout(ctx).apply {
                 bindToWebView(webView) { state.reload() }
             }
             state.webView = webView
@@ -170,6 +229,9 @@ fun ManageWebSurface(
         },
         onRelease = { refresh ->
             val webView = state.webView
+            // Retire the indicator before the View that owns it goes away, so a
+            // refresh interrupted by navigation is not reported as a load.
+            state.cancelRefresh()
             state.clear()
             refresh.removeAllViews()
             // Destroy explicitly: a leaked WebView keeps its timers and its
@@ -186,7 +248,22 @@ fun ManageWebSurface(
             isEnabled = pullToRefreshEnabled
             setColorSchemeColors(colorScheme.primary.toArgb(), colorScheme.secondary.toArgb())
             setProgressBackgroundColorSchemeColor(colorScheme.surfaceContainerHigh.toArgb())
+            // LAMA-334 item 2 — the terminal-state fix. SwipeRefreshLayout raises
+            // its own spinner when a pull completes and NEVER lowers it on its
+            // own; the shell's state is the single source of truth for both the
+            // gesture and the top-bar action, so mirror it here. Without this
+            // the indicator outlived every load it was waiting for.
+            isRefreshing = state.refreshing
         }
+    }
+
+    // Watchdog: a requested refresh always reaches a terminal state, even when
+    // the WebView reports neither a finish nor an error (a stalled connection,
+    // a page that never commits).
+    LaunchedEffect(state.refreshGeneration) {
+        if (state.refreshGeneration == 0) return@LaunchedEffect
+        delay(REFRESH_TIMEOUT_MS)
+        state.refreshTimedOut()
     }
 
     // LAMA-296 stage 1: an upload receipt's open-in-web path (Data Browser).

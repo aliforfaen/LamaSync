@@ -5,7 +5,7 @@ pass, browser `/settings`, brand/motion assets, PWA, screenshot evidence) remain
 to implement.
 Date: 2026-09-10
 
-## Implementation status (updated on completion of phases 1–7)
+## Implementation status (updated on completion of phases 1–7, plus the LAMA-334 feedback pass)
 
 Shipped, in the `android-stage-2` worktree:
 
@@ -222,6 +222,83 @@ Decisions taken during implementation that change the written plan:
     origin-wide: deleting every name but the current one would erase caches
     belonging to another app or worker on the same origin. The worker now owns a
     name prefix and deletes only its own superseded shell caches.
+
+LAMA-334 (physical-phone feedback pass) added these decisions:
+
+17. **Pull-to-refresh is bounded to the top strip of the surface, because the
+    container cannot see the DOM.** The reported defect: dragging DOWN inside
+    the phone layout's More sheet (which scrolls the sheet UP) started a
+    refresh. `SwipeRefreshLayout.setOnChildScrollUpCallback` can only ask about
+    the DOCUMENT's scroll position, and a fixed overlay with its own scroller
+    keeps that at 0 — so the sheet looked like "the page is at the top". Native
+    code cannot hit-test the DOM and this app has no JavaScript bridge
+    (`web/HardenedWebView.kt`, and Android's own guidance calls
+    `addJavascriptInterface` the low-security option), so `PullToRefreshLayout`
+    adds the second fact it *can* observe: a pull may only start within 16% of
+    the view's height, capped at 120dp. The More sheet is `max-height: 82dvh`
+    and bottom-anchored, so its top edge is at 18% and its scrollable list
+    starts below that; the strip has no dp floor precisely so the two can never
+    meet (`PullToRefreshGateTest` asserts it at nine view heights). Rejected:
+    a JavaScript bridge (new native attack surface for one gesture), a
+    web-side gesture (replaces shipped, tested native machinery and duplicates
+    the spinner), and making the sheet a route (changes the navigation contract
+    phase 3 fixed). Recorded cost: a pull must begin in the top strip, which is
+    where a pull naturally begins on a phone but is a narrower target than
+    Chrome's.
+18. **A gallery folder is a MediaStore top-level segment, and an upload is a
+    one-shot snapshot.** "Upload a gallery folder" means the folders the phone's
+    gallery apps present (`DCIM/…` → Camera roll, `Download/…` → Downloads),
+    derived from `RELATIVE_PATH` (API 29+) or the storage-root-stripped `DATA`
+    path before that — never a filesystem walk. It runs on the media grants the
+    app already asks for (READ_MEDIA_IMAGES/VIDEO, or READ_EXTERNAL_STORAGE
+    before API 33), honours Android 14's PARTIAL "selected photos" access rather
+    than claiming coverage it does not have, and cannot reach any directory the
+    user did not grant. The semantics the operator has to be able to predict are
+    stated on the screen: the batch copies what is in the folder NOW, newest
+    first, excluding MediaStore rows that are still pending or trashed; media
+    added later is Camera protection's job, and the section links there. Each
+    item is an independent queue entry with its own receipt, retry and cancel.
+    Staging keeps only three un-transferred files on disk at a time
+    (`GalleryFolders` + the window in `UploadsViewModel`), because a 3,000-photo
+    roll must not need 12 GB of free space to start; the batch re-offers the
+    drainer with KEEP while the window is full, which is a no-op while a worker
+    runs and a fresh pass when one does not — that is what stops a batch
+    stranding files its own worker never snapshotted.
+19. **Wide desktop tables collapse on phones, and the collapsed value keeps its
+    column name.** The reported defect was a host's folder table rendering text
+    one character per line: seven columns plus `table-layout: fixed` plus
+    `overflow-wrap: anywhere` below 900px is a precise recipe for it. The three
+    tables on a device page and the Admin access-key table now use the same
+    `.data-list` skeleton the phase-4 pass introduced, and a cell whose value is
+    not self-describing (a bare timestamp, a cron string, a key fingerprint)
+    carries `data-label`, which the CSS renders as an inline column name. A
+    source-scanning test (`responsive-tables.test.ts`) holds the invariant for
+    every `table.data` in the app, with the two deliberate exceptions — the
+    storage-destinations table, which hides columns 3–8 instead, and the data
+    browser's listing, which is already a deliberate horizontal scroll pane —
+    listed with their reasons.
+20. **The dashboard states its connection in the product's own words, and the
+    pause control describes the state it is in.** The websocket pill printed the
+    raw transport constant (`OPEN`); it now renders the same derivation the
+    connectivity banner uses (`connectivity.ts`), so the two cannot disagree,
+    as an icon plus the state word plus the sentence in its title — never colour
+    or a glyph alone. `PauseControl` was a button labelled "Pause…" whether or
+    not a window was in effect; its icon, label and action now follow the live
+    state (pause while syncing runs, resume while a window is up), it names the
+    transition while a request is in flight, it explains why it is unavailable
+    rather than failing on tap, and changing an existing window became its own
+    second control instead of being folded into Resume. The derivation is pure
+    (`pauseControlState`), so "paused" cannot render as "Pause" again.
+21. **The shell header is the app's, and the server is a name, not a URL.**
+    The app bar now leads with the LamaSync mark and title; the second line is
+    `<server> · <connection state>`, where the server is the origin's HOST with
+    its port only when it is not the scheme default (`serverIdentity`). The full
+    origin, the device id and the check-in state stay one tap away under
+    "Connection details" (the Connection screen), which is where verbose
+    endpoint detail belongs. The mark carries `contentDescription = null`
+    because the title beside it already says "LamaSync"; the reload and
+    overflow actions keep their accessibility labels, and a thin progress bar
+    under the app bar covers both the reload action and a pull gesture.
 
 ### Phase 8 — what is verified and what still needs a human
 

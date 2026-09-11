@@ -6,6 +6,7 @@ import {
   formatRemaining,
   formatUntilClock,
   pauseBannerText,
+  pauseControlState,
   presetUntil,
   validateBwlimit,
 } from "./pause.ts";
@@ -101,5 +102,74 @@ describe("formatUntilClock", () => {
   it("returns a non-empty local time string", () => {
     const text = formatUntilClock("2026-08-25T18:00:00Z");
     expect(text.length).toBeGreaterThan(0);
+  });
+});
+
+// LAMA-334 item 5: the dashboard's pause control must describe the LIVE state.
+// The old control's label was always "Pause…", so a paused fleet and a running
+// fleet looked identical, and the resume path was a separate banner.
+describe("pauseControlState (LAMA-334)", () => {
+  const window: PauseState = { mode: "pause", until: "2026-08-25T15:00:00Z", bwlimit: null };
+  const slow: PauseState = { mode: "slow", until: "2026-08-25T15:00:00Z", bwlimit: "1M" };
+
+  it("offers pause while syncing runs", () => {
+    const s = pauseControlState({ state: null, busy: false });
+    expect(s.action).toBe("pause");
+    expect(s.label).toBe("Pause");
+    expect(s.active).toBe(false);
+    expect(s.disabled).toBe(false);
+    // The label and the accessible name agree, and neither is generic.
+    expect(s.ariaLabel).toContain("Pause");
+    expect(s.label).not.toContain("…");
+  });
+
+  it("offers resume, not pause, while a window is in effect", () => {
+    const s = pauseControlState({ state: window, busy: false });
+    expect(s.action).toBe("resume");
+    expect(s.label).toBe("Resume");
+    expect(s.active).toBe(true);
+    // The title carries the state's own sentence (countdown), so hovering the
+    // control explains what is in effect rather than repeating "Pause".
+    expect(s.title).toContain("paused");
+  });
+
+  it("names slow mode as the active state and still offers full speed", () => {
+    const s = pauseControlState({ state: slow, busy: false });
+    expect(s.slow).toBe(true);
+    expect(s.action).toBe("resume");
+    expect(s.ariaLabel).toContain("slow mode");
+    expect(s.title).toContain("Slow mode");
+  });
+
+  it("says which transition is running instead of looking inert", () => {
+    expect(pauseControlState({ state: null, busy: true }).label).toBe("Pausing…");
+    const resuming = pauseControlState({ state: window, busy: true });
+    expect(resuming.label).toBe("Resuming…");
+    expect(resuming.disabled).toBe(true);
+  });
+
+  it("explains why an unavailable control cannot act", () => {
+    const s = pauseControlState({
+      state: null,
+      busy: false,
+      unavailableReason: "Server unreachable",
+    });
+    expect(s.disabled).toBe(true);
+    expect(s.disabledReason).toBe("Server unreachable");
+    // The reason replaces the generic hint rather than being hidden behind it.
+    expect(s.title).toBe("Server unreachable");
+  });
+
+  it("keeps the resume action available when a window is up but offline", () => {
+    // Disabled, but still labelled for the state it is in — a Resume control
+    // that reads "Pause" while paused is the bug this derivation exists for.
+    const s = pauseControlState({
+      state: slow,
+      busy: false,
+      unavailableReason: "Offline",
+    });
+    expect(s.action).toBe("resume");
+    expect(s.disabled).toBe(true);
+    expect(s.label).toBe("Resume");
   });
 });

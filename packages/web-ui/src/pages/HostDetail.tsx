@@ -379,7 +379,7 @@ export function HostDetail() {
           scope="host"
           hostId={hostId}
           deviceName={host.hostname}
-          active={activePause !== null && activePause !== undefined}
+          state={activePause ?? null}
           onChanged={() => void refreshPause()}
         />
         <button
@@ -542,7 +542,10 @@ export function HostDetail() {
         {assignmentRows.length === 0 ? (
           <div className="empty-row">No folders on this device yet</div>
         ) : (
-          <table className="data">
+          // LAMA-334 item 6: seven desktop columns cannot be legible on a
+          // phone, so this collapses to the list skeleton at < 640px (see
+          // `.data-host-folders` in index.css). The class is inert above it.
+          <table className="data data-list data-host-folders">
             <thead>
               <tr>
                 <th>Folder</th>
@@ -579,8 +582,8 @@ export function HostDetail() {
                     )}
                   </td>
                   <td className="muted"><code>{assignment.localPath}</code></td>
-                  <td className="muted">{assignment.syncExpr ?? "—"}</td>
-                  <td className="muted">{assignment.role}</td>
+                  <td className="muted" data-label="Schedule">{assignment.syncExpr ?? "—"}</td>
+                  <td className="muted" data-label="Role">{assignment.role}</td>
                   <td>
                     <button
                       type="button"
@@ -660,7 +663,7 @@ export function HostDetail() {
         {operations.length === 0 ? (
           <div className="empty-row">No operations recorded</div>
         ) : (
-          <table className="data">
+          <table className="data data-list data-host-operations">
             <thead>
               <tr>
                 <th>Time</th>
@@ -672,7 +675,7 @@ export function HostDetail() {
             <tbody>
               {operations.map((op) => (
                 <tr key={String(op.id)}>
-                  <td className="mono">{formatTimestamp(op.timestamp)}</td>
+                  <td className="mono" data-label="Time">{formatTimestamp(op.timestamp)}</td>
                   <td>{op.operation}</td>
                   <td>
                     <span className={`badge badge-${op.status}`}>{op.status}</span>
@@ -690,7 +693,7 @@ export function HostDetail() {
         {actions.length === 0 ? (
           <div className="empty-row">No actions queued yet</div>
         ) : (
-          <table className="data">
+          <table className="data data-list data-host-actions">
             <thead>
               <tr>
                 <th>Type</th>
@@ -710,10 +713,10 @@ export function HostDetail() {
                       {a.status}
                     </span>
                   </td>
-                  <td className="mono muted">{formatTimestamp(a.createdAt)}</td>
-                  <td className="mono muted">{formatTimestamp(a.takenAt)}</td>
-                  <td className="mono muted">{formatTimestamp(a.completedAt)}</td>
-                  <td className="muted">{a.result ?? "—"}</td>
+                  <td className="mono muted" data-label="Created">{formatTimestamp(a.createdAt)}</td>
+                  <td className="mono muted" data-label="Taken">{formatTimestamp(a.takenAt)}</td>
+                  <td className="mono muted" data-label="Completed">{formatTimestamp(a.completedAt)}</td>
+                  <td className="muted" data-label="Result">{a.result ?? "—"}</td>
                 </tr>
               ))}
             </tbody>

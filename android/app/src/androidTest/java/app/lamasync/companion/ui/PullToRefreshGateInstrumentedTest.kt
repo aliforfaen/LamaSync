@@ -2,8 +2,9 @@ package app.lamasync.companion.ui
 
 import android.app.Activity
 import android.content.Context
+import android.os.SystemClock
+import android.view.MotionEvent
 import android.webkit.WebView
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -16,22 +17,28 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * LAMA-329 — the pull-to-refresh acceptance gate, against a real WebView.
+ * LAMA-329 / LAMA-334 — the pull-to-refresh acceptance gate, against a real
+ * WebView and a real container.
  *
- * The gate is "pull-to-refresh cannot fire while a nested page is scrolled away
- * from top". Compose's `Modifier.pullToRefresh` cannot express that for a
- * WebView (it is nested-scroll driven, and an `AndroidView` host dispatches no
- * nested scroll), which is why the Manage destination uses
- * `SwipeRefreshLayout.setOnChildScrollUpCallback`. That wiring is only
- * meaningful if the callback is consulted and actually reports the page
- * position, so both halves are checked here through the production helper
- * (`bindToWebView`), not a replica of it.
+ * Two rules have to hold at once:
+ *
+ *  1. "pull-to-refresh cannot fire while the page is scrolled away from top"
+ *     (LAMA-329), and
+ *  2. "it never steals a list gesture" (LAMA-334): a drag that begins low on
+ *     the view is refused so an inner scroller — the phone layout's More sheet
+ *     — receives it.
+ *
+ * Compose's `Modifier.pullToRefresh` cannot express either for a WebView (it is
+ * nested-scroll driven, and an `AndroidView` host dispatches no nested scroll),
+ * which is why the Manage destination uses [PullToRefreshLayout]. Both halves
+ * are checked here through the production helper (`bindToWebView`), not a
+ * replica of it.
  */
 @RunWith(AndroidJUnit4::class)
 class PullToRefreshGateInstrumentedTest {
 
     /** Widens the protected hook so the container's own answer can be read. */
-    private class Probe(context: Context) : SwipeRefreshLayout(context) {
+    private class Probe(context: Context) : PullToRefreshLayout(context) {
         override fun canChildScrollUp(): Boolean = super.canChildScrollUp()
     }
 
@@ -106,6 +113,41 @@ class PullToRefreshGateInstrumentedTest {
         return answer
     }
 
+    /**
+     * Sends a real DOWN → MOVE… → UP gesture starting at [startY], as the
+     * platform would, and returns whether the container ever claimed it. The
+     * events are dispatched to the container so both the container's own
+     * interception and the child's consuming behaviour are exercised.
+     */
+    private fun drag(
+        scenario: ActivityScenario<Activity>,
+        fixture: Fixture,
+        startY: Float,
+        distance: Float = 400f,
+    ) {
+        scenario.onActivity {
+            val downTime = SystemClock.uptimeMillis()
+            val x = fixture.probe.width / 2f
+            fun event(action: Int, y: Float, offsetMs: Long) = MotionEvent.obtain(
+                downTime,
+                downTime + offsetMs,
+                action,
+                x,
+                y,
+                0,
+            )
+            fixture.probe.dispatchTouchEvent(event(MotionEvent.ACTION_DOWN, startY, 0))
+            // Several moves: SwipeRefreshLayout only commits once the drag
+            // passes the touch slop.
+            for (step in 1..6) {
+                val y = startY + distance * step / 6f
+                fixture.probe.dispatchTouchEvent(event(MotionEvent.ACTION_MOVE, y, step * 16L))
+            }
+            fixture.probe.dispatchTouchEvent(event(MotionEvent.ACTION_UP, startY + distance, 120))
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
     @Test
     fun aPageAtTheTopMayBePulled() {
         withWiredWebView { _, fixture ->
@@ -143,8 +185,96 @@ class PullToRefreshGateInstrumentedTest {
         }
     }
 
+    // ---------------------------------------------------- LAMA-334 item 3
+
+    @Test
+    fun aGestureStartingInTheTopStripMayPull() {
+        withWiredWebView { scenario, fixture ->
+            val zone = mainThreadAnswerHeight(scenario, fixture, ::pullStartZone)
+            assertTrue("the container must have been laid out", zone > 0f)
+
+            scenario.onActivity {
+                fixture.probe.dispatchTouchEvent(
+                    MotionEvent.obtain(
+                        SystemClock.uptimeMillis(),
+                        SystemClock.uptimeMillis(),
+                        MotionEvent.ACTION_DOWN,
+                        fixture.probe.width / 2f,
+                        zone / 2f,
+                        0,
+                    ),
+                )
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+            assertFalse(
+                "a gesture that begins in the top strip must be able to become a pull",
+                mainThreadAnswer(scenario) { fixture.probe.canChildScrollUp() },
+            )
+        }
+    }
+
+    @Test
+    fun aGestureStartingBelowTheTopStripIsRefusedSoTheListKeepsIt() {
+        withWiredWebView { scenario, fixture ->
+            val zone = mainThreadAnswerHeight(scenario, fixture, ::pullStartZone)
+            assertTrue("the container must have been laid out", zone > 0f)
+            val startY = zone + 80f
+            assertTrue(
+                "the fixture must be tall enough to gesture below the strip",
+                mainThreadAnswer(scenario) { fixture.probe.height.toFloat() } > startY,
+            )
+            assertTrue("the fixture page should start at the top", webViewAtScrollTop(fixture.webView))
+
+            drag(scenario, fixture, startY = startY)
+
+            assertFalse(
+                "a drag that began below the top strip must not fire a refresh",
+                fixture.refreshRequested,
+            )
+        }
+    }
+
+    @Test
+    fun aGestureStartingInTheTopStripActuallyRefreshes() {
+        withWiredWebView { scenario, fixture ->
+            val zone = mainThreadAnswerHeight(scenario, fixture, ::pullStartZone)
+            assertTrue("the container must have been laid out", zone > 0f)
+
+            drag(scenario, fixture, startY = zone / 2f, distance = fixture.probePullDistance(scenario))
+
+            assertTrue(
+                "a long drag from the top strip must reach the refresh listener",
+                fixture.refreshRequested,
+            )
+        }
+    }
+
+    private fun Fixture.probePullDistance(scenario: ActivityScenario<Activity>): Float {
+        var distance = 400f
+        scenario.onActivity {
+            distance = (probe.height * 0.6f).coerceAtLeast(400f)
+        }
+        return distance
+    }
+
+    private fun mainThreadAnswerHeight(
+        scenario: ActivityScenario<Activity>,
+        fixture: Fixture,
+        compute: (Int, Float) -> Float,
+    ): Float {
+        var answer = 0f
+        scenario.onActivity {
+            answer = compute(fixture.probe.height, fixture.probe.resources.displayMetrics.density)
+        }
+        return answer
+    }
+
     private companion object {
         const val ORIGIN = "https://fleet.example.com"
+
+        fun pullStartZone(heightPx: Int, density: Float): Float =
+            app.lamasync.companion.ui.pullStartZonePx(heightPx, density)
 
         fun pollUntil(timeoutMillis: Long, condition: () -> Boolean): Boolean {
             val deadline = System.currentTimeMillis() + timeoutMillis

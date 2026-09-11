@@ -422,3 +422,54 @@ export function IconPresets(props: SVGProps<SVGSVGElement>) {
     ...props,
   });
 }
+
+// LAMA-334: the dashboard's live-connection state. Three glyphs that must be
+// tellable apart at 14px AND at 20px in the rail-less phone header: a
+// broadcasting mark (live), the sync arrows (reconnecting) and a barred circle
+// (no route to the server). Colour never carries a state on its own — the
+// label beside these always names it.
+export function IconConnectionLiveFilled(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none" />
+        <path d="M7.4 16.6a6.5 6.5 0 0 1 0-9.2" />
+        <path d="M16.6 7.4a6.5 6.5 0 0 1 0 9.2" />
+        <path d="M4.6 19.4a10.4 10.4 0 0 1 0-14.8" />
+        <path d="M19.4 4.6a10.4 10.4 0 0 1 0 14.8" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconConnectionOfflineFilled(props: SVGProps<SVGSVGElement>) {
+  return iconBase({
+    children: (
+      <>
+        <circle cx="12" cy="12" r="8.6" />
+        <line x1="6.2" y1="17.8" x2="17.8" y2="6.2" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconPauseFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: (
+      <>
+        <rect x="6.4" y="4.6" width="4" height="14.8" rx="1.2" />
+        <rect x="13.6" y="4.6" width="4" height="14.8" rx="1.2" />
+      </>
+    ),
+    ...props,
+  });
+}
+
+export function IconPlayFilled(props: SVGProps<SVGSVGElement>) {
+  return filledIconBase({
+    children: <path d="M8.2 4.9 19 12 8.2 19.1V4.9Z" />,
+    ...props,
+  });
+}

@@ -88,5 +88,69 @@ class ShellNavigationTest {
         assertFalse(state.refreshing)
         assertFalse(state.loading)
         assertTrue(state.canGoBack)
+        assertEquals(RefreshOutcome.Loaded, state.consumeRefreshOutcome())
+    }
+
+    // ------------------------------------------------- LAMA-334 item 2 states
+
+    @Test
+    fun `a main-frame load failure retires the indicator and reports it`() {
+        val state = ManageWebState()
+        state.reload()
+        state.onWebStateChanged(canGoBack = false, loading = true)
+
+        state.onLoadFailed("net::ERR_NAME_NOT_RESOLVED")
+
+        assertFalse("a failed load must not leave the spinner up", state.refreshing)
+        assertFalse(state.loading)
+        assertEquals(
+            RefreshOutcome.Failed("net::ERR_NAME_NOT_RESOLVED"),
+            state.consumeRefreshOutcome(),
+        )
+    }
+
+    @Test
+    fun `the watchdog retires an indicator that no event ever closed`() {
+        val state = ManageWebState()
+        state.reload()
+        state.onWebStateChanged(canGoBack = false, loading = true)
+
+        // No onPageFinished, no onReceivedError — exactly the stall the field
+        // report described.
+        state.refreshTimedOut()
+
+        assertFalse("a timed-out refresh must stop spinning", state.refreshing)
+        assertEquals(RefreshOutcome.TimedOut, state.consumeRefreshOutcome())
+
+        // A late load finishing afterwards is not a second outcome.
+        state.onWebStateChanged(canGoBack = true, loading = false)
+        assertEquals(null, state.consumeRefreshOutcome())
+    }
+
+    @Test
+    fun `leaving the surface cancels a refresh instead of leaving it raised`() {
+        val state = ManageWebState()
+        state.reload()
+
+        state.cancelRefresh()
+        state.clear()
+
+        assertFalse(state.refreshing)
+        assertFalse(state.loading)
+        assertEquals(RefreshOutcome.Cancelled, state.consumeRefreshOutcome())
+    }
+
+    @Test
+    fun `every reload bumps the generation the watchdog keys on`() {
+        val state = ManageWebState()
+        val before = state.refreshGeneration
+
+        state.reload()
+        state.reload()
+
+        assertEquals(before + 2, state.refreshGeneration)
+        // Nothing has reported a terminal event yet, so there is no outcome to
+        // announce — a fresh generation must not reuse the previous one's.
+        assertEquals(null, state.consumeRefreshOutcome())
     }
 }

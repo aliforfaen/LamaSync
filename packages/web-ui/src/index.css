@@ -458,35 +458,42 @@ button.action.theme-toggle {
   padding: 0.3rem 0.6rem;
 }
 
-/* WS5 P5: WS connection status pill (replaces raw `WS: state` text). */
-.ws-pill {
+/* LAMA-334 item 5: the dashboard's live-connection state.
+   This replaces the pill that printed the raw WebSocket constant (`OPEN`).
+   The label is the product's own wording — the same sentence the connectivity
+   banner uses, from the same derivation in `connectivity.ts` — and the icon
+   repeats it, so the state survives a monochrome screenshot, a colour-blind
+   reader and a screen reader. Colour is decoration on top of both. */
+.conn-status {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1-5);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-mono-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 0.15rem 0.5rem;
+  min-width: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: 0.15rem 0.55rem;
   border-radius: var(--radius-full);
   border: 1px solid var(--badge-border);
+  white-space: nowrap;
 }
-.ws-dot {
-  width: 0.45rem;
-  height: 0.45rem;
-  border-radius: 50%;
-  background: currentColor;
+.conn-status-icon {
+  font-size: 1rem;
   flex-shrink: 0;
 }
-.ws-open {
+.conn-status-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.conn-status--online {
   color: var(--accent-ok);
   background: var(--accent-ok-bg);
 }
-.ws-connecting {
+.conn-status--reconnecting {
   color: var(--accent-warn);
   background: var(--accent-warn-bg);
 }
-.ws-closed {
+.conn-status--offline {
   color: var(--accent-critical);
   background: var(--accent-critical-bg);
 }
@@ -3122,6 +3129,40 @@ html[data-motion="full"] .palette {
   flex-direction: column;
   gap: var(--space-2);
 }
+
+/* LAMA-334 item 5: the pause control is icon-led and stateful. The icon is
+   decorative (the action is named in the visible label and repeated in
+   `aria-label`); the active window gets the play glyph and a tinted surface,
+   so "another window is in effect" is never carried by colour alone. */
+.pause-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+.pause-control-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+}
+.pause-control-icon {
+  font-size: 1.05rem;
+  flex-shrink: 0;
+}
+.pause-control-active {
+  border-color: var(--accent-warn);
+  background: var(--accent-warn-bg);
+  color: var(--text-strong);
+}
+.pause-control-change {
+  min-width: 2.25rem;
+  padding-inline: 0.3rem;
+}
+.pause-control-error {
+  flex: 1 1 100%;
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
 .form-label {
   font-size: var(--font-size-sm);
   color: var(--text-muted);
@@ -3997,6 +4038,21 @@ html[data-motion="reduce"] .signal-tile:hover { transform: none; }
     padding: 0;
   }
 
+  /* A surviving cell whose value is not self-describing (a bare timestamp, an
+     id, a cron string) gets its column name back as an inline label; without
+     it the collapsed row would show an unlabelled value. `data-label` is set
+     in the markup, next to the `<th>` it mirrors. */
+  .data.data-list > tbody > tr > td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.1rem;
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
   /* The loading skeleton and the empty/error rows span every column, so they
      must survive the per-column rules above — without this the whole table
      renders as an empty box while loading. */
@@ -4111,6 +4167,120 @@ html[data-motion="reduce"] .signal-tile:hover { transform: none; }
     text-align: left;
   }
 
+  /* --- Folders on one device (Host detail) ------------------------------ */
+  /* LAMA-334 item 6: seven columns in a fixed-layout table at 360px is what
+     produced the character-per-line text the operator reported. Name + its
+     state action lead, the type badge and the path follow, schedule and role
+     sit side by side (labelled), and the three row actions get a full row
+     instead of a squeezed column. */
+  .data.data-host-folders > tbody > tr > td:nth-child(1),
+  .data.data-host-folders > tbody > tr > td:nth-child(2),
+  .data.data-host-folders > tbody > tr > td:nth-child(3),
+  .data.data-host-folders > tbody > tr > td:nth-child(4),
+  .data.data-host-folders > tbody > tr > td:nth-child(5),
+  .data.data-host-folders > tbody > tr > td:nth-child(6),
+  .data.data-host-folders > tbody > tr > td:nth-child(7) {
+    display: block;
+  }
+
+  .data.data-host-folders > tbody > tr > td:nth-child(6) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-host-folders > tbody > tr > td:nth-child(2) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .data.data-host-folders > tbody > tr > td:nth-child(3) {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  .data.data-host-folders > tbody > tr > td:nth-child(4) {
+    grid-column: 1;
+    grid-row: 4;
+    min-width: 0;
+  }
+
+  .data.data-host-folders > tbody > tr > td:nth-child(5) {
+    grid-column: 2;
+    grid-row: 4;
+    justify-self: end;
+    text-align: right;
+  }
+
+  .data.data-host-folders > tbody > tr > td:nth-child(7) {
+    grid-column: 1 / -1;
+    grid-row: 5;
+    margin-top: var(--space-1);
+  }
+
+  .data.data-host-folders .table-actions {
+    text-align: left;
+  }
+
+  /* --- Last operations on one device ------------------------------------ */
+  /* Time + status badge lead, the operation names itself, the summary takes a
+     full row because it is the sentence that explains the row. */
+  .data.data-host-operations > tbody > tr > td:nth-child(1),
+  .data.data-host-operations > tbody > tr > td:nth-child(2),
+  .data.data-host-operations > tbody > tr > td:nth-child(3),
+  .data.data-host-operations > tbody > tr > td:nth-child(4) {
+    display: block;
+  }
+
+  .data.data-host-operations > tbody > tr > td:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .data.data-host-operations > tbody > tr > td:nth-child(3) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-host-operations > tbody > tr > td:nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    color: var(--text-strong);
+    font-weight: 500;
+  }
+
+  .data.data-host-operations > tbody > tr > td:nth-child(4) {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  /* --- Action history on one device ------------------------------------- */
+  /* Type + status lead; the three timestamps and the result keep their column
+     names, because a bare "12:04" says nothing about which of the three it
+     is. */
+  .data.data-host-actions > tbody > tr > td:nth-child(1),
+  .data.data-host-actions > tbody > tr > td:nth-child(2),
+  .data.data-host-actions > tbody > tr > td:nth-child(3),
+  .data.data-host-actions > tbody > tr > td:nth-child(4),
+  .data.data-host-actions > tbody > tr > td:nth-child(5),
+  .data.data-host-actions > tbody > tr > td:nth-child(6) {
+    display: block;
+  }
+
+  .data.data-host-actions > tbody > tr > td:nth-child(2) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-host-actions > tbody > tr > td:nth-child(3),
+  .data.data-host-actions > tbody > tr > td:nth-child(4),
+  .data.data-host-actions > tbody > tr > td:nth-child(5),
+  .data.data-host-actions > tbody > tr > td:nth-child(6) {
+    grid-column: 1 / -1;
+  }
+
   /* --- Active locks ------------------------------------------------------ */
   .data.data-locks > tbody > tr > td:nth-child(1),
   .data.data-locks > tbody > tr > td:nth-child(2),
@@ -4197,6 +4367,55 @@ html[data-motion="reduce"] .signal-tile:hover { transform: none; }
   .data.data-notification-log > tbody > tr > td:nth-child(4) {
     grid-column: 1 / -1;
     grid-row: 2;
+  }
+
+  /* --- Access keys (Admin) ----------------------------------------------- */
+  /* Eight columns of key metadata. Label + status lead (the two facts that
+     decide whether the row matters), the type badge and bound device follow,
+     then the timestamps and fingerprint as labelled key/value rows, and the
+     Reveal/Revoke pair on a full row of its own. */
+  .data.data-access-keys > tbody > tr > td:nth-child(1),
+  .data.data-access-keys > tbody > tr > td:nth-child(2),
+  .data.data-access-keys > tbody > tr > td:nth-child(3),
+  .data.data-access-keys > tbody > tr > td:nth-child(4),
+  .data.data-access-keys > tbody > tr > td:nth-child(5),
+  .data.data-access-keys > tbody > tr > td:nth-child(6),
+  .data.data-access-keys > tbody > tr > td:nth-child(7),
+  .data.data-access-keys > tbody > tr > td:nth-child(8) {
+    display: block;
+  }
+
+  .data.data-access-keys > tbody > tr > td:nth-child(6) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-access-keys > tbody > tr > td:nth-child(2) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .data.data-access-keys > tbody > tr > td:nth-child(3) {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  .data.data-access-keys > tbody > tr > td:nth-child(4) {
+    grid-area: 4 / 1 / 5 / 3;
+  }
+
+  .data.data-access-keys > tbody > tr > td:nth-child(5) {
+    grid-area: 5 / 1 / 6 / 3;
+  }
+
+  .data.data-access-keys > tbody > tr > td:nth-child(7) {
+    grid-area: 6 / 1 / 7 / 3;
+  }
+
+  .data.data-access-keys > tbody > tr > td:nth-child(8) {
+    grid-area: 7 / 1 / 8 / 3;
+    margin-top: var(--space-1);
   }
 
   /* --- action and filter rows ------------------------------------------- */

@@ -4,42 +4,13 @@
 // statement about whether what it is showing can be trusted. The wording comes
 // from `connectivity.ts`; this component only decides how it looks.
 
-import { useEffect, useState } from "react";
-import {
-  REQUEST_FAILED_EVENT,
-  REQUEST_SUCCEEDED_EVENT,
-} from "../api.ts";
 import { connectivityFrom, shouldShowConnectivityBanner } from "../connectivity.ts";
+import { useTransportHealth } from "../hooks/useTransportHealth.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 
 export function ConnectivityBanner() {
   const { state: socket } = useWebSocket();
-  const [browserOnline, setBrowserOnline] = useState(
-    typeof navigator === "undefined" ? true : navigator.onLine,
-  );
-  const [requestFailed, setRequestFailed] = useState(false);
-
-  useEffect(() => {
-    const goOnline = () => setBrowserOnline(true);
-    const goOffline = () => setBrowserOnline(false);
-    window.addEventListener("online", goOnline);
-    window.addEventListener("offline", goOffline);
-    return () => {
-      window.removeEventListener("online", goOnline);
-      window.removeEventListener("offline", goOffline);
-    };
-  }, []);
-
-  useEffect(() => {
-    const onFailure = () => setRequestFailed(true);
-    const onSuccess = () => setRequestFailed(false);
-    window.addEventListener(REQUEST_FAILED_EVENT, onFailure);
-    window.addEventListener(REQUEST_SUCCEEDED_EVENT, onSuccess);
-    return () => {
-      window.removeEventListener(REQUEST_FAILED_EVENT, onFailure);
-      window.removeEventListener(REQUEST_SUCCEEDED_EVENT, onSuccess);
-    };
-  }, []);
+  const { browserOnline, requestFailed } = useTransportHealth();
 
   const connectivity = connectivityFrom({ browserOnline, socket, requestFailed });
   if (!shouldShowConnectivityBanner(connectivity)) return null;
