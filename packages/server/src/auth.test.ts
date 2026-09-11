@@ -219,6 +219,17 @@ describe("requireAdmin", () => {
 describe("deviceMayAccessHost", () => {
   const master = { kind: "master", keyId: null, hostId: null } as const;
   const admin = { kind: "admin", keyId: "k", hostId: null } as const;
+  const webSessionAdmin = {
+    kind: "web-session",
+    sessionId: "session-1",
+    hostId: "mobile-1",
+    admin: true,
+    csrfToken: "csrf",
+    expiresAt: 1,
+    displayName: "Phone",
+    clientType: "android",
+  } as const;
+  const webSessionNonAdmin = { ...webSessionAdmin, admin: false } as const;
   const deviceA = { kind: "device", keyId: "k", hostId: "host-a" } as const;
   const deviceB = { kind: "device", keyId: "k", hostId: "host-b" } as const;
 
@@ -226,6 +237,13 @@ describe("deviceMayAccessHost", () => {
     expect(deviceMayAccessHost(master, "whatever")).toBe(true);
     expect(deviceMayAccessHost(admin, "whatever")).toBe(true);
     expect(deviceMayAccessHost(master, null)).toBe(true);
+  });
+
+  test("an admin web session may list or act across the fleet", () => {
+    expect(deviceMayAccessHost(webSessionAdmin, "host-a")).toBe(true);
+    expect(deviceMayAccessHost(webSessionAdmin, null)).toBe(true);
+    expect(deviceMayAccessHost(webSessionNonAdmin, "host-a")).toBe(false);
+    expect(deviceMayAccessHost(webSessionNonAdmin, null)).toBe(false);
   });
 
   test("device key only on its bound host", () => {

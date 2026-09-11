@@ -362,7 +362,11 @@ export function deviceMayAccessHost(
 ): boolean {
   if (!principal) return false;
   if (principal.kind === "master" || principal.kind === "admin") return true;
-  if (principal.kind === "web-session") return principal.admin && typeof hostId === "string";
+  // An admin mobile web session is the management SPA's full fleet authority,
+  // just like a master/admin bearer. In particular, list routes intentionally
+  // omit hostId; requiring one here made valid cookie sessions receive 403
+  // from /conflicts and /restic/snapshots while ordinary fleet reads worked.
+  if (principal.kind === "web-session") return principal.admin;
   if (principal.kind === "device" && typeof hostId === "string") {
     return principal.hostId === hostId;
   }
