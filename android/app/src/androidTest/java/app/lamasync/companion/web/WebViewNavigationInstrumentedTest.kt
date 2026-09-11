@@ -45,6 +45,7 @@ class WebViewNavigationInstrumentedTest {
 
         override fun onBlockedSsl(url: String) = Unit
         override fun onPageTitle(title: String?) = Unit
+        override fun onWebStateChanged(canGoBack: Boolean, loading: Boolean) = Unit
     }
 
     @Test

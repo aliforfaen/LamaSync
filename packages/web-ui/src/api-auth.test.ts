@@ -19,6 +19,7 @@ import {
   api,
   apiFetch,
   clearApiKey,
+  clearStoredBearerForEmbeddedShell,
   clearSessionAuth,
   CSRF_HEADER,
   getAuthMode,
@@ -222,6 +223,23 @@ describe("auth mode resolution", () => {
     await probeSession();
     setApiKey("lmsk.admin.123", false);
     expect(getAuthMode()).toBe("bearer");
+  });
+
+  it("embedded-shell cleanup removes an old bearer so a fresh cookie can be discovered", async () => {
+    // This models a device that was unpaired and re-paired without Android
+    // clearing the WebView's origin-scoped DOM storage. The server must keep
+    // explicit bearer precedence; the embedded document removes the stale
+    // local bearer before it probes its new cookie session.
+    sessionStorage.setItem("lamasync_api_key", "lmsk.device.session-old");
+    localStorage.setItem("lamasync_api_key_persist", "lmsk.device.persist-old");
+    clearStoredBearerForEmbeddedShell();
+
+    expect(getApiKeyStored()).toBeNull();
+    expect(sessionStorage.getItem("lamasync_api_key")).toBeNull();
+    expect(localStorage.getItem("lamasync_api_key_persist")).toBeNull();
+    installFetch(() => json(200, SESSION_ME));
+    expect(await probeSession()).toEqual({ mode: "session" });
+    expect(getAuthMode()).toBe("session");
   });
 });
 

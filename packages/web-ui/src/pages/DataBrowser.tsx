@@ -870,7 +870,10 @@ function TrashPanel({
 }
 
 export function DataBrowser() {
-  const [tab, setTab] = useState<Tab>("local");
+  const [searchParams] = useSearchParams();
+  const initialFolderId = searchParams.get("folderId")?.trim() || null;
+  const initialFolderPath = useMemo(() => initialBrowsePathFromParam(searchParams.get("path")), [searchParams]);
+  const [tab, setTab] = useState<Tab>(initialFolderId ? "s3" : "local");
   const [context, setContext] = useState<Record<Tab, TabContext | null>>({
     local: null,
     s3: null,
@@ -923,7 +926,6 @@ export function DataBrowser() {
   // LAMA-296 stage 1: deep-link support. `#/data?kind=local&path=…` opens
   // the local browser at the given folder (the completion receipt's
   // browse/open path). The server validates the path anyway.
-  const [searchParams] = useSearchParams();
   const initialLocalPath = useMemo(() => initialBrowsePathFromParam(searchParams.get("path")), [searchParams]);
   // The local tab is CONTROLLED by this component: breadcrumb/entry
   // navigation calls onContext with the next ref, which updates [localPath]
@@ -1260,7 +1262,7 @@ export function DataBrowser() {
           trashPanel
         />
       )}
-      {tab === "s3" && <S3Browser onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} onPreview={onPreview} emptyCtaLabel="Upload a file" emptyCta={openUpload} />}
+      {tab === "s3" && <S3Browser initialFolderId={initialFolderId} initialPath={initialFolderPath} onContext={reportS3Context} selection={selection} onToggleSelect={toggleSelect} onRename={onRename} onDownload={onDownload} onPreview={onPreview} emptyCtaLabel="Upload a file" emptyCta={openUpload} />}
       {tab === "restic" && <ResticBrowser />}
 
       {previewTarget && current && (
@@ -1586,6 +1588,8 @@ function uploadErrorMessage(err: unknown): string {
 }
 
 function S3Browser({
+  initialFolderId,
+  initialPath,
   onContext,
   selection,
   onToggleSelect,
@@ -1595,6 +1599,8 @@ function S3Browser({
   emptyCtaLabel,
   emptyCta,
 }: {
+  initialFolderId?: string | null;
+  initialPath?: string;
   onContext: (ctx: TabContext) => void;
   selection?: Set<string>;
   onToggleSelect?: (name: string) => void;
@@ -1628,7 +1634,8 @@ function S3Browser({
           );
           setFolders(browseable);
           if (!state && browseable.length > 0) {
-            setState({ folderId: browseable[0].id, path: "" });
+            const selected = browseable.find((folder) => folder.id === initialFolderId) ?? browseable[0];
+            setState({ folderId: selected.id, path: selected.id === initialFolderId ? (initialPath ?? "") : "" });
           }
         }
       })

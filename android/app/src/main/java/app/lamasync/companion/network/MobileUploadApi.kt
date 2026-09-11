@@ -66,7 +66,11 @@ data class MobileUploadReceiptDto(
 )
 
 @Serializable
-data class MobileBrowseRefDto(val kind: String = "local", val path: String)
+data class MobileBrowseRefDto(
+    val kind: String = "local",
+    val path: String,
+    val folderId: String? = null,
+)
 
 @Serializable
 private data class DestinationsEnvelope(val destinations: List<MobileUploadDestinationDto>)

@@ -6,6 +6,23 @@
     <!-- Camera is used exclusively for QR scanning (spec: no media/storage). -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- LAMA-296 stage 2: reading the camera/screenshot media collections. -->
+    <!-- Devices running Android 12L (API 32) or lower. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- Devices running Android 13 (API 33) or higher. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- API 34+: detect/handle SELECTED-photos partial access explicitly. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+
+    <!-- Foreground transfer notification (long videos) + boot recovery. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <uses-feature
         android:name="android.hardware.camera.any"
         android:required="true" />
@@ -31,7 +48,9 @@
             android:name=".ui.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|fontScale"
+            android:enableOnBackInvokedCallback="true"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -50,6 +69,24 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <!-- LAMA-296 stage 2: re-register automatic-protection work after a
+             reboot (durable state survives; work must be re-created). -->
+        <receiver
+            android:name=".work.AutoProtectBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- WorkManager's foreground-service worker promotion (stage 2):
+             long transfers run as a dataSync foreground service worker. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge"
+            xmlns:tools="http://schemas.android.com/tools" />
     </application>
 
 </manifest>

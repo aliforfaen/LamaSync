@@ -55,6 +55,7 @@ import type {
   MobileUploadDestination,
   MobileUploadDestinationCreateRequest,
   MobileUploadDestinationCreateResponse,
+  MobileUploadDestinationUpdateRequest,
   MobileUploadDestinationRevokeResponse,
   MobileWebSessionLogoutResponse,
   PauseMode,
@@ -149,6 +150,27 @@ export function setApiKey(key: string, persist = false): void {
 export function clearApiKey(): void {
   sessionStorage.removeItem(API_KEY_STORAGE);
   localStorage.removeItem(API_KEY_PERSIST_STORAGE);
+}
+
+/**
+ * The Android companion's WebView shares DOM storage with earlier visits to
+ * the same fleet origin. A legacy browser bearer there would otherwise win
+ * over the companion's freshly bootstrapped cookie: the server correctly
+ * treats an explicit bearer as authoritative and returns 403 for a
+ * device-scoped key instead of falling back to the cookie.
+ *
+ * This is local credential hygiene, not an authorization signal. The caller
+ * has already selected the embedded document; clearing a stored bearer grants
+ * nothing, never touches the HttpOnly cookie, and never sends a value to the
+ * server. A normal browser document retains its existing bearer behaviour.
+ */
+export function clearStoredBearerForEmbeddedShell(): void {
+  try {
+    clearApiKey();
+  } catch {
+    // Storage may be disabled by the embedding WebView. In that case there is
+    // no reliable legacy bearer to use, and session discovery remains safe.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +290,7 @@ function isSessionAuthInfo(value: unknown): value is AuthMeSessionResponse {
 export async function probeSession(): Promise<SessionProbeResult> {
   clearSessionAuth();
   try {
-    const res = await fetch(apiUrl("/auth/me"), {
+    const res = await fetchWithTransportSignal(apiUrl("/auth/me"), {
       method: "GET",
       headers: {},
       credentials: "same-origin",
@@ -321,6 +343,26 @@ export async function sessionLogout(): Promise<SessionLogoutResult> {
 
 /** Fired on `window` when the server rejects the stored credential. */
 export const UNAUTHORIZED_EVENT = "lamasync:unauthorized";
+
+/**
+ * LAMA-329 phase 7: transport-outcome signals for the connectivity banner.
+ *
+ * Only a TRANSPORT failure counts. A 4xx/5xx response means the server is
+ * reachable and answered, which is a different problem and must not make the
+ * UI claim the fleet is unreachable.
+ */
+export const REQUEST_FAILED_EVENT = "lamasync:request-failed";
+export const REQUEST_SUCCEEDED_EVENT = "lamasync:request-succeeded";
+
+export function notifyRequestFailed(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(REQUEST_FAILED_EVENT));
+}
+
+export function notifyRequestSucceeded(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(REQUEST_SUCCEEDED_EVENT));
+}
 
 /**
  * Clear the stored key and any in-memory session and notify the app that
@@ -432,6 +474,33 @@ function missingCredentialError(): ApiError {
   return new ApiError(401, "no active credential");
 }
 
+/**
+ * `fetch` plus the LAMA-329 transport signals.
+ *
+ * Every request path here resolves its credential and then talks to the
+ * network, so the connectivity banner's "did a request actually fail?" fact has
+ * to be published from all of them — not only from the JSON helper. A resolved
+ * response counts as success whatever its status (a 4xx/5xx means the server
+ * answered and is a different problem); only a transport rejection counts as a
+ * failure. Without this, a failed multipart upload leaves the banner saying
+ * "Live updates paused" instead of "Server unreachable".
+ */
+export async function fetchWithTransportSignal(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  return fetch(input, init).then(
+    (response) => {
+      notifyRequestSucceeded();
+      return response;
+    },
+    (error: unknown) => {
+      notifyRequestFailed();
+      throw error;
+    },
+  );
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   init: RequestInit = {},
@@ -444,7 +513,7 @@ export async function apiFetch<T = unknown>(
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(apiUrl(path), {
+  const res = await fetchWithTransportSignal(apiUrl(path), {
     ...init,
     headers,
     credentials: "same-origin",
@@ -553,7 +622,7 @@ async function apiBlob(path: string): Promise<Blob> {
   // Downloads are GETs: session mode authenticates via the cookie and needs
   // no CSRF header (cookie + CSRF only apply to non-safe mutations).
   applyCredential(headers, credential, "GET");
-  const res = await fetch(apiUrl(path), { headers, credentials: "same-origin" });
+  const res = await fetchWithTransportSignal(apiUrl(path), { headers, credentials: "same-origin" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 401) {
@@ -633,6 +702,14 @@ export const api = {
       `/mobile/registrations/${encodeURIComponent(hostId)}/destinations`,
       req,
     ),
+  updateMobileRegistrationDestination: (
+    hostId: string,
+    id: string,
+    req: MobileUploadDestinationUpdateRequest,
+  ) => apiPatch<MobileUploadDestinationCreateResponse>(
+    `/mobile/registrations/${encodeURIComponent(hostId)}/destinations/${encodeURIComponent(id)}`,
+    req,
+  ),
   revokeMobileRegistrationDestination: (hostId: string, id: string) =>
     apiPost<MobileUploadDestinationRevokeResponse>(
       `/mobile/registrations/${encodeURIComponent(hostId)}/destinations/${encodeURIComponent(id)}/revoke`,
@@ -808,7 +885,7 @@ export const api = {
     const headers = new Headers();
     // Multipart: no Content-Type here — the browser sets the boundary.
     applyCredential(headers, credential, "POST");
-    const res = await fetch(
+    const res = await fetchWithTransportSignal(
       `/api/v1/apps/protections/${encodeURIComponent(protectionId)}/snapshots`,
       { method: "POST", headers, body: form, credentials: "same-origin" },
     );
@@ -981,7 +1058,7 @@ export const api = {
     const headers = new Headers();
     // Multipart: no Content-Type here — the browser sets the boundary.
     applyCredential(headers, credential, "POST");
-    const res = await fetch(
+    const res = await fetchWithTransportSignal(
       `/api/v1/folders/${encodeURIComponent(folderId)}/files`,
       { method: "POST", headers, body: form, credentials: "same-origin" },
     );

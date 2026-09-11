@@ -122,7 +122,7 @@ passing and 9 skipped on 2026-08-30). Worth knowing by name:
 4. Document the command in `packages/agent-skill/reference/cli.md`
    (strict drift check runs in CI).
 
-## Android companion (LAMA-296 phase 1 + stage 1)
+## Android companion (LAMA-296 phase 1 → stage 2)
 
 The Android app is a **standalone Gradle project** (`android/`) that is
 deliberately outside the Bun workspace: `bun` never discovers it, and its
@@ -148,7 +148,8 @@ runs against the platforms already installed — `gradlew` provisions **no**
 new SDK components. `applicationId` is `app.lamasync.companion` (stable once
 chosen) with `versionName 0.1.0`.
 
-Build, lint, and unit-test (77 JVM tests; instrumented tests need a device/AVD):
+Build, lint, and unit tests (148 JVM tests; instrumented tests need a
+device/AVD):
 
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
@@ -156,9 +157,62 @@ export ANDROID_HOME=/opt/android-sdk
 
 ./android/gradlew -p android assembleDebug          # → android/app/build/outputs/apk/debug/app-debug.apk
 ./android/gradlew -p android lintDebug              # 0 errors expected (warnings are version-available notices)
-./android/gradlew -p android testDebugUnitTest      # 86 unit tests, no device required
-./android/gradlew -p android connectedDebugAndroidTest  # 42 tests (6 vertical tests skip without a live server)
+./android/gradlew -p android testDebugUnitTest      # 148 unit tests, no device required
+./android/gradlew -p android connectedDebugAndroidTest  # 52 tests (2 permission-negative tests skip w/o the extra pass)
 ```
+
+### Stage-2 automatic protection (permissions, scheduling, tests)
+
+- **Media permissions** (official guidance, API tiers): `READ_EXTERNAL_STORAGE`
+  (maxSdk 32), `READ_MEDIA_IMAGES` + `READ_MEDIA_VIDEO` (33+), and
+  `READ_MEDIA_VISUAL_USER_SELECTED` (34+) requested in ONE dialog so the app
+  can distinguish FULL / PARTIAL (selected photos only) / NOT_GRANTED access.
+  Scope is checked LIVE (per scan / on resume) — never stored as authority.
+- **Discovery** scans per-volume MediaStore collections with keyset
+  pagination `(date_added, _id)`. `LIMIT` is passed through the query-args
+  bundle (`QUERY_ARG_SQL_SORT_ORDER` + `QUERY_ARG_LIMIT`): API 35 rejects
+  `LIMIT` embedded in the sortOrder string. New-only boundaries are captured
+  BEFORE the first import query (race-safe); edits of known rows are caught
+  by a known-ids reconciliation (size/date_modified); partial access never
+  claims deletions (rows outside the selected set become UNREADABLE).
+- **Scheduling**: a unique prompt `:auto-protect-discovery` one-time worker
+  (local-only constraints — discovery needs no network) + a ~6 h unique
+  periodic `:auto-protect-reconcile`. Automatic items drain via the
+  DEDICATED `lamasync:auto-upload-queue` work constrained by the AUTOMATIC
+  policy in `AutoProtectSettings`; manual/user uploads keep the stage-1
+  `UPLOAD_QUEUE_WORK_NAME` drainer with the stage-1 `UploadPolicyStore` —
+  neither policy can delay the other kind (the worker filters by item kind).
+  Boot recovery re-enqueues both. Long transfers promote to a `dataSync`
+  foreground-service worker on every supported API level — notification
+  permission is NOT a precondition (the FGS notification surfaces in the
+  Task Manager even when `POST_NOTIFICATIONS` is denied); only a genuine OS
+  refusal (background FGS start restriction) degrades the pass to a plain
+  constrained worker (durable per-chunk offsets keep progress, and the
+  degradation is reported via worker progress).
+- **Instrumented coverage** runs on the API-35 `lamadb-test` AVD: real
+  MediaStore inserts (camera photo, screenshot, >64 MiB video), idempotent
+  duplicate scans, local-deletion detection, WorkManager constraint REPLACE
+  (network + charging), plus the stage-2 HTTPS vertical (see below).
+- **Permission-negative pass** (documented optional): revoking a runtime
+  permission of a RUNNING app force-stops it, so the two negative tests are
+  shell-prepared OUTSIDE the process:
+
+```bash
+# fresh install, then per state:
+adb shell pm revoke app.lamasync.companion android.permission.READ_MEDIA_IMAGES
+adb shell pm revoke app.lamasync.companion android.permission.READ_MEDIA_VIDEO
+adb shell am instrument -w -r \
+  -e class app.lamasync.companion.media.MediaStoreDiscoveryInstrumentedTest#revokedMediaAccessIsDetectedAsNotGranted \
+  -e mediaScopeNegative true \
+  app.lamasync.companion.test/androidx.test.runner.AndroidJUnitRunner
+# partial: revoke images/video, GRANT READ_MEDIA_VISUAL_USER_SELECTED only, then run
+#   ...#partialSelectedAccessIsDetectedAsPartialNotFull with the same -e mediaScopeNegative true
+```
+
+With a live server configured, the suite also runs the stage-1 vertical
+(uploads) and the stage-2 auto-protect vertical. A **fresh server data dir is
+required per full vertical run** — the suite seeds the same display names
+across runs and asserts uniqueness (see the `rm -rf $V/data/*` step below).
 
 ### Stage-1 HTTPS vertical (manual uploads, disposable server)
 
@@ -177,7 +231,13 @@ debug builds trust user CAs). The repo-local helper used for this milestone:
 
 It runs the phase-1 enrollment verticals plus `VerticalUploadFlowTest` (a
 65 MiB+ chunked upload through the real HTTPS stack with ≤ 1 MiB payloads
-and server-side verification, and a declared-checksum-mismatch negative).
+and server-side verification, and a declared-checksum-mismatch negative)
+and `VerticalAutoProtectTest` (stage 2: REAL MediaStore rows — a camera
+photo and a >64 MiB video — through real discovery → bounded staging →
+idempotent enqueue → resumable transfer; checksum-verified arrival in the
+Data Browser, `operation_log` provenance with the real mobile host id,
+no duplicates on repeat scans, and a local deletion leaving the server
+copy intact).
 
 The stage-1 correction pass rebuilt this disposable harness from scratch
 (it is host-local by design and was absent):

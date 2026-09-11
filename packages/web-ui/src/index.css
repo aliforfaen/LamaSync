@@ -13,6 +13,16 @@
    Warm-homelab register: comfortable sizes win over density except inside
    dense tables/logs. */
 
+/* Motion contract (LAMA-329 phase 5). The system preference is the default and
+   `motion.ts` writes an explicit override to `<html data-motion>`:
+     system (or absent) → `prefers-reduced-motion` decides
+     reduce            → motion suppressed
+     full              → motion allowed even when the system asks for reduce
+   Every motion gate therefore has two spellings — the system media query with
+   `:not([data-motion])`, and the explicit attribute. `@keyframes` are kept
+   unconditional and global: a keyframes rule inside a media query would leave
+   an explicit `full` override without a definition. */
+
 :root,
 [data-theme="dark"] {
   /* Cozy nocturnal workshop palette: graphite, espresso, moss, and clay. */
@@ -188,7 +198,11 @@ body,
 #root {
   margin: 0;
   padding: 0;
+  /* LAMA-329 phase 3: `dvh` tracks the CURRENT viewport, so a phone browser
+     whose toolbars collapse no longer leaves a phantom scroll of the
+     difference. The `vh` line stays first as the fallback. */
   min-height: 100vh;
+  min-height: 100dvh;
   font-family: var(--font-family);
   background: var(--bg);
   color: var(--text);
@@ -235,11 +249,43 @@ td.num {
   font-variant-numeric: tabular-nums;
 }
 
+/* LAMA-329 phase 3: shell layout tokens. Declared outside the two theme
+   blocks because they are geometry, not colour. */
+:root {
+  /* Compact rail width for 640–899px (a tablet or a landscape phone). */
+  --nav-rail-compact-width: 8.5rem;
+  /* Display-cutout / home-indicator insets. `env()` only reports non-zero
+     values because the viewport opts in with `viewport-fit=cover`. Inside the
+     Android companion the WebView already sits within the native
+     safe-drawing padding, so these resolve to 0 and cannot double-pad. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
 /* LAMA-275 shell: grouped left rail on desktop, off-canvas drawer <900px.
    The old flat top nav (LAMA-205 wrap rules) is replaced by the rail; routes
-   and deep links are unchanged. */
+   and deep links are unchanged.
+   LAMA-329 phase 3 keeps this rail for ≥640px and retires the drawer below
+   that in favour of the bottom tab bar. */
 .app {
   flex-direction: row; /* overrides the base column layout below */
+  /* The shell pads itself for display cutouts, so it must subtract that
+     padding from its own height: with a bare `min-height: 100vh` a notched
+     device would scroll by exactly the inset height with nothing to show. */
+  min-height: calc(100dvh - var(--safe-top));
+  padding-top: var(--safe-top);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+/* The page landmark. Until phase 3 the routed page was a direct flex child of
+   `.app`; the phone tab bar has to FOLLOW the page in the DOM to stick to the
+   viewport bottom, which needs this wrapper in between. */
+.app-main {
+  flex: 1;
+  min-width: 0;
 }
 
 .rail {
@@ -316,79 +362,17 @@ td.num {
   text-align: left;
 }
 
-/* Slim top bar + drawer behavior below 900px. Hidden on desktop. */
+/* Brand bar. Rendered below 640px only, where the rail is absent; from 640px
+   up the rail carries the brand. */
 .topbar {
   display: none;
 }
 
-.rail-backdrop {
-  display: none;
-}
-
+/* LAMA-329 phase 3: touch targets for pointer-coarse surfaces below the rail
+   width. Interactive controls get a ~40px minimum height. Tiny in-row chrome
+   (breadcrumbs, drawer close, the rail theme toggle) keeps its compact
+   footprint. */
 @media (max-width: 899px) {
-  .app {
-    flex-direction: column;
-  }
-
-  .topbar {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
-    z-index: 30;
-  }
-
-  .topbar-menu {
-    font-size: 1.25rem;
-    line-height: 1;
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    color: var(--text-dim);
-    padding: var(--space-1) var(--space-2);
-    cursor: pointer;
-  }
-
-  .rail {
-    position: fixed;
-    z-index: 40;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    transform: translateX(-100%);
-    transition: transform 0.18s ease-out;
-    box-shadow: var(--shadow-lg);
-    height: 100dvh;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .rail {
-      transition: none;
-    }
-  }
-
-  .rail-open {
-    transform: translateX(0);
-  }
-
-  .rail-backdrop {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 35;
-    background: var(--backdrop);
-    border: none;
-    cursor: pointer;
-  }
-
-  /* P-A (2026-08-26): touch targets — interactive controls get a ~40px
-     minimum height below the rail→drawer breakpoint. Tiny in-row chrome
-     (breadcrumbs, drawer close, the rail theme toggle) keeps its compact
-     footprint. */
   button.action,
   a.action {
     min-height: 40px;
@@ -413,7 +397,7 @@ td.num {
   }
 }
 
-/* LamaSync masthead: the generated pack mark is decorative; the wordmark is
+/* LamaSync masthead: the courier mark is decorative; the wordmark is
    live text so it stays accessible and remains usable if the art changes. */
 .brand-lockup {
   display: inline-flex;
@@ -428,9 +412,9 @@ td.num {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2rem;
-  height: 1.75rem;
-  flex: 0 0 2rem;
+  width: 2.15rem;
+  height: 2.15rem;
+  flex: 0 0 2.15rem;
 }
 
 .brand-mark-image {
@@ -1084,9 +1068,13 @@ a.action:hover {
    (colour hover transitions above are exempt: they animate colour, not
    position). */
 @media (prefers-reduced-motion: no-preference) {
-  button.action:active {
+  html:not([data-motion="reduce"]) button.action:active {
     transform: translateY(1px);
   }
+}
+/* Explicit override: `full` restores the press shift on a reduce system. */
+html[data-motion="full"] button.action:active {
+  transform: translateY(1px);
 }
 
 button.action.primary {
@@ -1506,8 +1494,9 @@ button.action:disabled {
   padding: var(--space-2) 0;
 }
 @media (prefers-reduced-motion: reduce) {
-  .skel::after { animation: none; }
+  html:not([data-motion="full"]) .skel::after { animation: none; }
 }
+html[data-motion="reduce"] .skel::after { animation: none; }
 
 /* --- Host list / detail (LAMA-198) ---
    LAMA-272: the host table became a device-card grid (Tailscale-like
@@ -1711,9 +1700,12 @@ button.action:disabled {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .host-status-dot {
+  html:not([data-motion="full"]) .host-status-dot {
     animation: none;
   }
+}
+html[data-motion="reduce"] .host-status-dot {
+  animation: none;
 }
 
 /* "Last backup 2h ago" — omitted entirely when no backup was found. */
@@ -2501,9 +2493,12 @@ button.action:disabled {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .estate-core {
+  html:not([data-motion="full"]) .estate-core {
     animation: none;
   }
+}
+html[data-motion="reduce"] .estate-core {
+  animation: none;
 }
 
 /* LAMA-265: the hopping-llama glyph slot (EmptyState `glyph="llama"`).
@@ -2519,9 +2514,12 @@ button.action:disabled {
   color: var(--estate-accent);
 }
 @media (prefers-reduced-motion: no-preference) {
-  .estate-glyph--llama .estate-llama {
+  html:not([data-motion="reduce"]) .estate-glyph--llama .estate-llama {
     animation: llama-hop 2.4s ease-in-out infinite;
   }
+}
+html[data-motion="full"] .estate-glyph--llama .estate-llama {
+  animation: llama-hop 2.4s ease-in-out infinite;
 }
 @keyframes llama-hop {
   0%,
@@ -2728,12 +2726,18 @@ button.action:disabled {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .palette-backdrop {
+  html:not([data-motion="reduce"]) .palette-backdrop {
     animation: palette-fade 120ms ease-out;
   }
-  .palette {
+  html:not([data-motion="reduce"]) .palette {
     animation: palette-pop 140ms ease-out;
   }
+}
+html[data-motion="full"] .palette-backdrop {
+  animation: palette-fade 120ms ease-out;
+}
+html[data-motion="full"] .palette {
+  animation: palette-pop 140ms ease-out;
 }
 
 @keyframes palette-fade {
@@ -3149,22 +3153,28 @@ button.action:disabled {
   border-radius: 1px;
   opacity: 0;
 }
+/* Keyframes stay outside the media query so the explicit `full` override below
+   still has a definition when the system prefers reduced motion. */
+@keyframes confetti-fly {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(0deg) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy)))
+      rotate(var(--rot)) scale(var(--scale));
+  }
+}
 @media (prefers-reduced-motion: no-preference) {
-  .confetti-bit {
+  html:not([data-motion="reduce"]) .confetti-bit {
     animation: confetti-fly 1.2s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
     animation-delay: var(--delay);
   }
-  @keyframes confetti-fly {
-    0% {
-      opacity: 1;
-      transform: translate(-50%, -50%) rotate(0deg) scale(1);
-    }
-    100% {
-      opacity: 0;
-      transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy)))
-        rotate(var(--rot)) scale(var(--scale));
-    }
-  }
+}
+html[data-motion="full"] .confetti-bit {
+  animation: confetti-fly 1.2s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+  animation-delay: var(--delay);
 }
 
 /* Reduced-motion fallback: a short, quiet confirmation line instead of the
@@ -3636,6 +3646,797 @@ button.action:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .signal-tile { transition: none; }
-  .signal-tile:hover { transform: none; }
+  html:not([data-motion="full"]) .signal-tile { transition: none; }
+  html:not([data-motion="full"]) .signal-tile:hover { transform: none; }
+}
+html[data-motion="reduce"] .signal-tile { transition: none; }
+html[data-motion="reduce"] .signal-tile:hover { transform: none; }
+
+/* ===========================================================================
+   LAMA-329 phase 3 — responsive navigation shell
+   ≥900px full rail · 640–899px compact rail · <640px bottom tab bar.
+   These rules sit at the end of the file deliberately: an override of equal
+   specificity only wins the cascade by coming after the base rule (the same
+   convention the "P-A" responsive block above records), and the `.page`
+   padding and `.app` direction they override are declared much earlier.
+   =========================================================================== */
+
+/* Visible only below 640px, where it replaces the rail. */
+.mobile-tabbar {
+  display: none;
+}
+
+/* Shared by the rail footer and the phone's More sheet. */
+.shell-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* --- 640–899px: the rail stays, one notch narrower ----------------------- */
+@media (min-width: 640px) and (max-width: 899px) {
+  .rail {
+    width: var(--nav-rail-compact-width);
+    padding: var(--space-2) var(--space-1-5) var(--space-3);
+    gap: var(--space-2);
+  }
+
+  .rail a {
+    gap: 0.3rem;
+    padding: 0.34rem 0.4rem;
+    font-size: var(--font-size-xs);
+  }
+
+  .rail-group-label {
+    padding-inline: var(--space-1);
+    font-size: 0.6875rem;
+    letter-spacing: 0.05em;
+  }
+
+  .rail-brand {
+    margin: 0 var(--space-1);
+  }
+}
+
+/* --- <640px: brand bar on top, tab bar on the bottom -------------------- */
+@media (max-width: 639px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+  }
+
+  /* Retired, not hidden: the tab bar plus the More sheet carry every
+     destination the rail lists, and the sheet also carries the shell
+     actions the rail footer held. */
+  .rail {
+    display: none;
+  }
+
+  .page {
+    padding: var(--space-4);
+  }
+
+  /* Sticky rather than fixed: it stays in flow, so no page needs bottom
+     padding to avoid being covered by it. */
+  .mobile-tabbar {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    position: sticky;
+    bottom: 0;
+    z-index: 30;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding-bottom: var(--safe-bottom);
+  }
+
+  .mobile-tabbar a,
+  .mobile-tabbar-more {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    min-height: 56px;
+    padding: var(--space-1);
+    border: none;
+    /* Active destinations carry a rule as well as a colour, so the state is
+       never signalled by colour alone. */
+    border-top: 2px solid transparent;
+    background: none;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: var(--font-size-xs);
+    text-align: center;
+    cursor: pointer;
+  }
+
+  .mobile-tabbar svg {
+    font-size: 1.35rem;
+  }
+
+  .mobile-tabbar a:hover,
+  .mobile-tabbar-more:hover {
+    background: var(--surface-inset);
+    color: var(--text-strong);
+  }
+
+  .mobile-tabbar a.active,
+  .mobile-tabbar-more.active {
+    border-top-color: var(--accent-info);
+    color: var(--accent-info);
+    font-weight: 500;
+  }
+
+  .mobile-tabbar-label {
+    overflow: hidden;
+    max-width: 100%;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sheet-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: var(--backdrop);
+    border: none;
+    cursor: pointer;
+  }
+
+  .mobile-sheet {
+    display: block;
+    position: fixed;
+    z-index: 61;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    max-height: 82dvh;
+    overflow-y: auto;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-top-left-radius: var(--radius-lg);
+    border-top-right-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    padding: var(--space-3) var(--space-4) calc(var(--space-4) + var(--safe-bottom));
+  }
+
+  .mobile-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-2);
+  }
+
+  .mobile-sheet-head h2 {
+    margin: 0;
+    font-size: var(--font-size-lg);
+  }
+
+  .sheet-close {
+    min-width: 44px;
+    min-height: 44px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: none;
+    color: var(--text-dim);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .mobile-sheet-groups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  /* The sheet reuses the rail's link treatment so the two surfaces read the
+     same way, at touch size. */
+  .mobile-sheet a {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-md);
+    color: var(--text-dim);
+    font-size: var(--font-size-md);
+  }
+
+  .mobile-sheet a:hover {
+    background: var(--surface-inset);
+    color: var(--text-strong);
+  }
+
+  .mobile-sheet a.active {
+    background: var(--accent-info-bg);
+    color: var(--text-strong);
+    font-weight: 500;
+  }
+
+  .mobile-sheet-actions {
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border);
+  }
+
+  .mobile-sheet-actions a {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: var(--space-1) var(--space-2);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html:not([data-motion="reduce"]) .mobile-sheet {
+      animation: mobile-sheet-in 0.18s ease-out;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html:not([data-motion="full"]) .mobile-sheet {
+      animation: none;
+    }
+  }
+
+  html[data-motion="full"] .mobile-sheet {
+    animation: mobile-sheet-in 0.18s ease-out;
+  }
+
+  html[data-motion="reduce"] .mobile-sheet {
+    animation: none;
+  }
+}
+
+@keyframes mobile-sheet-in {
+  from {
+    transform: translateY(12%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* ===========================================================================
+   LAMA-329 phase 4 — responsive page pass
+   Measured at 360 CSS px against the seeded demo fleet before this pass:
+   /apps/backups 670px, /operations 577px, /admin 632px of content inside a
+   360px viewport. One cause every time: `table.data` asks for `width: 100%`
+   but its min-content width — nowrap uppercase headers plus long machine
+   strings — is larger, so the table wins and the PAGE scrolls sideways.
+
+   Two layers fix it:
+     1. a safety net for every table, so none can push the page sideways even
+        if it is not enumerated here;
+     2. a list treatment for the multi-column tables, following the
+        `.data-folders` precedent that already shipped: keep each row's
+        identity, its decisive state and its actions, drop the rest. The
+        dropped fields stay reachable — the detail view, the expanded row or
+        the operation sentence still carries them.
+   =========================================================================== */
+
+/* --- layer 1: no table may exceed the viewport --------------------------
+   Applies across the whole sub-900px shell, not just the phone. Below 900px
+   the navigation is no longer a desktop sidebar: from 640–899 the compact
+   rail takes a permanent ~136px column, which widens the page's scroll width
+   for any table whose min-content is larger than what is left. Measured at
+   768px against the demo fleet, `/backends` went from 812px to 948px of
+   scroll width and `/admin` and `/apps/backups` started scrolling, purely
+   because the rail appeared. Fixed layout plus wrapping cells is what keeps
+   the table inside its column, so the gate holds at every width where the
+   shell layout changes. */
+@media (max-width: 899px) {
+  table.data {
+    table-layout: fixed;
+  }
+
+  /* Headers are nowrap by default, which is what forces the min-content
+     width. Sub-900px they wrap, and long paths/ids break instead of
+     stretching their column. */
+  table.data th,
+  table.data td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 639px) {
+  /* --- layer 2: the list skeleton ---------------------------------------- */
+  /* `data-list` marks the tables that collapse to a list; each also carries a
+     `data-<name>` class used below to choose the surviving columns. */
+  .data.data-list {
+    display: block;
+    border: 0;
+    background: transparent;
+  }
+
+  .data.data-list > thead {
+    display: none;
+  }
+
+  .data.data-list > tbody {
+    display: block;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+  }
+
+  .data.data-list > tbody > tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .data.data-list > tbody > tr:last-child {
+    border-bottom: 0;
+  }
+
+  /* Every cell starts hidden; each table below reveals the ones it keeps. */
+  .data.data-list > tbody > tr > td {
+    display: none;
+    border: 0;
+    padding: 0;
+  }
+
+  /* The loading skeleton and the empty/error rows span every column, so they
+     must survive the per-column rules above — without this the whole table
+     renders as an empty box while loading. */
+  .data.data-list > tbody > tr > td[colspan],
+  .data.data-list > tbody > tr.empty-row > td {
+    display: block;
+    grid-column: 1 / -1;
+  }
+
+  /* --- Activity ---------------------------------------------------------- */
+  /* The sentence rendered by `operationSentence` already names the device and
+     the folder and carries the relative time and the status word, so those
+     three columns are redundant rather than lost. */
+  .data.data-activity > tbody > tr > td:nth-child(1),
+  .data.data-activity > tbody > tr > td:nth-child(4),
+  .data.data-activity > tbody > tr > td:nth-child(5),
+  .data.data-activity > tbody > tr > td:nth-child(6) {
+    display: block;
+  }
+
+  .data.data-activity > tbody > tr > td:nth-child(4) {
+    grid-area: 1 / 1;
+    color: var(--text-strong);
+    font-weight: 500;
+  }
+
+  .data.data-activity > tbody > tr > td:nth-child(5) {
+    grid-area: 1 / 2;
+    justify-self: end;
+  }
+
+  .data.data-activity > tbody > tr > td:nth-child(6) {
+    grid-area: 2 / 1 / 3 / 3;
+    color: var(--text-muted);
+  }
+
+  .data.data-activity > tbody > tr > td:nth-child(1) {
+    grid-area: 3 / 1 / 4 / 3;
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+  }
+
+  /* --- App protections --------------------------------------------------- */
+  /* Identity + status badge, then the actions on their own full-width row so
+     they are not squeezed into a dropdown. */
+  .data.data-app-protections > tbody > tr > td:nth-child(1),
+  .data.data-app-protections > tbody > tr > td:nth-child(2),
+  .data.data-app-protections > tbody > tr > td:nth-child(6) {
+    display: block;
+  }
+
+  .data.data-app-protections > tbody > tr > td:nth-child(2) {
+    justify-self: end;
+  }
+
+  .data.data-app-protections > tbody > tr > td:nth-child(6) {
+    grid-column: 1 / -1;
+  }
+
+  .data.data-app-protections .table-actions {
+    text-align: left;
+  }
+
+  /* --- Snapshots (App backups) ------------------------------------------- */
+  /* Identity + integrity badge on the first row, created time + actions on
+     the second. Integrity is the field that decides whether a snapshot is
+     worth restoring, so it outranks size and description here. */
+  .data.data-snapshots > tbody > tr > td:nth-child(1),
+  .data.data-snapshots > tbody > tr > td:nth-child(2),
+  .data.data-snapshots > tbody > tr > td:nth-child(4),
+  .data.data-snapshots > tbody > tr > td:nth-child(6) {
+    display: block;
+  }
+
+  .data.data-snapshots > tbody > tr > td:nth-child(4) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-snapshots > tbody > tr > td:nth-child(2) {
+    grid-column: 1;
+    grid-row: 2;
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+  }
+
+  .data.data-snapshots > tbody > tr > td:nth-child(6) {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+  }
+
+  /* --- Per-host assignments (a folder's expanded row) ------------------- */
+  /* Device + effective-mode badge + actions. The mode badge is LAMA-239's
+     per-host override, which is the reason to open this table at all. */
+  .data.data-nested > tbody > tr > td:nth-child(1),
+  .data.data-nested > tbody > tr > td:nth-child(5),
+  .data.data-nested > tbody > tr > td:nth-child(6) {
+    display: block;
+  }
+
+  .data.data-nested > tbody > tr > td:nth-child(5) {
+    justify-self: end;
+  }
+
+  .data.data-nested > tbody > tr > td:nth-child(6) {
+    grid-column: 1 / -1;
+  }
+
+  .data.data-nested .table-actions {
+    text-align: left;
+  }
+
+  /* --- Active locks ------------------------------------------------------ */
+  .data.data-locks > tbody > tr > td:nth-child(1),
+  .data.data-locks > tbody > tr > td:nth-child(2),
+  .data.data-locks > tbody > tr > td:nth-child(4) {
+    display: block;
+  }
+
+  .data.data-locks > tbody > tr > td:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .data.data-locks > tbody > tr > td:nth-child(4) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-locks > tbody > tr > td:nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    color: var(--text-muted);
+  }
+
+  /* --- Paired Android devices ------------------------------------------- */
+  .data.data-mobile-devices > tbody > tr > td:nth-child(1),
+  .data.data-mobile-devices > tbody > tr > td:nth-child(5),
+  .data.data-mobile-devices > tbody > tr > td:nth-child(6) {
+    display: block;
+  }
+
+  .data.data-mobile-devices > tbody > tr > td:nth-child(5) {
+    justify-self: end;
+  }
+
+  .data.data-mobile-devices > tbody > tr > td:nth-child(6) {
+    grid-column: 1 / -1;
+  }
+
+  .data.data-mobile-devices .table-actions {
+    text-align: left;
+  }
+
+  /* --- Notification destinations and log -------------------------------- */
+  .data.data-notifications > tbody > tr > td:nth-child(1),
+  .data.data-notifications > tbody > tr > td:nth-child(5),
+  .data.data-notifications > tbody > tr > td:nth-child(7) {
+    display: block;
+  }
+
+  .data.data-notifications > tbody > tr > td:nth-child(5) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-notifications > tbody > tr > td:nth-child(7) {
+    grid-column: 1 / -1;
+  }
+
+  .data.data-notifications .table-actions {
+    text-align: left;
+  }
+
+  .data.data-notification-log > tbody > tr > td:nth-child(1),
+  .data.data-notification-log > tbody > tr > td:nth-child(3),
+  .data.data-notification-log > tbody > tr > td:nth-child(4) {
+    display: block;
+  }
+
+  .data.data-notification-log > tbody > tr > td:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+  }
+
+  .data.data-notification-log > tbody > tr > td:nth-child(3) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-notification-log > tbody > tr > td:nth-child(4) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  /* --- action and filter rows ------------------------------------------- */
+  /* `.toolbar` is `space-between` with no wrap, so "Android devices" plus two
+     buttons, or Activity's three filter selects, push the last control past
+     the right edge. */
+  .toolbar {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .toolbar > h1,
+  .toolbar > h2 {
+    flex: 1 1 100%;
+    margin-bottom: 0;
+  }
+
+  .toolbar > button,
+  .toolbar > .action {
+    flex: 0 0 auto;
+  }
+
+  /* Filters go label-above-control: three selects side by side never fit
+     360px, and this keeps them a readable size instead of squeezing. */
+  .scope-filter {
+    display: flex;
+    flex: 1 1 45%;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+  }
+
+  .scope-filter select {
+    width: 100%;
+    min-height: 48px;
+  }
+
+  /* The plan's acceptance gate is 48px for primary targets, and the shipped
+     40px rule above dates from before it. Compact in-row chrome keeps its
+     footprint, exactly as the 899px block exempts it. */
+  button.action,
+  a.action {
+    min-height: 48px;
+  }
+
+  .browser-breadcrumb .action,
+  .drawer-close,
+  .theme-toggle {
+    min-height: 0;
+  }
+
+  /* Row menus ("Set up", "More") sit inside a list row, where a full 48px
+     primary height would defeat the collapse. They get a real tap target
+     without becoming the tallest thing in the row. */
+  .data.data-list .row-menu > summary {
+    min-height: 44px;
+  }
+}
+
+/* ===========================================================================
+   LAMA-329 phases 5-7 — browser settings, boot state, connectivity
+   =========================================================================== */
+
+/* --- Phase 6: the boot state ------------------------------------------------ */
+/* `Llama`'s "nap" pose is the slot LAMA-274 reserved for a loading state; the
+   animation is decoration, so it exists only where motion is welcome and the
+   pose itself is always drawn. */
+.boot-card {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  text-align: center;
+}
+
+.boot-llama {
+  color: var(--accent-info);
+}
+
+.boot-status {
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-motion="reduce"]) .boot-llama {
+    animation: boot-breathe 2.6s ease-in-out infinite;
+  }
+}
+html[data-motion="full"] .boot-llama {
+  animation: boot-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes boot-breathe {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* --- Phase 7: the connectivity banner ------------------------------------- */
+/* Sits above the page, below the top bar, for every authenticated screen. The
+   state is carried by a word ("Offline", "Live updates paused") as well as a
+   colour, and the sentence underneath says what it means for the data. */
+.connectivity-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-size-sm);
+}
+
+.connectivity-banner--offline {
+  background: var(--accent-critical-bg);
+  color: var(--accent-critical);
+}
+
+.connectivity-banner--reconnecting {
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
+.connectivity-banner strong {
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.connectivity-banner span {
+  color: var(--text-dim);
+}
+
+/* --- Phase 5: browser density -------------------------------------------- */
+/* Comfortable is the default and is what the rest of this file encodes. Compact
+   tightens the recurring surfaces — page gutters, section rhythm, table cells
+   and device cards — without changing type size, because shrinking text is not
+   what an operator reading a fleet should get from "denser". */
+html[data-density="compact"] .page {
+  padding: var(--space-3);
+}
+
+html[data-density="compact"] .page-header {
+  margin-bottom: var(--space-3);
+}
+
+html[data-density="compact"] .section {
+  margin-bottom: var(--space-4);
+}
+
+html[data-density="compact"] table.data th,
+html[data-density="compact"] table.data td {
+  padding: var(--space-1) var(--space-2);
+}
+
+html[data-density="compact"] .host-card {
+  padding: var(--space-2) var(--space-3);
+  gap: var(--space-2);
+}
+
+html[data-density="compact"] .settings-row {
+  gap: var(--space-1-5);
+}
+
+/* --- Phase 5: the settings page ------------------------------------------- */
+.settings-row {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+
+.settings-row p {
+  margin: 0;
+  max-width: var(--content-max);
+}
+
+.settings-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.settings-choice-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 44px;
+}
+
+/* The command-palette shortcut, shown inline in the Settings help. Monospace
+   because it is a literal chord to type, matching the mono-is-machine-data
+   rule rather than decorating prose. */
+.settings-row kbd {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono-xs);
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* The preference-ownership table collapses like the phase-4 tables: identity
+   and layer on the first row, the store and the explanation underneath. The
+   store string is the point of the table, so it is shown rather than dropped. */
+@media (max-width: 639px) {
+  .data.data-preferences > tbody > tr > td:nth-child(1),
+  .data.data-preferences > tbody > tr > td:nth-child(2),
+  .data.data-preferences > tbody > tr > td:nth-child(3),
+  .data.data-preferences > tbody > tr > td:nth-child(4) {
+    display: block;
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(3) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    color: var(--text-dim);
+  }
+
+  .data.data-preferences > tbody > tr > td:nth-child(4) {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
 }

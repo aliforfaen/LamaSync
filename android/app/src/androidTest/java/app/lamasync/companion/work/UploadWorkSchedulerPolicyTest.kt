@@ -53,6 +53,35 @@ class UploadWorkSchedulerPolicyTest {
         awaitConstraint(NetworkType.CONNECTED)
     }
 
+    @Test
+    fun chargingToggleActuallyReplacesTheConstraint() {
+        UploadWorkScheduler.scheduleUploads(app, UploadPolicy())
+        awaitConstraint(NetworkType.CONNECTED)
+
+        UploadWorkScheduler.rescheduleWithPolicy(app, UploadPolicy(chargingOnly = true))
+        awaitCharging(true)
+
+        UploadWorkScheduler.rescheduleWithPolicy(app, UploadPolicy(chargingOnly = false))
+        awaitCharging(false)
+    }
+
+    /** Wait until the unique work's request actually requires charging. */
+    private fun awaitCharging(expected: Boolean) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            val infos = workManager.getWorkInfosForUniqueWork(
+                UploadWorkScheduler.UPLOAD_QUEUE_WORK_NAME,
+            ).get()
+            if (infos.any { it.constraints.requiresCharging() == expected }) return
+            Thread.sleep(50)
+        }
+        val infos = workManager.getWorkInfosForUniqueWork(
+            UploadWorkScheduler.UPLOAD_QUEUE_WORK_NAME,
+        ).get()
+        val states = infos.joinToString { it.state.name + ":charging=" + it.constraints.requiresCharging() }
+        throw AssertionError("charging constraint never became $expected (work: $states)")
+    }
+
     /** Wait until the unique work's request actually carries [expected]. */
     private fun awaitConstraint(expected: NetworkType) {
         val deadline = System.currentTimeMillis() + 10_000

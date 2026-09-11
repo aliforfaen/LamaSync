@@ -57,6 +57,16 @@ android {
         unitTests {
             isIncludeAndroidResources = false
             isReturnDefaultValues = false
+            // LAMA-329: PaletteMirrorsWebTokensTest reads the web UI's
+            // design-token contract (packages/web-ui/src/index.css) to detect
+            // palette drift. Resolved from the Gradle root project rather than
+            // the test's working directory, which AGP does not guarantee.
+            all {
+                it.systemProperty(
+                    "lamasync.webUiCss",
+                    rootProject.file("../packages/web-ui/src/index.css").absolutePath,
+                )
+            }
         }
     }
 }
@@ -77,6 +87,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.swipe.refresh.layout)
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)

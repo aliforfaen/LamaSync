@@ -157,6 +157,11 @@ export function createServerApp() {
               name: "Stats",
               description: "Storage usage reports",
             },
+            {
+              name: "Web app",
+              description:
+                "Browser plumbing for the installable web app: manifest, icons and the shell-only service worker. Served from the origin root, not /api/v1, and carries no fleet data.",
+            },
           ],
           components: {
             securitySchemes: {
@@ -218,4 +223,21 @@ export function createServerApp() {
     });
 }
 
-export type App = ReturnType<typeof createServerApp>;
+/**
+ * The composed server app.
+ *
+ * Deliberately NOT `ReturnType<typeof createServerApp>`. Materialising the
+ * inferred type of the whole plugin chain now exceeds TypeScript's
+ * instantiation depth: at 158 routes it type-checked, and adding the three
+ * PWA asset routes (LAMA-329 phase 7) turned it into `TS2589` in this file.
+ * The alias is the only place that type is ever computed — nothing in the repo
+ * consumes it, and there is no Eden-style typed client, so callers only need
+ * `handle`/`listen`.
+ *
+ * The route contract has two other sources of truth that are exercised by
+ * tests: `reference/api.md` (drift-checked against the real route table) and
+ * the generated `/swagger/json` spec (`openapi.test.ts`). If a typed client is
+ * ever wanted, mount the routers behind a narrower facade rather than
+ * reopening this alias.
+ */
+export type App = Elysia;

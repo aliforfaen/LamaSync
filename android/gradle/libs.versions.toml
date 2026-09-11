@@ -13,6 +13,16 @@
 #   * ML Kit barcode-scanning 17.3.0 (bundled model; current stable per
 #     https://developers.google.com/ml-kit/release-notes).
 #   * camera 1.4.2: last CameraX line that does not require compileSdk 36.
+#   * navigation-compose 2.9.0 (LAMA-329): the last navigation line that
+#     compiles against SDK 35. It pins compose 1.7.2 transitively, which the
+#     Compose BOM below raises to 1.8.3; its kotlinx-serialization dependency
+#     is already satisfied by kotlinx-serialization-json.
+#   * swiperefreshlayout 1.1.0 (LAMA-329): the pull-to-refresh gesture around
+#     the hardened WebView. A View-based ViewGroup is used deliberately —
+#     Compose's `Modifier.pullToRefresh` is nested-scroll based and an
+#     AndroidView host does not dispatch nested scroll, and
+#     `setOnChildScrollUpCallback` is the supported way to honour the
+#     "never fire while the page is scrolled away from top" gate.
 
 [versions]
 agp = "8.9.3"
@@ -25,6 +35,8 @@ camera = "1.4.2"
 mlkitBarcode = "17.3.0"
 serializationJson = "1.8.1"
 coroutines = "1.10.2"
+navigation = "2.9.0"
+swipeRefreshLayout = "1.1.0"
 workManager = "2.10.0"
 junit = "4.13.2"
 androidxTestJunit = "1.2.1"
@@ -50,6 +62,8 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workManager" }
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigation" }
+androidx-swipe-refresh-layout = { group = "androidx.swiperefreshlayout", name = "swiperefreshlayout", version.ref = "swipeRefreshLayout" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }

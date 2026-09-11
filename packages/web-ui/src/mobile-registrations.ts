@@ -50,9 +50,10 @@ export interface MobileDevicesServices {
   /** GET /api/v1/mobile/registrations/:hostId/destinations (admin, stage 1). */
   listDestinations(hostId: string): Promise<MobileUploadDestination[]>;
   /** POST /api/v1/mobile/registrations/:hostId/destinations (admin, stage 1). */
-  createDestination(hostId: string, label: string, slug?: string): Promise<MobileUploadDestination>;
+  createDestination(hostId: string, label: string, slug?: string, folderId?: string | null): Promise<MobileUploadDestination>;
   /** POST /api/v1/mobile/registrations/:hostId/destinations/:id/revoke (admin, stage 1). */
   revokeDestination(hostId: string, id: string): Promise<unknown>;
+  updateDestination?(hostId: string, id: string, folderId: string | null): Promise<MobileUploadDestination>;
 }
 
 /** Result of one flow step: fresh rows on success, human error text on
@@ -135,9 +136,10 @@ export async function createDestinationAndReload(
   hostId: string,
   label: string,
   slug?: string,
+  folderId?: string | null,
 ): Promise<MobileDestinationsResult> {
   try {
-    await services.createDestination(hostId, label, slug);
+    await services.createDestination(hostId, label, slug, folderId);
   } catch (err) {
     return {
       destinations: null,
@@ -160,6 +162,23 @@ export async function revokeDestinationAndReload(
       destinations: null,
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+  return loadDestinationsForDevice(services, hostId);
+}
+
+export async function updateDestinationAndReload(
+  services: MobileDevicesServices,
+  hostId: string,
+  id: string,
+  folderId: string | null,
+): Promise<MobileDestinationsResult> {
+  if (!services.updateDestination) {
+    return { destinations: null, error: "Destination editing is unavailable" };
+  }
+  try {
+    await services.updateDestination(hostId, id, folderId);
+  } catch (err) {
+    return { destinations: null, error: err instanceof Error ? err.message : String(err) };
   }
   return loadDestinationsForDevice(services, hostId);
 }

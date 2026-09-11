@@ -14,6 +14,12 @@ compact, theme-aware alternative for product UI.
 | `umbrella-loading-concept.png` | a quiet empty/loading state or subtle dashboard background |
 | `slip-error-concept.png` | a recoverable error or failed-sync empty state |
 | `filled-icon-pose-study.png` | visual reference for the compact filled llama icon family |
+| `courier-standing.png` | compact calm/success illustration derived from the transparent pose study |
+| `courier-seated-file.png` | larger getting-started or empty-state illustration with a protected file |
+
+The two courier illustrations belong in spacious dashboard, onboarding, and
+empty-state compositions. They are not semantic status icons and should remain
+decorative when adjacent copy already describes the state.
 
 The two illustrations preserve transparency and are supporting artwork, not
 everyday product chrome. The pose study is not a sprite sheet for production:

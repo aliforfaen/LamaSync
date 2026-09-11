@@ -381,7 +381,7 @@ export function AppBackups() {
         </p>
       ) : null}
 
-      <table className="data">
+      <table className="data data-list data-app-protections">
         <thead>
           <tr>
             <th>Protection</th>
@@ -548,7 +548,7 @@ export function AppBackups() {
                             protection on its schedule, or when you upload one.
                           </span>
                         ) : (
-                          <table className="data">
+                          <table className="data data-list data-snapshots">
                             <thead>
                               <tr>
                                 <th>Snapshot</th>

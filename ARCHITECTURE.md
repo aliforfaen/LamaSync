@@ -290,6 +290,29 @@ onboarding surface; policy changes REPLACE the WorkManager constraint
 (`REPLACE`, verified both directions); NO_SPACE staging deletes its partial
 file; destination revoke enforces its hostId parent.
 
+Stage-2 (automatic protection) is entirely Android-local: the companion
+keeps a durable device-side registry (media identity `collection:<id>@<volume>`,
+never a path), per-collection/volume discovery cursors, settings (camera
+photos/videos, optional screenshots, NEW_ONLY vs EXISTING_HISTORY), transfer
+policy (unmetered + charging), and the observed permission scope
+(FULL / PARTIAL / NOT_GRANTED, checked live). Discovery uses per-volume
+`(date_added, _id)` keyset pagination (race-safe new-only boundaries;
+`LIMIT` is passed via the query-args bundle — API 35 rejects it inside the
+sortOrder string), and a reconciliation pass compares known ids by
+size/date_modified so edits are re-protected and deletions become
+LOCALLY_DELETED (never a server deletion; under partial access a missing row
+is UNREADABLE, not deleted). "Protected through" is derived from the
+contiguous completion chain, never from the latest upload timestamp.
+Queued auto items reuse the stage-1 resumable engine byte-for-byte; repeated
+names are retried under versioned names with derived idempotency keys
+(`^[A-Za-z0-9._-]+$`, the server's create contract). Scheduling: unique
+prompt discovery work (local-only constraints) + a ~6 h unique periodic
+reconciliation; transfers run under the same policy-constrained drainer;
+long transfers promote to a dataSync foreground-service worker only when
+the platform allows the notification, degrading gracefully otherwise. Central
+revocation stops discovery/upload via the stage-1 binding gate with a
+re-pair action; local queue/registry state is preserved.
+
 ---
 
 ## REST API (Server)
@@ -782,12 +805,17 @@ lamasync/
 3. **Encryption at rest** — implemented (LAMA-124) as an rclone `crypt`
    remote on top of SFTP. The crypt password is distributed inside the
    generated rclone config (which is itself 0o600 on disk).
-4. **Mobile** — manual uploads shipped (LAMA-296 stage 1): a desktop-assigned
-   inbox per Android registration accepts checksum-verified files under
-   `Mobile/<hostId>/<slug>` via the resumable mobile upload protocol (see the
-   Mobile uploads section above). Automatic camera/media discovery,
-   background transfer forensics on real devices, and onward cloud
-   replication remain future work.
+4. **Mobile** — manual and automatic uploads shipped (LAMA-296 stages 1–2): a
+   desktop-assigned inbox per Android registration accepts checksum-verified
+   files under `Mobile/<hostId>/<slug>` via the resumable mobile upload
+   protocol (see the Mobile uploads section above); the Android companion
+   additionally discovers camera photos/videos and screenshots locally and
+   automatically protects them into the server-approved **Camera** inbox
+   (device-local discovery cursors + record registry, contiguous coverage
+   reporting, unmetered/charging policy, WorkManager scheduling with a
+   graceful foreground-service promotion for long videos). Real-device
+   background-transfer forensics and onward cloud replication remain future
+   work.
 5. **Windows/WSL** — paths are hardcoded to Unix conventions. rclone works
    on Windows but the daemon does not.
 6. **v0.2.0 completionist verification** — the suite now stands at 118 unit

@@ -64,25 +64,13 @@ fun UploadsScreen(
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column {
-                Text(
-                    "Uploads",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    "Device ${pairedRegistration.hostId}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            TextButton(onClick = onBack) { Text("Back") }
-        }
+        // LAMA-329: the title and the back affordance moved to the app bar;
+        // this line keeps the one fact the app bar does not carry.
+        Text(
+            "Device ${pairedRegistration.hostId}",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         state.message?.let {
             val color = if (state.messageIsError) {
@@ -131,7 +119,13 @@ fun UploadsScreen(
                         onRemove = { viewModel.removeItem(item.id) },
                         onOpen = {
                             item.receipt?.let {
-                                onOpenUrl(viewModel.browseUrlFor(pairedRegistration.origin, it.browsePath))
+                                onOpenUrl(
+                                    viewModel.browseUrlFor(
+                                        pairedRegistration.origin,
+                                        it.browsePath,
+                                        it.browseFolderId,
+                                    ),
+                                )
                             }
                         },
                     )

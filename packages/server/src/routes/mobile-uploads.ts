@@ -36,6 +36,7 @@ import {
   MAX_IDEMPOTENCY_KEY_LENGTH,
   mobileChunkSizeBytes,
   revokeMobileUploadDestination,
+  updateMobileUploadDestinationFolder,
   rowToUpload,
   type ChunkOutcome,
   type MobileUploadRow,
@@ -161,7 +162,7 @@ export const mobileUploadRoutes = new Elysia({ prefix: "/api/v1" })
   // -----------------------------------------------------------------------
   .get(
     "/mobile/registrations/:hostId/destinations",
-    ({ request, params, set }) => {
+    async ({ request, params, set }) => {
       const admin = requireAdmin({ principal: principalOf(request) });
       if (!admin) {
         set.status = 403;
@@ -220,6 +221,7 @@ export const mobileUploadRoutes = new Elysia({ prefix: "/api/v1" })
         registrationId: params.hostId,
         label,
         slug,
+        folderId: body.folderId,
       });
       switch (outcome.kind) {
         case "ok":
@@ -229,6 +231,9 @@ export const mobileUploadRoutes = new Elysia({ prefix: "/api/v1" })
         case "invalid_slug":
           set.status = 400;
           return { error: "invalid destination" };
+        case "invalid_folder":
+          set.status = 400;
+          return { error: "selected folder is not a writable S3 destination" };
         case "duplicate":
           set.status = 409;
           return { error: "a destination already exists at that path" };
@@ -242,10 +247,11 @@ export const mobileUploadRoutes = new Elysia({ prefix: "/api/v1" })
       body: t.Object({
         label: t.String(),
         slug: t.Optional(t.String()),
+        folderId: t.Optional(t.Union([t.String(), t.Null()])),
       }),
       detail: {
         summary:
-          "Create an upload destination (inbox) for one registration (admin). The path is always server-computed `Mobile/<hostId>/<slug>`; request bodies can never select arbitrary roots or another host's inbox.",
+          "Create an upload destination for one registration. An optional managed S3 folder is the sole final store; paths remain server-computed.",
         tags: ["Mobile"],
         responses: {
           201: { description: "{ destination }" },
@@ -286,6 +292,34 @@ export const mobileUploadRoutes = new Elysia({ prefix: "/api/v1" })
           403: { description: "Not an admin credential" },
           404: { description: "Unknown destination" },
         },
+      },
+    },
+  )
+  .patch(
+    "/mobile/registrations/:hostId/destinations/:id",
+    ({ request, params, body, set }) => {
+      const admin = requireAdmin({ principal: principalOf(request) });
+      if (!admin) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      const outcome = updateMobileUploadDestinationFolder(params.hostId, params.id, body.folderId);
+      if (outcome.kind === "not_found") {
+        set.status = 404;
+        return { error: "destination not found" };
+      }
+      if (outcome.kind === "invalid_folder") {
+        set.status = 400;
+        return { error: "selected folder is not a writable S3 destination" };
+      }
+      return { destination: outcome.destination };
+    },
+    {
+      params: t.Object({ hostId: t.String(), id: t.String() }),
+      body: t.Object({ folderId: t.Union([t.String(), t.Null()]) }),
+      detail: {
+        summary: "Change the managed S3 folder used by future uploads to an active mobile inbox.",
+        tags: ["Mobile"],
       },
     },
   )
@@ -520,7 +554,7 @@ export const mobileUploadRoutes = new Elysia({ prefix: "/api/v1" })
   // -----------------------------------------------------------------------
   .post(
     "/mobile/uploads/:id/finalize",
-    ({ request, params, set }) => {
+    async ({ request, params, set }) => {
       const principal = principalOf(request);
       if (!isMobileNative(principal)) {
         set.status = 403;
@@ -530,7 +564,7 @@ export const mobileUploadRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 401;
         return { error: "Unauthorized" };
       }
-      const outcome = finalizeMobileUpload({
+      const outcome = await finalizeMobileUpload({
         registrationId: principal.hostId,
         uploadId: params.id,
       });

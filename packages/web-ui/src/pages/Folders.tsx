@@ -1121,7 +1121,7 @@ export function Folders() {
                         Not set up on any device yet — use “Set up” above to add one.
                       </p>
                     ) : (
-                      <table className="data data-nested">
+                      <table className="data data-list data-nested">
                         <thead>
                           <tr>
                             <th>Device</th>

@@ -20,7 +20,7 @@
 // convention — see pages/apps.test.ts and access-keys.ts).
 
 import { useEffect, useState } from "react";
-import type { MobileRegistrationSummary, MobileUploadDestination } from "@lamasync/core";
+import type { Folder, MobileRegistrationSummary, MobileUploadDestination } from "@lamasync/core";
 import { api, type AuthMeInfo } from "../api.ts";
 import { ConfirmDialog } from "./Modal.tsx";
 import { AndroidEnrollmentModal } from "./AndroidEnrollmentModal.tsx";
@@ -33,6 +33,7 @@ import {
   mobileRegistrationLabel,
   mobileRegistrationStatus,
   revokeDestinationAndReload,
+  updateDestinationAndReload,
   revokeDeviceAndReload,
   type MobileDevicesServices,
 } from "../mobile-registrations.ts";
@@ -43,10 +44,12 @@ const mobileDevicesServices: MobileDevicesServices = {
   revoke: (hostId, reason) => api.revokeMobileRegistration(hostId, reason),
   listDestinations: (hostId) =>
     api.listMobileRegistrationDestinations(hostId).then((r) => r.destinations),
-  createDestination: (hostId, label, slug) =>
-    api.createMobileRegistrationDestination(hostId, { label, slug }).then((r) => r.destination),
+  createDestination: (hostId, label, slug, folderId) =>
+    api.createMobileRegistrationDestination(hostId, { label, slug, folderId }).then((r) => r.destination),
   revokeDestination: (hostId, id) =>
     api.revokeMobileRegistrationDestination(hostId, id),
+  updateDestination: (hostId, id, folderId) =>
+    api.updateMobileRegistrationDestination(hostId, id, { folderId }).then((r) => r.destination),
 };
 
 export function MobileDevicesPanel() {
@@ -232,7 +235,7 @@ export function MobileDevicesTable({
   return (
     <>
       {listError ? <div className="error">{listError}</div> : null}
-      <table className="data">
+      <table className="data data-list data-mobile-devices">
         <thead>
           <tr>
             <th>Device</th>
@@ -393,6 +396,8 @@ export function MobileDestinationsSection({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [label, setLabel] = useState("Inbox");
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderId, setFolderId] = useState("");
 
   async function refresh(): Promise<void> {
     const result = await loadDestinationsForDevice(mobileDevicesServices, hostId);
@@ -406,6 +411,9 @@ export function MobileDestinationsSection({
 
   useEffect(() => {
     void refresh();
+    void api.listFolders()
+      .then((rows) => setFolders(rows.filter((folder) => folder.backend === "s3")))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostId]);
 
@@ -424,7 +432,13 @@ export function MobileDestinationsSection({
     setBusy(true);
     setError(null);
     try {
-      const result = await createDestinationAndReload(mobileDevicesServices, hostId, trimmed);
+      const result = await createDestinationAndReload(
+        mobileDevicesServices,
+        hostId,
+        trimmed,
+        undefined,
+        folderId === "" ? null : folderId,
+      );
       if (result.error !== null) {
         setError(result.error);
       } else {
@@ -451,6 +465,19 @@ export function MobileDestinationsSection({
     }
   }
 
+  async function updateDestination(id: string, nextFolderId: string): Promise<void> {
+    setBusy(true);
+    const result = await updateDestinationAndReload(
+      mobileDevicesServices,
+      hostId,
+      id,
+      nextFolderId === "" ? null : nextFolderId,
+    );
+    setBusy(false);
+    if (result.error !== null) setError(result.error);
+    else setDestinations(result.destinations);
+  }
+
   return (
     <div className="nested-panel">
       <div className="toolbar">
@@ -472,6 +499,20 @@ export function MobileDestinationsSection({
             return (
               <li key={d.id}>
                 <strong>{d.label}</strong> <code>{d.relPath}</code>{" "}
+                <span className="muted">{d.folderName ? `in ${d.folderName}` : "on server"}</span>{" "}
+                {active ? (
+                  <select
+                    value={d.folderId ?? ""}
+                    disabled={busy}
+                    aria-label={`Storage for ${d.label}`}
+                    onChange={(e) => void updateDestination(d.id, e.target.value)}
+                  >
+                    <option value="">Server local storage</option>
+                    {folders.map((folder) => (
+                      <option key={folder.id} value={folder.id}>{folder.name}</option>
+                    ))}
+                  </select>
+                ) : null}{" "}
                 <span
                   className={`badge ${active ? "badge-success" : "badge-failed"}`}
                 >
@@ -506,6 +547,16 @@ export function MobileDestinationsSection({
           aria-label="Inbox label"
           maxLength={64}
         />{" "}
+        <select
+          value={folderId}
+          onChange={(e) => setFolderId(e.target.value)}
+          aria-label="Inbox storage folder"
+        >
+          <option value="">Server local storage</option>
+          {folders.map((folder) => (
+            <option key={folder.id} value={folder.id}>{folder.name}</option>
+          ))}
+        </select>{" "}
         <button type="submit" className="action primary" disabled={busy}>
           {busy ? "Assigning…" : "Assign inbox"}
         </button>

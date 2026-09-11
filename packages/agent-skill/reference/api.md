@@ -188,9 +188,10 @@ All paths are under `/api/v1/` unless noted.
 | POST     | `/mobile/web-session/logout`              | (cookie web session, CSRF-protected) invalidate the current session + clear the cookie; does NOT revoke the native registration or web grant (LAMA-296) |
 | GET      | `/mobile/destinations`                   | (mobile native bearer) the caller's ACTIVE upload destinations — `{ destinations: MobileUploadDestination[] }`; an empty list means no inbox is assigned to this device yet (LAMA-296 stage 1) |
 | GET      | `/mobile/registrations/:hostId/destinations` | (admin) one registration's upload destinations, active + revoked — `{ destinations: MobileUploadDestination[] }` (LAMA-296 stage 1) |
-| POST     | `/mobile/registrations/:hostId/destinations` | (admin, body `{ label, slug? }`) assign an upload inbox to a registration. Server-computed path `Mobile/<hostId>/<slug>` (slug defaults to the sanitized label); the client can never select a root/backend/another host's inbox. `registration_id` is never client-chosen (LAMA-296 stage 1) |
+| POST     | `/mobile/registrations/:hostId/destinations` | (admin, body `{ label, slug?, folderId? }`) assign an upload inbox. `folderId` may select a managed S3 folder as the sole final store; null/omitted retains legacy server-local storage. The object path remains server-computed `Mobile/<hostId>/<slug>` (LAMA-296) |
+| PATCH    | `/mobile/registrations/:hostId/destinations/:id` | (admin, body `{ folderId: string|null }`) change where future uploads to an active inbox are published. Existing upload intents retain their creation-time target and are never silently rerouted (LAMA-296) |
 | POST     | `/mobile/registrations/:hostId/destinations/:id/revoke` | (admin) revoke an upload destination. Idempotent; in-flight uploads fail at finalize after revocation (LAMA-296 stage 1) |
-| POST     | `/mobile/uploads`                         | (mobile native bearer; `Idempotency-Key` header + body `{ destinationId, fileName, sizeBytes?, sha256? }`) create a resumable upload — `{ upload: MobileUpload }` (id, reserved `finalRelPath`, durable `bytesReceived`, negotiated `chunkSizeBytes`/`maxSizeBytes`). Same key → same upload (lost-response safe). 409 final-name collision; `Mobile/<hostId>/<slug>` paths only (LAMA-296 stage 1) |
+| POST     | `/mobile/uploads`                         | (mobile native bearer; `Idempotency-Key` header + body `{ destinationId, fileName, sizeBytes?, sha256? }`) create a resumable upload and snapshot its local/managed-folder storage target. Same key → same upload; later inbox edits never reroute it (LAMA-296) |
 | PUT      | `/mobile/uploads/:id/chunks`             | (mobile native bearer; raw binary body, `X-Upload-Offset` header) write one bounded chunk at the durable offset — returns `{ upload }`. Wrong offset → 409; concurrent writes serialized; chunk size capped; never whole-file buffering (LAMA-296 stage 1) |
 | GET      | `/mobile/uploads`                         | (mobile native bearer) own upload history, newest first — `{ uploads: MobileUpload[] }` with progress/status/errors/receipts (LAMA-296 stage 1) |
 | GET      | `/mobile/uploads/:id`                     | (mobile native bearer, owner only) one upload's durable state — the lost-response/offset recovery query (LAMA-296 stage 1) |
@@ -427,6 +428,20 @@ spec. The high-level shapes (verbose commentary):
     default `30 * 24 * 60 * 60 * 1000`) and `LAMASYNC_DRILL_CHECK_INTERVAL_MS`
     (how often the server looks for due backends, default `60 * 60 * 1000`).
     Set either to `0` to opt out.
+
+## Web app assets (served from the origin root, not `/api/v1`)
+
+Browser plumbing for the installable web app (LAMA-329 phase 7). These carry
+no bearer auth and no fleet data — the SPA shell they belong to is already
+public at `GET /`. They are routes rather than files because the web UI is
+inlined into one `index.html` by `scripts/inline-web-ui.ts`, which also deletes
+`dist/assets/`, so there is no static-asset directory to serve from.
+
+| Method   | Path                    | Purpose                                                       |
+|----------|-------------------------|---------------------------------------------------------------|
+| GET      | `/manifest.webmanifest` | Web app manifest: install identity, icons, theme colours      |
+| GET      | `/sw.js`                | Service worker: caches the app shell only, never `/api/` data  |
+| GET      | `/icons/:file`          | PWA icon by name (`icon-192.png`, `icon-512.png`, `icon-maskable-512.png`) |
 
 ## See also
 

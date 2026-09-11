@@ -14,6 +14,9 @@ import app.lamasync.companion.data.UploadQueueStore
 import app.lamasync.companion.data.UploadReceipt
 import app.lamasync.companion.data.UploadStatus
 import app.lamasync.companion.data.UploadTransferEngine
+import app.lamasync.companion.data.UploadNaming
+import app.lamasync.companion.media.MediaProtectionEngine
+import app.lamasync.companion.media.MediaProtectionStore
 import app.lamasync.companion.network.HttpUrlConnectionTransport
 import app.lamasync.companion.network.MobileUploadApi
 import java.io.File
@@ -65,7 +68,46 @@ class UploadWorker(
         var transientFailure = false
         var processed = 0
 
-        for (item in store.pendingItems().toList()) {
+        // Item-kind scope: MANUAL items transfer under the manual upload
+        // policy, AUTO (mediaIdentity-bound) items under the automatic policy
+        // (LAMA-296 stage 2 — the Auto Protect screen must not delay explicit
+        // user shares). ALL is the backward-compatible default.
+        val kind = inputData.getString(KEY_KIND) ?: UploadWorkScheduler.UploadItemKind.ALL.name
+        fun matchesKind(item: UploadQueueItem): Boolean = when (kind) {
+            UploadWorkScheduler.UploadItemKind.AUTO.name -> item.mediaIdentity != null
+            UploadWorkScheduler.UploadItemKind.MANUAL.name -> item.mediaIdentity == null
+            else -> true
+        }
+
+        // Long-transfer promotion (stage 2): the OS reschedules workers that
+        // run past ~10 minutes, so a transfer with pending items promotes to
+        // a foreground service worker (dataSync) when the platform allows.
+        // Notification permission is NOT a precondition — the FGS runs (and
+        // its notification shows in Task Manager) even when POST_NOTIFICATIONS
+        // is denied; only pre-Q platforms lack the API. Degrades gracefully —
+        // durable per-chunk offsets carry progress either way.
+        var foregroundActive = false
+        val pending = store.pendingItems().filter { matchesKind(it) }
+        if (pending.isNotEmpty()) {
+            val foregroundInfo = TransferForeground.foregroundInfo(
+                context,
+                "Protecting ${pending.size} file${if (pending.size == 1) "" else "s"}",
+            )
+            if (foregroundInfo != null) {
+                try {
+                    setForeground(foregroundInfo)
+                    foregroundActive = true
+                } catch (e: Exception) {
+                    // ForegroundServiceStartNotAllowedException / anything
+                    // else: continue as a plain constrained worker. This is
+                    // NOT silent data loss (offsets are durable); the
+                    // degraded long-run guarantee is observable via progress.
+                    setProgress(workDataOf("foreground" to false, "foregroundDenied" to (e.message ?: "unknown")))
+                }
+            }
+        }
+
+        for (item in pending.toList()) {
             processed += 1
             // Skip items with nothing left to do.
             if (item.status == UploadStatus.CANCELLED || item.status == UploadStatus.DONE) continue
@@ -105,12 +147,13 @@ class UploadWorker(
 
             setProgress(workDataOf("itemId" to item.id, "status" to "transferring"))
 
-            val outcome = try {
-                engine.transfer(
+            val retryResult = try {
+                transferItem(
+                    engine = engine,
                     item = item,
                     native = native,
-                    stagedFile = staged.file,
-                    stagedSha256 = staged.sha256,
+                    staged = staged,
+                    store = store,
                     onProgress = { updated ->
                         // Cooperative cancellation (R2): if the user's cancel
                         // (or a server-authoritative completion) landed while
@@ -122,6 +165,15 @@ class UploadWorker(
                             throw CancellationException("transfer superseded by durable state")
                         }
                         store.update(updated)
+                        if (foregroundActive) {
+                            val total = updated.sizeBytes ?: 0L
+                            val pct = if (total > 0) (updated.uploadedBytes * 100 / total).toInt() else 0
+                            TransferForeground.updateForeground(
+                                context,
+                                "Uploading ${updated.displayName} — $pct%",
+                                pct,
+                            )
+                        }
                         setProgress(
                             workDataOf(
                                 "itemId" to updated.id,
@@ -137,35 +189,64 @@ class UploadWorker(
                 // local staging). Move to the next item.
                 continue
             }
+            // The outcome applies to the LATEST durable item — a collision
+            // retry series mutates displayName/idempotencyKey/autoNameAttempt,
+            // and the pre-retry snapshot must never overwrite those fields.
+            val outcome = retryResult.outcome
+            val currentItem = retryResult.item
 
             when (outcome) {
                 is UploadTransferEngine.TransferOutcome.Completed -> {
-                    store.update(
-                        item.copy(
-                            status = UploadStatus.DONE,
-                            serverStatus = "finalized",
-                            receipt = outcome.receipt,
-                            uploadedBytes = outcome.receipt.sizeBytes,
-                            serverBytesReceived = outcome.receipt.sizeBytes,
-                            error = null,
-                            updatedAtEpochMillis = System.currentTimeMillis(),
-                        ),
+                    val done = currentItem.copy(
+                        status = UploadStatus.DONE,
+                        serverStatus = "finalized",
+                        receipt = outcome.receipt,
+                        uploadedBytes = outcome.receipt.sizeBytes,
+                        serverBytesReceived = outcome.receipt.sizeBytes,
+                        error = null,
+                        updatedAtEpochMillis = System.currentTimeMillis(),
                     )
+                    store.update(done)
                     // Durable completion permits local staging cleanup.
                     staged.file.delete()
+                    // P0-1: reconcile the automatic media registry — the
+                    // STAGED record becomes PROTECTED with the receipt path
+                    // and protection time as soon as the upload is verified.
+                    MediaProtectionEngine.reconcileCompleted(
+                        MediaProtectionStore.getInstance(context),
+                        done,
+                    )
                 }
                 is UploadTransferEngine.TransferOutcome.Blocked -> {
                     store.update(
-                        item.copy(
+                        currentItem.copy(
                             status = UploadStatus.BLOCKED,
                             error = outcome.message,
                             updatedAtEpochMillis = System.currentTimeMillis(),
                         ),
                     )
                 }
+                is UploadTransferEngine.TransferOutcome.Collision -> {
+                    // Stage-2 automatic items retry under versioned names
+                    // (repeated/edited camera names) inside [transferItem];
+                    // reaching here means the bounded retry series failed.
+                    // Manual items keep the explicit blocked state.
+                    store.update(
+                        currentItem.copy(
+                            status = UploadStatus.BLOCKED,
+                            error = if (currentItem.mediaIdentity != null) {
+                                "The destination already contains several files with this name. " +
+                                    "Remove or rename them, then retry."
+                            } else {
+                                outcome.message + " Rename the file or choose another inbox."
+                            },
+                            updatedAtEpochMillis = System.currentTimeMillis(),
+                        ),
+                    )
+                }
                 is UploadTransferEngine.TransferOutcome.Failed -> {
                     store.update(
-                        item.copy(
+                        currentItem.copy(
                             status = UploadStatus.FAILED,
                             error = outcome.message,
                             updatedAtEpochMillis = System.currentTimeMillis(),
@@ -186,6 +267,64 @@ class UploadWorker(
         // Transient failures → retry with WorkManager backoff; everything
         // else drains cleanly and the worker stops (no busy loop).
         return if (transientFailure && processed > 0) Result.retry() else Result.success()
+    }
+
+    /**
+     * One transfer, retrying server name collisions for automatic items
+     * under deterministic versioned names (see [UploadNaming]). Manual
+     * items never enter this path.
+     *
+     * Restart determinism: the series ALWAYS derives from the item's
+     * immutable base name and idempotency key (captured once, before any
+     * retry) plus the PERSISTED [UploadQueueItem.autoNameAttempt] — a restart
+     * resumes the same series instead of nesting `name (2) (2).jpg` /
+     * `base.v1.v1`. The attempt bound is global per item (persisted), not per
+     * run. Returns the outcome together with the LATEST item so the caller
+     * applies the final state to the durable current fields.
+     */
+    private data class RetryResult(
+        val outcome: UploadTransferEngine.TransferOutcome,
+        val item: UploadQueueItem,
+    )
+
+    private suspend fun transferItem(
+        engine: UploadTransferEngine,
+        item: UploadQueueItem,
+        native: NativeToken,
+        staged: StagedSource,
+        store: UploadQueueStore,
+        onProgress: suspend (UploadQueueItem) -> Unit,
+    ): RetryResult {
+        // Immutable base for the whole series — derived ONCE from the item as
+        // loaded from the durable store, so every attempt (including one
+        // resumed after a restart) produces `base (2)`, `base (3)`… and
+        // `base.v1`, `base.v2`… instead of nesting versions.
+        val baseName = UploadNaming.baseDisplayName(item.displayName)
+        val baseKey = UploadNaming.baseIdempotencyKey(item.idempotencyKey)
+        var current = item
+        // The persisted attempt count is the global bound across restarts.
+        var attempts = current.autoNameAttempt
+        while (true) {
+            val outcome = engine.transfer(current, native, staged.file, staged.sha256, onProgress)
+            if (outcome is UploadTransferEngine.TransferOutcome.Collision &&
+                UploadNaming.canRetry(current.mediaIdentity, attempts)
+            ) {
+                attempts += 1
+                current = current.copy(
+                    displayName = UploadNaming.versionedName(baseName, attempts),
+                    idempotencyKey = UploadNaming.derivedKey(baseKey, attempts),
+                    autoNameAttempt = attempts,
+                    status = UploadStatus.UPLOADING,
+                    error = null,
+                    updatedAtEpochMillis = System.currentTimeMillis(),
+                )
+                // Persist the attempt so a restart resumes the SAME versioned
+                // upload row instead of creating abandoned staging rows.
+                store.update(current)
+                continue
+            }
+            return RetryResult(outcome, current)
+        }
     }
 
     /** Item binds to the current registration identity or is blocked. */
@@ -257,6 +396,12 @@ class UploadWorker(
     }
 
     private data class StagedSource(val file: File, val sha256: String)
+
+    companion object {
+        /** Worker input selecting which pending items this drainer pass owns
+         *  (manual vs automatic transfer policy; ALL is the default). */
+        const val KEY_KIND = "itemKind"
+    }
 }
 
 /**
@@ -276,6 +421,7 @@ internal suspend fun syncServerCancellations(
     api: app.lamasync.companion.network.MobileUploadService,
     native: NativeToken?,
     registration: Registration?,
+    onFinalized: suspend (UploadQueueItem) -> Unit = {},
 ): Int {
     if (native == null) return -1
     val cancelled = store.load().items.filter {
@@ -302,22 +448,25 @@ internal suspend fun syncServerCancellations(
                     fileName = it.fileName,
                     finalRelPath = it.finalRelPath,
                     browsePath = it.browseRef?.path ?: it.finalRelPath,
+                    browseFolderId = it.browseRef?.folderId,
                     sizeBytes = it.sizeBytes,
                     sha256 = it.sha256,
                     finalizedAtEpochMillis = it.finalizedAt,
                 )
             }
-            store.update(
-                item.copy(
-                    status = UploadStatus.DONE,
-                    serverStatus = "finalized",
-                    receipt = receipt,
-                    uploadedBytes = serverResult.bytesReceived,
-                    serverBytesReceived = serverResult.bytesReceived,
-                    error = null,
-                    updatedAtEpochMillis = System.currentTimeMillis(),
-                ),
+            val finalized = item.copy(
+                status = UploadStatus.DONE,
+                serverStatus = "finalized",
+                receipt = receipt,
+                uploadedBytes = serverResult.bytesReceived,
+                serverBytesReceived = serverResult.bytesReceived,
+                error = null,
+                updatedAtEpochMillis = System.currentTimeMillis(),
             )
+            store.update(finalized)
+            // A cancel that lost the race to finalize is still a durable
+            // completion: reconcile the automatic media registry too.
+            onFinalized(finalized)
             reconciled += 1
         }
     }

@@ -280,7 +280,7 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
             if (stagedCount > 0) {
-                UploadWorkScheduler.scheduleUploads(context, policyStore.load())
+                UploadWorkScheduler.scheduleUploads(context, policyStore.load(), UploadWorkScheduler.UploadItemKind.MANUAL)
             }
             _ui.update { it.copy(busy = false) }
             if (stagedCount > 0) {
@@ -299,7 +299,7 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
                 updatedAtEpochMillis = System.currentTimeMillis(),
             ),
         )
-        UploadWorkScheduler.scheduleUploads(context, policyStore.load())
+        UploadWorkScheduler.scheduleUploads(context, policyStore.load(), UploadWorkScheduler.UploadItemKind.MANUAL)
     }
 
     /**
@@ -327,7 +327,7 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
         )
         // Force a reconciliation pass. KEEP can lose this request when the
         // existing worker is between its final cancellation scan and success.
-        UploadWorkScheduler.scheduleCancellationReconciliation(context, policyStore.load())
+        UploadWorkScheduler.scheduleCancellationReconciliation(context, policyStore.load(), UploadWorkScheduler.UploadItemKind.MANUAL)
         viewModelScope.launch {
             // 2) Cancel remotely before deleting staging (best-effort; the
             // worker also re-syncs offline cancellations on its next run).
@@ -352,21 +352,27 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
                         fileName = it.fileName,
                         finalRelPath = it.finalRelPath,
                         browsePath = it.browseRef?.path ?: it.finalRelPath,
+                        browseFolderId = it.browseRef?.folderId,
                         sizeBytes = it.sizeBytes,
                         sha256 = it.sha256,
                         finalizedAtEpochMillis = it.finalizedAt,
                     )
                 }
-                store.update(
-                    item.copy(
-                        status = UploadStatus.DONE,
-                        serverStatus = "finalized",
-                        receipt = receipt,
-                        uploadedBytes = serverResult.bytesReceived,
-                        serverBytesReceived = serverResult.bytesReceived,
-                        error = null,
-                        updatedAtEpochMillis = System.currentTimeMillis(),
-                    ),
+                val done = item.copy(
+                    status = UploadStatus.DONE,
+                    serverStatus = "finalized",
+                    receipt = receipt,
+                    uploadedBytes = serverResult.bytesReceived,
+                    serverBytesReceived = serverResult.bytesReceived,
+                    error = null,
+                    updatedAtEpochMillis = System.currentTimeMillis(),
+                )
+                store.update(done)
+                // A cancel that lost the race to finalize is a durable
+                // completion: keep the automatic media registry honest too.
+                app.lamasync.companion.media.MediaProtectionEngine.reconcileCompleted(
+                    app.lamasync.companion.media.MediaProtectionStore.getInstance(context),
+                    done,
                 )
             }
         }
@@ -392,16 +398,37 @@ class UploadsViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setUnmeteredOnly(value: Boolean) {
-        val policy = policyStore.load().copy(unmeteredOnly = value)
+        updatePolicy { it.copy(unmeteredOnly = value) }
+    }
+
+    /**
+     * LAMA-329 — the charging constraint was already enforced for manual
+     * uploads (UploadWorkScheduler sets `setRequiresCharging` from the stored
+     * policy) but had no way to be turned on. Settings owns the switch.
+     */
+    fun setChargingOnly(value: Boolean) {
+        updatePolicy { it.copy(chargingOnly = value) }
+    }
+
+    private fun updatePolicy(transform: (UploadPolicy) -> UploadPolicy) {
+        val policy = transform(policyStore.load())
         policyStore.save(policy)
         _ui.update { it.copy(policy = policy) }
-        UploadWorkScheduler.rescheduleWithPolicy(context, policy)
+        UploadWorkScheduler.rescheduleWithPolicy(
+            context,
+            policy,
+            UploadWorkScheduler.UploadItemKind.MANUAL,
+        )
     }
 
     /** Browse/open URL for a completed receipt (embedded web UI Data Browser). */
-    fun browseUrlFor(origin: String, browsePath: String): String {
+    fun browseUrlFor(origin: String, browsePath: String, folderId: String? = null): String {
         val encoded = android.net.Uri.encode(browsePath)
-        return "$origin/#/data?kind=local&path=$encoded"
+        return if (folderId == null) {
+            "$origin/#/data?kind=local&path=$encoded"
+        } else {
+            "$origin/#/data?kind=s3&folderId=${android.net.Uri.encode(folderId)}&path=$encoded"
+        }
     }
 
     private fun displayNameFor(uri: Uri, fallback: String): String {

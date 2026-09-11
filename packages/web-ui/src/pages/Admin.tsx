@@ -754,7 +754,7 @@ export function Admin() {
             </div>
           </form>
         )}
-        <table className="data">
+        <table className="data data-list data-notifications">
           <thead>
             <tr>
               <th>Name</th>
@@ -932,7 +932,7 @@ export function Admin() {
           </div>
         )}
         {notificationError && <div className="error">{notificationError}</div>}
-        <table className="data">
+        <table className="data data-list data-notification-log">
           <thead>
             <tr>
               <th>Time</th>

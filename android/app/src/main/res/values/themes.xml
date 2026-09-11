@@ -1,10 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Compose owns all rendering; a framework theme is required for the
-         activity and the launcher. -->
+    <!-- Compose owns all rendering; a framework theme is still required for the
+         activity and the launcher.
+
+         LAMA-329: the window background is the light "canvas" token from the
+         Compose palette (packages/web-ui/src/index.css mirrors the same value),
+         so a cold start paints the brand background instead of a white flash
+         before the first frame. `values-night/themes.xml` carries the dark
+         counterpart; MainActivity then re-applies the EXACT colour for the
+         app's own theme preference, which may differ from the system's.
+
+         `android:windowLayoutInDisplayCutoutMode` is deliberately absent:
+         it needs API 27, and adding it would mean four theme files (the night
+         and version qualifiers do not combine the way one would hope — night
+         mode outranks the version qualifier, so values-v27 alone would be lost
+         in dark mode). Content is kept clear of cutouts by the shell's
+         `WindowInsets.safeDrawing` padding, which is the actual requirement;
+         on API 35, where cutouts matter most, edge-to-edge already extends the
+         window into them. -->
     <style name="Theme.LamaSync" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:windowBackground">@color/lamasync_canvas</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 </resources>

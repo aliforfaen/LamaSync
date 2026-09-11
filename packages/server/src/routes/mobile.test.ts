@@ -728,6 +728,21 @@ describe("POST /mobile/web-session + cookie REST", () => {
       req("/api/v1/hosts", { headers: { Authorization: `BEARER ${masterToken}` } }),
     );
     expect(upperScheme.status).toBe(200);
+
+    // This is the real-device regression shape: a stale native/device bearer
+    // persisted by the WebView must not downgrade the explicit-credential
+    // boundary into cookie fallback. The client removes that stale local
+    // bearer before booting an embedded re-pair; the server continues to
+    // reject it at the fleet-admin boundary.
+    const nativeWithCookie = await app.handle(
+      req("/api/v1/hosts", {
+        headers: {
+          Authorization: `Bearer ${exchange.nativeToken}`,
+          Cookie: cookieHeader,
+        },
+      }),
+    );
+    expect(nativeWithCookie.status).toBe(403);
   });
 
   test("cookie session reaches GETs without CSRF and can log out (clears cookie)", async () => {

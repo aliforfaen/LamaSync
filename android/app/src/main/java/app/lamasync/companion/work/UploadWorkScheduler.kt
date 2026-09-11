@@ -7,6 +7,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.work.workDataOf
 import app.lamasync.companion.data.UploadPolicy
 import app.lamasync.companion.data.UploadQueueStore
 import java.util.concurrent.TimeUnit
@@ -36,28 +37,53 @@ object UploadWorkScheduler {
 
     const val UPLOAD_QUEUE_WORK_NAME = "lamasync:upload-queue"
 
+    /** Separate drainer for AUTOMATIC media items so the Auto Protect
+     *  screen's transfer conditions cannot delay explicit user shares (and
+     *  vice-versa). Both drainers run the same durable [UploadWorker] with a
+     *  kind-scoped item filter. */
+    const val AUTO_UPLOAD_QUEUE_WORK_NAME = "lamasync:auto-upload-queue"
+
+    /** Which pending items a drainer pass owns. ALL is the backward-
+     *  compatible default; the manual and automatic UI paths never use it. */
+    enum class UploadItemKind { ALL, AUTO, MANUAL }
+
     /** Enqueue (or keep) the draining worker. KEEP avoids duplicate workers;
      *  when the worker runs it re-evaluates pendingItems() fresh, so a
      *  previous run that ended early is picked up by the next enqueue. */
     fun scheduleUploads(
         context: Context,
         policy: UploadPolicy = UploadPolicy(),
+        kind: UploadItemKind = UploadItemKind.ALL,
     ) {
         WorkManager.getInstance(context).enqueueUniqueWork(
             UPLOAD_QUEUE_WORK_NAME,
             ExistingWorkPolicy.KEEP,
-            requestFor(policy),
+            requestFor(policy, kind),
         )
     }
 
     /** Rebuild the scheduled work after a policy change (e.g. the unmetered
      *  toggle): REPLACE cancels the stale request and enqueues one carrying
      *  the NEW constraint — both policy transitions actually take effect. */
-    fun rescheduleWithPolicy(context: Context, policy: UploadPolicy) {
+    fun rescheduleWithPolicy(
+        context: Context,
+        policy: UploadPolicy,
+        kind: UploadItemKind = UploadItemKind.ALL,
+    ) {
         WorkManager.getInstance(context).enqueueUniqueWork(
             UPLOAD_QUEUE_WORK_NAME,
             ExistingWorkPolicy.REPLACE,
-            requestFor(policy),
+            requestFor(policy, kind),
+        )
+    }
+
+    /** Automatic items: dedicated drainer with the AUTOMATIC policy.
+     *  REPLACE so a policy change on the Auto Protect screen takes effect. */
+    fun scheduleAutoUploads(context: Context, policy: UploadPolicy) {
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            AUTO_UPLOAD_QUEUE_WORK_NAME,
+            ExistingWorkPolicy.REPLACE,
+            requestFor(policy, UploadItemKind.AUTO),
         )
     }
 
@@ -67,23 +93,31 @@ object UploadWorkScheduler {
     fun scheduleCancellationReconciliation(
         context: Context,
         policy: UploadPolicy = UploadPolicy(),
+        kind: UploadItemKind = UploadItemKind.ALL,
     ) {
         WorkManager.getInstance(context).enqueueUniqueWork(
             UPLOAD_QUEUE_WORK_NAME,
             ExistingWorkPolicy.REPLACE,
-            requestFor(policy),
+            requestFor(policy, kind),
         )
     }
 
-    /** One drainer request carrying the policy's network constraint. */
-    fun requestFor(policy: UploadPolicy): OneTimeWorkRequest {
+    /** One drainer request carrying the policy's network + charging
+     *  constraints and the item-kind scope (stage 2 adds charging and the
+     *  automatic/manual split; transitions are REPLACEd on policy change). */
+    fun requestFor(
+        policy: UploadPolicy,
+        kind: UploadItemKind = UploadItemKind.ALL,
+    ): OneTimeWorkRequest {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(
                 if (policy.unmeteredOnly) NetworkType.UNMETERED else NetworkType.CONNECTED,
             )
+            .setRequiresCharging(policy.chargingOnly)
             .build()
         return OneTimeWorkRequestBuilder<UploadWorker>()
             .setConstraints(constraints)
+            .setInputData(workDataOf(UploadWorker.KEY_KIND to kind.name))
             .setBackoffCriteria(
                 androidx.work.BackoffPolicy.EXPONENTIAL,
                 30,
