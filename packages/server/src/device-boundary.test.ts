@@ -29,6 +29,8 @@ const { __setDb: __setResticDb, resticRoutes } = await import("./routes/restic.t
 const { __setDb: __setFoldersDb, foldersRoutes } = await import("./routes/folders.ts");
 const { __setDb: __setAppsDb, appsRoutes } = await import("./routes/apps.ts");
 const { __setDb: __setConfigRevisionDb } = await import("./config-revision.ts");
+const { __setDb: __setBrowseDb, browseRoutes, __setListS3Impl } = await import("./routes/browse.ts");
+const { encryptSecret } = await import("./crypto.ts");
 const { __setCachedLatestVersionForTests } = await import("./release-cache.ts");
 const { __resetNotificationStateForTests } = await import("./notifications.ts");
 
@@ -62,6 +64,9 @@ beforeEach(() => {
   __setResticDb(db);
   __setFoldersDb(db);
   __setAppsDb(db);
+  __setBrowseDb(db);
+  // The S3 listing seam is replaced so no test ever reaches a real endpoint.
+  __setListS3Impl(async () => ({ entries: [] }));
   // Register/heartbeat bump config revisions; point that seam at this db
   // too so it never touches the default path or another file's closed db.
   __setConfigRevisionDb(db);
@@ -127,6 +132,17 @@ beforeEach(() => {
     [],
   );
 
+  // A fleet-owned S3 destination. Its credentials live on the backend row and
+  // must never appear in a browse response (LAMA-335's trust boundary).
+  seedRow(
+    "INSERT INTO backends (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at) VALUES ('b1', 'cold', 's3', 'other', 's3.example.com', 'us-east-1', 'ACCESSKEYID', ?, ?)",
+    [encryptSecret(BROWSE_SECRET), Date.now()],
+  );
+  seedRow(
+    "INSERT INTO folders (id, name, type, backend, backend_id, s3_bucket) VALUES ('sb1', 'cold-bucket', 'backup', 's3', 'b1', 'bucket')",
+    [],
+  );
+
   app = new Elysia()
     .use(getAuthPlugin())
     .use(hostsRoutes)
@@ -137,7 +153,8 @@ beforeEach(() => {
     .use(conflictsRoutes)
     .use(resticRoutes)
     .use(foldersRoutes)
-    .use(appsRoutes);
+    .use(appsRoutes)
+    .use(browseRoutes);
 });
 
 afterEach(() => {
@@ -162,6 +179,9 @@ async function statusOf(token: string, method: string, path: string, body?: unkn
 }
 
 const MASTER = process.env.LAMASYNC_API_KEY!;
+
+/** Never written to a response; asserted against the browse listing body. */
+const BROWSE_SECRET = "browse-destination-secret-value";
 
 describe("own-host access works for device keys", () => {
   test("config, host detail, register, heartbeat, report, pending actions", async () => {
@@ -360,6 +380,45 @@ describe("fleet/admin surface is off-limits to device keys", () => {
     expect(await statusOf(deviceA, "GET", "/api/v1/admin/export")).toBe(403);
     expect(await statusOf(deviceA, "GET", "/api/v1/apps/templates")).toBe(403);
     expect(await statusOf(deviceA, "DELETE", "/api/v1/hosts/host-a")).toBe(403);
+  });
+});
+
+// LAMA-335: the backup viewer's trust boundary. Browsing a shared S3 folder is
+// a fleet-admin capability, so the two things that must hold are that a
+// device-scoped credential cannot reach it at all, and that what a permitted
+// caller gets back never contains the destination's own credentials.
+describe("the browse surface is admin-only and never leaks destination secrets", () => {
+  test("a device key is refused on every browse action", async () => {
+    expect(await statusOf(deviceA, "GET", "/api/v1/browse/local")).toBe(403);
+    expect(await statusOf(deviceA, "GET", "/api/v1/browse/s3?folderId=sb1")).toBe(403);
+    expect(await statusOf(deviceA, "GET", "/api/v1/browse/restic")).toBe(403);
+    expect(await statusOf(deviceA, "POST", "/api/v1/browse/download", { ref: { kind: "s3", folderId: "sb1", path: "" }, name: "a.txt" })).toBe(403);
+    expect(await statusOf(deviceA, "POST", "/api/v1/browse/delete", { ref: { kind: "s3", folderId: "sb1", path: "" }, names: ["a.txt"] })).toBe(403);
+    expect(await statusOf(deviceA, "POST", "/api/v1/browse/upload", { ref: { kind: "s3", folderId: "sb1", path: "" }, name: "a.txt", content: "" })).toBe(403);
+    expect(await statusOf(deviceA, "POST", "/api/v1/browse/size", { ref: { kind: "s3", folderId: "sb1", path: "" } })).toBe(403);
+    expect(await statusOf(deviceA, "GET", "/api/v1/browse/jobs")).toBe(403);
+  });
+
+  test("the same routes are 401 without a credential", async () => {
+    const anon = (method: string, path: string) =>
+      app.handle(new Request(`http://localhost${path}`, { method }));
+    expect((await anon("GET", "/api/v1/browse/local")).status).toBe(401);
+    expect((await anon("GET", "/api/v1/browse/s3?folderId=sb1")).status).toBe(401);
+    expect((await anon("GET", "/api/v1/browse/jobs")).status).toBe(401);
+  });
+
+  test("an admin listing of an S3 folder carries no destination credentials", async () => {
+    const res = await app.handle(as(adminToken, "GET", "/api/v1/browse/s3?folderId=sb1"));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // The secret is stored encrypted on the backend row; neither the plaintext
+    // nor the ciphertext, nor the key id, may appear in a browse response —
+    // and there is no presigned URL for the client to reuse.
+    expect(body).not.toContain(BROWSE_SECRET);
+    expect(body).not.toContain("ACCESSKEYID");
+    expect(body).not.toContain("s3_secret_key_enc");
+    expect(body).not.toContain("X-Amz-Signature");
+    expect(body).toContain("\"backend\":\"s3\"");
   });
 });
 

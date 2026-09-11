@@ -1,12 +1,26 @@
 // LAMA-260: pure, unit-testable helpers that decide whether a Data Browser
 // file can be previewed and how. Kept free of React / DOM so the extension→
-// kind classifier, the size cap, and the byte sniffing can be tested in
-// isolation (see file-preview.test.ts).
+// kind classifier, the size caps, the MIME mapping and the byte sniffing can
+// be tested in isolation (see file-preview.test.ts).
+//
+// LAMA-335 extended this from "image | text" to the set the issue agreed on:
+// image, text, audio and video, all rendered by the BROWSER itself (no viewer
+// library, no new bundle weight), plus a reason string for every file that
+// gets no in-app preview, so the UI can offer Download instead of a dead end.
 
-export type PreviewKind = "image" | "text";
+export type PreviewKind = "image" | "text" | "audio" | "video";
 
 /** Text previews are capped at 256 KB — anything larger is not previewed. */
 export const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
+
+/**
+ * Media previews are capped at 48 MB. The server's own browse-download cap is
+ * 64 MiB and the whole payload arrives as base64 JSON before it becomes a
+ * Blob, so a larger file would be decoded in memory on a phone to be shown in
+ * a player that cannot buffer it from the network anyway. Over the cap the
+ * file gets the Download fallback, which streams nothing extra.
+ */
+export const MEDIA_PREVIEW_MAX_BYTES = 48 * 1024 * 1024;
 
 const IMAGE_EXTENSIONS = new Set([
   "png",
@@ -74,34 +88,154 @@ const TEXT_EXTENSIONS = new Set([
   "ipynb",
 ]);
 
-/** Lowercased file extension (no dot), or "" when the name has none. */
+/**
+ * Lowercased file extension (no dot), or "" when the name has none.
+ */
 export function extensionOf(name: string): string {
   const idx = name.lastIndexOf(".");
   if (idx <= 0 || idx === name.length - 1) return "";
   return name.slice(idx + 1).toLowerCase();
 }
 
+const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
+const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "webm", "ogv", "mov", "mkv"]);
+
 /**
- * Classify a file for preview from its name + size alone (synchronous, no
- * bytes needed). Returns "image" for image extensions, "text" for common
- * text extensions under the size cap, and "text" for extension-less files
- * under the cap (their bytes are sniffed later, in the modal, to confirm).
- * Returns null when the file is not worth previewing.
+ * The MIME type to construct the preview Blob with.
+ *
+ * The browse-download endpoint returns bytes without a content type, so the
+ * SPA has to state one, and it matters: an `<audio>`/`<video>` element given a
+ * typeless Blob is at the browser's mercy (`canPlayType` on an empty type is
+ * "maybe" at best and often renders nothing). Extension-derived, never
+ * content-sniffed, because the bytes are the user's own files and the element
+ * gets no execution rights either way.
  */
-export function previewKindForName(name: string, size: number): PreviewKind | null {
+export function mimeTypeForName(name: string): string {
   const ext = extensionOf(name);
-  if (IMAGE_EXTENSIONS.has(ext)) return "image";
-  if (size > TEXT_PREVIEW_MAX_BYTES) return null;
-  if (TEXT_EXTENSIONS.has(ext)) return "text";
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "svg":
+      return "image/svg+xml";
+    case "bmp":
+      return "image/bmp";
+    case "ico":
+      return "image/x-icon";
+    case "avif":
+      return "image/avif";
+    case "mp3":
+      return "audio/mpeg";
+    case "m4a":
+      return "audio/mp4";
+    case "aac":
+      return "audio/aac";
+    case "ogg":
+    case "oga":
+      return "audio/ogg";
+    case "opus":
+      return "audio/opus";
+    case "wav":
+      return "audio/wav";
+    case "flac":
+      return "audio/flac";
+    case "mp4":
+    case "m4v":
+      return "video/mp4";
+    case "webm":
+      return "video/webm";
+    case "ogv":
+      return "video/ogg";
+    case "mov":
+      return "video/quicktime";
+    case "mkv":
+      return "video/x-matroska";
+    case "txt":
+    case "md":
+    case "log":
+    case "csv":
+    case "tsv":
+      return "text/plain";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+/**
+ * What the viewer should do with a file, including WHY it will not preview it.
+ *
+ * The issue's acceptance is "at least the agreed initial preview formats render
+ * safely in app; unsupported formats have a clear fallback" — so "no preview"
+ * is a decided outcome with a sentence, not a silent `null`.
+ */
+export interface PreviewPlan {
+  /** The renderer to use, or null when the file gets no in-app preview. */
+  kind: PreviewKind | null;
+  /** One sentence naming the limit that applies, for the download fallback. */
+  reason: string | null;
+  /** The bytes must be sniffed before rendering (extension-less text). */
+  sniff: boolean;
+}
+
+export function previewPlanFor(name: string, size: number): PreviewPlan {
+  const ext = extensionOf(name);
+
+  if (IMAGE_EXTENSIONS.has(ext)) return { kind: "image", reason: null, sniff: false };
+
+  if (AUDIO_EXTENSIONS.has(ext)) {
+    return size > MEDIA_PREVIEW_MAX_BYTES
+      ? { kind: null, reason: MEDIA_TOO_LARGE_REASON, sniff: false }
+      : { kind: "audio", reason: null, sniff: false };
+  }
+
+  if (VIDEO_EXTENSIONS.has(ext)) {
+    return size > MEDIA_PREVIEW_MAX_BYTES
+      ? { kind: null, reason: MEDIA_TOO_LARGE_REASON, sniff: false }
+      : { kind: "video", reason: null, sniff: false };
+  }
+
+  if (size > TEXT_PREVIEW_MAX_BYTES && TEXT_EXTENSIONS.has(ext)) {
+    return { kind: null, reason: TEXT_TOO_LARGE_REASON, sniff: false };
+  }
+
+  if (TEXT_EXTENSIONS.has(ext)) return { kind: "text", reason: null, sniff: false };
+
   // No recognised extension: extension-less files are the common "README" /
   // "LICENSE" / ".bashrc" case — optimistically text, confirmed by sniffing
-  // the first bytes once fetched (see sniffPreviewKind).
-  if (ext === "") return "text";
-  return null;
+  // the first bytes once fetched (see sniffPreviewKind). The cap applies to
+  // them too, because their bytes are what would have to be decoded.
+  if (ext === "") {
+    return size > TEXT_PREVIEW_MAX_BYTES
+      ? { kind: null, reason: TEXT_TOO_LARGE_REASON, sniff: false }
+      : { kind: "text", reason: null, sniff: true };
+  }
+
+  return { kind: null, reason: UNSUPPORTED_REASON, sniff: false };
+}
+
+const MEDIA_TOO_LARGE_REASON =
+  "This file is larger than the 48 MB in-app preview limit.";
+const TEXT_TOO_LARGE_REASON =
+  "This file is larger than the 256 KB text preview limit.";
+const UNSUPPORTED_REASON = "There is no in-app viewer for this file type.";
+
+/**
+ * Classify a file for preview from its name + size alone (synchronous, no
+ * bytes needed). Kept because it is the shape the entries table wants; the
+ * decision itself lives in [previewPlanFor].
+ */
+export function previewKindForName(name: string, size: number): PreviewKind | null {
+  return previewPlanFor(name, size).kind;
 }
 
 // Magic-byte prefixes for the image types we promise in the UI.
-const IMAGE_SIGNATURES: Array<{ kind: PreviewKind; bytes: number[] }> = [
+const IMAGE_SIGNATURES: Array<{ kind: "image"; bytes: number[] }> = [
   { kind: "image", bytes: [0x89, 0x50, 0x4e, 0x47] }, // PNG
   { kind: "image", bytes: [0xff, 0xd8, 0xff] }, // JPEG
   { kind: "image", bytes: [0x47, 0x49, 0x46] }, // GIF

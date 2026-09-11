@@ -17,6 +17,12 @@ do not treat old handoffs as current requirements.
 - [Features and limitations](features.md) — capability index by LAMA issue.
 - [Terminology](terminology.md) — user-facing naming rules.
 - [Production deploy](prod-deploy.md) — private LXC operations.
+- [Android + mobile web UX plan](android-mobile-ux-plan.md) — the live design
+  record for the companion shell and the phone-width web layout, including the
+  decisions taken during implementation.
+- [Backup viewer component decision](browse-viewer-decisions.md) — what the
+  in-app file browser and previewers are made of, the licences and weights of
+  the alternatives, and the trust boundary the choice keeps.
 
 `handoff-302-event-triggered-sync.md` is retained as completed implementation
 and soak evidence. `handoff-315-path-classification.md` remains here because the
