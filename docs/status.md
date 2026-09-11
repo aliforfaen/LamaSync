@@ -288,7 +288,7 @@ distributable binary build.
      hearing), and the More sheet's dialog semantics.
    - **Gesture vs 3-button navigation** on a device. Under 3-button nav the
      system bar takes bottom space, which is exactly where the tab bar now
-    lives; the `safeDrawing` insets should handle it, but that is an
+     lives; the `safeDrawing` insets should handle it, but that is an
      inference from the API, not an observation.
    - **Installed-PWA launch**: title, icon, theme colour, scope, and that the
      installed app starts offline and still refuses to show stale data. The
@@ -306,8 +306,8 @@ distributable binary build.
      exercised through the build, but the *look* of compact density at 360 and
      412px and the override visibly stopping a running animation in a real
      browser belong to this sweep. The review's fixes are covered by tests: the
-   raw-fetch transport signals, the shared sign-out ordering, and
-   service-worker activation pruning only `lamasync-shell-*`.
+     raw-fetch transport signals, the shared sign-out ordering, and
+     service-worker activation pruning only `lamasync-shell-*`.
 6. **LAMA-332 — Android WebView fleet administration is forbidden after a
    fresh re-pair.** On the physical device, the embedded management UI returns
    `Forbidden` for fleet data while the native shell reports `Connected`. The
