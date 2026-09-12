@@ -35,7 +35,6 @@ import { IconFolder, IconStorage } from "../components/icons.tsx";
 import {
   TEXT_PREVIEW_MAX_BYTES,
   mimeTypeForName,
-  previewKindForName,
   previewPlanFor,
   sniffPreviewKind,
   truncateText,
@@ -243,7 +242,13 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
             </td>
           </tr>
         )}
-        {sorted.map((entry) => (
+        {sorted.map((entry) => {
+          // LAMA-335 review fix: one plan per row drives BOTH actions. The
+          // Download fallback and the Preview both ride the same base64
+          // `POST /browse/download`, so a file the transport cannot fetch gets
+          // no Download button that would only fail.
+          const plan = entry.type === "file" ? previewPlanFor(entry.name, entry.size) : null;
+          return (
           <tr key={entry.name} className="browser-row">
             {selectable && (
               <td className="browser-cell-select">
@@ -284,7 +289,7 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
             )}
             {hasActions && (
               <td className="browser-cell-actions">
-                {onPreview && entry.type === "file" && previewKindForName(entry.name, entry.size) !== null && (
+                {onPreview && plan?.kind != null && (
                   <button
                     type="button"
                     className="action"
@@ -294,13 +299,25 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
                   </button>
                 )}
                 {onDownload && entry.type === "file" && (
-                  <button
-                    type="button"
-                    className="action"
-                    onClick={() => onDownload(entry.name)}
-                  >
-                    Download
-                  </button>
+                  plan !== null && plan.downloadable ? (
+                    <button
+                      type="button"
+                      className="action"
+                      title={plan.reason ?? undefined}
+                      onClick={() => onDownload(entry.name)}
+                    >
+                      Download
+                    </button>
+                  ) : (
+                    // Truthful fallback: over the transport cap neither Preview
+                    // nor Download can deliver the bytes, so do not pretend.
+                    <span
+                      className="muted browser-download-blocked"
+                      title={plan?.reason ?? "This file cannot be downloaded here."}
+                    >
+                      Too large to download
+                    </span>
+                  )
                 )}
                 {onRename && (
                   <button type="button" className="action" onClick={() => onRename(entry.name)}>
@@ -310,7 +327,8 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
               </td>
             )}
           </tr>
-        ))}
+          );
+        })}
       </tbody>
     </table>
     </div>
@@ -1484,7 +1502,13 @@ function FilePreviewModal({
       onClose={onClose}
       footer={
         <>
-          <button type="button" className="action" onClick={onDownload}>
+          <button
+            type="button"
+            className="action"
+            onClick={onDownload}
+            disabled={!target.plan.downloadable}
+            title={target.plan.downloadable ? undefined : target.plan.reason ?? undefined}
+          >
             Download
           </button>
           <button type="button" className="action primary" onClick={onClose}>
@@ -1504,7 +1528,11 @@ function FilePreviewModal({
       ) : fallbackReason !== null ? (
         <div className="file-preview">
           <p className="muted">{fallbackReason}</p>
-          <p className="muted">Download it to open it outside LamaSync.</p>
+          {target.plan.downloadable ? (
+            <p className="muted">Download it to open it outside LamaSync.</p>
+          ) : (
+            <p className="muted">{target.plan.reason ?? NO_DOWNLOAD_REASON}</p>
+          )}
         </div>
       ) : (
         <div className="file-preview">
@@ -1548,6 +1576,8 @@ function FilePreviewModal({
 }
 
 const NO_VIEWER_REASON = "This file's contents are not something the viewer can render.";
+const NO_DOWNLOAD_REASON =
+  "This file is larger than the 64 MB transfer limit, so it cannot be downloaded here.";
 
 /**
  * Modal for the folder-scoped upload (POST /folders/:id/files). Validates the

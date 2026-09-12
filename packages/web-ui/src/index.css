@@ -2281,6 +2281,16 @@ html[data-motion="reduce"] .host-status-dot {
   background: var(--surface-elevated);
 }
 
+/* LAMA-335 review fix: when a file is above the base64 transport cap the row
+   states the limit instead of offering a Download button that would only
+   fail. Sized like the action it replaces so the row height does not jump. */
+.browser-download-blocked {
+  display: inline-block;
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
 /* LAMA-321: detected freedesktop trash cards in the Data Browser. */
 .browser-trash {
   display: flex;

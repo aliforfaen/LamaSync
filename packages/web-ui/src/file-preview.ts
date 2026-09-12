@@ -14,13 +14,23 @@ export type PreviewKind = "image" | "text" | "audio" | "video";
 export const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
 
 /**
- * Media previews are capped at 48 MB. The server's own browse-download cap is
- * 64 MiB and the whole payload arrives as base64 JSON before it becomes a
- * Blob, so a larger file would be decoded in memory on a phone to be shown in
- * a player that cannot buffer it from the network anyway. Over the cap the
- * file gets the Download fallback, which streams nothing extra.
+ * Every rendered preview (image, audio, video) is capped at 48 MB. The whole
+ * payload arrives as base64 JSON before it becomes a Blob, so a larger file
+ * would be decoded in memory on a phone to be shown by a renderer that cannot
+ * buffer it from the network anyway. Images are capped too: the browser scales
+ * them, but it still has to hold the decoded bytes. Over the cap the file gets
+ * the Download fallback — but only while the transport can actually serve it.
  */
 export const MEDIA_PREVIEW_MAX_BYTES = 48 * 1024 * 1024;
+
+/**
+ * The browse-download transport cap, mirroring `MAX_BROWSE_BYTES` in
+ * `packages/server/src/browse-jobs.ts`. `POST /browse/download` returns 400
+ * above this, and both Preview and Download go through that one endpoint, so
+ * over this size there is no in-app action that can deliver the bytes and the
+ * UI must not claim otherwise.
+ */
+export const DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 
 const IMAGE_EXTENSIONS = new Set([
   "png",
@@ -181,30 +191,48 @@ export interface PreviewPlan {
   reason: string | null;
   /** The bytes must be sniffed before rendering (extension-less text). */
   sniff: boolean;
+  /**
+   * Whether the Download fallback can actually fetch these bytes. Preview and
+   * Download ride the same base64 `POST /browse/download`, so above
+   * [DOWNLOAD_MAX_BYTES] there is no working download to offer either.
+   */
+  downloadable: boolean;
 }
 
 export function previewPlanFor(name: string, size: number): PreviewPlan {
   const ext = extensionOf(name);
 
-  if (IMAGE_EXTENSIONS.has(ext)) return { kind: "image", reason: null, sniff: false };
+  // The transport is the hard floor. Above it the server rejects the request
+  // outright, so there is neither a preview nor a download fallback to offer.
+  if (size > DOWNLOAD_MAX_BYTES) {
+    return { kind: null, reason: TRANSFER_TOO_LARGE_REASON, sniff: false, downloadable: false };
+  }
+
+  if (IMAGE_EXTENSIONS.has(ext)) {
+    return size > MEDIA_PREVIEW_MAX_BYTES
+      ? { kind: null, reason: MEDIA_TOO_LARGE_REASON, sniff: false, downloadable: true }
+      : { kind: "image", reason: null, sniff: false, downloadable: true };
+  }
 
   if (AUDIO_EXTENSIONS.has(ext)) {
     return size > MEDIA_PREVIEW_MAX_BYTES
-      ? { kind: null, reason: MEDIA_TOO_LARGE_REASON, sniff: false }
-      : { kind: "audio", reason: null, sniff: false };
+      ? { kind: null, reason: MEDIA_TOO_LARGE_REASON, sniff: false, downloadable: true }
+      : { kind: "audio", reason: null, sniff: false, downloadable: true };
   }
 
   if (VIDEO_EXTENSIONS.has(ext)) {
     return size > MEDIA_PREVIEW_MAX_BYTES
-      ? { kind: null, reason: MEDIA_TOO_LARGE_REASON, sniff: false }
-      : { kind: "video", reason: null, sniff: false };
+      ? { kind: null, reason: MEDIA_TOO_LARGE_REASON, sniff: false, downloadable: true }
+      : { kind: "video", reason: null, sniff: false, downloadable: true };
   }
 
   if (size > TEXT_PREVIEW_MAX_BYTES && TEXT_EXTENSIONS.has(ext)) {
-    return { kind: null, reason: TEXT_TOO_LARGE_REASON, sniff: false };
+    return { kind: null, reason: TEXT_TOO_LARGE_REASON, sniff: false, downloadable: true };
   }
 
-  if (TEXT_EXTENSIONS.has(ext)) return { kind: "text", reason: null, sniff: false };
+  if (TEXT_EXTENSIONS.has(ext)) {
+    return { kind: "text", reason: null, sniff: false, downloadable: true };
+  }
 
   // No recognised extension: extension-less files are the common "README" /
   // "LICENSE" / ".bashrc" case — optimistically text, confirmed by sniffing
@@ -212,18 +240,21 @@ export function previewPlanFor(name: string, size: number): PreviewPlan {
   // them too, because their bytes are what would have to be decoded.
   if (ext === "") {
     return size > TEXT_PREVIEW_MAX_BYTES
-      ? { kind: null, reason: TEXT_TOO_LARGE_REASON, sniff: false }
-      : { kind: "text", reason: null, sniff: true };
+      ? { kind: null, reason: TEXT_TOO_LARGE_REASON, sniff: false, downloadable: true }
+      : { kind: "text", reason: null, sniff: true, downloadable: true };
   }
 
-  return { kind: null, reason: UNSUPPORTED_REASON, sniff: false };
+  return { kind: null, reason: UNSUPPORTED_REASON, sniff: false, downloadable: true };
 }
 
 const MEDIA_TOO_LARGE_REASON =
-  "This file is larger than the 48 MB in-app preview limit.";
+  "This file is larger than the 48 MB in-app preview limit; download it to open it outside LamaSync.";
 const TEXT_TOO_LARGE_REASON =
-  "This file is larger than the 256 KB text preview limit.";
-const UNSUPPORTED_REASON = "There is no in-app viewer for this file type.";
+  "This file is larger than the 256 KB text preview limit; download it to open it outside LamaSync.";
+const UNSUPPORTED_REASON =
+  "There is no in-app viewer for this file type; download it to open it outside LamaSync.";
+const TRANSFER_TOO_LARGE_REASON =
+  "This file is larger than the 64 MB transfer limit, so it cannot be previewed or downloaded here.";
 
 /**
  * Classify a file for preview from its name + size alone (synchronous, no

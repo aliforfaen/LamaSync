@@ -70,13 +70,18 @@ was visible then.
 
 1. **The agreed initial preview set is image, text, audio and video**, all
    rendered by the browser itself. `previewPlanFor(name, size)` is the single
-   decision point and returns a `kind`, a `sniff` flag and — when there is no
-   viewer — a **reason sentence**, so "unsupported" is a stated outcome with a
-   Download action beside it rather than a dead end.
-2. **Limits are explicit**: text 256 KB (unchanged), audio/video 48 MB, images
-   uncapped. The media cap exists because the whole payload arrives as base64
-   JSON before becoming a Blob; above it the file is offered for download
-   instead of being decoded on a phone.
+   decision point and returns a `kind`, a `sniff` flag, a `downloadable` flag
+   and — when there is no viewer — a **reason sentence**, so "unsupported" is a
+   stated outcome with a Download action beside it rather than a dead end. The
+   Download action is offered only while the byte transport can serve it: see
+   the review note below.
+2. **Limits are explicit and share one transport floor**: text 256 KB
+   (unchanged), and image/audio/video 48 MB — images are capped like the other
+   rendered media, because the browser still has to hold the decoded bytes.
+   Both preview and download use the whole-file base64 `POST /browse/download`,
+   whose server cap is 64 MiB (`MAX_BROWSE_BYTES`). Above that cap the plan
+   reports `downloadable: false` and the row states the limit instead of
+   rendering a button that would only 400.
 3. **The preview Blob carries a MIME type** derived from the extension
    (`mimeTypeForName`). The browse-download response has no content type, and a
    typeless Blob is what makes `<audio>`/`<video>` refuse to play — the fix is
@@ -103,6 +108,25 @@ phone listing), `lama335-browser-1280.png` (the desktop table, unchanged),
 `lama335-preview-{text,image,audio,video}-360.png` (each renderer in the modal,
 with the audio player reporting the real duration and the video showing a
 decoded frame).
+
+## Review fix — the transport cap is the floor (finding 1)
+
+The first slice capped audio/video at 48 MB but left images uncapped, while
+both Preview and Download share the 64 MiB `POST /browse/download` transport.
+A 65 MiB image therefore advertised a Preview that 400'd and a Download that
+could not work either: an error with no fallback. The policy is now one rule:
+
+- the transport cap (64 MiB) is checked first, and above it the plan is
+  `kind: null`, `downloadable: false` with a reason naming the 64 MB limit;
+- images use the same 48 MB preview cap as audio and video;
+- between 48 MiB and 64 MiB (or above the 256 KB text cap) the row keeps a
+  working Download and the plan's reason says so;
+- the row renders "Too large to download" (with the reason in its title)
+  instead of a Download button when the transport cannot serve the file.
+
+Regression coverage: `file-preview.test.ts` (image cap, `downloadable`
+boundary at the cap, no download claim above it) and
+`download-fallback-policy.test.ts` (the row consumes the plan).
 
 ## Deliberately not in this slice
 

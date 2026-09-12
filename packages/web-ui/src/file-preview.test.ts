@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+  DOWNLOAD_MAX_BYTES,
   MEDIA_PREVIEW_MAX_BYTES,
   TEXT_PREVIEW_MAX_BYTES,
   mimeTypeForName,
@@ -25,10 +26,12 @@ describe("extensionOf", () => {
 });
 
 describe("previewKindForName", () => {
-  it("classifies images regardless of size", () => {
+  it("classifies images under the preview cap", () => {
     for (const name of ["a.png", "a.jpg", "a.jpeg", "a.gif", "a.webp", "a.svg"]) {
       expect(previewKindForName(name, 1000)).toBe("image");
-      expect(previewKindForName(name, TEXT_PREVIEW_MAX_BYTES + 1)).toBe("image");
+      expect(previewKindForName(name, MEDIA_PREVIEW_MAX_BYTES)).toBe("image");
+      // LAMA-335 review: images obey the same 48 MB cap as audio/video.
+      expect(previewKindForName(name, MEDIA_PREVIEW_MAX_BYTES + 1)).toBeNull();
     }
   });
 
@@ -92,11 +95,12 @@ describe("truncateText", () => {
 // fallback the issue requires. The plan (not just the kind) is what the UI
 // renders, so the reason a file has no viewer is a decision, not a silence.
 describe("previewPlanFor (LAMA-335)", () => {
-  it("previews images of any size (the browser scales them)", () => {
-    const plan = previewPlanFor("photo.png", 200 * 1024 * 1024);
-    expect(plan.kind).toBe("image");
-    expect(plan.reason).toBeNull();
-    expect(plan.sniff).toBe(false);
+  it("previews images under the media cap and refuses them above it", () => {
+    expect(previewPlanFor("photo.png", 200 * 1024).kind).toBe("image");
+    const big = previewPlanFor("photo.png", MEDIA_PREVIEW_MAX_BYTES + 1);
+    expect(big.kind).toBeNull();
+    expect(big.reason).toContain("48 MB");
+    expect(big.downloadable).toBe(true);
   });
 
   it("previews audio and video under the media cap", () => {
@@ -109,6 +113,7 @@ describe("previewPlanFor (LAMA-335)", () => {
     const plan = previewPlanFor("holiday.mov", MEDIA_PREVIEW_MAX_BYTES + 1);
     expect(plan.kind).toBeNull();
     expect(plan.reason).toContain("48 MB");
+    expect(plan.downloadable).toBe(true);
   });
 
   it("previews text under the cap and refuses it above", () => {
@@ -133,6 +138,31 @@ describe("previewPlanFor (LAMA-335)", () => {
     expect(plan.reason).toBeTruthy();
     // A reason is not an error: the modal shows it next to Download.
     expect(plan.reason).not.toContain("error");
+    expect(plan.downloadable).toBe(true);
+  });
+
+  // LAMA-335 review finding 1: Preview and Download share ONE byte transport
+  // (`POST /browse/download`, 64 MiB server cap). A file above that cap must
+  // report no working Download fallback instead of offering a request the
+  // server will hard-reject.
+  it("never claims a Download fallback above the transport cap", () => {
+    for (const name of ["photo.png", "track.mp3", "clip.mp4", "notes.md", "README", "archive.zip"]) {
+      const atCap = previewPlanFor(name, DOWNLOAD_MAX_BYTES);
+      const overCap = previewPlanFor(name, DOWNLOAD_MAX_BYTES + 1);
+      expect(atCap.downloadable).toBe(true);
+      expect(overCap.kind).toBeNull();
+      expect(overCap.downloadable).toBe(false);
+      expect(overCap.reason).toContain("64 MB");
+      // A refused preview must not offer a download the transport cannot serve.
+      expect(overCap.reason).not.toContain("download it to open");
+    }
+  });
+
+  it("caps image preview at the same limit as the other rendered media", () => {
+    expect(MEDIA_PREVIEW_MAX_BYTES).toBeLessThan(DOWNLOAD_MAX_BYTES);
+    const overPreview = previewPlanFor("photo.png", MEDIA_PREVIEW_MAX_BYTES + 1);
+    expect(overPreview.kind).toBeNull();
+    expect(overPreview.downloadable).toBe(true);
   });
 
   it("stays consistent with previewKindForName", () => {
