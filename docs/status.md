@@ -316,10 +316,17 @@ distributable binary build.
    transfer).
 
 1. **LAMA-315 — path classification and recommendation UX.** The design
-   handoff is written: [`handoff-315-path-classification.md`](
-   handoff-315-path-classification.md) audits the current capture-spec model
-   and proposes taxonomy, data model, and staged delivery. Next step is
-   implementing stage 1 of that proposal.
+   handoff is [`handoff-315-path-classification.md`](
+   handoff-315-path-classification.md) (taxonomy, data model, staged
+   delivery). Stage 1 — annotation provenance, the deterministic classifier,
+   the read-only classify route, and per-path editor suggestions — and stage
+   2 — read-only review surfaces that group a snapshot's captured paths by the
+   class its own frozen `capturedSpec` recorded, and show a protection's
+   frozen enrollment spec separately from the editable template — are
+   implemented. Stages 3–5 (suggestion-driven authoring, the restore/change
+   plan, optional denormalization) remain. Known contract gap: `excludes` is a
+   raw `string[]` with no class or rationale, so review surfaces list exclude
+   patterns verbatim and associate no classification with them.
 2. **Application setup/restore executor.** Build the target-side wizard:
    preflight, dry-run/change plan, populated-target decisions, revalidation
    before writes, rollback artifact, and execution journal. Direct app restore

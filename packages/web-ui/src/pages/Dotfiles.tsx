@@ -13,6 +13,8 @@ import type {
   Host,
 } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
+import { protectionCaptureReview, snapshotCaptureReview } from "../app-classification.ts";
+import { CaptureSpecReview } from "../components/CaptureSpecReview.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { ConfirmDialog, Modal } from "../components/Modal.tsx";
 import { RetentionPanel } from "../components/RetentionPanel.tsx";
@@ -138,6 +140,10 @@ export function AppBackups() {
   // file again (input value is cleared after each pick).
   const uploadRefs = useRef(new Map<string, HTMLInputElement>());
   const [busyProtectionId, setBusyProtectionId] = useState<string | null>(null);
+  // LAMA-315 stage 2: one snapshot's captured-path review expanded at a time.
+  // The review renders the snapshot's own frozen `capturedSpec`, never the
+  // protection's current spec or the template.
+  const [contentsSnapshotId, setContentsSnapshotId] = useState<string | null>(null);
   const [deletingProtection, setDeletingProtection] =
     useState<ApplicationProtectionListItem | null>(null);
   const [deletingSnapshot, setDeletingSnapshot] = useState<ApplicationSnapshot | null>(null);
@@ -410,6 +416,9 @@ export function AppBackups() {
               const expanded = expandedId === protection.id;
               const protectionSnapshots = snapshots[protection.id];
               const busy = busyProtectionId === protection.id;
+              // LAMA-315 stage 2: the protection's frozen enrollment spec, as
+              // opposed to the template the operator may have edited since.
+              const frozenEnrollment = protectionCaptureReview(protection);
               return (
                 <Fragment key={protection.id}>
                   <tr>
@@ -539,6 +548,20 @@ export function AppBackups() {
                   {expanded ? (
                     <tr className="dotfile-versions-row">
                       <td colSpan={6}>
+                        {/* LAMA-315 stage 2: kept separate from the template
+                            so a frozen decision is never confused with an
+                            editable suggestion. */}
+                        <details className="spec-review-details">
+                          <summary>
+                            Frozen enrollment paths ({frozenEnrollment.totalPaths}) · enrolled from template
+                            revision {protection.templateRevision}
+                          </summary>
+                          <CaptureSpecReview
+                            review={frozenEnrollment}
+                            subtitle="Copied into this protection when it was enrolled. Later edits to the template never change what this protection captures — re-enroll to pick up a new recipe."
+                            emptyText="This protection's frozen enrollment spec declares no paths."
+                          />
+                        </details>
                         <h3 className="form-title">Snapshot history — {protection.name}</h3>
                         {protectionSnapshots === undefined ? (
                           <span className="skel skel-line" aria-busy="true" />
@@ -561,35 +584,66 @@ export function AppBackups() {
                             </thead>
                             <tbody>
                               {protectionSnapshots.map((snapshot) => (
-                                <tr key={snapshot.id}>
-                                  <td><code>{snapshot.id.slice(0, 8)}</code></td>
-                                  <td className="muted">{new Date(snapshot.createdAt).toLocaleString()}</td>
-                                  <td className="muted">{formatBytes(snapshot.sizeBytes)}</td>
-                                  <td className="muted">
-                                    <span className={`badge ${INTEGRITY_BADGE[snapshot.integrityStatus] ?? ""}`}>
-                                      {snapshot.integrityStatus}
-                                    </span>
-                                  </td>
-                                  <td className="muted">{snapshot.description ?? "—"}</td>
-                                  <td className="table-actions">
-                                    <button
-                                      type="button"
-                                      className="action"
-                                      disabled={busy}
-                                      onClick={() => void download(snapshot.id)}
-                                    >
-                                      Download
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="action danger"
-                                      disabled={busy}
-                                      onClick={() => setDeletingSnapshot(snapshot)}
-                                    >
-                                      Delete
-                                    </button>
-                                  </td>
-                                </tr>
+                                <Fragment key={snapshot.id}>
+                                  <tr>
+                                    <td><code>{snapshot.id.slice(0, 8)}</code></td>
+                                    <td className="muted">{new Date(snapshot.createdAt).toLocaleString()}</td>
+                                    <td className="muted">{formatBytes(snapshot.sizeBytes)}</td>
+                                    <td className="muted">
+                                      <span className={`badge ${INTEGRITY_BADGE[snapshot.integrityStatus] ?? ""}`}>
+                                        {snapshot.integrityStatus}
+                                      </span>
+                                    </td>
+                                    <td className="muted">{snapshot.description ?? "—"}</td>
+                                    <td className="table-actions">
+                                      {/* LAMA-315 stage 2: read-only review of
+                                          what this snapshot froze. */}
+                                      <button
+                                        type="button"
+                                        className="action"
+                                        aria-expanded={contentsSnapshotId === snapshot.id}
+                                        aria-controls={`snapshot-contents-${snapshot.id}`}
+                                        onClick={() =>
+                                          setContentsSnapshotId(
+                                            contentsSnapshotId === snapshot.id ? null : snapshot.id,
+                                          )
+                                        }
+                                      >
+                                        {contentsSnapshotId === snapshot.id ? "Hide" : "Contents"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="action"
+                                        disabled={busy}
+                                        onClick={() => void download(snapshot.id)}
+                                      >
+                                        Download
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="action danger"
+                                        disabled={busy}
+                                        onClick={() => setDeletingSnapshot(snapshot)}
+                                      >
+                                        Delete
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {contentsSnapshotId === snapshot.id ? (
+                                    <tr className="snapshot-contents-row">
+                                      <td colSpan={6} id={`snapshot-contents-${snapshot.id}`}>
+                                        <CaptureSpecReview
+                                          review={snapshotCaptureReview(snapshot)}
+                                          title="Captured paths, grouped by classification at capture time"
+                                          subtitle={`Frozen when this snapshot was uploaded from template revision ${snapshot.templateRevision} — later template or protection edits never reinterpret it.`}
+                                          emptyText="This snapshot recorded no captured paths."
+                                          showOs
+                                          archiveMapping="full"
+                                        />
+                                      </td>
+                                    </tr>
+                                  ) : null}
+                                </Fragment>
                               ))}
                             </tbody>
                           </table>

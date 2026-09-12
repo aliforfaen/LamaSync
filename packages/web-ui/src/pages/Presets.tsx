@@ -16,7 +16,13 @@ import type {
   PathClassificationResult,
 } from "@lamasync/core";
 import { api, errorText } from "../api.ts";
+import {
+  CLASS_LABEL,
+  confidenceLabel,
+  reviewCaptureSpec,
+} from "../app-classification.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
+import { CaptureSpecReview } from "../components/CaptureSpecReview.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { APP_PRESETS, type AppPreset, type OSKey } from "../presets.ts";
 import { SCHEDULE_PRESETS } from "../schedule-presets.ts";
@@ -100,24 +106,9 @@ export function pathAnnotationKey(os: OSKey, path: string): string {
   return `${os}\u0000${path}`;
 }
 
-/** Display labels for the taxonomy in the editor. */
-export const CLASS_LABEL: Record<PathClassification, string> = {
-  portable_config: "Portable config",
-  machine_state: "Machine state",
-  cache: "Cache",
-  secrets: "Secrets",
-  custom: "Custom",
-  unknown: "Unknown",
-};
-
-/** Coarse label for a stored `suggested` confidence number.
- *  Matches the classifier's documented high/medium/low (0.9/0.6/0.3). */
-export function confidenceLabel(confidence: number | null | undefined): string {
-  if (confidence === null || confidence === undefined) return "";
-  if (confidence >= 0.75) return "high";
-  if (confidence >= 0.45) return "medium";
-  return "low";
-}
+/** Display labels and confidence text live in the shared review module so the
+ *  editor and the read-only review surfaces name a class identically. */
+export { CLASS_LABEL, confidenceLabel };
 
 /** The annotation a path gets when the operator APPLIES a suggestion: the
  *  suggested class becomes an operator confirmation (`manual`, confidence
@@ -767,6 +758,10 @@ function TemplateEditor({
       <PathClassPanel os="linux" osLabel="Linux" paths={linux} {...panelProps} />
       <PathClassPanel os="macos" osLabel="macOS" paths={macos} {...panelProps} />
       <PathClassPanel os="windows" osLabel="Windows" paths={windows} {...panelProps} />
+      <p className="muted">
+        These classes belong to the template. A protection keeps the copy it froze at enrollment, so
+        editing here never reinterprets an existing protection or its snapshots.
+      </p>
       <label className="field"><span>Excluded paths (one per line, optional)</span><textarea rows={2} value={draft.excludes} onChange={(e) => onChange({ ...draft, excludes: e.target.value })} /></label>
       <label className="field"><span>Capture notes (optional)</span><textarea rows={2} value={draft.notes} onChange={(e) => onChange({ ...draft, notes: e.target.value })} /></label>
       <label className="field"><span>Install or documentation URL (optional)</span><input type="url" value={draft.installUrl} onChange={(e) => onChange({ ...draft, installUrl: e.target.value })} /></label>
@@ -838,6 +833,12 @@ export function AppTemplates() {
     if (!enrollDraft || enrollDraft.backendId === null) return null;
     return backends.find((b) => b.id === enrollDraft.backendId) ?? null;
   }, [enrollDraft, backends]);
+  // LAMA-315 stage 2: what enrolling is about to freeze. Read from the card's
+  // spec (the recipe being enrolled), not from any existing protection.
+  const enrollReview = useMemo(
+    () => (enrollDraft ? reviewCaptureSpec(enrollDraft.card.spec) : null),
+    [enrollDraft],
+  );
   const builtInRows = useMemo(
     () => [
       ...starterCards,
@@ -1126,6 +1127,15 @@ export function AppTemplates() {
           ) : null}
           {enrollDraft.schedule ? (
             <p className="muted">Snapshots will be captured on this schedule by the device’s daemon for this protection.</p>
+          ) : null}
+          {enrollReview ? (
+            <CaptureSpecReview
+              review={enrollReview}
+              title="Paths this enrollment freezes"
+              subtitle="Enrolling copies these paths into the protection. Only the device's own OS bucket is captured, and later template edits never change the protection."
+              emptyText="This template declares no paths to capture."
+              showOs
+            />
           ) : null}
           {enrollDraft.card.id === null ? (
             <p className="muted">
