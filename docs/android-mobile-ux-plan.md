@@ -299,6 +299,18 @@ LAMA-334 (physical-phone feedback pass) added these decisions:
     because the title beside it already says "LamaSync"; the reload and
     overflow actions keep their accessibility labels, and a thin progress bar
     under the app bar covers both the reload action and a pull gesture.
+22. **A history update is not a finished load.** `doUpdateVisitedHistory` can
+    arrive BEFORE `onPageFinished`, and the first pass mapped both into one
+    `loading = false` callback, so a pull-refresh could hide while the page was
+    still loading. The hard boundary now has two callbacks:
+    `onWebHistoryChanged(canGoBack)` from `doUpdateVisitedHistory` moves only the
+    back stack, and `onWebLoadStateChanged(canGoBack, loading)` from
+    `onPageStarted`/`onPageFinished` owns the load flag. `ManageWebState`
+    settles a refresh on exactly the terminal events it always named —
+    `onPageFinished`, a main-frame failure, the watchdog, or cancellation — and
+    a history update can no longer be mistaken for one. Regression coverage:
+    `ShellNavigationTest` replays the real callback ordering (history before
+    finish) and asserts the spinner stays up.
 
 ### Phase 8 — what is verified and what still needs a human
 

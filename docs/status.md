@@ -12,9 +12,6 @@ workspace. CI runs type-check, web build, tests, strict skill drift, and
 distributable binary build.
 
 ## Recently shipped
-
-## Recently shipped
-
 - **LAMA-334 — the physical-phone feedback pass.** Seven defects reported from
   real use, fixed at the layer that owned each one:
   *Gallery folders:* the uploads screen can queue a whole gallery top-level
@@ -26,7 +23,9 @@ distributable binary build.
   need 12 GB free. *Pull-to-refresh:* the spinner was raised by
   `SwipeRefreshLayout` and never lowered — `ManageWebState` is now the single
   source of truth with four terminal paths (load finished, main-frame failure,
-  a 20s watchdog, surface released), and the gesture is bounded to the top
+  a 20s watchdog, surface released); a `doUpdateVisitedHistory` back-stack
+  callback is a separate signal and can no longer settle the spinner before
+  `onPageFinished` (review finding 2); and the gesture is bounded to the top
   strip of the view so the phone's More sheet keeps its own scroll. *Queue
   rows:* the status badge is a horizontal badge and the filename is the
   element that truncates, so `Queued` can no longer wrap one character per

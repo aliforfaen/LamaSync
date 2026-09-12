@@ -1,7 +1,6 @@
 package app.lamasync.companion.ui
 
 import android.app.Activity
-import android.content.Context
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.webkit.WebView
@@ -37,26 +36,25 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class PullToRefreshGateInstrumentedTest {
 
-    /** Widens the protected hook so the container's own answer can be read. */
-    private class Probe(context: Context) : PullToRefreshLayout(context) {
-        override fun canChildScrollUp(): Boolean = super.canChildScrollUp()
-    }
-
     private class LoadListener : HardenedWebView.Listener {
         val settled = CountDownLatch(1)
         override fun onOpenExternally(url: String) = Unit
         override fun onBlockedNavigation(url: String) = Unit
         override fun onBlockedSsl(url: String) = Unit
         override fun onPageTitle(title: String?) = Unit
-        override fun onWebStateChanged(canGoBack: Boolean, loading: Boolean) {
-            // onPageFinished / doUpdateVisitedHistory arrive with loading = false.
+        override fun onWebHistoryChanged(canGoBack: Boolean) = Unit
+
+        override fun onWebLoadStateChanged(canGoBack: Boolean, loading: Boolean) {
+            // Only onPageFinished arrives with loading = false.
+            // doUpdateVisitedHistory is a separate history callback and no
+            // longer counts as a finished load (LAMA-334 review finding 2).
             if (!loading) settled.countDown()
         }
     }
 
     private class Fixture {
         lateinit var webView: WebView
-        lateinit var probe: Probe
+        lateinit var probe: PullToRefreshLayout
         val listener = LoadListener()
         var refreshRequested = false
     }
@@ -76,7 +74,7 @@ class PullToRefreshGateInstrumentedTest {
                     debugAllowWebContentsDebugging = false,
                     listener = fixture.listener,
                 )
-                val probe = Probe(activity).apply {
+                val probe = PullToRefreshLayout(activity).apply {
                     bindToWebView(webView) { fixture.refreshRequested = true }
                 }
                 activity.setContentView(probe)
@@ -222,7 +220,7 @@ class PullToRefreshGateInstrumentedTest {
             val startY = zone + 80f
             assertTrue(
                 "the fixture must be tall enough to gesture below the strip",
-                mainThreadAnswer(scenario) { fixture.probe.height.toFloat() } > startY,
+                mainThreadAnswerHeight(scenario, fixture) { height, _ -> height.toFloat() } > startY,
             )
             assertTrue("the fixture page should start at the top", webViewAtScrollTop(fixture.webView))
 

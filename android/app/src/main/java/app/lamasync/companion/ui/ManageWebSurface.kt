@@ -51,10 +51,15 @@ sealed interface RefreshOutcome {
  *
  * LAMA-334 item 2: the refresh indicator is a STATE, not a View property. It is
  * raised by [reload] and lowered by exactly one terminal event — the load
- * finishing, a main-frame load failure, the [REFRESH_TIMEOUT_MS] watchdog, or
- * [cancelRefresh]. The View container mirrors this state
- * ([SwipeRefreshLayout.isRefreshing]), so the spinner cannot outlive the
- * gesture that started it.
+ * finishing (`onPageFinished`), a main-frame load failure, the
+ * [REFRESH_TIMEOUT_MS] watchdog, or [cancelRefresh]. The View container mirrors
+ * this state ([SwipeRefreshLayout.isRefreshing]), so the spinner cannot outlive
+ * the gesture that started it.
+ *
+ * LAMA-334 review finding 2: a history/back-stack update
+ * (`doUpdateVisitedHistory`) is NOT one of those terminal events. It can arrive
+ * before `onPageFinished`, so it only updates [canGoBack]; treating it as a
+ * completed load hid the spinner while the page was still loading.
  */
 @Stable
 class ManageWebState {
@@ -82,7 +87,20 @@ class ManageWebState {
     var refreshOutcome by mutableStateOf<RefreshOutcome?>(null)
         private set
 
-    internal fun onWebStateChanged(canGoBack: Boolean, loading: Boolean) {
+    /**
+     * Back-stack only (`doUpdateVisitedHistory`). It can arrive before
+     * `onPageFinished`, so it updates [canGoBack] and nothing else — in
+     * particular it must not settle a refresh that is still loading.
+     */
+    internal fun onWebHistoryChanged(canGoBack: Boolean) {
+        this.canGoBack = canGoBack
+    }
+
+    /**
+     * A main-frame load started (`loading = true`) or finished
+     * (`loading = false`). Only the `false` edge is a refresh terminal event.
+     */
+    internal fun onWebLoadStateChanged(canGoBack: Boolean, loading: Boolean) {
         this.canGoBack = canGoBack
         this.loading = loading
         if (!loading) endRefresh(RefreshOutcome.Loaded)
@@ -203,8 +221,11 @@ fun ManageWebSurface(
 
             override fun onPageTitle(title: String?) = Unit
 
-            override fun onWebStateChanged(canGoBack: Boolean, loading: Boolean) =
-                state.onWebStateChanged(canGoBack, loading)
+            override fun onWebHistoryChanged(canGoBack: Boolean) =
+                state.onWebHistoryChanged(canGoBack)
+
+            override fun onWebLoadStateChanged(canGoBack: Boolean, loading: Boolean) =
+                state.onWebLoadStateChanged(canGoBack, loading)
 
             override fun onLoadFailed(url: String, description: String?) =
                 state.onLoadFailed(description)

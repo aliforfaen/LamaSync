@@ -47,7 +47,8 @@ class SessionCookieJarInstrumentedTest {
         override fun onBlockedNavigation(url: String) = Unit
         override fun onBlockedSsl(url: String) = Unit
         override fun onPageTitle(title: String?) = Unit
-        override fun onWebStateChanged(canGoBack: Boolean, loading: Boolean) = Unit
+        override fun onWebHistoryChanged(canGoBack: Boolean) = Unit
+        override fun onWebLoadStateChanged(canGoBack: Boolean, loading: Boolean) = Unit
     }
 
     @Before
