@@ -1,16 +1,23 @@
-// LAMA-273: pause / slow mode — control entry point. An unobtrusive "Pause…"
-// button opens a small modal to set a global or device-scoped pause window:
-// duration preset (1h / 4h / Until I resume), mode (Pause / Slow), and an
-// optional bandwidth cap for slow mode (validated client-side with the same
-// regex the server enforces). Confirm POSTs to the matching endpoint, then the
-// parent refreshes so the banner appears.
+// LAMA-273: pause / slow mode — control entry point. The button's icon and
+// action always describe the LIVE state (LAMA-334): when syncing is running it
+// offers "Pause" and opens the window picker; when a window is up it offers
+// "Resume" and clears it immediately, with a second, compact affordance for
+// changing the window instead. A request in flight says which transition is
+// running; an unavailable control says why.
+//
+// The window picker itself is unchanged: duration preset (1h / 4h / Until I
+// resume), mode (Pause / Slow), and an optional bandwidth cap for slow mode
+// (validated client-side with the same regex the server enforces). Confirm
+// POSTs to the matching endpoint, then the parent refreshes.
 
 import { useState } from "react";
-import type { PauseMode } from "@lamasync/core";
+import type { PauseMode, PauseState } from "@lamasync/core";
 import { Modal } from "./Modal.tsx";
+import { IconPauseFilled, IconPlayFilled } from "./icons.tsx";
 import { api, errorText } from "../api.ts";
 import {
   UNTIL_RESUME_MS,
+  pauseControlState,
   presetUntil,
   validateBwlimit,
 } from "../pause.ts";
@@ -30,10 +37,11 @@ interface PauseControlProps {
   hostId?: string;
   /** Device label for copy ("this device"); falls back to "this device". */
   deviceName?: string;
-  /** Whether a pause is currently active for this context (drives the
-   *  button label/title). */
-  active: boolean;
-  /** Called after a successful set so the parent refreshes the banner. */
+  /** The active window for this scope, or null while syncing runs. */
+  state: PauseState | null;
+  /** Why the control cannot act (server unreachable, device offline). */
+  unavailableReason?: string | null;
+  /** Called after a successful change so the parent refreshes. */
   onChanged: () => void;
 }
 
@@ -41,7 +49,8 @@ export function PauseControl({
   scope,
   hostId,
   deviceName,
-  active,
+  state,
+  unavailableReason = null,
   onChanged,
 }: PauseControlProps) {
   const [open, setOpen] = useState(false);
@@ -54,6 +63,7 @@ export function PauseControl({
   const scopeLabel = scope === "host" ? "this device" : "All devices";
   const bwlimitValid = validateBwlimit(bwlimit);
   const confirmDisabled = busy || (mode === "slow" && !bwlimitValid);
+  const control = pauseControlState({ state, busy, unavailableReason });
 
   function openModal(): void {
     setPreset("1h");
@@ -89,16 +99,65 @@ export function PauseControl({
     }
   }
 
+  async function onResume(): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (scope === "host" && hostId) {
+        await api.clearHostPause(hostId);
+      } else {
+        await api.clearPause();
+      }
+      onChanged();
+    } catch (err) {
+      // The window is still in effect server-side; the control keeps saying
+      // so and the message explains why the resume did not take.
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <>
+    <span className="pause-control">
       <button
         type="button"
-        className="action"
-        onClick={openModal}
-        title={active ? "Change the active pause" : "Pause syncing"}
+        className={`action pause-control-main${control.active ? " pause-control-active" : ""}`}
+        onClick={control.action === "resume" ? () => void onResume() : openModal}
+        disabled={control.disabled}
+        aria-label={control.ariaLabel}
+        title={control.title}
       >
-        Pause…
+        {control.active ? (
+          <IconPlayFilled className="pause-control-icon" />
+        ) : (
+          <IconPauseFilled className="pause-control-icon" />
+        )}
+        <span>{control.label}</span>
       </button>
+      {control.active ? (
+        // Changing the window is a second intent, so it is a second control —
+        // folding it into the Resume button is how "Resume" used to be
+        // unreachable while a pause was on.
+        <button
+          type="button"
+          className="action pause-control-change"
+          onClick={openModal}
+          disabled={busy}
+          aria-label={
+            control.slow ? "Change the slow-mode window" : "Change the pause window"
+          }
+          title={control.slow ? "Change the slow-mode window" : "Change the pause window"}
+        >
+          <span aria-hidden="true">⋯</span>
+        </button>
+      ) : null}
+      {error ? (
+        <span className="pause-control-error" role="alert">
+          {error}
+        </span>
+      ) : null}
       {open ? (
         <Modal
           title={scope === "host" ? `Pause ${deviceName ?? "this device"}` : "Pause all syncs"}
@@ -114,7 +173,7 @@ export function PauseControl({
                 disabled={confirmDisabled}
                 onClick={() => void onConfirm()}
               >
-                {busy ? "Pausing…" : "Pause now"}
+                {busy ? "Pausing…" : state === null ? "Pause now" : "Update window"}
               </button>
             </>
           }
@@ -180,6 +239,6 @@ export function PauseControl({
           ) : null}
         </Modal>
       ) : null}
-    </>
+    </span>
   );
 }

@@ -6,15 +6,19 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.Image
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
@@ -25,6 +29,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -42,9 +47,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.lamasync.companion.R
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -240,26 +248,33 @@ private fun ManagedShell(
 
     Scaffold(
         topBar = {
-            ManagedTopBar(
-                destination = destination,
-                hostLabel = registration?.origin?.removePrefix("https://")?.substringBefore('/')
-                    ?: "not paired",
-                connection = connection,
-                onBack = { navController.popBackStack() },
-                onRefresh = { webState.reload() },
-                onReconnect = sessionViewModel::reconnectWebSession,
-                onOpenInBrowser = {
-                    val origin = registration?.origin
-                    if (origin == null) {
-                        notify("This device is not paired")
-                    } else if (!openInBrowser(context, origin)) {
-                        notifyCouldNotOpen(context, origin)
-                    }
-                },
-                onNavigate = { target ->
-                    navController.navigate(target.route) { launchSingleTop = true }
-                },
-            )
+            Column {
+                ManagedTopBar(
+                    destination = destination,
+                    serverIdentity = serverIdentity(registration?.origin),
+                    connection = connection,
+                    onBack = { navController.popBackStack() },
+                    onRefresh = { webState.reload() },
+                    onReconnect = sessionViewModel::reconnectWebSession,
+                    onOpenInBrowser = {
+                        val origin = registration?.origin
+                        if (origin == null) {
+                            notify("This device is not paired")
+                        } else if (!openInBrowser(context, origin)) {
+                            notifyCouldNotOpen(context, origin)
+                        }
+                    },
+                    onNavigate = { target ->
+                        navController.navigate(target.route) { launchSingleTop = true }
+                    },
+                )
+                // LAMA-334: the reload affordance says what it is doing. The
+                // thin bar sits under the app bar and covers both the top-bar
+                // action and a pull gesture, so neither can look inert.
+                if (webState.loading) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
         },
         containerColor = MaterialTheme.colorScheme.background,
         // The app bar consumes the top inset itself; this hands the remaining
@@ -316,6 +331,11 @@ private fun ManagedShell(
                         navController.popBackStack(Destination.MANAGE.route, inclusive = false)
                     },
                     onOpenDocumentPicker = openDocumentPicker,
+                    onOpenCameraProtection = {
+                        navController.navigate(Destination.CAMERA_PROTECTION.route) {
+                            launchSingleTop = true
+                        }
+                    },
                 )
             }
 
@@ -386,6 +406,23 @@ private fun ManagedShell(
         }
     }
 
+    // LAMA-334 item 2: a refresh that ended badly says so once, and the retry
+    // path is the reload action that is already on screen.
+    LaunchedEffect(webState.refreshOutcome) {
+        when (val outcome = webState.consumeRefreshOutcome()) {
+            null, RefreshOutcome.Loaded -> Unit
+            is RefreshOutcome.Failed -> notify(
+                outcome.detail
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { "Could not load the page: $it" }
+                    ?: "Could not load the page. Pull down or tap reload to retry.",
+            )
+            RefreshOutcome.TimedOut ->
+                notify("The page is taking longer than expected. Tap reload to try again.")
+            RefreshOutcome.Cancelled -> Unit
+        }
+    }
+
     // Declared AFTER the NavHost on purpose. Back callbacks resolve
     // most-recently-registered first, so this one is consulted before the
     // NavHost's own predictive-back handler: inside a WebView with history,
@@ -401,7 +438,7 @@ private fun ManagedShell(
 @Composable
 private fun ManagedTopBar(
     destination: Destination,
-    hostLabel: String,
+    serverIdentity: String,
     connection: ConnectionState,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
@@ -414,15 +451,39 @@ private fun ManagedTopBar(
     TopAppBar(
         title = {
             if (destination == Destination.MANAGE) {
+                // LAMA-334 item 7: the header belongs to the app, not to the
+                // WebView. "LamaSync" is the title; the server and the live
+                // connection state are the supporting line. The full origin is
+                // deliberately not here — it is one tap away under
+                // "Connection details", where verbose endpoint detail belongs.
                 Column {
                     Text(
-                        text = "LamaSync · $hostLabel",
+                        text = "LamaSync",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    ConnectionIndicator(connection)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        // One announcement for the pair, so TalkBack does not
+                        // read a bare dot before the state it stands for.
+                        modifier = Modifier.semantics(mergeDescendants = true) {},
+                    ) {
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .background(connection.level.indicatorColor(), CircleShape),
+                        )
+                        Text(
+                            text = "$serverIdentity · ${connection.label}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             } else {
                 Text(
@@ -441,6 +502,8 @@ private fun ManagedTopBar(
                         contentDescription = "Back",
                     )
                 }
+            } else {
+                BrandMark()
             }
         },
         actions = {
@@ -478,6 +541,15 @@ private fun ManagedTopBar(
                             )
                         }
                         HorizontalDivider()
+                        // The diagnostic home for the origin, the device id and
+                        // the check-in state the header deliberately omits.
+                        DropdownMenuItem(
+                            text = { Text("Connection details") },
+                            onClick = {
+                                menuOpen = false
+                                onNavigate(Destination.CONNECTION)
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text("Open in browser") },
                             onClick = {
@@ -493,26 +565,20 @@ private fun ManagedTopBar(
 }
 
 /**
- * Connection state as a dot AND a label. The dot alone would be a colour-only
- * signal, which the acceptance gates forbid.
+ * The LamaSync mark in the app bar.
+ *
+ * Decorative on purpose (`contentDescription = null`): the adjacent title
+ * already reads "LamaSync", so announcing the mark would say it twice. It is
+ * the launcher art the device already shows, so the header and the home screen
+ * agree about what this app is.
  */
 @Composable
-private fun ConnectionIndicator(connection: ConnectionState) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Box(
-            Modifier
-                .size(8.dp)
-                .background(connection.level.indicatorColor(), CircleShape),
-        )
-        Text(
-            text = connection.label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+private fun BrandMark() {
+    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+        Image(
+            painter = painterResource(R.drawable.lama_courier_launcher),
+            contentDescription = null,
+            modifier = Modifier.size(26.dp),
         )
     }
 }

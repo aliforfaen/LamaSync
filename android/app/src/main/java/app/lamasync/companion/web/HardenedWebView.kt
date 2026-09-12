@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -36,11 +37,29 @@ object HardenedWebView {
         fun onPageTitle(title: String?)
 
         /**
-         * Page/history state the hosting shell needs: whether back can walk the
-         * WebView's own history, and whether a load is in flight. Fired from
-         * `onPageStarted`, `onPageFinished` and `doUpdateVisitedHistory`.
+         * The WebView's back stack changed (`doUpdateVisitedHistory`). This is
+         * HISTORY ONLY: the platform fires it before `onPageFinished` on a real
+         * page commit, so a host must never treat it as a completed load.
          */
-        fun onWebStateChanged(canGoBack: Boolean, loading: Boolean)
+        fun onWebHistoryChanged(canGoBack: Boolean)
+
+        /**
+         * A main-frame load started (`loading = true`) or finished
+         * (`loading = false`). Only the `false` edge — `onPageFinished` — is a
+         * load terminal event for the hosting shell.
+         */
+        fun onWebLoadStateChanged(canGoBack: Boolean, loading: Boolean)
+
+        /**
+         * LAMA-334: a MAIN-FRAME load failed (offline, unreachable host, a
+         * refused connection). The WebView shows its own error page; the shell
+         * needs this to retire a refresh indicator that would otherwise wait
+         * for a `onPageFinished` that a hard failure may never deliver.
+         *
+         * Defaulted to a no-op so listeners that do not care about load
+         * failures do not have to spell one out.
+         */
+        fun onLoadFailed(url: String, description: String?) = Unit
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -86,17 +105,34 @@ object HardenedWebView {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                listener.onWebStateChanged(view?.canGoBack() == true, loading = true)
+                listener.onWebLoadStateChanged(view?.canGoBack() == true, loading = true)
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                listener.onWebStateChanged(view?.canGoBack() == true, loading = false)
+                listener.onWebLoadStateChanged(view?.canGoBack() == true, loading = false)
             }
 
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
-                listener.onWebStateChanged(view?.canGoBack() == true, loading = false)
+                // History only. This can arrive BEFORE onPageFinished, so it must
+                // not be reported as a finished load (LAMA-334 review finding 2).
+                listener.onWebHistoryChanged(view?.canGoBack() == true)
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?,
+            ) {
+                super.onReceivedError(view, request, error)
+                // Sub-resource failures are not page failures: a blocked icon
+                // must not be reported as "the page did not load".
+                if (request?.isForMainFrame != true) return
+                listener.onLoadFailed(
+                    url = request.url?.toString() ?: "",
+                    description = error?.description?.toString(),
+                )
             }
 
             override fun shouldOverrideUrlLoading(

@@ -19,6 +19,9 @@ import { GettingStarted } from "../components/GettingStarted.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { InlineError } from "../components/InlineError.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
+import { useTransportHealth } from "../hooks/useTransportHealth.ts";
+import { connectivityFrom } from "../connectivity.ts";
+import { ConnectionStatus } from "../components/ConnectionStatus.tsx";
 import { usePause } from "../hooks/usePause.ts";
 import { PauseBanner } from "../components/PauseBanner.tsx";
 import { PauseControl } from "../components/PauseControl.tsx";
@@ -154,6 +157,19 @@ export function Dashboard() {
   // P-A: bump to re-run the whole dashboard fetch from the retry button.
   const [reloadKey, setReloadKey] = useState(0);
   const { state: wsState, event } = useWebSocket();
+  // LAMA-334 item 5: the connection pill states the same live condition the
+  // connectivity banner does, from the same derivation.
+  const { browserOnline, requestFailed } = useTransportHealth();
+  const connectivity = connectivityFrom({
+    browserOnline,
+    socket: wsState,
+    requestFailed,
+  });
+  // A pause request needs the server, so the control is disabled only when we
+  // know the server is unreachable — a dropped event stream ("Live updates
+  // paused") does not stop a POST from working.
+  const pauseUnavailableReason =
+    connectivity.level === "offline" ? connectivity.label : null;
   // LAMA-273: global pause / slow mode — banner + control for the fleet.
   const { overview, refresh: refreshPause } = usePause();
   // LAMA-224: storage report (server-side 5-min cache; refresh button bypasses).
@@ -469,12 +485,11 @@ export function Dashboard() {
             ))}
           </nav>
           <div className="dashboard-header-tools">
-          <span className={`ws-pill ws-${wsState}`} title="WebSocket connection status">
-            <span className="ws-dot" aria-hidden="true" /> {wsState}
-          </span>
+          <ConnectionStatus connectivity={connectivity} />
           <PauseControl
             scope="global"
-            active={Boolean(overview?.global)}
+            state={overview?.global ?? null}
+            unavailableReason={pauseUnavailableReason}
             onChanged={() => void refreshPause()}
           />
           {backupVerified !== null ? (

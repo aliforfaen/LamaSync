@@ -235,7 +235,7 @@ export function AccessKeysPanel() {
           </div>
           {createError && <div className="error">{createError}</div>}
         </form>
-        <table className="data">
+        <table className="data data-list data-access-keys">
           <thead>
             <tr>
               <th>Label</th>
@@ -286,8 +286,8 @@ export function AccessKeysPanel() {
                         <span className="muted">—</span>
                       )}
                     </td>
-                    <td>{new Date(key.createdAt).toLocaleString()}</td>
-                    <td>
+                    <td className="mono" data-label="Created">{new Date(key.createdAt).toLocaleString()}</td>
+                    <td data-label="Last used">
                       {key.lastUsedAt
                         ? new Date(key.lastUsedAt).toLocaleString()
                         : <span className="muted">never</span>}
@@ -297,7 +297,7 @@ export function AccessKeysPanel() {
                         {status === "revoked" ? "revoked" : "active"}
                       </span>
                     </td>
-                    <td>
+                    <td data-label="Fingerprint">
                       <code className="muted">{maskFingerprint(key.fingerprint)}</code>
                     </td>
                     <td>

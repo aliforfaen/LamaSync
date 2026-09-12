@@ -12,6 +12,34 @@ workspace. CI runs type-check, web build, tests, strict skill drift, and
 distributable binary build.
 
 ## Recently shipped
+- **LAMA-334 — the physical-phone feedback pass.** Seven defects reported from
+  real use, fixed at the layer that owned each one:
+  *Gallery folders:* the uploads screen can queue a whole gallery top-level
+  folder (Camera roll, Downloads, Pictures, …) as a one-shot snapshot of the
+  media the app is granted to read — permissions are the existing media
+  grants (PARTIAL "selected photos" honoured and labelled), contents are
+  MediaStore-derived rather than a filesystem walk, and staging keeps only
+  three un-transferred files on disk at a time so a 3,000-photo roll does not
+  need 12 GB free. *Pull-to-refresh:* the spinner was raised by
+  `SwipeRefreshLayout` and never lowered — `ManageWebState` is now the single
+  source of truth with four terminal paths (load finished, main-frame failure,
+  a 20s watchdog, surface released); a `doUpdateVisitedHistory` back-stack
+  callback is a separate signal and can no longer settle the spinner before
+  `onPageFinished` (review finding 2); and the gesture is bounded to the top
+  strip of the view so the phone's More sheet keeps its own scroll. *Queue
+  rows:* the status badge is a horizontal badge and the filename is the
+  element that truncates, so `Queued` can no longer wrap one character per
+  line. *Dashboard:* the raw `OPEN` websocket pill is replaced by an icon plus
+  the same state sentence the connectivity banner uses, and the pause control
+  is icon-led and stateful (pause/resume, in-flight transition, unavailable
+  reason) with changing an existing window as its own control. *Native header:*
+  the app bar leads with the LamaSync mark and "LamaSync", and the server line
+  is a host name rather than the raw origin — the full origin, device id and
+  check-in state stay on the Connection screen. *Responsive tables:* the three
+  device-page tables and the Admin access-key table now collapse with the
+  `.data-list` skeleton and keep their column names via `data-label`, with a
+  source-scanning test guarding every wide `table.data` in the app. See
+  `docs/android-mobile-ux-plan.md` decisions 17–21.
 
 - **LAMA-329 (phases 5–7 of 8) — browser settings, installable web app, brand
   icon exports.** A browser `#/settings` route owns what only the browser can
@@ -385,6 +413,24 @@ distributable binary build.
   Code splitting is maintenance work, not a release blocker.
 
 ## Recent verification baseline
+
+LAMA-334 feedback pass (this worktree): `bun x tsc --noEmit`, `bun run
+build:web-ui` (still one self-contained `index.html`), `bun test` **1557 pass /
+0 fail** (+17), strict skill drift OK (160 API rows / 161 server routes / 11 CLI
+commands — no route, command or flag changed). Android `assembleDebug` OK,
+`lintDebug` **0 errors (62 warnings**, all pre-existing version-availability
+noise) and `testDebugUnitTest` **242/242** (+12: the pull-gate arming rules at
+nine view heights, the refresh terminal states, `serverIdentity`, and the
+gallery folder semantics). Narrow-width evidence measured against the built
+bundle and a seeded demo fleet at 360x800: all seven sampled routes report
+`scrollWidth == clientWidth == 360`, the collapsed host-folder and access-key
+tables render as stacked labelled rows (screenshots in
+`docs/android-mobile-ux-artifacts/`), and no visible cell is both narrower than
+70px and more than three times its own width tall. **Not run in this pass:** the
+instrumented suite (the `lamadb-test` AVD's system image is not installed on
+this host, and the only attached device is the operator's paired phone, which
+the instrumented classes must not touch) and the physical-phone look at the new
+native surfaces.
 
 LAMA-329 phase 5–7 review pass (this worktree): `bun x tsc --noEmit`,
 `bun run build:web-ui` (still one self-contained `index.html`), `bun test`
