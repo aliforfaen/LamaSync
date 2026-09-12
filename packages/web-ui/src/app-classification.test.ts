@@ -281,11 +281,9 @@ describe("safety states", () => {
   test("a class the taxonomy never had is reviewed as unknown, not rendered verbatim", () => {
     // Malformed legacy JSON is the only way a value outside the union reaches
     // the UI; it must not become a label, and it must not be assumed classed.
-    const malformed = {
-      paths: { linux: [{ path: "~/x", classification: "totally_new_class" }] },
-      excludes: [],
-      notes: null,
-    } as unknown as CaptureSpec;
+    const malformedEntry = entry({ path: "~/x" });
+    Reflect.set(malformedEntry, "classification", "totally_new_class");
+    const malformed = spec([malformedEntry]);
     const review = reviewCaptureSpec(malformed);
     expect(review.groups.map((group) => group.classification)).toEqual(["unknown"]);
     expect(review.countByClass.unknown).toBe(1);

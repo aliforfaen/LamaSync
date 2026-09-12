@@ -40,6 +40,51 @@ const DEFAULT_MAX_BYTES = 512 * 1024 * 1024; // 512 MiB
 const MAX_CLASSIFY_PATHS = 500;
 const MAX_CLASSIFY_PATH_LEN = 4096;
 
+function isPathClassification(value: string): value is PathClassification {
+  return (
+    value === "portable_config" ||
+    value === "machine_state" ||
+    value === "cache" ||
+    value === "secrets" ||
+    value === "custom" ||
+    value === "unknown"
+  );
+}
+
+function isClassificationSource(value: string): value is ClassificationSource {
+  return value === "default" || value === "suggested" || value === "manual";
+}
+
+function classificationProvenanceOf(
+  entry: Record<string, unknown>,
+): { source: ClassificationSource; confidence: number | null; legacy: boolean } | null {
+  let source: ClassificationSource = "default";
+  let explicit = false;
+  const rawSource = entry.classificationSource;
+  if (rawSource !== undefined && rawSource !== null) {
+    explicit = true;
+    if (typeof rawSource !== "string" || !isClassificationSource(rawSource)) return null;
+    source = rawSource;
+  }
+  let confidence: number | null = null;
+  const rawConfidence = entry.confidence;
+  if (rawConfidence !== undefined && rawConfidence !== null) {
+    explicit = true;
+    if (
+      typeof rawConfidence !== "number" ||
+      !Number.isFinite(rawConfidence) ||
+      rawConfidence < 0 ||
+      rawConfidence > 1
+    ) {
+      return null;
+    }
+    confidence = rawConfidence;
+  }
+  if (source === "suggested" && confidence === null) return null;
+  if (source !== "suggested" && confidence !== null) return null;
+  return { source, confidence, legacy: !explicit };
+}
+
 function appUploadMax(): number {
   const raw = process.env.LAMASYNC_APPS_MAX_BYTES;
   if (raw === undefined || raw === "") return DEFAULT_MAX_BYTES;
@@ -196,59 +241,6 @@ function normalizeCaptureSpec(input: unknown): CaptureSpec | null {
     if (Object.keys(rec).length === 0) return { paths: {}, excludes: [], notes: null };
     return null;
   }
-  const classifications = new Set<PathClassification>([
-    "portable_config",
-    "machine_state",
-    "cache",
-    "secrets",
-    "custom",
-    "unknown",
-  ]);
-/** Type guard: a string is a valid classification source (LAMA-315). */
-function isClassificationSource(value: string): value is ClassificationSource {
-  return value === "default" || value === "suggested" || value === "manual";
-}
-
-/** LAMA-315 provenance/confidence validation for one spec entry.
- *
- *  - `classificationSource` must be `default | suggested | manual`;
- *  - `confidence` must be 0..1 and only present with `suggested`;
- *  - an entry with no provenance fields at all is a LEGACY row: it is
- *    normalized by the caller to the untouched `unknown`/`default` shape —
- *    the migration contract never reinterprets a stored class as a
- *    confirmation (handoff §Migration rule 2);
- *  - any explicitly supplied provenance is validated strictly (null result
- *    rejects the whole spec).
- */
-function provenanceOf(
-  o: Record<string, unknown>,
-): { source: ClassificationSource; confidence: number | null; legacy: boolean } | null {
-  let source: ClassificationSource = "default";
-  let explicit = false;
-  const rawSource = o.classificationSource;
-  if (rawSource !== undefined && rawSource !== null) {
-    explicit = true;
-    if (typeof rawSource !== "string" || !isClassificationSource(rawSource)) return null;
-    source = rawSource;
-  }
-  let confidence: number | null = null;
-  const rawConfidence = o.confidence;
-  if (rawConfidence !== undefined && rawConfidence !== null) {
-    explicit = true;
-    if (
-      typeof rawConfidence !== "number" ||
-      !Number.isFinite(rawConfidence) ||
-      rawConfidence < 0 ||
-      rawConfidence > 1
-    ) {
-      return null;
-    }
-    confidence = rawConfidence;
-  }
-  if (source === "suggested" && confidence === null) return null;
-  if (source !== "suggested" && confidence !== null) return null;
-  return { source, confidence, legacy: !explicit };
-}
   const bucket = (os: string): CaptureSpecPath[] | null => {
     const arr = pathsRaw[os];
     if (!Array.isArray(arr)) return [];
@@ -279,9 +271,9 @@ function provenanceOf(
         archivePaths.add(archivePath);
         const classification =
           typeof o.classification === "string" ? o.classification : "unknown";
-        if (!classifications.has(classification as PathClassification)) return null;
+        if (!isPathClassification(classification)) return null;
         const rationale = typeof o.rationale === "string" ? o.rationale : null;
-        const provenance = provenanceOf(o);
+        const provenance = classificationProvenanceOf(o);
         if (provenance === null) return null;
         if (provenance.legacy) {
           // Migration contract (handoff §Migration rule 2): an object entry
@@ -304,7 +296,7 @@ function provenanceOf(
         if (provenance.source === "default" && classification !== "unknown") return null;
         entries.push({
           path,
-          classification: classification as PathClassification,
+          classification,
           rationale,
           classificationSource: provenance.source,
           confidence: provenance.confidence,
