@@ -2002,6 +2002,165 @@ html[data-motion="reduce"] .host-status-dot {
   min-width: 40rem;
 }
 
+/* LAMA-335: below 640px the listing stops being a pannable table and becomes
+   stacked rows — reading a file name and tapping it (or its actions) is the
+   whole job on a phone, and panning sideways for the size and date is not a
+   reasonable substitute. Classes, not nth-child, because which columns exist
+   depends on the tab (selection, owner, actions); the generic `.data-list`
+   skeleton in the phone block does the row/visibility work, and these rules
+   only place the cells. All lengths here are intentional: desktop keeps the
+   deliberate horizontal scroll pane above 640px. */
+@media (max-width: 639px) {
+  .browser-table-scroll {
+    overflow-x: visible;
+  }
+
+  .data.browser-table {
+    min-width: 0;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-select,
+  .data.browser-table > tbody > tr > td.browser-cell-name,
+  .data.browser-table > tbody > tr > td.browser-cell-type,
+  .data.browser-table > tbody > tr > td.browser-cell-size,
+  .data.browser-table > tbody > tr > td.browser-cell-modified,
+  .data.browser-table > tbody > tr > td.browser-cell-owner,
+  .data.browser-table > tbody > tr > td.browser-cell-actions {
+    display: block;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-name {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-select {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-type {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-size {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+    text-align: right;
+    /* The right track is content-sized, so this is what stops "1.2 GB" from
+       wrapping after a short "6 B" row has already shrunk the column. */
+    min-width: 4.5rem;
+    white-space: nowrap;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-modified {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-owner {
+    grid-column: 1 / -1;
+    grid-row: 4;
+  }
+
+  .data.browser-table > tbody > tr > td.browser-cell-actions {
+    grid-column: 1 / -1;
+    grid-row: 5;
+    margin-top: var(--space-1);
+  }
+
+  .data.browser-table .browser-dir-name {
+    min-height: 44px;
+    text-align: left;
+  }
+
+  .data.browser-table .table-actions,
+  .data.browser-table .browser-row-actions {
+    text-align: left;
+  }
+
+  /* --- Browse jobs (the Data Browser's "Recent operations") --------------- */
+  /* Operation badge + status lead; source, destination and progress become
+     labelled rows instead of three 90px columns holding full paths. */
+  .data.data-browse-jobs > tbody > tr > td:nth-child(1),
+  .data.data-browse-jobs > tbody > tr > td:nth-child(2),
+  .data.data-browse-jobs > tbody > tr > td:nth-child(3),
+  .data.data-browse-jobs > tbody > tr > td:nth-child(4),
+  .data.data-browse-jobs > tbody > tr > td:nth-child(5) {
+    display: block;
+  }
+
+  .data.data-browse-jobs > tbody > tr > td:nth-child(5) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-browse-jobs > tbody > tr > td:nth-child(2),
+  .data.data-browse-jobs > tbody > tr > td:nth-child(3),
+  .data.data-browse-jobs > tbody > tr > td:nth-child(4) {
+    grid-column: 1 / -1;
+  }
+
+  /* --- Restic snapshot picker -------------------------------------------- */
+  /* The snapshot id is a long hash: it gets its own full-width row (it is the
+     identity), the metadata follows as labelled rows, and Restore gets a row
+     of its own rather than a squeezed column. */
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(1),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(2),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(3),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(4),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(5),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(6),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(7) {
+    display: block;
+  }
+
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(1),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(2),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(3),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(4),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(5),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(6),
+  .data.data-snapshot-picker > tbody > tr > td:nth-child(7) {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  /* --- Restore jobs ------------------------------------------------------ */
+  .data.data-restore-jobs > tbody > tr > td:nth-child(1),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(2),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(3),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(4),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(5),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(6) {
+    display: block;
+  }
+
+  .data.data-restore-jobs > tbody > tr > td:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .data.data-restore-jobs > tbody > tr > td:nth-child(5) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .data.data-restore-jobs > tbody > tr > td:nth-child(2),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(3),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(4),
+  .data.data-restore-jobs > tbody > tr > td:nth-child(6) {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -2061,6 +2220,18 @@ html[data-motion="reduce"] .host-status-dot {
   max-height: 56vh;
   object-fit: contain;
 }
+
+/* LAMA-335: the browser's own media renderers, bounded the same way the image
+   box is, so a phone never gets a player taller than the dialog. */
+.file-preview-audio {
+  width: 100%;
+}
+.file-preview-video {
+  width: 100%;
+  max-height: 56vh;
+  background: var(--surface-elevated);
+  border-radius: var(--radius-md);
+}
 .file-preview-text {
   margin: 0;
   padding: var(--space-3);
@@ -2108,6 +2279,16 @@ html[data-motion="reduce"] .host-status-dot {
 
 .browser-row:hover {
   background: var(--surface-elevated);
+}
+
+/* LAMA-335 review fix: when a file is above the base64 transport cap the row
+   states the limit instead of offering a Download button that would only
+   fail. Sized like the action it replaces so the row height does not jump. */
+.browser-download-blocked {
+  display: inline-block;
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 /* LAMA-321: detected freedesktop trash cards in the Data Browser. */

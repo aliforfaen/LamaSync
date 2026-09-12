@@ -23,10 +23,10 @@ const EXEMPT: Record<string, string> = {
   // Seven storage columns that the desktop table needs; the phone rule hides
   // columns 3–8 in `index.css` instead of restacking the row.
   "pages/Backends.tsx": "column-hiding rules for .data-backends",
-  // The data browser's listing is a deliberate horizontal scroll pane
-  // (`.browser-table-scroll`), not a squeezed grid: file names and paths are
-  // the content and truncating them is worse than panning.
-  "pages/DataBrowser.tsx": ".browser-table-scroll pane",
+  // The data browser's listing used to be exempt as a deliberate horizontal
+  // scroll pane. LAMA-335 removed that: below 640px it is a stacked list
+  // (`.data-browser`), which is what the issue's phone-width criterion asks
+  // for. Desktop keeps the pane.
 };
 
 function sourceFiles(dir: string, out: string[] = []): string[] {

@@ -34,11 +34,12 @@ import { useOverlayA11y } from "../hooks/useOverlayA11y.ts";
 import { IconFolder, IconStorage } from "../components/icons.tsx";
 import {
   TEXT_PREVIEW_MAX_BYTES,
-  extensionOf,
-  previewKindForName,
+  mimeTypeForName,
+  previewPlanFor,
   sniffPreviewKind,
   truncateText,
   type PreviewKind,
+  type PreviewPlan,
 } from "../file-preview.ts";
 import { isValidUploadPath, normalizeUploadPath } from "../upload-path.ts";
 
@@ -215,7 +216,11 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
     // rail's negative translate. The wrapper is width:100% inside the rail's
     // content column; the table keeps a min-width so columns don't crush.
     <div className="browser-table-scroll">
-      <table className="data browser-table">
+      {/* LAMA-335: `data-list`/`data-browser` turn this into stacked rows below
+          640px (see index.css). Classes rather than nth-child on the cells,
+          because which columns exist depends on the tab (selection, owner,
+          actions). */}
+      <table className="data data-list data-browser browser-table">
       <thead>
         <tr>
           {selectable && <th />}
@@ -237,10 +242,16 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
             </td>
           </tr>
         )}
-        {sorted.map((entry) => (
+        {sorted.map((entry) => {
+          // LAMA-335 review fix: one plan per row drives BOTH actions. The
+          // Download fallback and the Preview both ride the same base64
+          // `POST /browse/download`, so a file the transport cannot fetch gets
+          // no Download button that would only fail.
+          const plan = entry.type === "file" ? previewPlanFor(entry.name, entry.size) : null;
+          return (
           <tr key={entry.name} className="browser-row">
             {selectable && (
-              <td>
+              <td className="browser-cell-select">
                 <input
                   type="checkbox"
                   checked={selection!.has(entry.name)}
@@ -249,7 +260,7 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
                 />
               </td>
             )}
-            <td>
+            <td className="browser-cell-name">
               {entry.type === "dir" ? (
                 <button
                   type="button"
@@ -262,17 +273,23 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
                 <span className="browser-file-name">{entry.name}</span>
               )}
             </td>
-            <td>{entry.type === "dir" ? "directory" : "file"}</td>
-            <td className="num mono">{formatBytes(entry.size)}</td>
-            <td className="mono">{formatTimestamp(entry.mtime)}</td>
+            <td className="browser-cell-type">
+              {entry.type === "dir" ? "directory" : "file"}
+            </td>
+            <td className="num mono browser-cell-size" data-label="Size">
+              {formatBytes(entry.size)}
+            </td>
+            <td className="mono browser-cell-modified" data-label="Modified">
+              {formatTimestamp(entry.mtime)}
+            </td>
             {ownerLabel && (
-              <td>
+              <td className="browser-cell-owner" data-label={ownerLabel}>
                 {entry.folderId ? <span className="mono muted">{entry.folderId}</span> : "—"}
               </td>
             )}
             {hasActions && (
-              <td>
-                {onPreview && entry.type === "file" && previewKindForName(entry.name, entry.size) !== null && (
+              <td className="browser-cell-actions">
+                {onPreview && plan?.kind != null && (
                   <button
                     type="button"
                     className="action"
@@ -282,13 +299,25 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
                   </button>
                 )}
                 {onDownload && entry.type === "file" && (
-                  <button
-                    type="button"
-                    className="action"
-                    onClick={() => onDownload(entry.name)}
-                  >
-                    Download
-                  </button>
+                  plan !== null && plan.downloadable ? (
+                    <button
+                      type="button"
+                      className="action"
+                      title={plan.reason ?? undefined}
+                      onClick={() => onDownload(entry.name)}
+                    >
+                      Download
+                    </button>
+                  ) : (
+                    // Truthful fallback: over the transport cap neither Preview
+                    // nor Download can deliver the bytes, so do not pretend.
+                    <span
+                      className="muted browser-download-blocked"
+                      title={plan?.reason ?? "This file cannot be downloaded here."}
+                    >
+                      Too large to download
+                    </span>
+                  )
                 )}
                 {onRename && (
                   <button type="button" className="action" onClick={() => onRename(entry.name)}>
@@ -298,7 +327,8 @@ function EntriesTable({ response, loading, path, onNavigate, ownerLabel, selecti
               </td>
             )}
           </tr>
-        ))}
+          );
+        })}
       </tbody>
     </table>
     </div>
@@ -537,7 +567,7 @@ function JobsPanel({ jobs }: { jobs: BrowseJob[] }) {
   return (
     <div className="section">
       <h2>Recent operations</h2>
-      <table className="data">
+      <table className="data data-list data-browse-jobs">
         <thead>
           <tr>
             <th>Op</th>
@@ -553,9 +583,9 @@ function JobsPanel({ jobs }: { jobs: BrowseJob[] }) {
               <td>
                 <span className={`badge badge-${job.status}`}>{job.operation}</span>
               </td>
-              <td className="muted">{job.source}</td>
-              <td className="muted">{job.destination}</td>
-              <td className="mono num">
+              <td className="muted" data-label="Source">{job.source}</td>
+              <td className="muted" data-label="Destination">{job.destination}</td>
+              <td className="mono num" data-label="Progress">
                 {job.totalBytes !== null
                   ? `${formatBytes(job.progressBytes ?? 0)} / ${formatBytes(job.totalBytes)}`
                   : "—"}
@@ -901,6 +931,7 @@ export function DataBrowser() {
     ref: BrowseRef;
     name: string;
     kind: PreviewKind;
+    plan: PreviewPlan;
   } | null>(null);
   // LAMA-260: folder-scoped upload dialog state (folderId + target path).
   const [uploadOpen, setUploadOpen] = useState<{
@@ -1007,13 +1038,14 @@ export function DataBrowser() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 
-  // LAMA-260: open the preview modal for a file. The kind was decided at
-  // render time (extension + size) so the modal can fetch the right bytes.
+  // LAMA-260 / LAMA-335: open the preview modal for a file. The plan was
+  // decided at render time (extension + size) and carries the reason to show
+  // when the bytes turn out not to be previewable after all.
   function onPreview(entry: BrowseEntry): void {
     if (!current || entry.type !== "file") return;
-    const kind = previewKindForName(entry.name, entry.size);
-    if (kind === null) return;
-    setPreviewTarget({ ref: current.ref, name: entry.name, kind });
+    const plan = previewPlanFor(entry.name, entry.size);
+    if (plan.kind === null) return;
+    setPreviewTarget({ ref: current.ref, name: entry.name, kind: plan.kind, plan });
   }
 
   // LAMA-271: the empty-directory teaching CTA opens the existing upload
@@ -1269,6 +1301,7 @@ export function DataBrowser() {
         <FilePreviewModal
           target={previewTarget}
           onClose={() => setPreviewTarget(null)}
+          onDownload={() => onDownload(previewTarget.name)}
         />
       )}
       {uploadOpen && (
@@ -1374,22 +1407,35 @@ export function DataBrowser() {
 // ---------------------------------------------------------------------------
 
 /**
- * Modal that fetches a file's bytes via the browse-download auth flow and
- * renders an image (object URL, max-height box) or text (<pre>, capped with
- * a truncated note). Esc / backdrop close via the shared Modal a11y.
+ * Modal that fetches a file's bytes through the browse-download auth flow and
+ * renders it with the BROWSER's own renderer: `<img>` for images, `<audio>` /
+ * `<video>` for media, and `<pre>` (textContent, never HTML) for text. Esc /
+ * backdrop close via the shared Modal a11y.
+ *
+ * LAMA-335: every path ends in either a rendered file or a stated reason plus
+ * a Download action — "No preview available" is never a dead end. The bytes
+ * reach this component only through `api.browsePreviewBlob`, which carries the
+ * caller's normal credential and is authorized server-side per request. The SPA
+ * holds no storage credential, no signed storage URL and no backend grant; see
+ * `browse-trust-boundary.test.ts`, which fails if one is ever added.
  */
 function FilePreviewModal({
   target,
   onClose,
+  onDownload,
 }: {
-  target: { ref: BrowseRef; name: string; kind: PreviewKind };
+  target: { ref: BrowseRef; name: string; kind: PreviewKind; plan: PreviewPlan };
   onClose: () => void;
+  onDownload: () => void;
 }) {
   const [text, setText] = useState<{ text: string; truncated: boolean } | null>(null);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [bump, setBump] = useState(0);
+  // The reason to show instead of a viewer when the bytes turn out not to be
+  // previewable after all (an extension-less binary, a mislabelled file).
+  const [fallbackReason, setFallbackReason] = useState<string | null>(null);
   // Resolved kind after sniffing an extension-less file's bytes.
   const [resolvedKind, setResolvedKind] = useState<PreviewKind | null>(null);
 
@@ -1398,7 +1444,8 @@ function FilePreviewModal({
     setLoading(true);
     setError(null);
     setText(null);
-    setImageUrl((prev) => {
+    setFallbackReason(null);
+    setMediaUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
@@ -1407,21 +1454,25 @@ function FilePreviewModal({
       .browsePreviewBlob(target.ref, target.name)
       .then(async (nextBlob) => {
         if (cancelled) return;
-        const kind =
-          target.kind === "text" && extensionOf(target.name) === ""
-            ? (sniffPreviewKind(new Uint8Array(await nextBlob.slice(0, 16).arrayBuffer())) ?? null)
-            : target.kind;
+        let kind: PreviewKind | null = target.kind;
+        if (target.plan.sniff) {
+          kind = sniffPreviewKind(new Uint8Array(await nextBlob.slice(0, 16).arrayBuffer()));
+        }
         if (kind === null) {
-          setError("This file doesn't look like previewable text or an image.");
+          setFallbackReason(NO_VIEWER_REASON);
           setLoading(false);
           return;
         }
         setResolvedKind(kind);
-        if (kind === "image") {
-          setImageUrl(URL.createObjectURL(nextBlob));
+        if (kind === "text") {
+          setText(truncateText(await nextBlob.text(), TEXT_PREVIEW_MAX_BYTES));
         } else {
-          const content = await nextBlob.text();
-          setText(truncateText(content, TEXT_PREVIEW_MAX_BYTES));
+          // A typeless Blob leaves an <audio>/<video> element guessing at
+          // whether it can play at all, so the extension's MIME type is stated
+          // explicitly. No copy: the fetched blob becomes the part.
+          setMediaUrl(
+            URL.createObjectURL(new Blob([nextBlob], { type: mimeTypeForName(target.name) })),
+          );
         }
         setLoading(false);
       })
@@ -1439,12 +1490,33 @@ function FilePreviewModal({
 
   useEffect(() => {
     return () => {
-      if (imageUrl) URL.revokeObjectURL(imageUrl);
+      if (mediaUrl) URL.revokeObjectURL(mediaUrl);
     };
-  }, [imageUrl]);
+  }, [mediaUrl]);
+
+  const kind = resolvedKind ?? target.kind;
 
   return (
-    <Modal title={`Preview — ${target.name}`} onClose={onClose}>
+    <Modal
+      title={`Preview — ${target.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button
+            type="button"
+            className="action"
+            onClick={onDownload}
+            disabled={!target.plan.downloadable}
+            title={target.plan.downloadable ? undefined : target.plan.reason ?? undefined}
+          >
+            Download
+          </button>
+          <button type="button" className="action primary" onClick={onClose}>
+            Close
+          </button>
+        </>
+      }
+    >
       {loading ? (
         <div className="browser-skel" aria-busy="true">
           <div className="skel skel-line" />
@@ -1453,12 +1525,38 @@ function FilePreviewModal({
         </div>
       ) : error ? (
         <InlineError message={error} onRetry={() => setBump((n) => n + 1)} />
+      ) : fallbackReason !== null ? (
+        <div className="file-preview">
+          <p className="muted">{fallbackReason}</p>
+          {target.plan.downloadable ? (
+            <p className="muted">Download it to open it outside LamaSync.</p>
+          ) : (
+            <p className="muted">{target.plan.reason ?? NO_DOWNLOAD_REASON}</p>
+          )}
+        </div>
       ) : (
         <div className="file-preview">
-          {(resolvedKind ?? target.kind) === "image" && imageUrl ? (
+          {kind === "image" && mediaUrl ? (
             <div className="file-preview-image">
-              <img src={imageUrl} alt={target.name} />
+              <img src={mediaUrl} alt={target.name} />
             </div>
+          ) : kind === "audio" && mediaUrl ? (
+            <audio
+              className="file-preview-audio"
+              src={mediaUrl}
+              controls
+              preload="metadata"
+              aria-label={`Audio preview of ${target.name}`}
+            />
+          ) : kind === "video" && mediaUrl ? (
+            <video
+              className="file-preview-video"
+              src={mediaUrl}
+              controls
+              preload="metadata"
+              playsInline
+              aria-label={`Video preview of ${target.name}`}
+            />
           ) : text ? (
             <>
               {text.truncated ? (
@@ -1469,13 +1567,17 @@ function FilePreviewModal({
               <pre className="file-preview-text">{text.text}</pre>
             </>
           ) : (
-            <p className="muted">No preview available for this file.</p>
+            <p className="muted">{target.plan.reason ?? NO_VIEWER_REASON}</p>
           )}
         </div>
       )}
     </Modal>
   );
 }
+
+const NO_VIEWER_REASON = "This file's contents are not something the viewer can render.";
+const NO_DOWNLOAD_REASON =
+  "This file is larger than the 64 MB transfer limit, so it cannot be downloaded here.";
 
 /**
  * Modal for the folder-scoped upload (POST /folders/:id/files). Validates the
@@ -2039,7 +2141,7 @@ function ResticBrowser() {
           />
         )
       ) : (
-      <table className="data">
+      <table className="data data-list data-snapshot-picker">
         <thead>
           <tr>
             <th>Snapshot</th>
@@ -2057,11 +2159,11 @@ function ResticBrowser() {
               <td>
                 <code>{s.snapshotId}</code>
               </td>
-              <td>{s.folderId}</td>
-              <td>{s.hostId}</td>
-              <td>{formatTimestamp(s.timestamp)}</td>
-              <td>{s.paths.join(", ")}</td>
-              <td>{formatBytes(s.sizeBytes ?? 0)}</td>
+              <td data-label="Folder">{s.folderId}</td>
+              <td data-label="Device">{s.hostId}</td>
+              <td data-label="Time">{formatTimestamp(s.timestamp)}</td>
+              <td data-label="Paths">{s.paths.join(", ")}</td>
+              <td data-label="Size">{formatBytes(s.sizeBytes ?? 0)}</td>
               <td>
                 <button
                   type="button"
@@ -2086,7 +2188,7 @@ function ResticBrowser() {
             target device's service.
           </div>
         ) : (
-          <table className="data">
+          <table className="data data-list data-restore-jobs">
             <thead>
               <tr>
                 <th>Status</th>
@@ -2103,13 +2205,13 @@ function ResticBrowser() {
                   <td>
                     <span className={`badge badge-${job.status}`}>{job.status}</span>
                   </td>
-                  <td>
+                  <td data-label="Snapshot">
                     <code>{job.snapshotId}</code>
                   </td>
-                  <td className="muted">{job.targetHostId}</td>
-                  <td className="muted"><code>{job.targetPath}</code></td>
-                  <td className="muted">{formatTimestamp(job.createdAt)}</td>
-                  <td className="muted">{job.error ?? "—"}</td>
+                  <td className="muted" data-label="Target device">{job.targetHostId}</td>
+                  <td className="muted" data-label="Target path"><code>{job.targetPath}</code></td>
+                  <td className="muted" data-label="Created">{formatTimestamp(job.createdAt)}</td>
+                  <td className="muted" data-label="Error">{job.error ?? "—"}</td>
                 </tr>
               ))}
             </tbody>

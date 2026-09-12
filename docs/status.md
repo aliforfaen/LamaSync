@@ -12,6 +12,29 @@ workspace. CI runs type-check, web build, tests, strict skill drift, and
 distributable binary build.
 
 ## Recently shipped
+
+- **LAMA-335 — the backup viewer became an in-app browser with previews.** The
+  Data Browser already had authorized listing/navigation for local, S3 and
+  restic refs (server-side path validation, its own SigV4 signer and a proxied
+  64 MiB `POST /browse/download`), and image/text preview. What this pass added:
+  audio and video preview through the browser's own renderers with a
+  MIME-typed Blob (a typeless one is why `<audio>`/`<video>` refuse to play),
+  one decision point (`previewPlanFor`) that returns a *reason* for every file
+  with no viewer plus a Download action, a 48 MB preview cap across image,
+  audio and video so a phone never decodes a 64 MiB payload for a renderer
+  that cannot stream it, and a truthful floor at the transport's own 64 MiB
+  (`downloadable: false` above it, stated in the row instead of a Download
+  button that would 400), and stacked
+  phone-width rows for the listing, the browse-jobs panel, the snapshot picker
+  and the restore jobs. The trust boundary is now covered on both sides:
+  `device-boundary.test.ts` proves a device credential gets 403 on every browse
+  action, that the routes are 401 without one, and that an admin's S3 listing
+  carries neither the destination's secret nor its access key nor a signed URL;
+  `browse-trust-boundary.test.ts` fails if an S3 client, a signed-URL helper or
+  a credential field is ever added to the SPA. The component decision —
+  candidates, licences, weights, rejected alternatives — is recorded in
+  [`browse-viewer-decisions.md`](browse-viewer-decisions.md).
+
 - **LAMA-334 — the physical-phone feedback pass.** Seven defects reported from
   real use, fixed at the layer that owned each one:
   *Gallery folders:* the uploads screen can queue a whole gallery top-level
@@ -413,6 +436,23 @@ distributable binary build.
   Code splitting is maintenance work, not a release blocker.
 
 ## Recent verification baseline
+
+LAMA-335 backup viewer (this worktree): `bun x tsc --noEmit`, `bun run
+build:web-ui` (still one self-contained `index.html`), `bun test` **1574 pass /
+0 fail** (+17 over the LAMA-334 pass: the preview plan and MIME mapping, the
+SPA trust-boundary scan, and the browse authorization / no-secret-leak route
+tests). Strict skill drift OK — no route, command or flag changed, so the
+agent-skill reference is untouched. Verified against the built bundle and a
+seeded demo fleet with real media at 360x800: the listing renders as stacked
+rows (`scrollWidth == clientWidth == 360`, no visible cell both narrower than
+70px and more than three times its own width tall), the desktop table is
+unchanged at 1280px, and all four renderers were exercised — text, image,
+audio (the player reports the file's real 0:02 duration, which only happens
+once the Blob is typed correctly) and video (a decoded frame with controls).
+Screenshots in `docs/android-mobile-ux-artifacts/lama335-*.png`. **Not
+exercised live:** the snapshot-picker and restore-job collapses, because the
+demo fleet has no restore history — they are covered by the source-scanning
+table guard and the same `.data-list` pattern as the verified tables.
 
 LAMA-334 feedback pass (this worktree): `bun x tsc --noEmit`, `bun run
 build:web-ui` (still one self-contained `index.html`), `bun test` **1557 pass /
