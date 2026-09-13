@@ -31,6 +31,7 @@ design reference and image artifacts remain here because the web UI assets
 link to them directly.
 
 [Android implementation handoff](handoff-296-android.md) defines LAMA-296’s QR-first Android companion scope, owner decisions, and acceptance checks.
+[Android releases through Obtainium](android-release.md) defines the signed APK release and update procedure.
 
 [Android phase 1 spec](spec-296-phase-1-android-foundation.md) is the bounded next coding assignment: native scaffolding and QR/session authentication, before uploads.
 

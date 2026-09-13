@@ -146,7 +146,9 @@ The SDK is pinned to compileSdk 35 on purpose: SDK 36 components require a
 provisioning step this project does not perform, and the whole chosen matrix
 runs against the platforms already installed — `gradlew` provisions **no**
 new SDK components. `applicationId` is `app.lamasync.companion` (stable once
-chosen) with `versionName 0.1.0`.
+chosen). Tagged builds set its `versionName` from the matching root release
+version; see [Android releases through Obtainium](android-release.md) for the
+signed-distribution and update contract.
 
 Build, lint, and unit tests (148 JVM tests; instrumented tests need a
 device/AVD):
@@ -159,6 +161,13 @@ export ANDROID_HOME=/opt/android-sdk
 ./android/gradlew -p android lintDebug              # 0 errors expected (warnings are version-available notices)
 ./android/gradlew -p android testDebugUnitTest      # 148 unit tests, no device required
 ./android/gradlew -p android connectedDebugAndroidTest  # 52 tests (2 permission-negative tests skip w/o the extra pass)
+```
+
+Release APKs require the ignored local signing credentials and a stable
+release version:
+
+```bash
+./android/gradlew -p android assembleRelease -PlamasyncVersionName=0.3.10
 ```
 
 ### Stage-2 automatic protection (permissions, scheduling, tests)
