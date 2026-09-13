@@ -5,13 +5,16 @@ Read this after `AGENTS.md` when entering a coding worktree.
 ## Current work
 
 LAMA-316's app-backup data contract, LAMA-324 storage destinations, LAMA-325
-retention, and the LAMA-302 real-worktree soak are complete. LAMA-336 (the
+retention, and the LAMA-302 real-worktree soak are complete. LAMA-327 live
+sync progress and LAMA-328 persisted stale-while-revalidate folder/storage
+statistics are integrated with the current application-update baseline.
+LAMA-336 (the
 live-tree tar fix plus the whole file-operation/app-destination audit batch)
-is implemented on `aliforfaen/app-updates` and awaits release and a `dev-vm`
+is merged and awaits release and a `dev-vm`
 update — see follow-up 2 in [status.md](status.md). LAMA-337 (reconnect QR for
 an existing Android registration: an admin-created one-time QR whose exchange
 rotates that device's credentials in place, so its host id, inboxes and upload
-history survive) is implemented in the same worktree and awaits release plus
+history survive) is merged and awaits release plus
 one owner call on the Android paired-state QR entry — see follow-up 1. The
 next product work is LAMA-315 path classification (design handoff ready in
 `docs/handoff-315-path-classification.md`; stages 1–2 are implemented), the

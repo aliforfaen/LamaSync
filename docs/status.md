@@ -13,6 +13,15 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-327/328 — live sync progress and fast persisted statistics.** Active
+  rclone work now reports bounded, non-blocking phases and counters through an
+  in-memory server registry, with WebSocket updates and reconnect hydration in
+  Activity's responsive **Running now** panel. Folder and storage pages answer
+  from persisted last-known sizes, expose stale/refreshing metadata, dedupe and
+  bound background measurement work, embed secret-free folder assignments,
+  and bound storage-history reads. Explicit single-folder refresh uses the same
+  scheduler; mutation invalidations survive server restarts.
+
 - **LAMA-337 — Reconnect with QR for an existing Android device.** A phone
   whose local credentials were lost (reset, reinstall, wiped vault) used to
   have exactly one way back in: pair again, which mints a **new** host id and
@@ -393,7 +402,7 @@ distributable binary build.
 ## Active follow-ups
 
 1. **LAMA-337 — release, and the one device-path question it leaves open.**
-   The reconnect flow is code-complete on `aliforfaen/app-updates` with the
+   The reconnect flow is merged with the
    repo gates green; the release and the production deploy are the operator's,
    not the worktree's. One deliberate non-change needs an owner call: the
    Android app has **no QR entry point while it is already paired** (the
@@ -404,7 +413,7 @@ distributable binary build.
    *Known limitations*.
 
 2. **LAMA-336 — release and live confirmation.** The code for every finding is
-   on `aliforfaen/app-updates`; the release, the `dev-vm` update and the
+   merged; the release, the `dev-vm` update and the
    check that the next Hermes capture produces a verified snapshot in the
    server archive are the operator's, not the worktree's. Nothing in the
    change set is deployed yet, so the original five failing attempts are still
@@ -492,6 +501,10 @@ distributable binary build.
    physical dashboard no longer reports Forbidden; separately improve the
    native cookie-presence indicator so it does not claim verified fleet
    authority.
+10. **size_history retention.** LAMA-328 bounds and downsamples history reads,
+    but successful measurements still append indefinitely. Add pruning to the
+    existing daily maintenance pass once an operator-approved retention
+    horizon is chosen.
 
 ## Known limitations
 
