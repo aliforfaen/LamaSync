@@ -12,6 +12,16 @@
 // which cuts both its native identity and its full web-administration
 // session.
 //
+// LAMA-337: the same modal serves the per-device "Reconnect QR" action. In
+// that mode it asks for a reconnect enrollment targeted at an EXISTING
+// registration (POST /mobile/registrations/:hostId/reconnect-enrollment): the
+// QR payload is byte-identical in shape, and exchanging it rotates the
+// device's credentials in place — same host id, same inboxes, same upload
+// history, previous session signed out. Creating the QR is inert, so the
+// copy says plainly that closing the window or letting it expire changes
+// nothing. Revoke stays on the panel row (this modal never destroys a device
+// in reconnect mode).
+//
 // Copy is explicit about what the QR grants: FULL web administration of the
 // fleet (same powers as this desktop session) plus a separate native
 // identity for the Android app.
@@ -20,6 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal } from "./Modal.tsx";
 import { InlineError } from "./InlineError.tsx";
 import { api, errorText } from "../api.ts";
+import { startReconnectEnrollment } from "../mobile-registrations.ts";
 import type {
   MobileEnrollmentCreateResponse,
   MobileEnrollmentStatus,
@@ -35,7 +46,31 @@ import {
 
 const POLL_MS = 10_000; // status poll while the card is open and pending
 
-export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
+/** What an existing registration looks like to the reconnect flow. */
+export interface ReconnectTarget {
+  hostId: string;
+  displayName: string;
+}
+
+export interface AndroidEnrollmentModalProps {
+  onClose: () => void;
+  /** LAMA-337: reconnect an existing registration instead of pairing a new
+   *  one. Omitted → the regular "Add Android device" flow. */
+  reconnect?: ReconnectTarget;
+  /** Called once when a reconnect QR is claimed, so the panel can refresh the
+   *  device projection without waiting for the modal to close. */
+  onReconnected?: () => void;
+}
+
+const reconnectServices = {
+  createReconnect: (hostId: string) => api.createMobileReconnectEnrollment(hostId),
+};
+
+export function AndroidEnrollmentModal({
+  onClose,
+  reconnect,
+  onReconnected,
+}: AndroidEnrollmentModalProps) {
   // The current enrollment (the QR being shown). `expiresAt`/`expiresInSeconds`
   // come from the create response; the status poll then tracks server truth.
   const [enrollment, setEnrollment] = useState<MobileEnrollmentCreateResponse | null>(null);
@@ -50,30 +85,46 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
   // Mirror of the enrollment currently on screen; poll responses from a
   // superseded (regenerated) QR must never overwrite the new one.
   const enrollmentIdRef = useRef<string | null>(null);
+  // A reconnect QR is claimed once: tell the panel exactly once, then let the
+  // card keep rendering the connected state.
+  const reconnectedNotified = useRef(false);
 
-  /** Create a fresh enrollment (initial open + regenerate). The server
-   *  transactionally revokes any other still-pending enrollment. */
+  /** Create a fresh enrollment (initial open + regenerate). For a pairing QR
+   *  the server transactionally revokes any other still-pending pairing QR;
+   *  for a reconnect QR it supersedes only this device's earlier pending
+   *  reconnect QR. */
   const create = useCallback(async (): Promise<void> => {
     setBusy(true);
     setError(null);
     setActionError(null);
     try {
-      const created = await api.createMobileEnrollment({
-        webAdmin: true,
-        clientType: "android",
-      });
-      if (!mounted.current) return;
+      let created: MobileEnrollmentCreateResponse | null;
+      if (reconnect) {
+        // The helper turns a failure into text; a failed reconnect request
+        // creates no QR and leaves the device exactly as it was.
+        const result = await startReconnectEnrollment(reconnectServices, reconnect.hostId);
+        if (result.error !== null) {
+          if (mounted.current) setError(result.error);
+          return;
+        }
+        created = result.enrollment;
+      } else {
+        created = await api.createMobileEnrollment({ webAdmin: true, clientType: "android" });
+      }
+      if (created === null || !mounted.current) return;
       enrollmentIdRef.current = created.enrollmentId;
       setEnrollment(created);
       setStatus(null); // restart polling against the new enrollment
       setRevokePending(null);
       setNow(Date.now());
+      // A regenerated reconnect QR is a fresh claim: let it notify the panel too.
+      reconnectedNotified.current = false;
     } catch (err) {
       if (mounted.current) setError(errorText(err));
     } finally {
       if (mounted.current) setBusy(false);
     }
-  }, []);
+  }, [reconnect]);
 
   useEffect(() => {
     mounted.current = true;
@@ -142,6 +193,18 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
 
   const host = status?.host ?? null;
   const revoked = status?.status === "revoked" || (host?.revokedAt ?? null) !== null;
+  // LAMA-337: reconnect mode reuses the whole card; only the copy and the
+  // revoke affordance differ.
+  const reconnectTarget = reconnect ?? null;
+  const reconnecting = reconnectTarget !== null;
+
+  // Tell the panel once when the device has claimed a reconnect QR, so the
+  // device row (last-seen, app version, display name) refreshes immediately.
+  useEffect(() => {
+    if (!reconnecting || status?.status !== "used" || reconnectedNotified.current) return;
+    reconnectedNotified.current = true;
+    onReconnected?.();
+  }, [reconnecting, status, onReconnected]);
 
   async function confirmRevoke(): Promise<void> {
     if (!revokePending || !enrollment) return;
@@ -167,7 +230,7 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal title="Add Android device" onClose={onClose}>
+    <Modal title={enrollmentModalTitle(reconnectTarget)} onClose={onClose}>
       {!enrollment && busy ? (
         <div className="pairing-loading" aria-busy="true">
           <div className="skel skel-line" />
@@ -184,14 +247,7 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
         </>
       ) : enrollment ? (
         <div className="pairing-card">
-          {/* The QR grants real authority — say so, plainly. */}
-          <div className="android-notice" role="note">
-            <strong>Scanning grants FULL web administration.</strong> The
-            paired phone manages this entire fleet (devices, folders, storage,
-            access keys) exactly like this desktop session — no second login —
-            and receives its own separate native identity for the Android app.
-            Only scan this QR from the phone you are pairing.
-          </div>
+          <EnrollmentNotice reconnect={reconnectTarget} />
 
           {error ? <div className="error">{error}</div> : null}
 
@@ -204,7 +260,9 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
           ) : !terminal && !revoked ? (
             <>
               <p className="muted">
-                On the phone: open the LamaSync Android app and scan this QR.
+                {reconnecting
+                  ? "On the phone: open the LamaSync Android app and scan this QR on the device you are reconnecting."
+                  : "On the phone: open the LamaSync Android app and scan this QR."}
               </p>
               <div className="pairing-qr">
                 <span dangerouslySetInnerHTML={{ __html: qrSvg }} aria-hidden="true" />
@@ -232,10 +290,13 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
             <>
               {effectiveStatus === "used" && !revoked && host ? (
                 <div className="pairing-claimed">
-                  <span className="badge badge-success">device paired</span>
+                  <span className="badge badge-success">
+                    {reconnecting ? "device reconnected" : "device paired"}
+                  </span>
                   <span className="muted">
-                    {host.displayName} is connected. This enrollment has been
-                    used — you're all set.
+                    {reconnecting
+                      ? `${host.displayName} is back on its existing identity. Its credentials were rotated and its previous session was signed out.`
+                      : `${host.displayName} is connected. This enrollment has been used — you're all set.`}
                   </span>
                 </div>
               ) : (
@@ -253,15 +314,24 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
               {host ? <PairedDeviceDetails host={host} /> : null}
 
               {effectiveStatus === "used" && !revoked ? (
-                <p className="muted">
-                  Revoking cuts the phone’s full web administration AND its
-                  native identity immediately. The app must re-pair with a new
-                  QR before it can sign in again.
-                </p>
+                reconnecting ? (
+                  <p className="muted">
+                    The device keeps its inboxes and upload history. The old
+                    session — on that phone or anywhere else — no longer
+                    signs in.
+                  </p>
+                ) : (
+                  <p className="muted">
+                    Revoking cuts the phone’s full web administration AND its
+                    native identity immediately. The app must re-pair with a new
+                    QR before it can sign in again.
+                  </p>
+                )
               ) : (
                 <p className="muted">
-                  Pair the device again with a fresh QR. Any still-pending
-                  older QR is voided the moment you generate one.
+                  {reconnecting
+                    ? "Show a new reconnect QR — this device's earlier pending QR is voided the moment you generate one."
+                    : "Pair the device again with a fresh QR. Any still-pending older QR is voided the moment you generate one."}
                 </p>
               )}
             </>
@@ -302,7 +372,9 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
               <button type="button" className="action" onClick={onClose}>
                 Close
               </button>
-              {effectiveStatus === "used" && !revoked && host ? (
+              {/* Revoke stays on the device row in reconnect mode: this card
+                  exists to restore the identity, not to destroy it. */}
+              {!reconnecting && effectiveStatus === "used" && !revoked && host ? (
                 <button
                   type="button"
                   className="action danger"
@@ -318,7 +390,7 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
                   disabled={busy}
                   onClick={() => void create()}
                 >
-                  {busy ? "Generating…" : "Generate new QR"}
+                  {busy ? "Generating…" : reconnecting ? "New reconnect QR" : "Generate new QR"}
                 </button>
               )}
             </div>
@@ -326,6 +398,46 @@ export function AndroidEnrollmentModal({ onClose }: { onClose: () => void }) {
         </div>
       ) : null}
     </Modal>
+  );
+}
+
+/** Modal title for each mode (exported so the copy is covered by tests). */
+export function enrollmentModalTitle(reconnect: ReconnectTarget | null): string {
+  return reconnect ? "Reconnect Android device" : "Add Android device";
+}
+
+/**
+ * What scanning the QR will do, stated plainly (LAMA-296: it grants real
+ * authority). A reconnect QR grants nothing new — it rotates the credentials
+ * of the device that already holds them — so its copy says exactly that, plus
+ * the two facts an operator needs: the device keeps its identity/inboxes/
+ * history, and creating the QR is inert.
+ *
+ * Exported as a presentational component so both modes' copy is tested
+ * without a DOM (the same react-dom/server convention as the device table).
+ */
+export function EnrollmentNotice({ reconnect }: { reconnect: ReconnectTarget | null }) {
+  if (reconnect) {
+    return (
+      <div className="android-notice" role="note">
+        <strong>Scanning rotates this device's credentials.</strong>{" "}
+        <strong>{reconnect.displayName}</strong> keeps its device id ({" "}
+        <code>{reconnect.hostId}</code>), its upload inboxes and its upload
+        history — and the phone's previous session is signed out the moment the
+        new credentials arrive. Its authority is unchanged. Nothing happens
+        until a phone scans this QR: closing this window or letting it expire
+        changes nothing.
+      </div>
+    );
+  }
+  return (
+    <div className="android-notice" role="note">
+      <strong>Scanning grants FULL web administration.</strong> The paired
+      phone manages this entire fleet (devices, folders, storage, access keys)
+      exactly like this desktop session — no second login — and receives its
+      own separate native identity for the Android app. Only scan this QR from
+      the phone you are pairing.
+    </div>
   );
 }
 

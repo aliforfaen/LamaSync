@@ -15,6 +15,15 @@
 // Admin page, so it survives modal close and page reload, and a revoke only
 // needs the row's hostId — never the enrollment id or a fresh QR.
 //
+// LAMA-337 adds a second per-row action, "Reconnect QR": it asks the server
+// for a one-time enrollment targeted at that EXISTING registration
+// (POST /api/v1/mobile/registrations/:hostId/reconnect-enrollment) and shows
+// the same modal/QR. Exchanging it rotates the device's credentials in place
+// — same host id, so its upload inboxes and upload history survive — and the
+// row is refreshed as soon as the phone claims the QR (or when the card
+// closes). Revoked rows get no reconnect action: those are paired again, not
+// reconnected.
+//
 // The interactive behavior lives in exported flow helpers / a presentational
 // table so bun:test drives the exact production handlers DOM-free (repo
 // convention — see pages/apps.test.ts and access-keys.ts).
@@ -42,6 +51,7 @@ import {
 const mobileDevicesServices: MobileDevicesServices = {
   list: () => api.listMobileRegistrations(),
   revoke: (hostId, reason) => api.revokeMobileRegistration(hostId, reason),
+  createReconnect: (hostId) => api.createMobileReconnectEnrollment(hostId),
   listDestinations: (hostId) =>
     api.listMobileRegistrationDestinations(hostId).then((r) => r.destinations),
   createDestination: (hostId, label, slug, folderId) =>
@@ -63,6 +73,8 @@ export function MobileDevicesPanel() {
   const [revokeBusy, setRevokeBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [showEnrollment, setShowEnrollment] = useState(false);
+  // LAMA-337: the device whose reconnect QR is on screen, if any.
+  const [reconnectTarget, setReconnectTarget] = useState<MobileRegistrationSummary | null>(null);
 
   /** (Re)load the projection. On failure the current rows stay put and the
    *  error banner explains why; on success rows are replaced and the banner
@@ -169,6 +181,15 @@ export function MobileDevicesPanel() {
         never choose a path, a backend, or another device's inbox. Completed
         files appear under the Data Browser's local root.
       </p>
+      <p className="muted">
+        <strong>Lost a device's credentials?</strong> Use <strong>Reconnect
+        QR</strong> on an active device instead of pairing it again. Scanning
+        the QR rotates that device's native token and web session while
+        keeping its device id — its inboxes and upload history stay put, and
+        anything still signed in with the old credentials is cut off. Nothing
+        changes until the phone scans it. Revoked devices cannot be
+        reconnected; pair those again.
+      </p>
 
       <MobileDevicesTable
         rows={rows}
@@ -177,6 +198,7 @@ export function MobileDevicesPanel() {
         actionError={actionError}
         revokeBusy={revokeBusy}
         onRevoke={(reg) => setRevokeTarget(reg)}
+        onReconnect={(reg) => setReconnectTarget(reg)}
       />
 
       {revokeTarget ? (
@@ -203,6 +225,23 @@ export function MobileDevicesPanel() {
         />
       ) : null}
 
+      {reconnectTarget ? (
+        <AndroidEnrollmentModal
+          reconnect={{
+            hostId: reconnectTarget.hostId,
+            displayName: reconnectTarget.displayName,
+          }}
+          // A reconnected device has fresh metadata (display name, app version,
+          // last seen) — refresh the projection as soon as it is claimed, not
+          // only when the modal closes.
+          onReconnected={() => void refresh()}
+          onClose={() => {
+            setReconnectTarget(null);
+            void refresh();
+          }}
+        />
+      ) : null}
+
       {showEnrollment ? (
         <AndroidEnrollmentModal onClose={() => void onEnrollmentClose()} />
       ) : null}
@@ -215,6 +254,10 @@ export function MobileDevicesPanel() {
  * render active + revoked fixtures, the loading skeleton, and the empty
  * state without a DOM. Never displays secrets, grants, or enrollment ids —
  * the projection itself is the only data source.
+ *
+ * LAMA-337: active rows also offer "Reconnect QR" (rotate this device's
+ * credentials while keeping its identity). Revoked rows get neither action —
+ * a revoked device is paired again, not reconnected.
  */
 export function MobileDevicesTable({
   rows,
@@ -223,6 +266,7 @@ export function MobileDevicesTable({
   actionError,
   revokeBusy,
   onRevoke,
+  onReconnect,
 }: {
   rows: MobileRegistrationSummary[] | null;
   loading: boolean;
@@ -230,6 +274,7 @@ export function MobileDevicesTable({
   actionError: string | null;
   revokeBusy: boolean;
   onRevoke: (reg: MobileRegistrationSummary) => void;
+  onReconnect: (reg: MobileRegistrationSummary) => void;
 }) {
   const [inboxFor, setInboxFor] = useState<string | null>(null);
   return (
@@ -280,6 +325,7 @@ export function MobileDevicesTable({
                     expanded={false}
                     revokeBusy={revokeBusy}
                     onRevoke={() => onRevoke(reg)}
+                    onReconnect={() => onReconnect(reg)}
                     onToggleInboxes={() => setInboxFor(reg.hostId)}
                   />
                 );
@@ -291,6 +337,7 @@ export function MobileDevicesTable({
                   expanded
                   revokeBusy={revokeBusy}
                   onRevoke={() => onRevoke(reg)}
+                  onReconnect={() => onReconnect(reg)}
                   onToggleInboxes={() => setInboxFor(null)}
                 />
               );
@@ -309,12 +356,14 @@ function DeviceRow({
   expanded,
   revokeBusy,
   onRevoke,
+  onReconnect,
   onToggleInboxes,
 }: {
   reg: MobileRegistrationSummary;
   expanded: boolean;
   revokeBusy: boolean;
   onRevoke: () => void;
+  onReconnect: () => void;
   onToggleInboxes: () => void;
 }) {
   const status = mobileRegistrationStatus(reg);
@@ -354,14 +403,23 @@ function DeviceRow({
             {expanded ? "Hide inboxes" : "Inboxes"}
           </button>{" "}
           {active ? (
-            <button
-              type="button"
-              className="action"
-              disabled={revokeBusy}
-              onClick={onRevoke}
-            >
-              {revokeBusy ? "Revoking…" : "Revoke"}
-            </button>
+            <>
+              <button
+                type="button"
+                className="action"
+                onClick={onReconnect}
+              >
+                Reconnect QR
+              </button>{" "}
+              <button
+                type="button"
+                className="action"
+                disabled={revokeBusy}
+                onClick={onRevoke}
+              >
+                {revokeBusy ? "Revoking…" : "Revoke"}
+              </button>
+            </>
           ) : null}
         </td>
       </tr>

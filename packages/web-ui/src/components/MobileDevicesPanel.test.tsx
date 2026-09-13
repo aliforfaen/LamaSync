@@ -39,6 +39,7 @@ function renderTable(
       actionError={opts.actionError ?? null}
       revokeBusy={false}
       onRevoke={() => undefined}
+      onReconnect={() => undefined}
     />,
   );
 }
@@ -48,18 +49,20 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 describe("MobileDevicesTable — projection row rendering", () => {
-  it("renders an active row with device name, host id, app, and a Revoke action", () => {
+  it("renders an active row with device name, host id, app, and the device actions", () => {
     const html = renderTable([reg()]);
     expect(html).toContain("Pixel 9");
     expect(html).toContain("host-pixel-9");
     expect(html).toContain("android · version 1.2.0");
     expect(html).toContain("badge-success");
     expect(html).toContain("active");
-    // Active rows get the destructive Revoke affordance.
+    // Active rows get the destructive Revoke affordance…
     expect(html).toContain("Revoke");
+    // …and the LAMA-337 reconnect action.
+    expect(html).toContain("Reconnect QR");
   });
 
-  it("renders a revoked row with its reason and NO Revoke action", () => {
+  it("renders a revoked row with its reason and NO device actions", () => {
     const html = renderTable([
       reg({
         hostId: "host-old-phone",
@@ -75,8 +78,10 @@ describe("MobileDevicesTable — projection row rendering", () => {
     expect(html).toContain("revoked");
     // The recorded reason is visible for audit…
     expect(html).toContain("Lost device");
-    // …but a revoked device cannot be revoked again from the row.
+    // …but a revoked device can be neither revoked nor reconnected from the
+    // row (it must be paired again with a fresh QR).
     expect(html).not.toContain("Revoke");
+    expect(html).not.toContain("Reconnect QR");
   });
 
   it("renders mixed active + revoked rows with exactly one Revoke action", () => {
@@ -92,6 +97,7 @@ describe("MobileDevicesTable — projection row rendering", () => {
     expect(html).toContain("Pixel 9");
     expect(html).toContain("Old phone");
     expect(countOccurrences(html, "Revoke")).toBe(1);
+    expect(countOccurrences(html, "Reconnect QR")).toBe(1);
     // Never renders secrets/grants — projection fields only.
     expect(html).not.toContain("nativeToken");
     expect(html).not.toContain("webGrant");
@@ -102,6 +108,7 @@ describe("MobileDevicesTable — projection row rendering", () => {
     const html = renderTable([]);
     expect(html).toContain("No Android devices paired yet");
     expect(html).not.toContain("Revoke");
+    expect(html).not.toContain("Reconnect QR");
   });
 
   it("shows a loading skeleton while the first projection read is pending", () => {

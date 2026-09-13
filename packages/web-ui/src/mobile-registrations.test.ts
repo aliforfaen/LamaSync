@@ -7,9 +7,18 @@
 // (GET /api/v1/mobile/registrations), locates the same phone by its row, and
 // revokes it with only that row's hostId. No enrollment id, no QR state, no
 // secrets are involved anywhere on this path.
+//
+// LAMA-337 adds the reconnect path: the panel asks for a reconnect QR for the
+// row's hostId (POST /mobile/registrations/:hostId/reconnect-enrollment) and
+// a failure must leave the device exactly as it was — the request creates,
+// never consumes, the QR.
 
 import { describe, expect, it } from "bun:test";
-import type { MobileRegistrationSummary, MobileUploadDestination } from "@lamasync/core";
+import type {
+  MobileEnrollmentCreateResponse,
+  MobileRegistrationSummary,
+  MobileUploadDestination,
+} from "@lamasync/core";
 import {
   createDestinationAndReload,
   DEVICE_REVOKE_REASON,
@@ -20,6 +29,7 @@ import {
   mobileRegistrationStatus,
   revokeDestinationAndReload,
   revokeDeviceAndReload,
+  startReconnectEnrollment,
   type MobileDevicesServices,
 } from "./mobile-registrations.ts";
 
@@ -59,6 +69,9 @@ function scriptedServices(initial: MobileRegistrationSummary[]) {
           ? { ...row, revokedAt: 1_784_000_100_000, revokedReason: reason }
           : row,
       );
+    },
+    async createReconnect() {
+      throw new Error("not used in this test");
     },
     // Stage 1 destination methods are unused by the registration-flow tests;
     // wire trivial stubs so the interface stays honest.
@@ -236,6 +249,52 @@ describe("revokeDeviceAndReload — revoke then refresh the projection", () => {
   });
 });
 
+describe("startReconnectEnrollment — create a QR for an existing device", () => {
+  function reconnectFixture(over: Partial<MobileEnrollmentCreateResponse> = {}): MobileEnrollmentCreateResponse {
+    return {
+      enrollmentId: "enr-reconnect-1",
+      secret: "one-time-reconnect-secret",
+      serverOrigin: "https://fleet.example.com",
+      clientType: "android",
+      webAdmin: true,
+      expiresAt: 1_784_000_600_000,
+      expiresInSeconds: 600,
+      ...over,
+    };
+  }
+
+  it("requests a reconnect QR for the row's host and returns its QR inputs", async () => {
+    const calls: string[] = [];
+    const result = await startReconnectEnrollment(
+      {
+        async createReconnect(hostId: string) {
+          calls.push(hostId);
+          return reconnectFixture();
+        },
+      },
+      "host-pixel-9",
+    );
+    expect(calls).toEqual(["host-pixel-9"]);
+    expect(result.error).toBeNull();
+    // The same one-time secret the modal renders into the QR payload.
+    expect(result.enrollment?.secret).toBe("one-time-reconnect-secret");
+    expect(result.enrollment?.expiresInSeconds).toBe(600);
+  });
+
+  it("returns error text (and no enrollment) when the server refuses — nothing is created", async () => {
+    const result = await startReconnectEnrollment(
+      {
+        async createReconnect() {
+          throw new Error("mobile registration is revoked; pair it again instead");
+        },
+      },
+      "host-revoked",
+    );
+    expect(result.enrollment).toBeNull();
+    expect(result.error).toBe("mobile registration is revoked; pair it again instead");
+  });
+});
+
 describe("stage 1 destination flows", () => {
   /** Scripted services with an in-memory destination list per host. */
   function destinationServices(initial: MobileUploadDestination[] = []) {
@@ -249,6 +308,9 @@ describe("stage 1 destination flows", () => {
       },
       async revoke() {
         return {};
+      },
+      async createReconnect() {
+        throw new Error("not used in this test");
       },
       async listDestinations(hostId) {
         if (error) throw error;

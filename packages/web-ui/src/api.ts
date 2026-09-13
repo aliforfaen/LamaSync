@@ -677,6 +677,16 @@ export const api = {
   // inside the QR the phone scans.
   createMobileEnrollment: (opts: MobileEnrollmentCreateRequest = { webAdmin: true }) =>
     apiPost<MobileEnrollmentCreateResponse>("/mobile/enrollments", opts),
+  /** LAMA-337: create a reconnect QR for an EXISTING registration. The QR is
+   *  the same `lamasync.android.enroll` v1 payload; exchanging it rotates that
+   *  device's credentials in place and returns its unchanged host id, so
+   *  destinations and upload history survive. Nothing about the working
+   *  device changes until the phone actually scans it. */
+  createMobileReconnectEnrollment: (hostId: string) =>
+    apiPost<MobileEnrollmentCreateResponse>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/reconnect-enrollment`,
+      {},
+    ),
   getMobileEnrollment: (enrollmentId: string) =>
     apiGet<MobileEnrollmentStatusResponse>(
       `/mobile/enrollments/${encodeURIComponent(enrollmentId)}`,

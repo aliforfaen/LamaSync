@@ -3,6 +3,12 @@
 // the projection mapping and the load/revoke/refresh orchestration are
 // unit-testable without a DOM (repo convention, see access-keys.ts).
 //
+// LAMA-337 adds the reconnect flow helper: the panel's per-device "Reconnect
+// QR" action asks the server for a one-time enrollment targeted at that
+// EXISTING registration. The QR itself is rendered by the enrollment modal
+// from the returned response — nothing here handles a secret beyond passing
+// the response through.
+//
 // The panel reads the admin-only projection GET /api/v1/mobile/registrations
 // (bare MobileRegistrationSummary[] — most recent first, revoked rows
 // included) and revokes through the existing POST
@@ -10,7 +16,11 @@
 // carries no secret hashes, grants, or enrollment ids — this module never
 // deals with any of those either.
 
-import type { MobileRegistrationSummary, MobileUploadDestination } from "@lamasync/core";
+import type {
+  MobileEnrollmentCreateResponse,
+  MobileRegistrationSummary,
+  MobileUploadDestination,
+} from "@lamasync/core";
 
 /**
  * Audit reason recorded server-side on every revoke initiated from this
@@ -47,6 +57,9 @@ export interface MobileDevicesServices {
   list(): Promise<MobileRegistrationSummary[]>;
   /** POST /api/v1/mobile/registrations/:hostId/revoke. */
   revoke(hostId: string, reason: string): Promise<unknown>;
+  /** POST /api/v1/mobile/registrations/:hostId/reconnect-enrollment (admin,
+   *  LAMA-337) — one-time QR inputs targeted at the existing registration. */
+  createReconnect(hostId: string): Promise<MobileEnrollmentCreateResponse>;
   /** GET /api/v1/mobile/registrations/:hostId/destinations (admin, stage 1). */
   listDestinations(hostId: string): Promise<MobileUploadDestination[]>;
   /** POST /api/v1/mobile/registrations/:hostId/destinations (admin, stage 1). */
@@ -99,6 +112,42 @@ export async function revokeDeviceAndReload(
     };
   }
   return loadMobileRegistrations(services);
+}
+
+// ---------------------------------------------------------------------------
+// LAMA-337 — reconnect QR
+// ---------------------------------------------------------------------------
+
+/** The one call the reconnect flow needs (narrow, so the modal can inject it
+ *  and bun:test can drive it without a DOM). */
+export interface MobileReconnectServices {
+  createReconnect(hostId: string): Promise<MobileEnrollmentCreateResponse>;
+}
+
+/** Result of one reconnect-QR request: the QR inputs on success, human error
+ *  text on failure (the modal renders it inline and offers a retry). */
+export interface MobileReconnectResult {
+  enrollment: MobileEnrollmentCreateResponse | null;
+  error: string | null;
+}
+
+/**
+ * Ask for a reconnect QR for an existing device. A failure here changes
+ * nothing on either side — the device keeps working with the credentials it
+ * already has (that is the point of creating, not consuming, the QR).
+ */
+export async function startReconnectEnrollment(
+  services: MobileReconnectServices,
+  hostId: string,
+): Promise<MobileReconnectResult> {
+  try {
+    return { enrollment: await services.createReconnect(hostId), error: null };
+  } catch (err) {
+    return {
+      enrollment: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
