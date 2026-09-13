@@ -13,6 +13,39 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-336 — live-tree app captures, destination updates and the audit
+  batch around them.** A `dev-vm` Hermes protection was enabled, scheduled and
+  pointed at the server archive, and had produced no snapshots: five scheduled
+  attempts reached the daemon and died before upload because GNU tar exits 1
+  on a live tree. The whole set of findings is now fixed, one commit each.
+  *tar capture:* `~` and absolute exclude patterns are normalized into tar's
+  `-C /` member namespace (so `~/.hermes/backups` can finally match
+  `home/<user>/.hermes/backups`), `LC_ALL=C` keeps diagnostics stable, and
+  exit 1 is recoverable only when every diagnostic is one of the recognized
+  live-tree warnings — permission errors, unknown text, empty stderr and
+  exit 2+ stay fatal. `runAppTarCapture` is the seam the regression tests
+  drive real GNU tar through, including an actual Unix socket and a file
+  appended to for the whole read.
+  *Atomicity:* server-local EXDEV fallback and local/NFS publication copy to a
+  sibling temp file, fsync and rename instead of writing the final object key
+  in place; the daemon's config cache, update cooldown, gitignore filter hash
+  and report queue share one `writeFileAtomic` with mode preservation.
+  *Untrusted input:* the skill bundle lists and validates every archive member
+  (relative, inside `lamasync-skill-<version>/`, plain file or directory)
+  before `tar -xzf` runs.
+  *Destinations and schedules:* `PUT /apps/protections/:id` treats an explicit
+  `null` as a clear (so `backendId: null` also drops the bucket and switching
+  s3 → local works), and one shared schedule grammar
+  (`validateScheduleExpression`, backed by the daemon's own parser) rejects any
+  expression the daemon could not arm — for protections and folder
+  assignments alike. The enrollment form now opens on an explicit "Manual
+  only" choice and the protection table says "Not scheduled" instead of an
+  em-dash next to a green Enabled badge.
+  *Conflicts:* manual keep-both resolution is a checked `renameSync` again (it
+  used to ignore `mv`'s exit status and then overwrite the local copy anyway)
+  and its `.conflict-YYYYMMDD` name no longer collides with an earlier copy
+  from the same day.
+
 - **LAMA-335 — the backup viewer became an in-app browser with previews.** The
   Data Browser already had authorized listing/navigation for local, S3 and
   restic refs (server-side path validation, its own SigV4 signer and a proxied
@@ -307,7 +340,14 @@ distributable binary build.
 
 ## Active follow-ups
 
-0. **LAMA-296 stage 2 — real-device soak.** Automatic camera protection is
+1. **LAMA-336 — release and live confirmation.** The code for every finding is
+   on `aliforfaen/app-updates`; the release, the `dev-vm` update and the
+   check that the next Hermes capture produces a verified snapshot in the
+   server archive are the operator's, not the worktree's. Nothing in the
+   change set is deployed yet, so the original five failing attempts are still
+   the live behaviour until it ships.
+
+2. **LAMA-296 stage 2 — real-device soak.** Automatic camera protection is
    emulator-verified (see
    [`report-296-stage-2-auto-protection.md`](report-296-stage-2-auto-protection.md));
    the remaining evidence is a one-day real-phone run (Doze/battery,
@@ -315,7 +355,7 @@ distributable binary build.
    paths, a real partial-access selection, and a server restart mid-
    transfer).
 
-1. **LAMA-315 — path classification and recommendation UX.** The design
+3. **LAMA-315 — path classification and recommendation UX.** The design
    handoff is [`handoff-315-path-classification.md`](
    handoff-315-path-classification.md) (taxonomy, data model, staged
    delivery). Stage 1 — annotation provenance, the deterministic classifier,
@@ -327,18 +367,18 @@ distributable binary build.
    plan, optional denormalization) remain. Known contract gap: `excludes` is a
    raw `string[]` with no class or rationale, so review surfaces list exclude
    patterns verbatim and associate no classification with them.
-2. **Application setup/restore executor.** Build the target-side wizard:
+4. **Application setup/restore executor.** Build the target-side wizard:
    preflight, dry-run/change plan, populated-target decisions, revalidation
    before writes, rollback artifact, and execution journal. Direct app restore
    remains intentionally unavailable until this exists.
-3. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
+5. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
   validation are complete; production-client rollout/acceptance on `cachy`
   remains pending because it requires an explicit restart/update authority.
-4. **LAMA-321 follow-up — trash retention.** Optional per-folder
+6. **LAMA-321 follow-up — trash retention.** Optional per-folder
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
-5. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
+7. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
    close.** Phases 3–7 shipped; see **Recently shipped**. What remains is
    verification that needs a human or a device, not more code:
    - **TalkBack** over the shell and the mobile nav: focus order, the
@@ -366,7 +406,7 @@ distributable binary build.
      browser belong to this sweep. The review's fixes are covered by tests: the
      raw-fetch transport signals, the shared sign-out ordering, and
      service-worker activation pruning only `lamasync-shell-*`.
-6. **LAMA-332 — Android WebView fleet administration is forbidden after a
+8. **LAMA-332 — Android WebView fleet administration is forbidden after a
    fresh re-pair.** On the physical device, the embedded management UI returns
    `Forbidden` for fleet data while the native shell reports `Connected`. The
    operator signed out, removed the registration from LamaSync, and paired
