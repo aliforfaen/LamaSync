@@ -6,9 +6,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { MIGRATIONS, SERVER_SCHEMA } from "@lamasync/core";
-import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, chmodSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "app-storage-test-secret-key-0001";
@@ -182,6 +182,92 @@ describe("local/nfs backend publish + delete (LAMA-324)", () => {
 
     expect((await deleteSnapshotArchive(db, loc)).status).toBe("deleted");
     expect((await deleteSnapshotArchive(db, loc)).status).toBe("absent");
+  });
+});
+
+describe("atomic publication (LAMA-336)", () => {
+  test("a failed backend publish leaves no partial object and no temporary sibling", async () => {
+    const localPath = join(testRoot, "nfs-atomic-fail");
+    const backendId = insertLocalBackend(localPath, "nfs");
+    const objectDir = join(localPath, "lamasync", "apps", "prot-fail");
+    mkdirSync(objectDir, { recursive: true });
+    // Make the destination directory unwritable: the publish must fail after
+    // staging the bytes, never by exposing a partial file at the final key.
+    chmodSync(objectDir, 0o500);
+    try {
+      await expect(
+        publishSnapshotArchive({
+          stagedPath: stageFile("fail-archive"),
+          protectionId: "prot-fail",
+          snapshotId: "snap-fail",
+          ...refMeta("fail-archive"),
+          destination: { backend: resolveAppBackend(db, backendId)!, s3Bucket: "" },
+        }),
+      ).rejects.toThrow();
+      expect(existsSync(join(objectDir, "snap-fail.tar.gz"))).toBe(false);
+      expect(readdirSync(objectDir)).toEqual([]);
+    } finally {
+      chmodSync(objectDir, 0o700);
+    }
+  });
+
+  test("a failed publication never truncates the object already at the key", async () => {
+    const localPath = join(testRoot, "nfs-atomic-existing");
+    const backendId = insertLocalBackend(localPath, "nfs");
+    const objectDir = join(localPath, "lamasync", "apps", "prot-existing");
+    const objectPath = join(objectDir, "snap-existing.tar.gz");
+    mkdirSync(objectDir, { recursive: true });
+    writeFileSync(objectPath, "previous-archive");
+    chmodSync(objectDir, 0o500);
+    try {
+      await expect(
+        publishSnapshotArchive({
+          stagedPath: stageFile("replacement"),
+          protectionId: "prot-existing",
+          snapshotId: "snap-existing",
+          ...refMeta("replacement"),
+          destination: { backend: resolveAppBackend(db, backendId)!, s3Bucket: "" },
+        }),
+      ).rejects.toThrow();
+      expect(readFileSync(objectPath, "utf8")).toBe("previous-archive");
+    } finally {
+      chmodSync(objectDir, 0o700);
+    }
+  });
+
+  test("a successful republish replaces the object and leaves no temporary file", async () => {
+    const localPath = join(testRoot, "nfs-atomic-ok");
+    const backendId = insertLocalBackend(localPath, "nfs");
+    const destination = { backend: resolveAppBackend(db, backendId)!, s3Bucket: "" };
+    const publish = (contents: string) =>
+      publishSnapshotArchive({
+        stagedPath: stageFile(contents),
+        protectionId: "prot-ok",
+        snapshotId: "snap-ok",
+        ...refMeta(contents),
+        destination,
+      });
+
+    await publish("first-archive");
+    await publish("second-archive");
+
+    const objectDir = join(localPath, "lamasync", "apps", "prot-ok");
+    expect(readFileSync(join(objectDir, "snap-ok.tar.gz"), "utf8")).toBe("second-archive");
+    expect(readdirSync(objectDir)).toEqual(["snap-ok.tar.gz"]);
+  });
+
+  test("a successful server-local publish leaves only the final archive", async () => {
+    const staged = stageFile("local-atomic");
+    const result = await publishSnapshotArchive({
+      stagedPath: staged,
+      protectionId: "prot-atomic",
+      snapshotId: "snap-atomic",
+      ...refMeta("local-atomic"),
+      destination: null,
+    });
+    const archiveDir = dirname(join(process.env.LAMASYNC_BACKUP_DIR!, result.localRelPath!));
+    expect(readdirSync(archiveDir)).toEqual([basename(result.localRelPath!)]);
+    expect(existsSync(staged)).toBe(false);
   });
 });
 
