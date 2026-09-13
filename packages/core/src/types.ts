@@ -1205,6 +1205,12 @@ export type MobileClientType = "android";
  * legacy CLI pairing QR normalization does NOT apply to this payload).
  * `secret` is a one-time 256-bit QR secret; it exists only on the QR the app
  * scans, never in a stored server response.
+ *
+ * LAMA-337: the SAME payload shape carries both flows. A reconnect QR encodes
+ * an enrollment whose exchange rotates credentials for an existing
+ * registration, so the payload adds no field — the server knows from the
+ * enrollment row whether the id is a new-installation or reconnect QR, and the
+ * app never needs a second parser.
  */
 export interface MobileEnrollmentQrV1 {
   kind: "lamasync.android.enroll";
@@ -1218,6 +1224,16 @@ export interface MobileEnrollmentQrV1 {
 /** Lifecycle of one mobile enrollment (mirrors the record status column). */
 export type MobileEnrollmentStatus = "pending" | "used" | "expired" | "revoked";
 
+/**
+ * Which flow an enrollment row belongs to (LAMA-337). `new` installs a
+ * brand-new device (the exchange creates the host); `reconnect` re-issues
+ * credentials for an existing live registration (the exchange rotates them in
+ * place and returns the same host id). Never sent on the wire — the desktop
+ * knows which action it invoked, and the app cannot tell the two apart, by
+ * design: both are the same `lamasync.android.enroll` v1 QR.
+ */
+export type MobileEnrollmentKind = "new" | "reconnect";
+
 /** Admin body creating an Android enrollment (POST /api/v1/mobile/enrollments). */
 export interface MobileEnrollmentCreateRequest {
   /** Whether the paired app may obtain a web grant carrying admin authority.
@@ -1228,8 +1244,9 @@ export interface MobileEnrollmentCreateRequest {
   clientType?: MobileClientType;
 }
 
-/** Admin create response. `secret` is the one-time QR secret, returned
- *  exactly once here. */
+/** Admin create response — both for a new installation and for a reconnect QR
+ *  (LAMA-337), which targets an existing registration and returns the same
+ *  fields. `secret` is the one-time QR secret, returned exactly once here. */
 export interface MobileEnrollmentCreateResponse {
   enrollmentId: string;
   /** One-time QR secret (only place it is ever returned). */
@@ -1285,7 +1302,8 @@ export interface MobileEnrollmentExchangeRequest {
  *  authority (native token + separate web grant). Each secret is returned
  *  exactly once here. */
 export interface MobileEnrollmentExchangeResponse {
-  /** Server-created host id for the new registration. */
+  /** The registration's host id: newly created for a pairing QR, and the
+   *  ALREADY EXISTING (unchanged) host id for a reconnect QR. */
   hostId: string;
   /** Opaque native credential; returned exactly once. */
   nativeToken: string;
