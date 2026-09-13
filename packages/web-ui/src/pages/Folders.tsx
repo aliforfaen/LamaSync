@@ -5,7 +5,7 @@ import { Link, useLocation } from "react-router-dom";
 import type { Backend, Folder, FolderAssignment, FolderBackend, Host } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
-import { validateCronExpression } from "../cron.ts";
+import { validateScheduleExpression } from "@lamasync/core/schedule";
 // LAMA-267: shared presets (single source of truth for labels) and the
 // client-side "Next: …" sentence helper.
 import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
@@ -442,7 +442,7 @@ export function Folders() {
     // UX workstream 4: validate cron client-side before the round-trip.
     const cron = assignForm.syncExpr.trim();
     if (cron) {
-      const cronError = validateCronExpression(cron);
+      const cronError = validateScheduleExpression(cron);
       if (cronError) {
         setAssignCronError(cronError);
         return;

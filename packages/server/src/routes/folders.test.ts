@@ -996,3 +996,96 @@ describe("watch fields on assignments (LAMA-302)", () => {
     expect(res300.status).toBe(201);
   });
 });
+
+// LAMA-336: an assignment schedule the daemon cannot arm is a silent no-op —
+// the assignment reads as enabled and never runs. Creation and update now
+// validate with the same grammar the Scheduler uses. Empty stays valid (it
+// means "no schedule" and the forms rely on it); a non-empty value the daemon
+// would reject is a 400.
+describe("assignment schedule validation (LAMA-336)", () => {
+  async function makeFolder(name: string): Promise<string> {
+    const folder = (await (await postJson("/api/v1/folders", { name, type: "sync" })).json()) as { id: string };
+    return folder.id;
+  }
+
+  async function patch(folderId: string, body: Record<string, unknown>): Promise<Response> {
+    return app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/a`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  test("accepts schedulable expressions and the supported keywords", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    for (const [index, expr] of ["0 */6 * * *", "@reboot", "@login", "@daily"].entries()) {
+      const folderId = await makeFolder(`sched-ok-${index}`);
+      const res = await postJson(`/api/v1/folders/${folderId}/assign`, {
+        hostId: "a",
+        role: "both",
+        localPath: `/tmp/sched-${index}`,
+        syncExpr: expr,
+      });
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as { syncExpr: string | null }).syncExpr).toBe(expr);
+    }
+  });
+
+  test("rejects an unschedulable expression on create and stores nothing", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    const folderId = await makeFolder("sched-bad-create");
+    for (const expr of ["@midnight", "60 * * * *", "not a cron", "* * * *"]) {
+      const res = await postJson(`/api/v1/folders/${folderId}/assign`, {
+        hostId: "a",
+        role: "both",
+        localPath: "/tmp/sched-bad",
+        syncExpr: expr,
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error.length).toBeGreaterThan(0);
+    }
+    const rows = db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM folder_assignments`)
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("rejects an unschedulable update and leaves the stored schedule alone", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    const folderId = await makeFolder("sched-bad-update");
+    await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "a",
+      role: "both",
+      localPath: "/tmp/sched-update",
+      syncExpr: "0 3 * * *",
+    });
+    const rejected = await patch(folderId, { syncExpr: "@noon" });
+    expect(rejected.status).toBe(400);
+    const row = db
+      .query<{ sync_expr: string | null }, [string]>(
+        `SELECT sync_expr FROM folder_assignments WHERE folder_id = ?`,
+      )
+      .get(folderId);
+    expect(row?.sync_expr).toBe("0 3 * * *");
+  });
+
+  test("an empty or null schedule still means no schedule", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    const folderId = await makeFolder("sched-empty");
+    const created = await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "a",
+      role: "both",
+      localPath: "/tmp/sched-empty",
+      syncExpr: "",
+    });
+    expect(created.status).toBe(201);
+    const cleared = await patch(folderId, { syncExpr: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { syncExpr: string | null }).syncExpr).toBeNull();
+  });
+});

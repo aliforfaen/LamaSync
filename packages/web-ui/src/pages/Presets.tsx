@@ -26,6 +26,10 @@ import { CaptureSpecReview } from "../components/CaptureSpecReview.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { APP_PRESETS, type AppPreset, type OSKey } from "../presets.ts";
 import { SCHEDULE_PRESETS } from "../schedule-presets.ts";
+// LAMA-336: the shared validator, imported from its subpath rather than the
+// core barrel — the barrel re-exports `initDb`/`bun:sqlite`, which Vite cannot
+// resolve in the web bundle (same pattern as AssignmentEditor.tsx).
+import { validateScheduleExpression } from "@lamasync/core/schedule";
 
 // ---------------------------------------------------------------------------
 // Card model: a mix of built-in starters (not yet materialized server-side,
@@ -70,7 +74,7 @@ export interface TemplateDraft {
 }
 
 /** Enrollment dialog state. */
-interface EnrollDraft {
+export interface EnrollDraft {
   card: TemplateCardData;
   hostId: string;
   name: string;
@@ -85,6 +89,37 @@ export type TemplateCreatePayload = Omit<
   ApplicationTemplate,
   "id" | "origin" | "revision" | "createdAt" | "updatedAt"
 >;
+
+/** LAMA-336: enrollment schedule choices. `manual` comes first and is the
+ *  default: a protection with no schedule is legitimate (snapshots are then
+ *  created by hand or uploaded), but it must be an explicit choice rather than
+ *  a blank field that reads like an omission. Everything else mirrors the
+ *  shared SCHEDULE_PRESETS, which the daemon's scheduler agrees with. */
+const ENROLL_MANUAL_PRESET = {
+  value: "manual",
+  label: "Manual only — no automatic captures",
+  cron: "",
+} as const;
+
+const ENROLL_SCHEDULE_PRESETS: ReadonlyArray<{ value: string; label: string; cron: string }> = [
+  ENROLL_MANUAL_PRESET,
+  ...SCHEDULE_PRESETS,
+];
+
+/** LAMA-336: the enrollment draft starts on the explicit manual choice, so an
+ *  enabled-but-unscheduled protection is something the operator picked — not
+ *  an empty field that looked optional. Exported for the enrollment tests. */
+export function emptyEnrollDraft(card: TemplateCardData, hostId: string): EnrollDraft {
+  return {
+    card,
+    hostId,
+    name: "",
+    schedulePreset: ENROLL_MANUAL_PRESET.value,
+    schedule: "",
+    backendId: null,
+    s3Bucket: "",
+  };
+}
 
 const STARTER_EMOJI: Record<string, string> = {
   vscode: "⌘",
@@ -858,15 +893,7 @@ export function AppTemplates() {
       setError("Register a device before enrolling a template on it.");
       return;
     }
-    setEnrollDraft({
-      card,
-      hostId: hosts[0].id,
-      name: "",
-      schedulePreset: "custom",
-      schedule: "",
-      backendId: null,
-      s3Bucket: "",
-    });
+    setEnrollDraft(emptyEnrollDraft(card, hosts[0].id));
   }
 
   function beginEdit(card: TemplateCardData): void {
@@ -935,6 +962,16 @@ export function AppTemplates() {
       setError("Pick a device to enroll this template on.");
       return;
     }
+    // LAMA-336: validate before the round-trip. The server rejects an
+    // unschedulable expression anyway; failing here keeps the draft intact.
+    const schedule = enrollDraft.schedule.trim();
+    if (enrollDraft.schedulePreset === "custom" && schedule !== "") {
+      const scheduleError = validateScheduleExpression(schedule);
+      if (scheduleError) {
+        setError(scheduleError);
+        return;
+      }
+    }
     setBusy(true);
     setError(null);
     try {
@@ -942,7 +979,7 @@ export function AppTemplates() {
         template: enrollDraft.card,
         hostId: enrollDraft.hostId,
         name: enrollDraft.name,
-        schedule: enrollDraft.schedule.trim() || null,
+        schedule: schedule || null,
         backendId: enrollDraft.backendId,
         s3Bucket: enrollDraft.s3Bucket.trim() || null,
       });
@@ -1057,15 +1094,15 @@ export function AppTemplates() {
             />
           </label>
           <label className="field">
-            <span>Capture schedule (optional)</span>
+            <span>Capture schedule</span>
             <select
               value={enrollDraft.schedulePreset}
               onChange={(e) => {
                 const preset = e.target.value;
-                if (preset === "custom") {
+                if (preset === "custom" || preset === ENROLL_MANUAL_PRESET.value) {
                   setEnrollDraft({ ...enrollDraft, schedulePreset: preset, schedule: "" });
                 } else {
-                  const match = SCHEDULE_PRESETS.find((p) => p.value === preset);
+                  const match = ENROLL_SCHEDULE_PRESETS.find((p) => p.value === preset);
                   setEnrollDraft({
                     ...enrollDraft,
                     schedulePreset: preset,
@@ -1074,7 +1111,7 @@ export function AppTemplates() {
                 }
               }}
             >
-              {SCHEDULE_PRESETS.map((preset) => (
+              {ENROLL_SCHEDULE_PRESETS.map((preset) => (
                 <option key={preset.value} value={preset.value}>{preset.label}</option>
               ))}
             </select>
@@ -1087,6 +1124,9 @@ export function AppTemplates() {
                 value={enrollDraft.schedule}
                 onChange={(e) => setEnrollDraft({ ...enrollDraft, schedule: e.target.value })}
               />
+              {enrollDraft.schedule.trim() !== "" && validateScheduleExpression(enrollDraft.schedule) !== null ? (
+                <span className="error">{validateScheduleExpression(enrollDraft.schedule)}</span>
+              ) : null}
             </label>
           ) : null}
           <label className="field">
@@ -1127,7 +1167,13 @@ export function AppTemplates() {
           ) : null}
           {enrollDraft.schedule ? (
             <p className="muted">Snapshots will be captured on this schedule by the device’s daemon for this protection.</p>
-          ) : null}
+          ) : (
+            <p className="muted">
+              No schedule: the protection is enabled, but nothing will capture automatically. Create snapshots
+              by hand with “Upload snapshot…” on the protection row, or edit the protection later to add a
+              schedule.
+            </p>
+          )}
           {enrollReview ? (
             <CaptureSpecReview
               review={enrollReview}

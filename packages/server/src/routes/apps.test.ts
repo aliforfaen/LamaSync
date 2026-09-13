@@ -1247,3 +1247,89 @@ describe("LAMA-315 — read-only classify endpoint", () => {
     expect(res.status).toBe(401);
   });
 });
+
+// LAMA-336: an invalid schedule used to be stored verbatim. The daemon then
+// logged it and armed no timer, so the protection looked enabled in the UI and
+// produced no snapshots — with nothing anywhere reporting a problem. The API
+// now validates with the same grammar the daemon schedules with.
+describe("app schedule validation (LAMA-336)", () => {
+  /** A fresh template per call: template name and host+template enrollment are
+   *  both unique, so reusing one would 409 before the schedule is checked. */
+  async function enrollWith(name: string, schedule: unknown): Promise<Response> {
+    const tmpl = await postJson("/api/v1/apps/templates", {
+      name,
+      origin: "custom",
+      paths: spec(["~/.config/nvim"]),
+    });
+    expect(tmpl.status).toBe(201);
+    const { id } = (await tmpl.json()) as { id: string };
+    return postJson("/api/v1/apps/protections", { templateId: id, hostId: "host-a", schedule });
+  }
+
+  async function enrolledProtection(): Promise<{ id: string; schedule: string | null }> {
+    const templateId = await createTemplate();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    expect(enroll.status).toBe(201);
+    return (await enroll.json()) as { id: string; schedule: string | null };
+  }
+
+  test("accepts a cron expression and the special tokens", async () => {
+    const enrolled = await enrollWith("tpl-sched-ok", "0 */6 * * *");
+    expect(enrolled.status).toBe(201);
+    const prot = (await enrolled.json()) as { id: string; schedule: string | null };
+    expect(prot.schedule).toBe("0 */6 * * *");
+
+    const reboot = await putJson(`/api/v1/apps/protections/${prot.id}`, { schedule: "@reboot" });
+    expect(reboot.status).toBe(200);
+    expect(((await reboot.json()) as { schedule: string | null }).schedule).toBe("@reboot");
+  });
+
+  test("rejects stored-but-unschedulable expressions at enrollment", async () => {
+    const bad = ["@midnight", "@noon", "@REBOOT", "60 * * * *", "not a cron", "* * * *", "* * * * * *"];
+    for (const [index, expression] of bad.entries()) {
+      const res = await enrollWith(`tpl-sched-bad-${index}`, expression);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error.length).toBeGreaterThan(0);
+    }
+    const rows = db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM application_protections`)
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("an empty schedule string is rejected; null means manual-only", async () => {
+    const blank = await enrollWith("tpl-sched-blank", "   ");
+    expect(blank.status).toBe(400);
+
+    const templateId = await createTemplate();
+    const manual = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    expect(manual.status).toBe(201);
+    expect(((await manual.json()) as { schedule: string | null }).schedule).toBeNull();
+  });
+
+  test("an invalid update is rejected and leaves the stored schedule alone", async () => {
+    const prot = await enrolledProtection();
+    const scheduled = await putJson(`/api/v1/apps/protections/${prot.id}`, {
+      schedule: "0 3 * * *",
+    });
+    expect(scheduled.status).toBe(200);
+
+    const rejected = await putJson(`/api/v1/apps/protections/${prot.id}`, { schedule: "@midnight" });
+    expect(rejected.status).toBe(400);
+    const row = db
+      .query<{ schedule: string | null }, [string]>(
+        `SELECT schedule FROM application_protections WHERE id = ?`,
+      )
+      .get(prot.id);
+    expect(row?.schedule).toBe("0 3 * * *");
+  });
+
+  test("an explicit null update clears the schedule back to manual-only", async () => {
+    const prot = await enrolledProtection();
+    await putJson(`/api/v1/apps/protections/${prot.id}`, { schedule: "0 3 * * *" });
+    const cleared = await putJson(`/api/v1/apps/protections/${prot.id}`, { schedule: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { schedule: string | null }).schedule).toBeNull();
+  });
+});

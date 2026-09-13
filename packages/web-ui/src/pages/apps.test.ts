@@ -11,6 +11,7 @@ import type {
   CaptureSpecPath,
 } from "@lamasync/core";
 import {
+  emptyEnrollDraft,
   runTemplateEnrollment,
   tryDeleteTemplate,
   applySuggestionToEntry,
@@ -405,5 +406,29 @@ describe("App templates — path classification annotations (LAMA-315)", () => {
     expect(isSecretsClass("secrets")).toBe(true);
     expect(isSecretsClass("cache")).toBe(false);
     expect(isSecretsClass(undefined)).toBe(false);
+  });
+});
+
+// LAMA-336: an enabled protection with no schedule is a real, useful state —
+// but it has to be an explicit choice. The enrollment draft used to open on a
+// blank "custom" schedule, which looked like an unfinished field and produced
+// a protection that would never capture on its own.
+describe("App templates — schedule defaults (LAMA-336)", () => {
+  test("the enrollment draft opens on the explicit manual choice", () => {
+    const draft = emptyEnrollDraft(templateCard(), "host-a");
+    expect(draft.schedulePreset).toBe("manual");
+    expect(draft.schedule).toBe("");
+    expect(draft.hostId).toBe("host-a");
+  });
+
+  test("a manual enrollment sends no schedule at all (server stores null)", async () => {
+    const { services, enrollCalls } = recordServices();
+    const message = await runTemplateEnrollment(services, {
+      template: templateCard(),
+      hostId: "host-a",
+      schedule: null,
+    });
+    expect(message).toBeNull();
+    expect(enrollCalls).toEqual([{ templateId: "tpl-1", hostId: "host-a", backendId: null, s3Bucket: null }]);
   });
 });

@@ -14,7 +14,7 @@ import type {
   PathClassification,
   PathClassificationResult,
 } from "@lamasync/core";
-import { classifyPath } from "@lamasync/core";
+import { classifyPath, validateScheduleExpression } from "@lamasync/core";
 import { bumpConfigRevision } from "../config-revision.ts";
 import { deviceMayAccessHost, principalOf, requireAdmin, requireHostAccess } from "../auth.ts";
 import {
@@ -898,6 +898,16 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: destination.error };
       }
+      // LAMA-336: an invalid schedule used to be stored verbatim; the daemon
+      // then logged it and armed no timer, leaving an enabled protection that
+      // silently never captured. Reject it where the operator can see it.
+      if (body.schedule !== undefined && body.schedule !== null) {
+        const scheduleError = validateScheduleExpression(body.schedule);
+        if (scheduleError) {
+          set.status = 400;
+          return { error: scheduleError };
+        }
+      }
       const id = crypto.randomUUID();
       const ts = Date.now();
       const name = body.name ?? template.name;
@@ -981,7 +991,18 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
       };
       if (body.name !== undefined) push("name", body.name);
       if (body.enabled !== undefined) push("enabled", body.enabled ? 1 : 0);
-      if (body.schedule !== undefined) push("schedule", body.schedule);
+      if (body.schedule !== undefined) {
+        // LAMA-336: null clears the schedule (manual-only); any string is
+        // validated with the same grammar the daemon schedules with.
+        if (body.schedule !== null) {
+          const scheduleError = validateScheduleExpression(body.schedule);
+          if (scheduleError) {
+            set.status = 400;
+            return { error: scheduleError };
+          }
+        }
+        push("schedule", body.schedule);
+      }
       if (body.backendId !== undefined || body.s3Bucket !== undefined) {
         // LAMA-324: destination changes affect FUTURE captures only. The
         // backend is validated like enrollment; snapshots keep their own

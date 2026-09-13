@@ -9,6 +9,7 @@ import {
   resolveDestination,
   isValidWatchQuietSec,
   normalizeWatchQuietSec,
+  validateScheduleExpression,
 } from "@lamasync/core";
 import { getBackend } from "../backends.ts";
 import {
@@ -806,6 +807,18 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           error: "watchQuietSec must be null or an integer between 10 and 300 seconds",
         };
       }
+      // LAMA-336: a schedule the daemon cannot arm is a silent no-op — the
+      // assignment shows as enabled and never runs. Validate with the same
+      // grammar the Scheduler uses. An empty string keeps meaning "no
+      // schedule" (the forms rely on that), but anything non-empty that the
+      // daemon's parser rejects is a clean 400 here.
+      if (typeof b.syncExpr === "string" && b.syncExpr.trim() !== "") {
+        const syncExprError = validateScheduleExpression(b.syncExpr);
+        if (syncExprError) {
+          set.status = 400;
+          return { error: syncExprError };
+        }
+      }
       const id = crypto.randomUUID();
       // LAMA-294: resolve the destination path/prefix, kept separate from the
       // connection alias (remoteName). Default is host-scoped for backups
@@ -1044,6 +1057,15 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         args.push(b.cacheMaxSize);
       }
       if (b.syncExpr !== undefined) {
+        // LAMA-336: same grammar as the Scheduler; empty/null clears the
+        // schedule (manual-only), garbage is a 400 rather than a silent no-op.
+        if (typeof b.syncExpr === "string" && b.syncExpr.trim() !== "") {
+          const syncExprError = validateScheduleExpression(b.syncExpr);
+          if (syncExprError) {
+            set.status = 400;
+            return { error: syncExprError };
+          }
+        }
         sets.push("sync_expr = ?");
         args.push(b.syncExpr);
       }

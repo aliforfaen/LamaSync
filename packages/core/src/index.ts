@@ -17,6 +17,12 @@ export {
 } from "./api-client.ts";
 export { VERSION } from "./version.ts";
 export { isNewer } from "./version-compare.ts";
+// LAMA-336: one schedule grammar shared by the scheduler, the API boundary
+// and the web forms.
+export {
+  SCHEDULE_SPECIAL_KEYWORDS,
+  validateScheduleExpression,
+} from "./schedule.ts";
 // LAMA-301: shared deploy output scrubbing (same module the deploy agent
 // uses — one set of rules for the wire and the audit trail).
 export {

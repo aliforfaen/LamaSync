@@ -445,6 +445,15 @@ export function AppBackups() {
                         <span className="next-run" title={protection.schedule}>
                           {nextRunSentence(protection.schedule) ?? protection.schedule}
                         </span>
+                      ) : protection.enabled ? (
+                        // LAMA-336: "enabled" next to an em-dash read as a
+                        // working protection. Say what actually happens.
+                        <span
+                          className="badge badge-unknown"
+                          title="Enabled, but no capture schedule is set — snapshots are only created by hand."
+                        >
+                          Not scheduled
+                        </span>
                       ) : (
                         "—"
                       )}

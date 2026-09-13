@@ -13,7 +13,7 @@ import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 // Workstream 2: hint copy lives in the shared glossary now.
 import { CONFLICT_STRATEGY_HINTS, ROLE_HINTS } from "../concepts.ts";
-import { validateCronExpression } from "../cron.ts";
+import { validateScheduleExpression } from "@lamasync/core/schedule";
 // LAMA-267: presets + the "Next: …" sentence live in shared helpers so every
 // web UI stays in lock-step with daemon schedule semantics.
 import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
@@ -113,7 +113,7 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
   // raises the error.
   const [cronError, setCronError] = useState<string | null>(
     state.schedulePreset === "custom" && state.syncExpr.trim() !== ""
-      ? validateCronExpression(state.syncExpr)
+      ? validateScheduleExpression(state.syncExpr)
       : null,
   );
 
@@ -132,7 +132,7 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
 
   function setCron(value: string) {
     set({ syncExpr: value });
-    setCronError(value.trim() === "" ? null : validateCronExpression(value));
+    setCronError(value.trim() === "" ? null : validateScheduleExpression(value));
   }
 
   async function onSave(e: React.FormEvent) {
@@ -143,7 +143,7 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
     // and the daemon falls back to its default). Presets short-circuit to
     // a known-good expression.
     if (state.schedulePreset === "custom" && state.syncExpr.trim() !== "") {
-      const err = validateCronExpression(state.syncExpr);
+      const err = validateScheduleExpression(state.syncExpr);
       if (err) {
         setCronError(err);
         return;
