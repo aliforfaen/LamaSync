@@ -36,10 +36,26 @@ const {
   revokeMobileWebSession,
 } = await import("./mobile-store.ts");
 const { wsRoutes, disconnectMobileRegistration, disconnectWebSession } = await import("./ws.ts");
+const { getAuthPlugin } = await import("./auth.ts");
+const { mobileRoutes } = await import("./routes/mobile.ts");
 
 let db: Database;
 let serverApp: { stop: () => Promise<unknown> } | null = null;
 let port: number;
+// LAMA-337: a second listener that carries the real HTTP route bundle, so a
+// reconnect performed over HTTP can be checked against the live socket the
+// device already holds (the ws-only server above has no mobile routes).
+let httpApp: { stop: () => Promise<unknown> } | null = null;
+let httpPort: number;
+
+async function startHttpServer(): Promise<number> {
+  const app = new Elysia().use(getAuthPlugin()).use(mobileRoutes).use(wsRoutes);
+  httpApp = app;
+  await app.listen({ port: 0, hostname: "127.0.0.1" });
+  const p = (app.server as unknown as { port: number } | null)?.port;
+  if (!p) throw new Error("no http port");
+  return p;
+}
 
 async function startServer(): Promise<number> {
   const app = new Elysia().use(wsRoutes);
@@ -52,6 +68,7 @@ async function startServer(): Promise<number> {
 
 beforeAll(async () => {
   port = await startServer();
+  httpPort = await startHttpServer();
 }, 20_000);
 
 afterAll(async () => {
@@ -59,7 +76,9 @@ afterAll(async () => {
   // Bun's server.stop() can linger on sockets whose close frame just
   // finished; the runner tears the process down right after, so cap it.
   await Promise.race([serverApp?.stop(), Bun.sleep(2000)]);
+  await Promise.race([httpApp?.stop(), Bun.sleep(2000)]);
   serverApp = null;
+  httpApp = null;
 }, 5000);
 
 beforeEach(() => {
@@ -270,5 +289,56 @@ describe("WebSocket mobile session upgrades", () => {
     const h = await open({ Origin: TEST_ORIGIN, Cookie: `__Host-lamasync-mobile=${cookieSecret}` });
     await waitFor(() => h.messages.some((m) => m.includes("forbidden")));
     await h.closed;
+  });
+
+  // -------------------------------------------------------------------------
+  // LAMA-337: a reconnect exchange over the real HTTP routes kills the old
+  // session's live socket and leaves the fresh grant able to open one.
+  // -------------------------------------------------------------------------
+
+  test("reconnect exchange closes the pre-rotation socket; the new grant opens one", async () => {
+    const { cookieSecret, hostId } = seedPairedSession();
+    const oldSocket = await open({
+      Origin: TEST_ORIGIN,
+      Cookie: `__Host-lamasync-mobile=${cookieSecret}`,
+    });
+    await waitFor(() => oldSocket.messages.some((m) => m.includes('"hello"')));
+
+    const master = process.env.LAMASYNC_API_KEY!;
+    const base = `http://127.0.0.1:${httpPort}`;
+    const created = await fetch(
+      `${base}/api/v1/mobile/registrations/${hostId}/reconnect-enrollment`,
+      { method: "POST", headers: { Authorization: `Bearer ${master}` } },
+    );
+    expect(created.status).toBe(201);
+    const qr = (await created.json()) as { enrollmentId: string; secret: string };
+
+    const exchanged = await fetch(
+      `${base}/api/v1/mobile/enrollments/${qr.enrollmentId}/exchange`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret: qr.secret, displayName: "Pixel 9", appVersion: "2.0.0" }),
+      },
+    );
+    expect(exchanged.status).toBe(200);
+    const body = (await exchanged.json()) as { hostId: string; webGrant: string };
+    expect(body.hostId).toBe(hostId);
+
+    // The device that was connected with the OLD cookie session is cut off.
+    await waitFor(() =>
+      oldSocket.messages.some((m) => m.includes("credentials rotated by reconnect")),
+    );
+    await oldSocket.closed;
+
+    // …and the rotated grant is a working authority for a fresh socket.
+    const boot = bootstrapMobileWebSession(body.webGrant);
+    if (boot.kind !== "ok") throw new Error("fresh grant failed to bootstrap");
+    const freshSocket = await open({
+      Origin: TEST_ORIGIN,
+      Cookie: `__Host-lamasync-mobile=${boot.sessionSecret}`,
+    });
+    await waitFor(() => freshSocket.messages.some((m) => m.includes('"hello"')));
+    await closeWs(freshSocket);
   });
 });

@@ -23,6 +23,7 @@ import type {
   MobileClientType,
   MobileEnrollmentCreateResponse,
   MobileEnrollmentExchangeResponse,
+  MobileEnrollmentKind,
   MobileEnrollmentStatusResponse,
   MobileMeResponse,
   MobileRegistrationSummary,
@@ -249,6 +250,7 @@ export interface MobileEnrollmentRow {
   id: string;
   secret_hash: string;
   host_id: string;
+  kind: MobileEnrollmentKind;
   client_type: MobileClientType;
   web_admin: number;
   status: string;
@@ -300,6 +302,9 @@ export const ENROLLMENT_TTL_MS = 10 * 60 * 1000;
 /** Web-session absolute lifetime. */
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
+/** LAMA-337: audit reason stamped on the web grant a reconnect supersedes. */
+export const RECONNECT_ROTATED_REASON = "credentials rotated by reconnect";
+
 // ---------------------------------------------------------------------------
 // Enrollment lifecycle
 // ---------------------------------------------------------------------------
@@ -311,10 +316,13 @@ export interface CreatedEnrollment {
 }
 
 /**
- * Create one pending enrollment (admin). Atomically revokes every OTHER
- * still-pending enrollment (QR regeneration semantics — an old unscanned
- * QR dies the moment a new one is shown). Returns the response with the
- * one-time QR secret. Throws when the canonical origin is unconfigured.
+ * Create one pending enrollment for a BRAND-NEW installation (admin).
+ * Atomically revokes every other still-pending new-installation enrollment
+ * (QR regeneration semantics — an old unscanned pairing QR dies the moment a
+ * new one is shown). Pending RECONNECT QRs are deliberately left alone: they
+ * belong to another (possibly offline) device and re-pairing a different
+ * phone must not silently void them. Returns the response with the one-time
+ * QR secret. Throws when the canonical origin is unconfigured.
  */
 export function createMobileEnrollment(opts: {
   webAdmin: boolean;
@@ -332,11 +340,12 @@ export function createMobileEnrollment(opts: {
       id: enrollmentId,
       secretHash: hashSecret(secret),
       hostId,
+      kind: "new",
       clientType: opts.clientType,
       webAdmin: opts.webAdmin,
       nowMs: now,
     });
-    revokeOtherPendingEnrollments(d, enrollmentId, now);
+    revokeOtherPendingNewEnrollments(d, enrollmentId, now);
     return { enrollmentId, secret };
   });
   const { enrollmentId, secret } = create();
@@ -356,12 +365,110 @@ export function createMobileEnrollment(opts: {
   };
 }
 
+export type ReconnectCreateOutcome =
+  | { kind: "ok"; created: CreatedEnrollment }
+  | { kind: "not_found" }
+  | { kind: "revoked" };
+
+/**
+ * LAMA-337: create a one-time RECONNECT enrollment for an EXISTING live
+ * registration (admin). The returned QR uses the unchanged
+ * `lamasync.android.enroll` v1 payload, but its exchange rotates credentials
+ * for `hostId` instead of creating a host — so the device keeps its identity,
+ * upload inboxes and upload history.
+ *
+ * Nothing about the working device changes here: the native token, web grant
+ * and sessions stay valid until a phone actually exchanges the QR, so an
+ * abandoned or expired reconnect QR has no effect at all. Only other pending
+ * RECONNECT QRs for the SAME host are superseded (the QR-regeneration rule,
+ * scoped to the device it belongs to).
+ *
+ * The fresh web grant preserves the registration's current grant authority
+ * (see existingGrantAdminFlag). Throws when the canonical origin is
+ * unconfigured.
+ */
+export function createReconnectEnrollment(opts: {
+  hostId: string;
+  nowMs?: number;
+}): ReconnectCreateOutcome {
+  const now = opts.nowMs ?? Date.now();
+  const origin = requiredServerOrigin();
+  const d = currentDb();
+  const registration = findRegistrationByHostId(opts.hostId);
+  if (!registration) return { kind: "not_found" };
+  if (isRowRevoked(registration)) return { kind: "revoked" };
+  const webAdmin = existingGrantAdminFlag(d, opts.hostId);
+  const create = d.transaction(() => {
+    // Re-check inside the transaction: the admin may have revoked the device
+    // between the read above and this insert. Rolling back leaves no QR behind.
+    const live = findRegistrationByHostId(opts.hostId);
+    if (!live || isRowRevoked(live)) throw new ReconnectTargetLost();
+    const enrollmentId = generatePublicId();
+    const secret = generateOpaqueSecret();
+    insertEnrollmentRow(d, {
+      id: enrollmentId,
+      secretHash: hashSecret(secret),
+      hostId: opts.hostId,
+      kind: "reconnect",
+      clientType: live.client_type,
+      webAdmin,
+      nowMs: now,
+    });
+    revokeOtherPendingReconnectsForHost(d, opts.hostId, enrollmentId, now);
+    return { enrollmentId, secret };
+  });
+  let enrollmentId: string;
+  let secret: string;
+  try {
+    ({ enrollmentId, secret } = create());
+  } catch (err) {
+    if (err instanceof ReconnectTargetLost) return { kind: "revoked" };
+    throw err;
+  }
+  const expiresAt = now + ENROLLMENT_TTL_MS;
+  return {
+    kind: "ok",
+    created: {
+      enrollmentId,
+      secret,
+      response: {
+        enrollmentId,
+        secret,
+        serverOrigin: origin,
+        clientType: registration.client_type,
+        webAdmin,
+        expiresAt,
+        expiresInSeconds: Math.floor(ENROLLMENT_TTL_MS / 1000),
+      },
+    },
+  };
+}
+
+/**
+ * The authority a reconnect's fresh web grant inherits: the registration's
+ * current grant flag. A registration always has a grant row (the exchange
+ * creates one); if it somehow has none it is treated like the desktop
+ * pairing default (full admin) rather than silently downgrading a device
+ * that already holds that authority.
+ */
+function existingGrantAdminFlag(d: Database, hostId: string): boolean {
+  const row = d
+    .query<{ admin: number }, [string]>(
+      `SELECT admin FROM web_grants WHERE registration_id = ?
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+    )
+    .get(hostId);
+  if (!row) return true;
+  return row.admin === 1;
+}
+
 function insertEnrollmentRow(
   d: Database,
   row: {
     id: string;
     secretHash: string;
     hostId: string;
+    kind: MobileEnrollmentKind;
     clientType: MobileClientType;
     webAdmin: boolean;
     nowMs: number;
@@ -369,19 +476,45 @@ function insertEnrollmentRow(
 ): void {
   d.run(
     `INSERT INTO mobile_enrollments
-       (id, secret_hash, host_id, client_type, web_admin, status, expires_at, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
-    [row.id, row.secretHash, row.hostId, row.clientType, row.webAdmin ? 1 : 0, row.nowMs + ENROLLMENT_TTL_MS, row.nowMs],
+       (id, secret_hash, host_id, kind, client_type, web_admin, status, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    [
+      row.id,
+      row.secretHash,
+      row.hostId,
+      row.kind,
+      row.clientType,
+      row.webAdmin ? 1 : 0,
+      row.nowMs + ENROLLMENT_TTL_MS,
+      row.nowMs,
+    ],
   );
 }
 
-/** Flip every OTHER pending enrollment to revoked (caller owns tx). */
-function revokeOtherPendingEnrollments(d: Database, keepId: string, nowMs: number): void {
+/** Flip every OTHER pending new-installation QR to revoked (caller owns tx). */
+function revokeOtherPendingNewEnrollments(d: Database, keepId: string, nowMs: number): void {
   d.run(
     `UPDATE mobile_enrollments
         SET status = 'revoked', revoked_at = ?
-      WHERE id != ? AND status = 'pending'`,
+      WHERE id != ? AND status = 'pending' AND kind = 'new'`,
     [nowMs, keepId],
+  );
+}
+
+/** Flip every OTHER pending reconnect QR OF THIS HOST to revoked (caller owns
+ *  tx). Scoped by host so showing a reconnect QR for one device never voids
+ *  a pending QR for another. */
+function revokeOtherPendingReconnectsForHost(
+  d: Database,
+  hostId: string,
+  keepId: string,
+  nowMs: number,
+): void {
+  d.run(
+    `UPDATE mobile_enrollments
+        SET status = 'revoked', revoked_at = ?
+      WHERE id != ? AND host_id = ? AND status = 'pending' AND kind = 'reconnect'`,
+    [nowMs, keepId, hostId],
   );
 }
 
@@ -430,12 +563,21 @@ export function mobileEnrollmentStatus(
 // ---------------------------------------------------------------------------
 
 export type ExchangeOutcome =
-  | { kind: "ok"; response: MobileEnrollmentExchangeResponse; hostId: string }
+  | {
+      kind: "ok";
+      response: MobileEnrollmentExchangeResponse;
+      hostId: string;
+      /** Web sessions revoked by this exchange (reconnect); empty for a new
+       *  installation. The route closes their live WebSockets after commit. */
+      revokedSessionIds: string[];
+    }
   | { kind: "not_found" }
   | { kind: "used" }
   | { kind: "expired" }
   | { kind: "revoked" }
-  | { kind: "invalid_secret" };
+  | { kind: "invalid_secret" }
+  /** LAMA-337: a reconnect QR whose target registration is gone or revoked. */
+  | { kind: "target_unavailable" };
 
 /**
  * Atomically exchange a pending+unexpired enrollment for one installation:
@@ -445,6 +587,13 @@ export type ExchangeOutcome =
  * Failure inside the transaction rolls back — the enrollment stays pending
  * and a retry is possible. A lost success response leaves the enrollment
  * consumed (fail-safe; the desktop regenerates a fresh QR).
+ *
+ * LAMA-337: a `reconnect` enrollment takes the other branch — it rotates the
+ * credentials of the EXISTING registration named by the row's host_id instead
+ * of creating a host, so the device keeps its identity, destinations and
+ * upload history. Both branches are one transaction: claim, credential
+ * rotation/issuance, and revocation of the superseded authorities commit
+ * together or not at all.
  *
  * No plaintext secret is retained: only hashes are persisted and the two
  * fresh secrets are returned exactly once.
@@ -471,7 +620,17 @@ export function exchangeMobileEnrollment(opts: {
   if (!hashesEqual(hashSecret(opts.secret), row.secret_hash)) {
     return { kind: "invalid_secret" };
   }
+  if (row.kind === "reconnect") return exchangeReconnectEnrollment(d, row, now, opts);
+  return exchangeNewEnrollment(d, row, now, opts);
+}
 
+/** New-installation branch: mint a fresh host + registration + web grant. */
+function exchangeNewEnrollment(
+  d: Database,
+  row: MobileEnrollmentRow,
+  now: number,
+  opts: { enrollmentId: string; displayName: string; appVersion: string },
+): ExchangeOutcome {
   const nativeToken = generateOpaqueSecret();
   const webGrant = generateOpaqueSecret();
   const grantId = generatePublicId();
@@ -482,18 +641,10 @@ export function exchangeMobileEnrollment(opts: {
     // Single-use gate: flip pending→used only while still pending AND
     // unexpired. The transaction begins before the claim, so a concurrent
     // exchange cannot interleave between the gate and the inserts.
-    const claimed = d.run(
-      `UPDATE mobile_enrollments
-          SET status = 'used', consumed_at = ?
-        WHERE id = ? AND status = 'pending' AND expires_at > ?`,
-      [now, opts.enrollmentId, now],
-    );
-    if (Number(claimed.changes) !== 1) {
-      throw new ExchangeClaimLost();
-    }
-    // Fresh host id was chosen at enrollment creation (host_id column is
-    // UNIQUE), so the row insert cannot collide with another host unless
-    // the enrollment was tampered with — in which case we roll back.
+    claimPendingEnrollment(d, opts.enrollmentId, now);
+    // Fresh host id was chosen at enrollment creation, so the row insert
+    // cannot collide with another host unless the enrollment was tampered
+    // with — in which case we roll back.
     d.run(
       `INSERT INTO hosts (id, hostname, last_seen, status, host_class)
        VALUES (?, ?, ?, 'online', 'phone')`,
@@ -511,25 +662,8 @@ export function exchangeMobileEnrollment(opts: {
       [grantId, hashSecret(webGrant), registrationId, row.web_admin === 1 ? 1 : 0, now],
     );
   });
-  try {
-    exchange();
-  } catch (err) {
-    if (err instanceof ExchangeClaimLost) {
-      // Another request consumed the enrollment between our read and the
-      // claim. Rollback already happened; report the current state.
-      const after = d
-        .query<MobileEnrollmentRow, [string]>(
-          "SELECT * FROM mobile_enrollments WHERE id = ?",
-        )
-        .get(opts.enrollmentId);
-      const postStatus = after ? enrollmentStatusOf(after, now) : null;
-      if (postStatus === "used") return { kind: "used" };
-      if (postStatus === "expired") return { kind: "expired" };
-      if (postStatus === "revoked") return { kind: "revoked" };
-      return { kind: "not_found" };
-    }
-    throw err;
-  }
+  const failed = runExchange(exchange, d, opts.enrollmentId, now);
+  if (failed) return failed;
   const response: MobileEnrollmentExchangeResponse = {
     hostId: registrationId,
     nativeToken,
@@ -538,12 +672,154 @@ export function exchangeMobileEnrollment(opts: {
     displayName: opts.displayName,
     clientType: "android",
   };
-  return { kind: "ok", response, hostId: registrationId };
+  return { kind: "ok", response, hostId: registrationId, revokedSessionIds: [] };
+}
+
+/**
+ * LAMA-337 reconnect branch: rotate the existing registration's credentials.
+ *
+ * In ONE transaction: claim the QR (pending→used), rotate native_token_hash,
+ * refresh display name/app version/last-seen (+ the host's heartbeat), revoke
+ * the previous web grant and every web session of that registration, and
+ * issue a fresh web grant. `mobile_registrations.created_at`, the
+ * registration row itself, its destinations and its upload history are all
+ * untouched — that is the whole point of reconnecting instead of re-pairing.
+ *
+ * The target registration is re-checked inside the transaction (it can be
+ * revoked between the QR being shown and scanned): a dead target rolls the
+ * claim back so no credential is ever issued for a revoked device.
+ */
+function exchangeReconnectEnrollment(
+  d: Database,
+  row: MobileEnrollmentRow,
+  now: number,
+  opts: { enrollmentId: string; displayName: string; appVersion: string },
+): ExchangeOutcome {
+  const registration = findRegistrationByHostId(row.host_id);
+  if (!registration || isRowRevoked(registration)) return { kind: "target_unavailable" };
+
+  const nativeToken = generateOpaqueSecret();
+  const webGrant = generateOpaqueSecret();
+  const grantId = generatePublicId();
+  const webAdmin = row.web_admin === 1 ? 1 : 0;
+  const origin = requiredServerOrigin();
+  const hostId = row.host_id;
+  let revokedSessionIds: string[] = [];
+
+  const exchange = d.transaction(() => {
+    claimPendingEnrollment(d, opts.enrollmentId, now);
+    const rotated = d.run(
+      `UPDATE mobile_registrations
+          SET native_token_hash = ?, display_name = ?, app_version = ?, last_seen_at = ?
+        WHERE host_id = ? AND (revoked_at IS NULL OR revoked_at = 0)`,
+      [hashSecret(nativeToken), opts.displayName, opts.appVersion, now, hostId],
+    );
+    if (Number(rotated.changes) !== 1) throw new ReconnectTargetLost();
+    // Sessions are read BEFORE they are revoked: their live WebSockets are
+    // closed by the route once this transaction has committed.
+    revokedSessionIds = d
+      .query<{ id: string }, [string]>(
+        "SELECT id FROM web_sessions WHERE registration_id = ? AND revoked_at IS NULL",
+      )
+      .all(hostId)
+      .map((s) => s.id);
+    d.run(
+      `UPDATE web_grants SET revoked_at = ?, revoked_reason = ?
+        WHERE registration_id = ? AND revoked_at IS NULL`,
+      [now, RECONNECT_ROTATED_REASON, hostId],
+    );
+    d.run(
+      `UPDATE web_sessions SET revoked_at = ?
+        WHERE registration_id = ? AND revoked_at IS NULL`,
+      [now, hostId],
+    );
+    d.run(
+      `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [grantId, hashSecret(webGrant), hostId, webAdmin, now],
+    );
+    // Establishing the new credentials is also proof of presence: treat the
+    // reconnect like a check-in for the host row (heartbeat + status).
+    d.run(`UPDATE hosts SET last_seen = ?, status = 'online' WHERE id = ?`, [now, hostId]);
+    // hosts.hostname is the pairing-time label; it follows a new app-reported
+    // name only while it still equals the previous one (an operator rename is
+    // never overwritten by a reconnect).
+    d.run(`UPDATE hosts SET hostname = ? WHERE id = ? AND hostname = ?`, [
+      opts.displayName,
+      hostId,
+      registration.display_name,
+    ]);
+  });
+  const failed = runExchange(exchange, d, opts.enrollmentId, now);
+  if (failed) return failed;
+  const response: MobileEnrollmentExchangeResponse = {
+    hostId,
+    nativeToken,
+    webGrant,
+    serverOrigin: origin,
+    displayName: opts.displayName,
+    clientType: registration.client_type,
+  };
+  return { kind: "ok", response, hostId, revokedSessionIds };
+}
+
+/**
+ * Single-use gate: flip pending→used only while still pending AND unexpired.
+ * Runs inside the caller's transaction, so a concurrent exchange cannot
+ * interleave between the gate and the writes it guards.
+ */
+function claimPendingEnrollment(d: Database, enrollmentId: string, now: number): void {
+  const claimed = d.run(
+    `UPDATE mobile_enrollments
+        SET status = 'used', consumed_at = ?
+      WHERE id = ? AND status = 'pending' AND expires_at > ?`,
+    [now, enrollmentId, now],
+  );
+  if (Number(claimed.changes) !== 1) throw new ExchangeClaimLost();
+}
+
+/**
+ * Run one exchange transaction, translating its known failure sentinels into
+ * outcomes (the transaction has already rolled back). Unexpected errors
+ * propagate. Returns null when the transaction committed.
+ */
+function runExchange(
+  exchange: () => void,
+  d: Database,
+  enrollmentId: string,
+  now: number,
+): ExchangeOutcome | null {
+  try {
+    exchange();
+    return null;
+  } catch (err) {
+    if (err instanceof ReconnectTargetLost) return { kind: "target_unavailable" };
+    if (!(err instanceof ExchangeClaimLost)) throw err;
+    // Another request consumed the enrollment between our read and the
+    // claim. Rollback already happened; report the current state.
+    const after = d
+      .query<MobileEnrollmentRow, [string]>(
+        "SELECT * FROM mobile_enrollments WHERE id = ?",
+      )
+      .get(enrollmentId);
+    const postStatus = after ? enrollmentStatusOf(after, now) : null;
+    if (postStatus === "used") return { kind: "used" };
+    if (postStatus === "expired") return { kind: "expired" };
+    if (postStatus === "revoked") return { kind: "revoked" };
+    return { kind: "not_found" };
+  }
 }
 
 class ExchangeClaimLost extends Error {
   constructor() {
     super("enrollment claim lost to a concurrent exchange");
+  }
+}
+
+/** Thrown when a reconnect QR's target registration is no longer live. */
+class ReconnectTargetLost extends Error {
+  constructor() {
+    super("reconnect target registration is no longer live");
   }
 }
 
@@ -762,9 +1038,11 @@ export interface RevokeResult {
 
 /**
  * Admin revoke: atomically revokes the native registration, its web grant,
- * and every web session, and marks the producing enrollment revoked.
- * Idempotent — revoking an already-revoked registration is a successful
- * no-op (same response). Returns found=false when no such registration.
+ * and every web session, and marks the enrollment(s) that produced it
+ * revoked — including any pending reconnect QR still waiting for a scan, so a
+ * revoked device cannot be revived by a QR shown earlier. Idempotent —
+ * revoking an already-revoked registration is a successful no-op (same
+ * response). Returns found=false when no such registration.
  */
 export function revokeMobileRegistration(
   hostId: string,
@@ -795,7 +1073,8 @@ export function revokeMobileRegistration(
       hostId,
     ]);
     d.run(
-      `UPDATE mobile_enrollments SET status = 'revoked', revoked_at = ? WHERE host_id = ? AND status = 'used'`,
+      `UPDATE mobile_enrollments SET status = 'revoked', revoked_at = ?
+        WHERE host_id = ? AND status != 'revoked'`,
       [now, hostId],
     );
   });
