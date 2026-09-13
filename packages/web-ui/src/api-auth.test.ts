@@ -444,8 +444,7 @@ describe("mobile enrollment api (desktop flow)", () => {
     expect(created.secret).toBe("s3cR3t_MiXeDcAsE");
   });
 
-  it("getMobileEnrollment reads status by id", async () => {
-    setApiKey("lmsk.admin.123", false);
+  it("getMobileEnrollment reads status by id", async () => {    setApiKey("lmsk.admin.123", false);
     installFetch((call) => {
       expect(call.url).toBe("/api/v1/mobile/enrollments/enr_9zXy7AbC");
       return json(200, {
@@ -523,6 +522,24 @@ describe("mobile enrollment api (desktop flow)", () => {
     expect(rows[0]?.hostId).toBe("host-pixel-9");
     expect(rows[1]?.revokedAt).not.toBeNull();
     expect(rows[1]?.revokedReason).toBe("Lost device");
+  });
+
+  it("createMobileReconnectEnrollment POSTs to the registration's reconnect route", async () => {
+    setApiKey("lmsk.admin.123", false);
+    installFetch((call) => {
+      // LAMA-337: the QR is created for an EXISTING registration — the row's
+      // hostId in the path, no body fields, no enrollment id anywhere.
+      expect(call.url).toBe(
+        "/api/v1/mobile/registrations/host-pixel-9/reconnect-enrollment",
+      );
+      expect(call.init.method ?? "GET").toBe("POST");
+      expect(headersOf(call).get("authorization")).toBe("Bearer lmsk.admin.123");
+      return json(201, SESSION_CREATE);
+    });
+
+    const created = await api.createMobileReconnectEnrollment("host-pixel-9");
+    expect(created.enrollmentId).toBe("enr_9zXy7AbC");
+    expect(created.secret).toBe("s3cR3t_MiXeDcAsE");
   });
 });
 

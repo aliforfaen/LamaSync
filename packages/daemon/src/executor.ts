@@ -13,6 +13,7 @@ import { homedir, tmpdir } from "os";
 import type { AppCaptureAssignment, ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { resolveDestination } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
+import { writeFileAtomic } from "./atomic-file.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
 import { getRemoteName } from "./rclone.ts";
@@ -403,12 +404,12 @@ async function applyResolvedConflicts(
         const exit = await proc.exited;
         if (exit !== 0) throw new Error(stderr.slice(-500));
       } else if (c.resolution === "both") {
-        const suffix = `.conflict-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
-        Bun.spawnSync(["mv", localFile, `${localFile}${suffix}`]);
-        const proc = Bun.spawn(["rclone", "copyto", remoteFile, localFile, "--config", configPath, "-v"], { stdout: "pipe", stderr: "pipe" });
-        const stderr = await new Response(proc.stderr).text();
-        const exit = await proc.exited;
-        if (exit !== 0) throw new Error(stderr.slice(-500));
+        // Same checked keep-both as the automatic path: `mv` used to be run
+        // through Bun.spawnSync with its exit status ignored, so a failed
+        // rename still pulled the remote file over the local one and then
+        // acknowledged the conflict as resolved.
+        keepLocalConflictCopy(localFile);
+        await rcloneCopyto(remoteFile, localFile, configPath);
       }
       applied += 1;
       try {
@@ -460,6 +461,37 @@ export function pickConflictAction(
   return { kind: "keep_both" };
 }
 
+/**
+ * LAMA-336: move the local side of a keep-both conflict aside.
+ *
+ * Returns the path the copy landed on, or null when there was no local copy to
+ * preserve (the caller then only pulls the remote version). A failed move
+ * throws: the caller pulls the remote version into the original path on the
+ * next line, so a keep-both that could not actually keep the local copy must
+ * abort instead of overwriting it.
+ *
+ * If the move succeeds but the pull then fails, the local copy is safe under
+ * the returned path and the original path is free, so a retry pulls the remote
+ * version without losing it (the conflict is only acknowledged after both
+ * steps succeed).
+ *
+ * The date-only suffix collides for two conflicts on the same path on the same
+ * day, so the target gets an incrementing counter (same guard as
+ * `archiveBisyncState`). `now` is injectable for tests.
+ */
+export function keepLocalConflictCopy(localFile: string, now: Date = new Date()): string | null {
+  if (!existsSync(localFile)) return null;
+  const base = `${localFile}.conflict-${now.toISOString().slice(0, 10).replace(/-/g, "")}`;
+  let target = base;
+  let n = 1;
+  while (existsSync(target)) {
+    target = `${base}.${n}`;
+    n += 1;
+  }
+  renameSync(localFile, target);
+  return target;
+}
+
 async function applyAutomaticConflicts(
   conflicts: ParsedConflict[],
   strategy: ConflictStrategy,
@@ -481,10 +513,9 @@ async function applyAutomaticConflicts(
       } else if (action.kind === "remote_wins") {
         await rcloneCopyto(remoteFile, localFile, configPath);
       } else if (action.kind === "keep_both") {
-        if (existsSync(localFile)) {
-          const suffix = `.conflict-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
-          renameSync(localFile, `${localFile}${suffix}`);
-        }
+        // Checked move first: it throws when the local copy cannot be set
+        // aside, which aborts before the pull below can overwrite it.
+        keepLocalConflictCopy(localFile);
         await rcloneCopyto(remoteFile, localFile, configPath);
       }
       resolved += 1;
@@ -842,7 +873,9 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
     !runResult.aborted
   ) {
     try {
-      writeFileSync(gitignoreHashFile, pendingGitignoreHash);
+      // LAMA-336: atomic — a truncated hash file would tell the next run
+      // that its filter snapshot is current and skip the resync.
+      writeFileAtomic(gitignoreHashFile, pendingGitignoreHash);
     } catch (err) {
       console.warn(
         `[executor] folder=${folder.id} could not persist gitignore filter snapshot: ${err instanceof Error ? err.message : String(err)}`,
@@ -1180,6 +1213,52 @@ export function appArchiveTransforms(sourceMember: string, archivePath: string):
   ];
 }
 
+/** Translate an absolute/home-relative capture exclude into tar's `-C /`
+ * member namespace. Relative/glob-only patterns retain GNU tar's native
+ * matching semantics. */
+export function appTarExclude(pattern: string): string {
+  const resolved = expandHomePath(pattern);
+  return sourceArchiveMember(resolved) ?? pattern;
+}
+
+/** GNU tar exits 1 when a live source changes while it is read. The archive
+ * is still usable in that narrow case, but every other non-zero outcome must
+ * remain fatal. LC_ALL=C on the child keeps these diagnostics stable. */
+export function isRecoverableAppTarResult(exitCode: number, stderr: string): boolean {
+  if (exitCode === 0) return true;
+  if (exitCode !== 1) return false;
+  const lines = stderr.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((line) =>
+    /^tar: .+: file changed as we read it$/.test(line) ||
+    /^tar: .+: socket ignored$/.test(line)
+  );
+}
+
+/** One app capture's tar invocation, split from the report plumbing so the
+ * live-tree exit-code contract can be regression-tested against real GNU tar.
+ * `excludes` are logical patterns and are normalized here. */
+export interface AppTarCapture {
+  tarball: string;
+  archiveInputs: string[];
+  transforms: string[];
+  excludes: string[];
+}
+
+export interface AppTarResult {
+  exitCode: number;
+  stderr: string;
+}
+
+export async function runAppTarCapture(capture: AppTarCapture): Promise<AppTarResult> {
+  const excludeArgs = capture.excludes.flatMap((pattern) => ["--exclude", appTarExclude(pattern)]);
+  const tar = Bun.spawn(
+    ["tar", "czf", capture.tarball, "-C", "/", ...excludeArgs, ...capture.transforms, "--", ...capture.archiveInputs],
+    { stdout: "pipe", stderr: "pipe", env: { ...process.env, LC_ALL: "C" } },
+  );
+  const stderr = await new Response(tar.stderr).text();
+  return { exitCode: await tar.exited, stderr };
+}
+
 /**
  * Capture one explicit application protection. This intentionally has no
  * FolderAssignment dependency: an application protection is its own
@@ -1231,12 +1310,14 @@ export async function captureAppSnapshot(opts: AppCaptureOptions): Promise<Opera
   const tmpDir = join(tmpdir(), `lamasync-dotfile-${process.pid}-${start}`);
   mkdirSync(tmpDir, { recursive: true });
   const tarball = join(tmpDir, `${start}.tar.gz`);
-  const excludeArgs = (app.excludes ?? []).flatMap((e) => ["--exclude", e]);
   try {
-    const tar = Bun.spawn(["tar", "czf", tarball, "-C", "/", ...excludeArgs, ...transforms, "--", ...archiveInputs], { stdout: "pipe", stderr: "pipe" });
-    const tarStderr = await new Response(tar.stderr).text();
-    const tarExit = await tar.exited;
-    if (tarExit !== 0) {
+    const { exitCode: tarExit, stderr: tarStderr } = await runAppTarCapture({
+      tarball,
+      archiveInputs,
+      transforms,
+      excludes: app.excludes ?? [],
+    });
+    if (!isRecoverableAppTarResult(tarExit, tarStderr)) {
       return appCaptureReport(hostId, "failed", start, {
         summary: `app archive failed (exit ${tarExit})`,
         details: { protectionId: app.protectionId, tarStderr: tail(tarStderr, 1000) },

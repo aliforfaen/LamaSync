@@ -10,6 +10,7 @@ import app.lamasync.companion.testutil.FakeVault
 import app.lamasync.companion.testutil.cookieResponse
 import app.lamasync.companion.testutil.jsonResponse
 import app.lamasync.companion.testutil.sampleQr
+import app.lamasync.companion.testutil.sampleQrWith
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -185,6 +186,87 @@ class CompanionRepositoryFlowTest {
         assertNull(vault.nativeToken()?.takeIf { it.value == "OLD_TOKEN" })
         assertFalse(registrationStore.load()?.origin?.contains("old") ?: true)
         assertTrue(cookieScope.installed.contains("https://new.example.com"))
+    }
+
+    @Test
+    fun `reconnect QR at the same origin rotates credentials and keeps the host id`() = runTest {
+        val transport = FakeTransport()
+        val vault = FakeVault()
+        val registrationStore = FakeRegistrationStore()
+        val cookieScope = FakeCookieScope()
+
+        // Already enrolled on this server (the device the admin is reconnecting).
+        vault.saveCredentials(NativeToken.of("OLD_TOKEN"), WebGrant.of("OLD_GRANT"))
+        registrationStore.save(
+            Registration(
+                origin = "https://fleet.example.com",
+                hostId = "host-7",
+                displayName = "Pixel",
+                enrolledAtEpochMillis = 1L,
+            ),
+        )
+        cookieScope.installSessionCookie(
+            "https://fleet.example.com",
+            "__Host-lamasync-mobile=oldCookie; Path=/; Secure",
+        )
+
+        // LAMA-337: the desktop's Reconnect QR is the SAME payload shape at the
+        // SAME origin with a NEW enrollment id, and its exchange answers with the
+        // device's existing host id (host-7) plus fresh credentials.
+        transport.enqueue(
+            FakeTransport.Rule(
+                method = "POST",
+                urlContains = "/exchange",
+                respond = jsonResponse(
+                    200,
+                    """{"hostId":"host-7","displayName":"Pixel","nativeToken":"NEW_TOKEN","webGrant":"NEW_GRANT"}""",
+                ),
+            ),
+        )
+        transport.enqueue(
+            FakeTransport.Rule(
+                method = "GET",
+                urlContains = "/me",
+                respond = jsonResponse(
+                    200,
+                    """{"hostId":"host-7","displayName":"Pixel","clientType":"android","appVersion":"0.2.0"}""",
+                ),
+            ),
+        )
+        transport.enqueue(
+            FakeTransport.Rule(
+                method = "POST",
+                urlContains = "/web-session",
+                respond = cookieResponse("__Host-lamasync-mobile=newCookie; Path=/; Secure; HttpOnly"),
+            ),
+        )
+        val repo = repository(transport, vault, registrationStore, cookieScope)
+
+        val reconnectQr = sampleQrWith("https://fleet.example.com", "enr_Reconnect9")
+        val outcome = repo.enroll(reconnectQr, "Pixel 9", "0.2.0")
+
+        assertTrue(outcome is CompanionRepository.EnrollOutcome.Success)
+        val registration = (outcome as CompanionRepository.EnrollOutcome.Success).registration
+        // The device identity is unchanged — that is what keeps its destinations
+        // and upload history attached to it server-side.
+        assertEquals("host-7", registration.hostId)
+        assertEquals("host-7", registrationStore.load()?.hostId)
+        // Both credentials were replaced, and the same-origin cookie was expired
+        // before the exchange and re-installed from the fresh grant after it.
+        assertEquals("NEW_TOKEN", vault.nativeToken()?.value)
+        assertEquals("NEW_GRANT", vault.webGrant()?.value)
+        assertEquals(listOf("https://fleet.example.com"), cookieScope.cleared)
+        assertTrue(cookieScope.installed.contains("https://fleet.example.com"))
+        // The QR went on the wire as-is (id in the exchange path, secret in the
+        // body), so the server can tell a reconnect from a pairing QR on its own
+        // row — no second parser, no extra field here.
+        val exchangeRequest = transport.requests.first { it.url.contains("/exchange") }
+        assertTrue(exchangeRequest.url.contains("enr_Reconnect9"))
+        assertTrue(transport.wireOf(exchangeRequest).contains(reconnectQr.secret))
+        // The persisted binding is the reconnect enrollment, so an interrupted
+        // run resumes THIS one (never the long-consumed pairing QR).
+        assertEquals("enr_Reconnect9", registrationStore.loadBinding()?.enrollmentId)
+        assertEquals(EnrollmentStage.REGISTERED, registrationStore.loadBinding()?.stage)
     }
 
     @Test

@@ -17,6 +17,12 @@ export {
 } from "./api-client.ts";
 export { VERSION } from "./version.ts";
 export { isNewer } from "./version-compare.ts";
+// LAMA-336: one schedule grammar shared by the scheduler, the API boundary
+// and the web forms.
+export {
+  SCHEDULE_SPECIAL_KEYWORDS,
+  validateScheduleExpression,
+} from "./schedule.ts";
 // LAMA-301: shared deploy output scrubbing (same module the deploy agent
 // uses — one set of rules for the wire and the audit trail).
 export {
@@ -32,6 +38,15 @@ export {
 export { defaultSocketPath, defaultSocketDir } from "./socket-path.ts";
 // LAMA-239: per-host mount/sync override helper + AssignmentMode narrow.
 export { effectiveFolderType, normalizeAssignmentMode } from "./effective-type.ts";
+// LAMA-315: deterministic explainable path classifier for app capture specs.
+export {
+  classifyPath,
+  classificationRuleIds,
+  CONFIDENCE_BY_LEVEL,
+  type PathSuggestion,
+  type PathClassificationResult,
+  type ConfidenceLevel,
+} from "./path-classification.ts";
 // LAMA-302: event-triggered sync watch configuration contract (defaults,
 // quiet-period validation).
 export {

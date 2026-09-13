@@ -23,18 +23,21 @@
 import { decryptSecret } from "./crypto.ts";
 import { getBackend, type BackendRow } from "./backends.ts";
 import { withTempRcloneConfig, writeTempRcloneConfig } from "./temp-rclone-config.ts";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
   copyFileSync,
   createWriteStream,
+  fsyncSync,
   mkdirSync,
+  openSync,
   renameSync,
   rmSync,
   unlinkSync,
   existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type { Database } from "bun:sqlite";
 
 /** Fixed remote layout prefix under any backend's root/bucket. */
@@ -497,6 +500,50 @@ function containedIn(root: string, candidate: string): boolean {
   return rel !== ".." && !rel.startsWith("../");
 }
 
+/**
+ * Copy `source` into `target` without ever exposing a partial file at
+ * `target`.
+ *
+ * The bytes land in a sibling temporary file first, are flushed to disk and
+ * only then replace `target` through a same-directory rename. Sibling
+ * placement is deliberate: a temporary file in another filesystem would fail
+ * to rename with EXDEV, which is exactly the case that used to fall back to a
+ * direct copy at the final path. A crash or full disk now leaves `target`
+ * absent (or holding the previous object) instead of truncated.
+ */
+function copyIntoPlace(source: string, target: string): void {
+  const tempPath = join(dirname(target), `.${basename(target)}.${randomUUID()}.part`);
+  try {
+    copyFileSync(source, tempPath);
+    const fd = openSync(tempPath, "r+");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tempPath, target);
+  } catch (err) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      /* the temporary file may never have been created */
+    }
+    throw err;
+  }
+  // The rename itself is durable only once the directory entry is flushed.
+  // Not every filesystem supports this; the file content is already safe.
+  try {
+    const dirFd = openSync(dirname(target), "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    /* best-effort directory durability */
+  }
+}
+
 /** Publish the verified staged file to the snapshot's destination. Does not
  *  touch the DB. The caller owns snapshot-row insertion + compensation. */
 export async function publishSnapshotArchive(input: PublishInput): Promise<PublishResult> {
@@ -517,8 +564,9 @@ export async function publishSnapshotArchive(input: PublishInput): Promise<Publi
     try {
       renameSync(input.stagedPath, fullPath);
     } catch {
-      // rename across devices — fall back to copy + unlink.
-      copyFileSync(input.stagedPath, fullPath);
+      // rename across devices — publish through a sibling temp file so an
+      // interrupted copy cannot leave a partial archive at the final path.
+      copyIntoPlace(input.stagedPath, fullPath);
       try {
         unlinkSync(input.stagedPath);
       } catch {
@@ -565,7 +613,7 @@ export async function publishSnapshotArchive(input: PublishInput): Promise<Publi
     throw new AppStorageError(`refusing to write outside backend path: ${objectKey}`);
   }
   mkdirSync(dirname(fullPath), { recursive: true });
-  copyFileSync(input.stagedPath, fullPath);
+  copyIntoPlace(input.stagedPath, fullPath);
   return { objectKey, localRelPath: null };
 }
 

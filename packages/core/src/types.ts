@@ -356,8 +356,10 @@ export interface FolderAssignment {
 // contract). This replaces the dotfile-manifest/profile/version model above.
 // ---------------------------------------------------------------------------
 
-/** LAMA-315 hook: stable path taxonomy. This delivery only stamps every path
- *  as "unknown" and exposes the field; no recommendation/exclusion logic. */
+/** LAMA-315: stable path taxonomy. Classifications are suggestions for
+ *  planning/review — nothing consumes a class to change capture or exclusion.
+ *  `unknown` is "not yet classified" and stays visibly unknown; `custom` is
+ *  an operator's explicit assignment. */
 export type PathClassification =
   | "portable_config"
   | "machine_state"
@@ -366,11 +368,25 @@ export type PathClassification =
   | "custom"
   | "unknown";
 
+/** LAMA-315: provenance of a path's `classification` value.
+ *  - `default`    untouched initial state — always `unknown`.
+ *  - `suggested`  placed by the deterministic recommender, not yet
+ *                 operator-confirmed. Carries the matching `confidence`.
+ *  - `manual`     operator override/confirmation — the only source that
+ *                 locks a recommendation in; confidence is dropped. */
+export type ClassificationSource = "default" | "suggested" | "manual";
+
 /** A single classified path entry inside a capture spec. */
 export interface CaptureSpecPath {
   path: string;
   classification: PathClassification;
   rationale?: string | null;
+  /** LAMA-315: provenance of `classification`; absent/null reads as
+   *  `"default"` on the wire (legacy entries round-trip as unknown/default). */
+  classificationSource?: ClassificationSource | null;
+  /** 0..1 — present only when `classificationSource === "suggested"`.
+   *  Dropped/ignored for `manual`; null for `default`. */
+  confidence?: number | null;
   /** Snapshot-only deterministic archive member root. Never client supplied. */
   archivePath?: string | null;
 }
@@ -1189,6 +1205,12 @@ export type MobileClientType = "android";
  * legacy CLI pairing QR normalization does NOT apply to this payload).
  * `secret` is a one-time 256-bit QR secret; it exists only on the QR the app
  * scans, never in a stored server response.
+ *
+ * LAMA-337: the SAME payload shape carries both flows. A reconnect QR encodes
+ * an enrollment whose exchange rotates credentials for an existing
+ * registration, so the payload adds no field — the server knows from the
+ * enrollment row whether the id is a new-installation or reconnect QR, and the
+ * app never needs a second parser.
  */
 export interface MobileEnrollmentQrV1 {
   kind: "lamasync.android.enroll";
@@ -1202,6 +1224,16 @@ export interface MobileEnrollmentQrV1 {
 /** Lifecycle of one mobile enrollment (mirrors the record status column). */
 export type MobileEnrollmentStatus = "pending" | "used" | "expired" | "revoked";
 
+/**
+ * Which flow an enrollment row belongs to (LAMA-337). `new` installs a
+ * brand-new device (the exchange creates the host); `reconnect` re-issues
+ * credentials for an existing live registration (the exchange rotates them in
+ * place and returns the same host id). Never sent on the wire — the desktop
+ * knows which action it invoked, and the app cannot tell the two apart, by
+ * design: both are the same `lamasync.android.enroll` v1 QR.
+ */
+export type MobileEnrollmentKind = "new" | "reconnect";
+
 /** Admin body creating an Android enrollment (POST /api/v1/mobile/enrollments). */
 export interface MobileEnrollmentCreateRequest {
   /** Whether the paired app may obtain a web grant carrying admin authority.
@@ -1212,8 +1244,9 @@ export interface MobileEnrollmentCreateRequest {
   clientType?: MobileClientType;
 }
 
-/** Admin create response. `secret` is the one-time QR secret, returned
- *  exactly once here. */
+/** Admin create response — both for a new installation and for a reconnect QR
+ *  (LAMA-337), which targets an existing registration and returns the same
+ *  fields. `secret` is the one-time QR secret, returned exactly once here. */
 export interface MobileEnrollmentCreateResponse {
   enrollmentId: string;
   /** One-time QR secret (only place it is ever returned). */
@@ -1269,7 +1302,8 @@ export interface MobileEnrollmentExchangeRequest {
  *  authority (native token + separate web grant). Each secret is returned
  *  exactly once here. */
 export interface MobileEnrollmentExchangeResponse {
-  /** Server-created host id for the new registration. */
+  /** The registration's host id: newly created for a pairing QR, and the
+   *  ALREADY EXISTING (unchanged) host id for a reconnect QR. */
   hostId: string;
   /** Opaque native credential; returned exactly once. */
   nativeToken: string;

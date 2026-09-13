@@ -59,6 +59,7 @@ import type {
   MobileUploadDestinationRevokeResponse,
   MobileWebSessionLogoutResponse,
   PauseMode,
+  PathClassificationResult,
   PauseState,
   PairingSessionCreateResponse,
   PairingSessionStatusResponse,
@@ -676,6 +677,16 @@ export const api = {
   // inside the QR the phone scans.
   createMobileEnrollment: (opts: MobileEnrollmentCreateRequest = { webAdmin: true }) =>
     apiPost<MobileEnrollmentCreateResponse>("/mobile/enrollments", opts),
+  /** LAMA-337: create a reconnect QR for an EXISTING registration. The QR is
+   *  the same `lamasync.android.enroll` v1 payload; exchanging it rotates that
+   *  device's credentials in place and returns its unchanged host id, so
+   *  destinations and upload history survive. Nothing about the working
+   *  device changes until the phone actually scans it. */
+  createMobileReconnectEnrollment: (hostId: string) =>
+    apiPost<MobileEnrollmentCreateResponse>(
+      `/mobile/registrations/${encodeURIComponent(hostId)}/reconnect-enrollment`,
+      {},
+    ),
   getMobileEnrollment: (enrollmentId: string) =>
     apiGet<MobileEnrollmentStatusResponse>(
       `/mobile/enrollments/${encodeURIComponent(enrollmentId)}`,
@@ -830,6 +841,14 @@ export const api = {
   ) => apiPut<ApplicationTemplate>(`/apps/templates/${encodeURIComponent(id)}`, body),
   deleteAppTemplate: (id: string) =>
     apiDelete(`/apps/templates/${encodeURIComponent(id)}`),
+  // LAMA-315: read-only per-path classification suggestions (deterministic
+  // pattern catalog; nothing is applied or excluded by this call).
+  classifyAppPaths: async (paths: string[]) => {
+    const body = await apiPost<{ results: PathClassificationResult[] }>("/apps/classify", {
+      paths,
+    });
+    return body.results;
+  },
   // LAMA-316: protections bind one template to one host (enrollment copies the
   // template's capture spec; later template edits never mutate protections).
   listAppProtections: (hostId?: string) =>

@@ -10,8 +10,11 @@ import type {
   ApplicationTemplate,
   CaptureSpec,
   CaptureSpecPath,
+  ClassificationSource,
   PathClassification,
+  PathClassificationResult,
 } from "@lamasync/core";
+import { classifyPath, validateScheduleExpression } from "@lamasync/core";
 import { bumpConfigRevision } from "../config-revision.ts";
 import { deviceMayAccessHost, principalOf, requireAdmin, requireHostAccess } from "../auth.ts";
 import {
@@ -31,6 +34,56 @@ import {
 } from "../app-storage.ts";
 
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024; // 512 MiB
+
+/** Bounds for the read-only classify endpoint (LAMA-315) — a small batch
+ *  recommend call, never a bulk-scan surface. */
+const MAX_CLASSIFY_PATHS = 500;
+const MAX_CLASSIFY_PATH_LEN = 4096;
+
+function isPathClassification(value: string): value is PathClassification {
+  return (
+    value === "portable_config" ||
+    value === "machine_state" ||
+    value === "cache" ||
+    value === "secrets" ||
+    value === "custom" ||
+    value === "unknown"
+  );
+}
+
+function isClassificationSource(value: string): value is ClassificationSource {
+  return value === "default" || value === "suggested" || value === "manual";
+}
+
+function classificationProvenanceOf(
+  entry: Record<string, unknown>,
+): { source: ClassificationSource; confidence: number | null; legacy: boolean } | null {
+  let source: ClassificationSource = "default";
+  let explicit = false;
+  const rawSource = entry.classificationSource;
+  if (rawSource !== undefined && rawSource !== null) {
+    explicit = true;
+    if (typeof rawSource !== "string" || !isClassificationSource(rawSource)) return null;
+    source = rawSource;
+  }
+  let confidence: number | null = null;
+  const rawConfidence = entry.confidence;
+  if (rawConfidence !== undefined && rawConfidence !== null) {
+    explicit = true;
+    if (
+      typeof rawConfidence !== "number" ||
+      !Number.isFinite(rawConfidence) ||
+      rawConfidence < 0 ||
+      rawConfidence > 1
+    ) {
+      return null;
+    }
+    confidence = rawConfidence;
+  }
+  if (source === "suggested" && confidence === null) return null;
+  if (source !== "suggested" && confidence !== null) return null;
+  return { source, confidence, legacy: !explicit };
+}
 
 function appUploadMax(): number {
   const raw = process.env.LAMASYNC_APPS_MAX_BYTES;
@@ -167,7 +220,12 @@ function normalizeCaptureSpec(input: unknown): CaptureSpec | null {
     const paths = input.filter((p): p is string => typeof p === "string");
     return {
       paths: {
-        linux: paths.map((p) => ({ path: p, classification: "unknown" as const })),
+        linux: paths.map((p) => ({
+          path: p,
+          classification: "unknown" as const,
+          classificationSource: "default" as const,
+          confidence: null,
+        })),
         macos: [],
         windows: [],
       },
@@ -183,14 +241,6 @@ function normalizeCaptureSpec(input: unknown): CaptureSpec | null {
     if (Object.keys(rec).length === 0) return { paths: {}, excludes: [], notes: null };
     return null;
   }
-  const classifications = new Set<PathClassification>([
-    "portable_config",
-    "machine_state",
-    "cache",
-    "secrets",
-    "custom",
-    "unknown",
-  ]);
   const bucket = (os: string): CaptureSpecPath[] | null => {
     const arr = pathsRaw[os];
     if (!Array.isArray(arr)) return [];
@@ -203,7 +253,13 @@ function normalizeCaptureSpec(input: unknown): CaptureSpec | null {
         const archivePath = archivePathForConfiguredPath(path);
         if (archivePath === null || archivePaths.has(archivePath)) return null;
         archivePaths.add(archivePath);
-        entries.push({ path, classification: "unknown", rationale: null });
+        entries.push({
+          path,
+          classification: "unknown",
+          rationale: null,
+          classificationSource: "default",
+          confidence: null,
+        });
         continue;
       }
       if (typeof e === "object" && e !== null) {
@@ -215,9 +271,36 @@ function normalizeCaptureSpec(input: unknown): CaptureSpec | null {
         archivePaths.add(archivePath);
         const classification =
           typeof o.classification === "string" ? o.classification : "unknown";
-        if (!classifications.has(classification as PathClassification)) return null;
+        if (!isPathClassification(classification)) return null;
         const rationale = typeof o.rationale === "string" ? o.rationale : null;
-        entries.push({ path, classification: classification as PathClassification, rationale });
+        const provenance = classificationProvenanceOf(o);
+        if (provenance === null) return null;
+        if (provenance.legacy) {
+          // Migration contract (handoff §Migration rule 2): an object entry
+          // with no provenance fields is a legacy row — normalize it to the
+          // untouched `unknown`/`default` shape; a stored class (even a
+          // non-unknown one) is never reinterpreted as a confirmation.
+          entries.push({
+            path,
+            classification: "unknown",
+            rationale: null,
+            classificationSource: "default",
+            confidence: null,
+          });
+          continue;
+        }
+        // An explicit `default` claim must agree with the untouched class
+        // `unknown`; `suggested`/`manual` may carry any class (a pending
+        // recommendation or an operator override) — the handoff pins no
+        // further source/class pairing.
+        if (provenance.source === "default" && classification !== "unknown") return null;
+        entries.push({
+          path,
+          classification,
+          rationale,
+          classificationSource: provenance.source,
+          confidence: provenance.confidence,
+        });
         continue;
       }
       return null;
@@ -277,6 +360,12 @@ function captureSpecForSnapshot(protection: ProtectionRow): CaptureSpec | null {
       path: entry.path,
       classification: entry.classification,
       rationale: entry.rationale ?? null,
+      // LAMA-315: a snapshot is self-describing — freeze the exact annotation
+      // (source/confidence) that classified the path at capture time. Legacy
+      // rows without the fields normalize to the untouched `default` state so
+      // old snapshots and new ones share one shape.
+      classificationSource: entry.classificationSource ?? "default",
+      confidence: entry.confidence ?? null,
       archivePath,
     });
   }
@@ -393,7 +482,11 @@ interface DestinationChoice {
 
 /** Validate a protection destination choice (LAMA-324). NULL backend =
  *  server archive; else the backend must exist, be of an allowed kind
- *  (s3/local/nfs — never restic), and s3 kinds require a bucket. */
+ *  (s3/local/nfs — never restic), and s3 kinds require a bucket.
+ *
+ *  Partial updates pass the request's own null through (LAMA-336): null means
+ *  "clear", undefined means "keep the stored value". Callers resolve the
+ *  stored value before calling, so this function never has to guess. */
 function validateDestination(body: { backendId?: string | null; s3Bucket?: string | null }): DestinationChoice {
   const backendId = body.backendId ?? null;
   if (backendId === null || backendId.trim() === "") {
@@ -665,6 +758,74 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
   )
 
   // ---------------------------------------------------------------------------
+  // LAMA-315: read-only path classification. A deterministic pattern catalog
+  // (never an opaque model) suggests a class + confidence + explanation for
+  // paths the operator already chose. Nothing here changes capture or
+  // exclusion — suggestions are applied only by an explicit operator action
+  // elsewhere (template authoring).
+  // ---------------------------------------------------------------------------
+  .post(
+    "/apps/classify",
+    ({ body, set, request }) => {
+      if (!requireAdmin({ principal: principalOf(request) })) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (body.paths.length === 0) {
+        set.status = 400;
+        return { error: "paths must not be empty" };
+      }
+      if (body.paths.length > MAX_CLASSIFY_PATHS) {
+        set.status = 400;
+        return { error: `too many paths; limit is ${MAX_CLASSIFY_PATHS}` };
+      }
+      for (const raw of body.paths) {
+        const path = raw.trim();
+        if (path.length === 0) {
+          set.status = 400;
+          return { error: "paths must not contain empty entries" };
+        }
+        if (path.length > MAX_CLASSIFY_PATH_LEN) {
+          set.status = 400;
+          return { error: `path too long; limit is ${MAX_CLASSIFY_PATH_LEN} characters` };
+        }
+      }
+      const results: PathClassificationResult[] = body.paths.map((raw) => {
+        const path = raw.trim();
+        const suggestion = classifyPath(path);
+        if (suggestion === null) {
+          return {
+            path,
+            classification: "unknown",
+            confidence: null,
+            confidenceLevel: null,
+            rationale: null,
+            ruleId: null,
+          };
+        }
+        return {
+          path,
+          classification: suggestion.classification,
+          confidence: suggestion.confidence,
+          confidenceLevel: suggestion.confidenceLevel,
+          rationale: suggestion.rationale,
+          ruleId: suggestion.ruleId,
+        };
+      });
+      return { results };
+    },
+    {
+      body: t.Object({
+        paths: t.Array(t.String()),
+      }),
+      detail: {
+        summary: "Classify app capture paths (read-only suggestions)",
+        tags: ["Apps"],
+      },
+    },
+  )
+
+  // ---------------------------------------------------------------------------
   // Protections (explicit binding on exactly one host).
   // ---------------------------------------------------------------------------
   .get(
@@ -736,6 +897,16 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
       if (destination.error) {
         set.status = 400;
         return { error: destination.error };
+      }
+      // LAMA-336: an invalid schedule used to be stored verbatim; the daemon
+      // then logged it and armed no timer, leaving an enabled protection that
+      // silently never captured. Reject it where the operator can see it.
+      if (body.schedule !== undefined && body.schedule !== null) {
+        const scheduleError = validateScheduleExpression(body.schedule);
+        if (scheduleError) {
+          set.status = 400;
+          return { error: scheduleError };
+        }
       }
       const id = crypto.randomUUID();
       const ts = Date.now();
@@ -820,14 +991,36 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
       };
       if (body.name !== undefined) push("name", body.name);
       if (body.enabled !== undefined) push("enabled", body.enabled ? 1 : 0);
-      if (body.schedule !== undefined) push("schedule", body.schedule);
+      if (body.schedule !== undefined) {
+        // LAMA-336: null clears the schedule (manual-only); any string is
+        // validated with the same grammar the daemon schedules with.
+        if (body.schedule !== null) {
+          const scheduleError = validateScheduleExpression(body.schedule);
+          if (scheduleError) {
+            set.status = 400;
+            return { error: scheduleError };
+          }
+        }
+        push("schedule", body.schedule);
+      }
       if (body.backendId !== undefined || body.s3Bucket !== undefined) {
         // LAMA-324: destination changes affect FUTURE captures only. The
         // backend is validated like enrollment; snapshots keep their own
         // immutable recorded location and history stays intact.
+        //
+        // LAMA-336: an explicitly supplied null is a clear, not an omission.
+        // `??` treated both null and undefined as absent, so
+        // `{ backendId: null }` silently re-applied the old backend (a no-op
+        // the UI reported as success) and `{ s3Bucket: null }` re-applied the
+        // old bucket, which then failed validation for the new kind.
         const destination = validateDestination({
-          backendId: body.backendId ?? existing.backend_id,
-          s3Bucket: body.s3Bucket ?? existing.s3_bucket,
+          backendId: body.backendId === undefined ? existing.backend_id : body.backendId,
+          s3Bucket:
+            body.s3Bucket !== undefined
+              ? body.s3Bucket
+              : body.backendId === null
+                ? null // moving to the server archive drops the bucket with it
+                : existing.s3_bucket,
         });
         if (destination.error) {
           set.status = 400;

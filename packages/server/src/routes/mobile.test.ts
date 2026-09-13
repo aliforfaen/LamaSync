@@ -44,9 +44,11 @@ const {
   __resetMobileRateLimits,
   __setMobileRateLimitClock,
   createMobileEnrollment,
+  createReconnectEnrollment,
   deriveCsrfToken,
   exchangeMobileEnrollment,
   hashSecret,
+  RECONNECT_ROTATED_REASON,
 } = await import("../mobile-store.ts");
 const { mobileRoutes } = await import("./mobile.ts");
 const { __setDb: __setHostsDb, hostsRoutes } = await import("./hosts.ts");
@@ -480,6 +482,548 @@ describe("POST /mobile/enrollments/:id/exchange", () => {
     await exchange(created.enrollmentId, created.secret);
     const second = await exchange(created.enrollmentId, created.secret);
     expect(second.status).toBe(409);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LAMA-337: reconnect enrollment (rotate an existing device's credentials)
+// ---------------------------------------------------------------------------
+
+describe("POST /mobile/registrations/:hostId/reconnect-enrollment", () => {
+  /** Admin-created reconnect QR (the exact route the desktop UI calls). */
+  async function createReconnect(hostId: string): Promise<{
+    enrollmentId: string;
+    secret: string;
+    serverOrigin: string;
+    clientType: string;
+    webAdmin: boolean;
+    expiresInSeconds: number;
+  }> {
+    const res = await app.handle(
+      req(`/api/v1/mobile/registrations/${hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(masterToken),
+      }),
+    );
+    expect(res.status).toBe(201);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    return (await res.json()) as {
+      enrollmentId: string;
+      secret: string;
+      serverOrigin: string;
+      clientType: string;
+      webAdmin: boolean;
+      expiresInSeconds: number;
+    };
+  }
+
+  async function enrollmentRow(
+    enrollmentId: string,
+  ): Promise<{ status: string; kind: string; host_id: string; secret_hash: string } | null> {
+    return db
+      .query<{ status: string; kind: string; host_id: string; secret_hash: string }, [string]>(
+        "SELECT status, kind, host_id, secret_hash FROM mobile_enrollments WHERE id = ?",
+      )
+      .get(enrollmentId);
+  }
+
+  function registrationRow(
+    hostId: string,
+  ): { native_token_hash: string; display_name: string; app_version: string; created_at: number; last_seen_at: number | null } | null {
+    return db
+      .query<
+        { native_token_hash: string; display_name: string; app_version: string; created_at: number; last_seen_at: number | null },
+        [string]
+      >(
+        "SELECT native_token_hash, display_name, app_version, created_at, last_seen_at FROM mobile_registrations WHERE host_id = ?",
+      )
+      .get(hostId);
+  }
+
+  async function nativeMe(token: string): Promise<Response> {
+    return app.handle(req("/api/v1/mobile/me", { headers: bearer(token) }));
+  }
+
+  test("admin creates a 10-minute reconnect QR that changes NOTHING about the device", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const before = registrationRow(paired.hostId);
+
+    const qr = await createReconnect(paired.hostId);
+
+    expect(qr.secret.length).toBeGreaterThanOrEqual(32);
+    expect(qr.serverOrigin).toBe(TEST_ORIGIN);
+    expect(qr.clientType).toBe("android");
+    expect(qr.webAdmin).toBe(true); // preserves the device's current authority
+    expect(qr.expiresInSeconds).toBe(600);
+    const row = await enrollmentRow(qr.enrollmentId);
+    expect(row?.kind).toBe("reconnect");
+    expect(row?.host_id).toBe(paired.hostId);
+    expect(row?.status).toBe("pending");
+    // The plaintext secret exists ONLY in this response.
+    expect(row?.secret_hash).toBe(hashSecret(qr.secret));
+
+    // Showing the QR is inert: same credential hash, no revocation, and both
+    // existing authorities still work.
+    expect(registrationRow(paired.hostId)?.native_token_hash).toBe(before?.native_token_hash);
+    expect((await nativeMe(paired.nativeToken)).status).toBe(200);
+    const bootstrap = await bootstrapSession(paired.webGrant);
+    expect(bootstrap.status).toBe(200);
+  });
+
+  test("create requires admin: no credential → 401, device key → 403, native token → 403", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const device = insertManagedApiKey({ name: "d", kind: "device", hostId: "host-x" });
+    const deviceRes = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(device.token),
+      }),
+    );
+    expect(deviceRes.status).toBe(403);
+    const nativeRes = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(paired.nativeToken),
+      }),
+    );
+    expect(nativeRes.status).toBe(403);
+    const anonRes = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, { method: "POST" }),
+    );
+    expect(anonRes.status).toBe(401);
+    // None of the denied calls created a QR.
+    const rows = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM mobile_enrollments WHERE kind = 'reconnect'")
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("missing registration → 404; revoked registration → 409 and no QR is stored", async () => {
+    const missing = await app.handle(
+      req("/api/v1/mobile/registrations/mob-nope/reconnect-enrollment", {
+        method: "POST",
+        headers: bearer(masterToken),
+      }),
+    );
+    expect(missing.status).toBe(404);
+
+    const { exchange: paired } = await pairAndroid();
+    const revoke = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/revoke`, {
+        method: "POST",
+        headers: bearer(masterToken),
+        body: JSON.stringify({ reason: "lost" }),
+      }),
+    );
+    expect(revoke.status).toBe(200);
+    const revoked = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(masterToken),
+      }),
+    );
+    expect(revoked.status).toBe(409);
+    const rows = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM mobile_enrollments WHERE kind = 'reconnect'")
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("supersession is kind- and host-scoped: a new pairing QR never voids a pending reconnect QR", async () => {
+    const { exchange: a } = await pairAndroid();
+    const { exchange: b } = await pairAndroid();
+    const firstA = await createReconnect(a.hostId);
+    const qrB = await createReconnect(b.hostId);
+    // Reconnecting device A again supersedes A's earlier QR only.
+    const secondA = await createReconnect(a.hostId);
+    expect((await enrollmentRow(firstA.enrollmentId))?.status).toBe("revoked");
+    expect((await enrollmentRow(qrB.enrollmentId))?.status).toBe("pending");
+    expect((await enrollmentRow(secondA.enrollmentId))?.status).toBe("pending");
+
+    // A new-installation QR still supersedes earlier pairing QRs, but leaves
+    // both pending reconnect QRs alone (they belong to other devices).
+    const pairing1 = await createEnrollmentAs(masterToken);
+    const pairing2 = await createEnrollmentAs(masterToken);
+    expect((await enrollmentRow(pairing1.enrollmentId))?.status).toBe("revoked");
+    expect((await enrollmentRow(pairing2.enrollmentId))?.status).toBe("pending");
+    expect((await enrollmentRow(qrB.enrollmentId))?.status).toBe("pending");
+    expect((await enrollmentRow(secondA.enrollmentId))?.status).toBe("pending");
+  });
+
+  test("abandoned and expired reconnect QRs leave the old credentials valid", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const qr = await createReconnect(paired.hostId);
+
+    // Abandoned: never scanned.
+    expect((await nativeMe(paired.nativeToken)).status).toBe(200);
+    expect((await bootstrapSession(paired.webGrant)).status).toBe(200);
+
+    // Expired: project the deadline into the past (no sleeping).
+    db.run("UPDATE mobile_enrollments SET expires_at = ? WHERE id = ?", [
+      Date.now() - 1,
+      qr.enrollmentId,
+    ]);
+    const status = await app.handle(
+      req(`/api/v1/mobile/enrollments/${qr.enrollmentId}`, { headers: bearer(masterToken) }),
+    );
+    expect(((await status.json()) as { status: string }).status).toBe("expired");
+    expect((await exchange(qr.enrollmentId, qr.secret)).status).toBe(410);
+    expect((await nativeMe(paired.nativeToken)).status).toBe(200);
+    expect((await bootstrapSession(paired.webGrant)).status).toBe(200);
+  });
+
+  test("exchange keeps the host id, rotates both authorities and preserves host-bound records", async () => {
+    const { exchange: paired, enrollmentId: pairingEnrollment } = await pairAndroid();
+    const oldRegistration = registrationRow(paired.hostId);
+    if (!oldRegistration) throw new Error("registration row missing before reconnect");
+    // A live cookie session from the device's current grant.
+    const oldSession = await bootstrapOk(paired.webGrant);
+    // Host-bound state that must survive the reconnect.
+    db.run(
+      `INSERT INTO mobile_upload_destinations (id, registration_id, label, rel_path, created_at)
+       VALUES ('mdst-keep', ?, 'Inbox', ?, ?)`,
+      [paired.hostId, `Mobile/${paired.hostId}/Inbox`, Date.now()],
+    );
+    db.run(
+      `INSERT INTO mobile_uploads
+         (id, registration_id, destination_id, idempotency_key, file_name, final_rel_path, status, created_at, updated_at)
+       VALUES ('mup-keep', ?, 'mdst-keep', 'key-1', 'photo.jpg', ?, 'finalized', ?, ?)`,
+      [paired.hostId, `Mobile/${paired.hostId}/Inbox/photo.jpg`, Date.now(), Date.now()],
+    );
+
+    const qr = await createReconnect(paired.hostId);
+    const res = await exchange(qr.enrollmentId, qr.secret, "Pixel 9 (reconnected)", "2.0.0");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = (await res.json()) as MobileEnrollmentExchangeResponse;
+
+    // Same device identity, brand-new secrets.
+    expect(body.hostId).toBe(paired.hostId);
+    expect(body.nativeToken).not.toBe(paired.nativeToken);
+    expect(body.webGrant).not.toBe(paired.webGrant);
+    expect(body.displayName).toBe("Pixel 9 (reconnected)");
+
+    // Old native bearer, old web grant and the old cookie session are dead.
+    expect((await nativeMe(paired.nativeToken)).status).toBe(401);
+    expect((await bootstrapSession(paired.webGrant)).status).toBe(401);
+    const oldCookieUse = await app.handle(
+      req("/api/v1/auth/me", {
+        headers: { Cookie: `__Host-lamasync-mobile=${oldSession.cookie}` },
+      }),
+    );
+    expect(oldCookieUse.status).toBe(401);
+
+    // The new pair works, and the registration keeps its identity + history.
+    const me = await nativeMe(body.nativeToken);
+    expect(me.status).toBe(200);
+    const meBody = (await me.json()) as { hostId: string; displayName: string; appVersion: string; pairedAt: number };
+    expect(meBody.hostId).toBe(paired.hostId);
+    expect(meBody.displayName).toBe("Pixel 9 (reconnected)");
+    expect(meBody.appVersion).toBe("2.0.0");
+    expect(meBody.pairedAt).toBe(oldRegistration.created_at);
+    expect((await bootstrapSession(body.webGrant)).status).toBe(200);
+
+    const after = registrationRow(paired.hostId);
+    expect(after?.created_at).toBe(oldRegistration.created_at);
+    expect(after?.display_name).toBe("Pixel 9 (reconnected)");
+    expect(after?.app_version).toBe("2.0.0");
+    const host = db
+      .query<{ status: string; last_seen: number | null; hostname: string }, [string]>(
+        "SELECT status, last_seen, hostname FROM hosts WHERE id = ?",
+      )
+      .get(paired.hostId);
+    expect(host?.status).toBe("online");
+    expect(host?.last_seen).not.toBeNull();
+    expect(host?.hostname).toBe("Pixel 9 (reconnected)");
+
+    // Destinations + upload history are untouched (same registration id).
+    const dest = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM mobile_upload_destinations WHERE registration_id = ?",
+      )
+      .get(paired.hostId);
+    expect(dest?.n).toBe(1);
+    const uploads = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM mobile_uploads WHERE registration_id = ?",
+      )
+      .get(paired.hostId);
+    expect(uploads?.n).toBe(1);
+
+    // Exactly one live grant, and the superseded one records why it died.
+    const grants = db
+      .query<{ revoked_at: number | null; revoked_reason: string | null }, [string]>(
+        "SELECT revoked_at, revoked_reason FROM web_grants WHERE registration_id = ? ORDER BY created_at",
+      )
+      .all(paired.hostId);
+    expect(grants).toHaveLength(2);
+    expect(grants[0]?.revoked_at).not.toBeNull();
+    expect(grants[0]?.revoked_reason).toBe(RECONNECT_ROTATED_REASON);
+    expect(grants[1]?.revoked_at).toBeNull();
+
+    // Enrollment history: the pairing QR stays `used` (historical), the
+    // reconnect QR is now `used`.
+    expect((await enrollmentRow(pairingEnrollment))?.status).toBe("used");
+    expect((await enrollmentRow(qr.enrollmentId))?.status).toBe("used");
+
+    // The admin card's own data source (status poll) flips to the refreshed
+    // host, which is what the desktop modal renders after a reconnect.
+    const statusRes = await app.handle(
+      req(`/api/v1/mobile/enrollments/${qr.enrollmentId}`, { headers: bearer(masterToken) }),
+    );
+    expect(statusRes.status).toBe(200);
+    const statusBody = (await statusRes.json()) as {
+      status: string;
+      host: { hostId: string; displayName: string; appVersion: string } | null;
+    };
+    expect(statusBody.status).toBe("used");
+    expect(statusBody.host?.hostId).toBe(paired.hostId);
+    expect(statusBody.host?.displayName).toBe("Pixel 9 (reconnected)");
+    expect(statusBody.host?.appVersion).toBe("2.0.0");
+  });
+
+  test("reconnect never overwrites an operator host rename", async () => {
+    const { exchange: paired } = await pairAndroid();
+    db.run("UPDATE hosts SET hostname = 'Alians Pixel' WHERE id = ?", [paired.hostId]);
+    const qr = await createReconnect(paired.hostId);
+    const res = await exchange(qr.enrollmentId, qr.secret, "Pixel 9", "2.0.0");
+    expect(res.status).toBe(200);
+    const host = db
+      .query<{ hostname: string }, [string]>("SELECT hostname FROM hosts WHERE id = ?")
+      .get(paired.hostId);
+    expect(host?.hostname).toBe("Alians Pixel");
+    expect(registrationRow(paired.hostId)?.display_name).toBe("Pixel 9");
+  });
+
+  test("replay and concurrent exchanges still yield exactly one winner", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const qr = await createReconnect(paired.hostId);
+    const attempts = await Promise.all([
+      exchange(qr.enrollmentId, qr.secret, "A", "2.0.0"),
+      exchange(qr.enrollmentId, qr.secret, "B", "2.0.0"),
+      exchange(qr.enrollmentId, qr.secret, "C", "2.0.0"),
+      exchange(qr.enrollmentId, qr.secret, "D", "2.0.0"),
+    ]);
+    const statuses = attempts.map((r) => r.status).sort();
+    expect(statuses.filter((s) => s === 200)).toHaveLength(1);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(3);
+    // A replay after the winner is the same 409.
+    expect((await exchange(qr.enrollmentId, qr.secret)).status).toBe(409);
+    // Only one live grant exists for the device; the winner's token is the
+    // one that resolves (the losers issued nothing).
+    const liveGrants = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM web_grants WHERE registration_id = ? AND revoked_at IS NULL",
+      )
+      .get(paired.hostId);
+    expect(liveGrants?.n).toBe(1);
+  });
+
+  test("invalid secret → 401 and the exchange rate limits are unchanged", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const qr = await createReconnect(paired.hostId);
+    // Inject the clock BEFORE the first attempt so every attempt shares one
+    // determinable window (the limiter keys per enrollment id).
+    let now = 1_700_000_000_000;
+    __setMobileRateLimitClock(() => now);
+    const wrong = await exchange(qr.enrollmentId, "wrong-secret-value-000000000000");
+    expect(wrong.status).toBe(401);
+    // The QR is untouched by a bad guess.
+    expect((await enrollmentRow(qr.enrollmentId))?.status).toBe("pending");
+    for (let i = 1; i < 5; i++) {
+      expect((await exchange(qr.enrollmentId, `wrong-secret-${i}-0000000000`)).status).toBe(401);
+    }
+    expect((await exchange(qr.enrollmentId, "wrong-secret-5-0000000000")).status).toBe(429);
+    // Window expiry reopens the budget without sleeping; the real secret then
+    // exchanges normally.
+    now += 61_000;
+    expect((await exchange(qr.enrollmentId, qr.secret, "Pixel 9", "2.0.0")).status).toBe(200);
+    __setMobileRateLimitClock(() => Date.now());
+  });
+
+  test("a QR whose target is revoked before the scan issues nothing and stays pending", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const qr = await createReconnect(paired.hostId);
+    const revoke = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/revoke`, {
+        method: "POST",
+        headers: bearer(masterToken),
+        body: JSON.stringify({ reason: "lost" }),
+      }),
+    );
+    expect(revoke.status).toBe(200);
+
+    const res = await exchange(qr.enrollmentId, qr.secret, "Pixel 9", "2.0.0");
+    expect(res.status).toBe(409);
+    // Revoking a device also marks its pending reconnect QR revoked (the
+    // explanation the admin sees is "revoked", not "pending forever").
+    expect((await enrollmentRow(qr.enrollmentId))?.status).toBe("revoked");
+    // No new authority exists: the device stays revoked and its row keeps the
+    // credential that revocation already invalidated.
+    expect((await nativeMe(paired.nativeToken)).status).toBe(401);
+    const grants = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM web_grants WHERE registration_id = ? AND revoked_at IS NULL",
+      )
+      .get(paired.hostId);
+    expect(grants?.n).toBe(0);
+  });
+
+  test("a reconnect QR created before a revoke cannot revive the device", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const qr = await createReconnect(paired.hostId);
+    // Revoke through the admin route, then attempt the scan.
+    await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/revoke`, {
+        method: "POST",
+        headers: bearer(masterToken),
+        body: JSON.stringify({ reason: "lost" }),
+      }),
+    );
+    const res = await exchange(qr.enrollmentId, qr.secret, "Pixel 9", "2.0.0");
+    expect(res.status).toBe(409);
+    const native = db
+      .query<{ revoked_at: number | null }, [string]>(
+        "SELECT revoked_at FROM mobile_registrations WHERE host_id = ?",
+      )
+      .get(paired.hostId);
+    expect(native?.revoked_at).not.toBeNull();
+  });
+
+  test("authority comes from the ONE live grant, not from the newest row", async () => {
+    // A device whose live grant is admin:0 (paired with webAdmin:false keeps
+    // working natively but cannot bootstrap a web session). Its authority must
+    // be preserved, not upgraded — a reconnect restores what the device has.
+    const { exchange: paired } = await pairAndroid(false);
+    const qr = await createReconnect(paired.hostId);
+    expect(qr.webAdmin).toBe(false);
+    const res = await exchange(qr.enrollmentId, qr.secret, "Pixel 9", "2.0.0");
+    expect(res.status).toBe(200);
+    // The fresh grant mirrors the live one, so the bootstrap refusal stands.
+    const body = (await res.json()) as MobileEnrollmentExchangeResponse;
+    expect((await bootstrapSession(body.webGrant)).status).toBe(403);
+    const live = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM web_grants WHERE registration_id = ? AND revoked_at IS NULL AND admin = 0",
+      )
+      .get(paired.hostId);
+    expect(live?.n).toBe(1);
+  });
+
+  test("a revoked historical grant next to the live one does not change the resolved authority", async () => {
+    const { exchange: paired } = await pairAndroid(true);
+    // A superseded grant from an earlier rotation: revoked, so it must be
+    // ignored even though it carries admin = 0.
+    db.run(
+      `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at, revoked_at, revoked_reason)
+       VALUES ('grant-historic', 'h-historic-grant', ?, 0, ?, ?, 'credentials rotated by reconnect')`,
+      [paired.hostId, Date.now() - 1000, Date.now() - 1000],
+    );
+    const qr = await createReconnect(paired.hostId);
+    // The live admin grant wins; the revoked admin:0 row is irrelevant.
+    expect(qr.webAdmin).toBe(true);
+  });
+
+  test("no live grant → 500 and nothing is created (never mint authority)", async () => {
+    const { exchange: paired } = await pairAndroid();
+    // Break the invariant the only way it can be broken today: revoke the
+    // registration's single grant without revoking the registration.
+    db.run("UPDATE web_grants SET revoked_at = ?, revoked_reason = ? WHERE registration_id = ?", [
+      Date.now(),
+      "hand-revoked for the test",
+      paired.hostId,
+    ]);
+    const res = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(masterToken),
+      }),
+    );
+    expect(res.status).toBe(500);
+    const rows = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM mobile_enrollments WHERE kind = 'reconnect'")
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("two live grants → 500 and nothing is created (ambiguous authority)", async () => {
+    const { exchange: paired } = await pairAndroid();
+    // The partial unique index forbids this state; drop it to simulate a
+    // database that carries the damage the index was never able to prevent
+    // (it is created best-effort over pre-existing rows).
+    db.exec("DROP INDEX IF EXISTS idx_web_grants_live_registration");
+    db.run(
+      `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at)
+       VALUES ('grant-second-live', 'h-second-live', ?, 1, ?)`,
+      [paired.hostId, Date.now()],
+    );
+    const res = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(masterToken),
+      }),
+    );
+    expect(res.status).toBe(500);
+    const rows = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM mobile_enrollments WHERE kind = 'reconnect'")
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("store outcome carries an explicit rotated flag, even with zero sessions", async () => {
+    // The route keys its post-commit socket sweep on this flag, so it must not
+    // depend on how many web-session rows happened to exist: a device that
+    // never bootstrapped a session still rotates (and still needs the sweep).
+    const { exchange: paired } = await pairAndroid();
+    const qr = createReconnectEnrollment({ hostId: paired.hostId });
+    if (qr.kind !== "ok") throw new Error("reconnect enrollment not created");
+    const sessions = db
+      .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM web_sessions WHERE registration_id = ?")
+      .get(paired.hostId);
+    expect(sessions?.n).toBe(0);
+    const rotated = exchangeMobileEnrollment({
+      enrollmentId: qr.created.enrollmentId,
+      secret: qr.created.secret,
+      displayName: "Pixel 9",
+      appVersion: "2.0.0",
+    });
+    if (rotated.kind !== "ok") throw new Error("reconnect exchange failed");
+    expect(rotated.rotated).toBe(true);
+    expect(rotated.revokedSessionIds).toEqual([]);
+
+    // A brand-new installation is NOT a rotation (it has no prior authority).
+    const fresh = createMobileEnrollment({ webAdmin: true, clientType: "android" });
+    const installed = exchangeMobileEnrollment({
+      enrollmentId: fresh.enrollmentId,
+      secret: fresh.secret,
+      displayName: "New phone",
+      appVersion: "2.0.0",
+    });
+    if (installed.kind !== "ok") throw new Error("pairing exchange failed");
+    expect(installed.rotated).toBe(false);
+    expect(installed.revokedSessionIds).toEqual([]);
+  });
+
+  test("no plaintext secret is persisted or returned by list/status", async () => {
+    const { exchange: paired } = await pairAndroid();
+    const qr = await createReconnect(paired.hostId);
+
+    const status = await app.handle(
+      req(`/api/v1/mobile/enrollments/${qr.enrollmentId}`, { headers: bearer(masterToken) }),
+    );
+    const statusJson = JSON.stringify(await status.json());
+    const list = await app.handle(
+      req("/api/v1/mobile/registrations", { headers: bearer(masterToken) }),
+    );
+    const listJson = JSON.stringify(await list.json());
+    expect(statusJson).not.toContain(qr.secret);
+    expect(listJson).not.toContain(qr.secret);
+    // The stored row carries the hash, never the secret in any column.
+    const row = db
+      .query<Record<string, unknown>, [string]>("SELECT * FROM mobile_enrollments WHERE id = ?")
+      .get(qr.enrollmentId);
+    expect(row?.secret_hash).toBe(hashSecret(qr.secret));
+    expect(JSON.stringify(row)).not.toContain(qr.secret);
   });
 });
 

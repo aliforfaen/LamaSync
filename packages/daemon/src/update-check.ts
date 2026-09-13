@@ -8,9 +8,10 @@
 // cooldown is deliberately far longer than the restart interval, so even a
 // hard loop fires at most a handful of checks per hour.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
+import { PRIVATE_FILE_MODE, writeFileAtomic } from "./atomic-file.ts";
 
 export const UPDATE_STATE_PATH = join(
   homedir(),
@@ -49,9 +50,12 @@ export function saveUpdateState(
   state: UpdateState,
   statePath: string = UPDATE_STATE_PATH,
 ): void {
+  // LAMA-336: atomic + 0600. A truncated state file reads back as "never
+  // checked", which is the failure that turns a crash loop into one update
+  // request per restart — the exact scenario this throttle exists to stop.
   const dir = dirname(statePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(statePath, JSON.stringify(state));
+  writeFileAtomic(statePath, JSON.stringify(state), PRIVATE_FILE_MODE);
 }
 
 /** True when the last check was recent enough to skip another. */

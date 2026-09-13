@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { SERVER_SCHEMA, MIGRATIONS, LEGACY_S3_DROP_MIGRATIONS } from "./schema.ts";
 import { convertLegacyAppConfig } from "./app-config-migration.ts";
+import { migrateMobileReconnectTables } from "./mobile-reconnect-migration.ts";
 
 export type { Database };
 
@@ -29,6 +30,12 @@ export function initDb(path: string, options: InitDbOptions = {}): Database {
   for (const sql of migrations) {
     try { db.exec(sql); } catch { /* column already exists / already dropped — safe to ignore */ }
   }
+  // LAMA-337: `mobile_enrollments.host_id` and `web_grants.registration_id`
+  // lost their UNIQUE constraints (one device keeps a history of enrollments
+  // and of rotated grants) and enrollments gained `kind`. CREATE TABLE IF NOT
+  // EXISTS cannot change an existing table, so legacy databases are rebuilt
+  // here, once, before anything reads those tables.
+  migrateMobileReconnectTables(db);
   // LAMA-316: convert legacy dotfile/profile/_global config to the
   // application templates/protections contract. Idempotent and a no-op on
   // fresh databases.

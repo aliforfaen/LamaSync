@@ -1,16 +1,25 @@
-// LAMA-296: Android-companion mobile routes (phase 1). Nine routes live
-// under /api/v1/mobile and each carries Swagger detail. The mobile native
-// identity (bearer token) is confined at the auth boundary to /mobile/me +
-// /mobile/check-in; cookie web sessions flow through the shared auth plugin
-// (which enforces CSRF + exact Origin on their mutations and denies
-// non-admin sessions centrally); the enrollment exchange and the web-session
-// bootstrap are exact pre-auth exemptions.
+// LAMA-296: Android-companion mobile routes (phase 1). The mobile route set
+// lives under /api/v1/mobile and each route carries Swagger detail. The
+// mobile native (bearer token) is confined at the auth boundary to
+// /mobile/me + /mobile/check-in; cookie web sessions flow through the shared
+// auth plugin (which enforces CSRF + exact Origin on their mutations and
+// denies non-admin sessions centrally); the enrollment exchange and the
+// web-session bootstrap are exact pre-auth exemptions.
+//
+// LAMA-337 adds the admin reconnect enrollment
+// (POST /mobile/registrations/:hostId/reconnect-enrollment): the same QR shape
+// as a pairing enrollment, but its exchange rotates the credentials of the
+// EXISTING registration in place (same host id), so a device can be
+// reconnected without orphaning its destinations, uploads or other host-bound
+// state.
 //
 // Status-code map (pinned in the LAMA-296 spec):
 //   400 invalid shape/origin · 401 absent/invalid/revoked authority ·
 //   403 valid authority without the required permission · 404 unknown ·
-//   409 consumed/revoked enrollment · 410 expired enrollment ·
-//   429 throttled · 503 server not configured for the mobile flow.
+//   409 consumed/revoked enrollment (or a reconnect whose target registration
+//   is no longer active) · 410 expired enrollment · 429 throttled ·
+//   500 a reconnect whose live web authority cannot be resolved ·
+//   503 server not configured for the mobile flow.
 
 import { Elysia, t } from "elysia";
 import { principalOf, requireAdmin } from "../auth.ts";
@@ -20,6 +29,7 @@ import {
   bootstrapMobileWebSession,
   canonicalOrigin,
   createMobileEnrollment,
+  createReconnectEnrollment,
   exchangeMobileEnrollment,
   findRegistrationByHostId,
   listMobileRegistrations,
@@ -43,6 +53,9 @@ const MAX_SECRET_LENGTH = 128; // QR secret / grant / session secret
 const MAX_DISPLAY_NAME = 64;
 const MAX_APP_VERSION = 32;
 const MAX_REASON_LENGTH = 200;
+
+/** Reason handed to revoked WebSockets when a reconnect rotates credentials. */
+const RECONNECT_DISCONNECT_REASON = "credentials rotated by reconnect";
 
 function boundedString(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
@@ -190,6 +203,65 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
     },
   )
   // -----------------------------------------------------------------------
+  // Admin reconnect enrollment (LAMA-337)
+  // -----------------------------------------------------------------------
+  .post(
+    "/mobile/registrations/:hostId/reconnect-enrollment",
+    ({ request, params, set }) => {
+      const admin = requireAdmin({ principal: principalOf(request) });
+      if (!admin) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!isCanonicalHttpsOrigin()) {
+        set.status = 503;
+        return {
+          error:
+            "mobile enrollments unavailable: LAMASYNC_ORIGIN must be set to an https:// origin",
+        };
+      }
+      const outcome = createReconnectEnrollment({ hostId: params.hostId });
+      switch (outcome.kind) {
+        case "ok":
+          noStore(set);
+          set.status = 201;
+          return outcome.created.response;
+        case "not_found":
+          set.status = 404;
+          return { error: "mobile registration not found" };
+        case "revoked":
+          set.status = 409;
+          return { error: "mobile registration is revoked; pair it again instead" };
+        case "authority_unresolved":
+          // Fail closed: a registration must have exactly one live web grant
+          // for a reconnect to restore its authority. Anything else is
+          // damaged state, and guessing would risk minting admin.
+          set.status = 500;
+          return {
+            error:
+              "cannot resolve this registration's web authority (expected exactly one live web grant)",
+          };
+      }
+    },
+    {
+      params: t.Object({ hostId: t.String() }),
+      detail: {
+        summary:
+          "Create a reconnect enrollment for an existing mobile registration (admin). Returns the same one-time QR inputs as a pairing enrollment, but exchanging it ROTATES that device's credentials in place and returns its unchanged host id — destinations, upload history and every other host-bound record survive. The fresh grant restores the device's CURRENT live authority; a registration without exactly one live web grant is refused rather than guessed at. Nothing changes until the QR is exchanged, so an abandoned or expired reconnect QR leaves the working device untouched; never valid for a revoked registration.",
+        tags: ["Mobile"],
+        responses: {
+          201: { description: "Reconnect enrollment created; `secret` is returned exactly once (QR)" },
+          401: { description: "Unauthorized" },
+          403: { description: "Not an admin credential" },
+          404: { description: "Unknown mobile registration" },
+          409: { description: "The registration is revoked" },
+          500: { description: "The registration's live web authority cannot be resolved (not exactly one live grant)" },
+          503: { description: "LAMASYNC_ORIGIN not configured" },
+        },
+      },
+    },
+  )
+  // -----------------------------------------------------------------------
   // Exchange: exact pre-auth exemption (see auth.ts AUTH_EXEMPT_ROUTES)
   // -----------------------------------------------------------------------
   .post(
@@ -221,6 +293,21 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
       });
       switch (outcome.kind) {
         case "ok":
+          // A rotation invalidates EVERY authority of that registration, so the
+          // registration's live sockets are swept whenever the exchange was a
+          // reconnect — never conditionally on how many web-session rows the
+          // transaction happened to see. A socket can outlive its session row
+          // (expired/pruned/legacy rows), and one left open would keep
+          // streaming fleet events under a credential that no longer exists.
+          // Closing happens AFTER the commit; closing first would let a racing
+          // request keep a socket whose session was still valid. The explicit
+          // per-session closes stay for reasons/logs and for tests.
+          if (outcome.rotated) {
+            for (const sessionId of outcome.revokedSessionIds) {
+              disconnectWebSession(sessionId, RECONNECT_DISCONNECT_REASON);
+            }
+            disconnectMobileRegistration(outcome.hostId, RECONNECT_DISCONNECT_REASON);
+          }
           noStore(set);
           return outcome.response;
         case "not_found":
@@ -232,6 +319,9 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
         case "revoked":
           set.status = 409;
           return { error: "enrollment revoked" };
+        case "target_unavailable":
+          set.status = 409;
+          return { error: "target mobile registration is no longer active" };
         case "expired":
           set.status = 410;
           return { error: "enrollment expired" };
@@ -249,7 +339,7 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
       }),
       detail: {
         summary:
-          "Exchange a pending+unexpired mobile enrollment for one installation (no auth — the id + one-time QR secret prove intent). Server-created host id, native token and separate web grant are returned exactly once; the client can never choose a host id or grant level.",
+          "Exchange a pending+unexpired mobile enrollment for one installation (no auth — the id + one-time QR secret prove intent). A pairing QR returns a server-created host id, native token and separate web grant exactly once; a reconnect QR instead rotates the credentials of its existing registration (prior grant + every web session revoked, live WebSockets closed) and returns that SAME host id. The client can never choose a host id or grant level.",
         tags: ["Mobile"],
         // Deliberately auth-exempt (auth.ts AUTH_EXEMPT_ROUTES) — the id +
         // one-time QR secret prove intent, so no bearer security applies.
@@ -259,7 +349,7 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
           400: { description: "Invalid/malformed payload" },
           401: { description: "Invalid enrollment secret" },
           404: { description: "Unknown enrollment id" },
-          409: { description: "Enrollment already used or revoked" },
+          409: { description: "Enrollment already used or revoked (or a reconnect's target registration is no longer active)" },
           410: { description: "Enrollment expired" },
           429: { description: "Rate limited (10/min per address, 5/min per enrollment)" },
           503: { description: "LAMASYNC_ORIGIN not configured" },
@@ -443,7 +533,7 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
       body: t.Optional(t.Object({ reason: t.Optional(t.String()) })),
       detail: {
         summary:
-          "Revoke a mobile registration (admin). Atomically revokes the native credential, its web grant and every web session, marks the producing enrollment revoked, and disconnects live WebSockets. Idempotent.",
+          "Revoke a mobile registration (admin). Atomically revokes the native credential, its web grant and every web session, marks the enrollment(s) that produced it — including any pending reconnect QR — revoked, and disconnects live WebSockets. Idempotent.",
         tags: ["Mobile"],
         responses: {
           200: { description: "Registration revoked" },
