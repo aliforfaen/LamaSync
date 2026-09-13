@@ -27,6 +27,72 @@ export function skillAssetName(version: string): string {
   return `lamasync-skill-${version}.tar.gz`;
 }
 
+/** Top-level directory the skill tarball extracts into (see
+ *  packaging/build-skill-tarball.sh). */
+export function skillBundleRoot(version: string): string {
+  return `lamasync-skill-${version}`;
+}
+
+interface TarRun {
+  ok: boolean;
+  stdout: string;
+}
+
+/** Run GNU tar with stdout captured. stderr is captured too (rather than
+ *  inherited) so warnings from a rejected archive never reach the daemon log
+ *  as if they were its own. */
+function runTar(args: string[]): TarRun {
+  const proc = Bun.spawnSync(["tar", ...args], { stdout: "pipe", stderr: "pipe" });
+  return { ok: proc.success, stdout: proc.stdout.toString() };
+}
+
+function tarMemberLines(stdout: string): string[] {
+  return stdout.split("\n").filter((line) => line !== "");
+}
+
+/** Every entry type a skill bundle may contain. A release is plain files and
+ *  directories; links, devices, FIFOs and sockets are rejected. */
+const SKILL_MEMBER_TYPES: ReadonlySet<string> = new Set(["-", "d"]);
+
+/** True when a listed member is a relative path living inside `root`.
+ *  Exported because this is the security predicate, not a formatting helper:
+ *  it is what stops an absolute name or a `..` component from escaping the
+ *  staged extraction directory. */
+export function isContainedSkillMember(name: string, root: string): boolean {
+  if (name.startsWith("/")) return false;
+  const trimmed = name.endsWith("/") ? name.slice(0, -1) : name;
+  if (trimmed === "") return false;
+  const parts = trimmed.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) return false;
+  return parts[0] === root;
+}
+
+/**
+ * Validate the downloaded bundle before tar is allowed to write anything.
+ *
+ * `tar -xzf` trusts every member path and entry type it finds: a hostile or
+ * merely corrupt artifact can carry traversal names, absolute paths or links
+ * whose later members land outside the stage directory. List the names and
+ * types first and reject anything the pack script never produces. Extraction
+ * additionally runs with defensive flags as a second layer.
+ *
+ * `--quoting-style=escape` keeps one member per line even when a name carries
+ * an embedded newline.
+ */
+export function validateSkillBundle(tarPath: string, root: string): boolean {
+  const listed = runTar(["-tzf", tarPath, "--quoting-style=escape"]);
+  if (!listed.ok) return false;
+  const names = tarMemberLines(listed.stdout);
+  if (names.length === 0) return false;
+  if (!names.every((name) => isContainedSkillMember(name, root))) return false;
+
+  const typed = runTar(["-tvzf", tarPath, "--quoting-style=escape"]);
+  if (!typed.ok) return false;
+  const types = tarMemberLines(typed.stdout).map((line) => line.charAt(0));
+  if (types.length !== names.length) return false;
+  return types.every((type) => SKILL_MEMBER_TYPES.has(type));
+}
+
 /** Fetch the release TAGGED for the locally-running binary's VERSION (NOT
  *  the latest release — cross-version drift is rejected, see the LAMA-227
  *  design notes — so a daemon one version behind latest can still refresh
@@ -82,19 +148,27 @@ export async function downloadSkillBundle(downloadUrl: string): Promise<boolean>
     // rely on the system's GNU tar, so we do the same here. The daemon
     // does NOT shell out to install binaries elsewhere; this is the one
     // exception and it is documented in the skill's safety file.
-    const extract = Bun.spawnSync(["tar", "-xzf", tarPath, "-C", stageDir], {
-      stdout: "inherit",
-      stderr: "inherit",
-    });
+    //
+    // The asset is validated before extraction (LAMA-336): `-xzf` must
+    // never be the first thing that touches an untrusted archive.
+    const bundleRoot = skillBundleRoot(VERSION);
+    if (!validateSkillBundle(tarPath, bundleRoot)) {
+      await rmSync(stageDir, { recursive: true, force: true });
+      return false;
+    }
+    const extract = Bun.spawnSync(
+      ["tar", "-xzf", tarPath, "-C", stageDir, "--no-same-owner", "--no-same-permissions"],
+      { stdout: "inherit", stderr: "inherit" },
+    );
     if (!extract.success) {
       await rmSync(stageDir, { recursive: true, force: true });
       return false;
     }
     // The tarball extracts into `<stageDir>/lamasync-skill-<ver>/...` —
-    // the pack script is owned by us, so we simply move the only
-    // top-level directory over.
+    // the pack script is owned by us and validation already rejected
+    // anything else, so the only remaining check is that it arrived.
     const extracted = readdirSync(stageDir).filter((n) => n !== skillAssetName(VERSION));
-    if (extracted.length !== 1) {
+    if (extracted.length !== 1 || extracted[0] !== bundleRoot) {
       await rmSync(stageDir, { recursive: true, force: true });
       return false;
     }
