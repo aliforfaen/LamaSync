@@ -172,6 +172,29 @@ test("every HTTP operation declares responses", () => {
   }
 });
 
+test("the reconnect enrollment operation is admin-only and documents each status once", () => {
+  // LAMA-337 review: the reconnect route is a normal protected admin
+  // operation (never pre-auth) and its documented responses must stay exactly
+  // the ones the handler can return — /swagger/json is keyed by status, so a
+  // duplicated code would silently drop a description rather than fail.
+  const path = "/api/v1/mobile/registrations/{hostId}/reconnect-enrollment";
+  const operation = spec.paths[path]?.post;
+  expect(operation, `expected POST ${path} in the spec`).toBeTruthy();
+  expect(operation?.tags).toEqual(["Mobile"]);
+  // No security override: it inherits the global bearer requirement (unlike
+  // the deliberately public exchange/bootstrap routes).
+  expect(operation?.security).toBeUndefined();
+  expect(Object.keys(operation?.responses ?? {})).toEqual([
+    "201", // QR created
+    "401", // no credential
+    "403", // valid credential without permission
+    "404", // unknown registration
+    "409", // revoked registration
+    "500", // live authority cannot be resolved (fail closed)
+    "503", // LAMASYNC_ORIGIN unset
+  ]);
+});
+
 test("the web UI root is the only untagged non-API surface", () => {
   const untagged = operations.filter(({ operation }) => !operation.tags || operation.tags.length === 0);
   expect(untagged.map(({ method, path }) => `${method.toUpperCase()} ${path}`)).toEqual(["GET /"]);

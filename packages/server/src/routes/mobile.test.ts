@@ -44,6 +44,7 @@ const {
   __resetMobileRateLimits,
   __setMobileRateLimitClock,
   createMobileEnrollment,
+  createReconnectEnrollment,
   deriveCsrfToken,
   exchangeMobileEnrollment,
   hashSecret,
@@ -887,6 +888,120 @@ describe("POST /mobile/registrations/:hostId/reconnect-enrollment", () => {
       )
       .get(paired.hostId);
     expect(native?.revoked_at).not.toBeNull();
+  });
+
+  test("authority comes from the ONE live grant, not from the newest row", async () => {
+    // A device whose live grant is admin:0 (paired with webAdmin:false keeps
+    // working natively but cannot bootstrap a web session). Its authority must
+    // be preserved, not upgraded — a reconnect restores what the device has.
+    const { exchange: paired } = await pairAndroid(false);
+    const qr = await createReconnect(paired.hostId);
+    expect(qr.webAdmin).toBe(false);
+    const res = await exchange(qr.enrollmentId, qr.secret, "Pixel 9", "2.0.0");
+    expect(res.status).toBe(200);
+    // The fresh grant mirrors the live one, so the bootstrap refusal stands.
+    const body = (await res.json()) as MobileEnrollmentExchangeResponse;
+    expect((await bootstrapSession(body.webGrant)).status).toBe(403);
+    const live = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM web_grants WHERE registration_id = ? AND revoked_at IS NULL AND admin = 0",
+      )
+      .get(paired.hostId);
+    expect(live?.n).toBe(1);
+  });
+
+  test("a revoked historical grant next to the live one does not change the resolved authority", async () => {
+    const { exchange: paired } = await pairAndroid(true);
+    // A superseded grant from an earlier rotation: revoked, so it must be
+    // ignored even though it carries admin = 0.
+    db.run(
+      `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at, revoked_at, revoked_reason)
+       VALUES ('grant-historic', 'h-historic-grant', ?, 0, ?, ?, 'credentials rotated by reconnect')`,
+      [paired.hostId, Date.now() - 1000, Date.now() - 1000],
+    );
+    const qr = await createReconnect(paired.hostId);
+    // The live admin grant wins; the revoked admin:0 row is irrelevant.
+    expect(qr.webAdmin).toBe(true);
+  });
+
+  test("no live grant → 500 and nothing is created (never mint authority)", async () => {
+    const { exchange: paired } = await pairAndroid();
+    // Break the invariant the only way it can be broken today: revoke the
+    // registration's single grant without revoking the registration.
+    db.run("UPDATE web_grants SET revoked_at = ?, revoked_reason = ? WHERE registration_id = ?", [
+      Date.now(),
+      "hand-revoked for the test",
+      paired.hostId,
+    ]);
+    const res = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(masterToken),
+      }),
+    );
+    expect(res.status).toBe(500);
+    const rows = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM mobile_enrollments WHERE kind = 'reconnect'")
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("two live grants → 500 and nothing is created (ambiguous authority)", async () => {
+    const { exchange: paired } = await pairAndroid();
+    // The partial unique index forbids this state; drop it to simulate a
+    // database that carries the damage the index was never able to prevent
+    // (it is created best-effort over pre-existing rows).
+    db.exec("DROP INDEX IF EXISTS idx_web_grants_live_registration");
+    db.run(
+      `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at)
+       VALUES ('grant-second-live', 'h-second-live', ?, 1, ?)`,
+      [paired.hostId, Date.now()],
+    );
+    const res = await app.handle(
+      req(`/api/v1/mobile/registrations/${paired.hostId}/reconnect-enrollment`, {
+        method: "POST",
+        headers: bearer(masterToken),
+      }),
+    );
+    expect(res.status).toBe(500);
+    const rows = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM mobile_enrollments WHERE kind = 'reconnect'")
+      .get();
+    expect(rows?.n).toBe(0);
+  });
+
+  test("store outcome carries an explicit rotated flag, even with zero sessions", async () => {
+    // The route keys its post-commit socket sweep on this flag, so it must not
+    // depend on how many web-session rows happened to exist: a device that
+    // never bootstrapped a session still rotates (and still needs the sweep).
+    const { exchange: paired } = await pairAndroid();
+    const qr = createReconnectEnrollment({ hostId: paired.hostId });
+    if (qr.kind !== "ok") throw new Error("reconnect enrollment not created");
+    const sessions = db
+      .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM web_sessions WHERE registration_id = ?")
+      .get(paired.hostId);
+    expect(sessions?.n).toBe(0);
+    const rotated = exchangeMobileEnrollment({
+      enrollmentId: qr.created.enrollmentId,
+      secret: qr.created.secret,
+      displayName: "Pixel 9",
+      appVersion: "2.0.0",
+    });
+    if (rotated.kind !== "ok") throw new Error("reconnect exchange failed");
+    expect(rotated.rotated).toBe(true);
+    expect(rotated.revokedSessionIds).toEqual([]);
+
+    // A brand-new installation is NOT a rotation (it has no prior authority).
+    const fresh = createMobileEnrollment({ webAdmin: true, clientType: "android" });
+    const installed = exchangeMobileEnrollment({
+      enrollmentId: fresh.enrollmentId,
+      secret: fresh.secret,
+      displayName: "New phone",
+      appVersion: "2.0.0",
+    });
+    if (installed.kind !== "ok") throw new Error("pairing exchange failed");
+    expect(installed.rotated).toBe(false);
+    expect(installed.revokedSessionIds).toEqual([]);
   });
 
   test("no plaintext secret is persisted or returned by list/status", async () => {

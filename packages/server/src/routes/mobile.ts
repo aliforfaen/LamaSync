@@ -18,6 +18,7 @@
 //   403 valid authority without the required permission · 404 unknown ·
 //   409 consumed/revoked enrollment (or a reconnect whose target registration
 //   is no longer active) · 410 expired enrollment · 429 throttled ·
+//   500 a reconnect whose live web authority cannot be resolved ·
 //   503 server not configured for the mobile flow.
 
 import { Elysia, t } from "elysia";
@@ -231,13 +232,22 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
         case "revoked":
           set.status = 409;
           return { error: "mobile registration is revoked; pair it again instead" };
+        case "authority_unresolved":
+          // Fail closed: a registration must have exactly one live web grant
+          // for a reconnect to restore its authority. Anything else is
+          // damaged state, and guessing would risk minting admin.
+          set.status = 500;
+          return {
+            error:
+              "cannot resolve this registration's web authority (expected exactly one live web grant)",
+          };
       }
     },
     {
       params: t.Object({ hostId: t.String() }),
       detail: {
         summary:
-          "Create a reconnect enrollment for an existing mobile registration (admin). Returns the same one-time QR inputs as a pairing enrollment, but exchanging it ROTATES that device's credentials in place and returns its unchanged host id — destinations, upload history and every other host-bound record survive. Nothing changes until the QR is exchanged, so an abandoned or expired reconnect QR leaves the working device untouched; never valid for a revoked registration.",
+          "Create a reconnect enrollment for an existing mobile registration (admin). Returns the same one-time QR inputs as a pairing enrollment, but exchanging it ROTATES that device's credentials in place and returns its unchanged host id — destinations, upload history and every other host-bound record survive. The fresh grant restores the device's CURRENT live authority; a registration without exactly one live web grant is refused rather than guessed at. Nothing changes until the QR is exchanged, so an abandoned or expired reconnect QR leaves the working device untouched; never valid for a revoked registration.",
         tags: ["Mobile"],
         responses: {
           201: { description: "Reconnect enrollment created; `secret` is returned exactly once (QR)" },
@@ -245,6 +255,7 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
           403: { description: "Not an admin credential" },
           404: { description: "Unknown mobile registration" },
           409: { description: "The registration is revoked" },
+          500: { description: "The registration's live web authority cannot be resolved (not exactly one live grant)" },
           503: { description: "LAMASYNC_ORIGIN not configured" },
         },
       },
@@ -282,13 +293,16 @@ export const mobileRoutes = new Elysia({ prefix: "/api/v1" })
       });
       switch (outcome.kind) {
         case "ok":
-          // A reconnect has just rotated this registration's credentials: its
-          // previous sessions/grant were revoked inside the transaction, so
-          // every live WebSocket of that registration is closed AFTER the
-          // commit (closing first would let a racing request keep a socket
-          // whose session is still valid). Session ids are closed explicitly
-          // for the log/return path; the registration sweep covers the rest.
-          if (outcome.revokedSessionIds.length > 0) {
+          // A rotation invalidates EVERY authority of that registration, so the
+          // registration's live sockets are swept whenever the exchange was a
+          // reconnect — never conditionally on how many web-session rows the
+          // transaction happened to see. A socket can outlive its session row
+          // (expired/pruned/legacy rows), and one left open would keep
+          // streaming fleet events under a credential that no longer exists.
+          // Closing happens AFTER the commit; closing first would let a racing
+          // request keep a socket whose session was still valid. The explicit
+          // per-session closes stay for reasons/logs and for tests.
+          if (outcome.rotated) {
             for (const sessionId of outcome.revokedSessionIds) {
               disconnectWebSession(sessionId, RECONNECT_DISCONNECT_REASON);
             }

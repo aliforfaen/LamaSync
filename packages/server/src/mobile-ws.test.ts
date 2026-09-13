@@ -341,4 +341,51 @@ describe("WebSocket mobile session upgrades", () => {
     await waitFor(() => freshSocket.messages.some((m) => m.includes('"hello"')));
     await closeWs(freshSocket);
   });
+
+  test("reconnect closes the registration's live socket even with ZERO session rows", async () => {
+    // Regression (review finding): the route used to infer "was this a
+    // reconnect?" from the number of web_sessions it revoked. A connection can
+    // outlive its session row — here the row is gone entirely — so a rotation
+    // with an empty session list used to leave that socket streaming fleet
+    // events under a credential the exchange had already replaced. The sweep
+    // must key on the rotation itself.
+    const { cookieSecret, hostId } = seedPairedSession();
+    const oldSocket = await open({
+      Origin: TEST_ORIGIN,
+      Cookie: `__Host-lamasync-mobile=${cookieSecret}`,
+    });
+    await waitFor(() => oldSocket.messages.some((m) => m.includes('"hello"')));
+    // The session row disappears (pruned/expired cleanup) while the socket the
+    // upgrade already opened stays tracked in-process.
+    db.run("DELETE FROM web_sessions WHERE session_hash = ?", [hashSecret(cookieSecret)]);
+    const remaining = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM web_sessions WHERE registration_id = ? AND revoked_at IS NULL",
+      )
+      .get(hostId);
+    expect(remaining?.n).toBe(0);
+
+    const master = process.env.LAMASYNC_API_KEY!;
+    const base = `http://127.0.0.1:${httpPort}`;
+    const created = await fetch(
+      `${base}/api/v1/mobile/registrations/${hostId}/reconnect-enrollment`,
+      { method: "POST", headers: { Authorization: `Bearer ${master}` } },
+    );
+    expect(created.status).toBe(201);
+    const qr = (await created.json()) as { enrollmentId: string; secret: string };
+    const exchanged = await fetch(
+      `${base}/api/v1/mobile/enrollments/${qr.enrollmentId}/exchange`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret: qr.secret, displayName: "Pixel 9", appVersion: "2.0.0" }),
+      },
+    );
+    expect(exchanged.status).toBe(200);
+
+    await waitFor(() =>
+      oldSocket.messages.some((m) => m.includes("credentials rotated by reconnect")),
+    );
+    await oldSocket.closed;
+  });
 });

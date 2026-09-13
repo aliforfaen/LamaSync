@@ -368,7 +368,11 @@ export function createMobileEnrollment(opts: {
 export type ReconnectCreateOutcome =
   | { kind: "ok"; created: CreatedEnrollment }
   | { kind: "not_found" }
-  | { kind: "revoked" };
+  | { kind: "revoked" }
+  /** The registration's web authority cannot be resolved from its stored
+   *  grants (none live, or more than one live row). Fail closed: issuing a QR
+   *  here would invent an authority, so nothing is created. */
+  | { kind: "authority_unresolved"; liveGrants: number };
 
 /**
  * LAMA-337: create a one-time RECONNECT enrollment for an EXISTING live
@@ -383,9 +387,15 @@ export type ReconnectCreateOutcome =
  * RECONNECT QRs for the SAME host are superseded (the QR-regeneration rule,
  * scoped to the device it belongs to).
  *
- * The fresh web grant preserves the registration's current grant authority
- * (see existingGrantAdminFlag). Throws when the canonical origin is
- * unconfigured.
+ * The fresh web grant preserves the registration's CURRENT LIVE grant
+ * authority (see resolveReconnectAuthority): a reconnect restores what the
+ * device has, it never mints more. A registration whose live grant cannot be
+ * resolved unambiguously is refused rather than guessed at. Throws when the
+ * canonical origin is unconfigured.
+ *
+ * The QR itself is created in one transaction that re-checks both the target's
+ * liveness and its authority, so a revoke or a concurrent rotation between the
+ * first read and the insert leaves no QR behind.
  */
 export function createReconnectEnrollment(opts: {
   hostId: string;
@@ -397,12 +407,18 @@ export function createReconnectEnrollment(opts: {
   const registration = findRegistrationByHostId(opts.hostId);
   if (!registration) return { kind: "not_found" };
   if (isRowRevoked(registration)) return { kind: "revoked" };
-  const webAdmin = existingGrantAdminFlag(d, opts.hostId);
+  const authority = resolveReconnectAuthority(d, opts.hostId);
+  if (authority.kind === "unresolved") {
+    return { kind: "authority_unresolved", liveGrants: authority.liveGrants };
+  }
   const create = d.transaction(() => {
-    // Re-check inside the transaction: the admin may have revoked the device
-    // between the read above and this insert. Rolling back leaves no QR behind.
+    // Re-check inside the transaction: the admin may have revoked the device —
+    // or another rotation may have replaced its grant — between the read above
+    // and this insert. Rolling back leaves no QR behind.
     const live = findRegistrationByHostId(opts.hostId);
     if (!live || isRowRevoked(live)) throw new ReconnectTargetLost();
+    const current = resolveReconnectAuthority(d, opts.hostId);
+    if (current.kind === "unresolved") throw new ReconnectAuthorityLost(current.liveGrants);
     const enrollmentId = generatePublicId();
     const secret = generateOpaqueSecret();
     insertEnrollmentRow(d, {
@@ -411,18 +427,22 @@ export function createReconnectEnrollment(opts: {
       hostId: opts.hostId,
       kind: "reconnect",
       clientType: live.client_type,
-      webAdmin,
+      webAdmin: current.webAdmin,
       nowMs: now,
     });
     revokeOtherPendingReconnectsForHost(d, opts.hostId, enrollmentId, now);
-    return { enrollmentId, secret };
+    return { enrollmentId, secret, webAdmin: current.webAdmin };
   });
   let enrollmentId: string;
   let secret: string;
+  let webAdmin: boolean;
   try {
-    ({ enrollmentId, secret } = create());
+    ({ enrollmentId, secret, webAdmin } = create());
   } catch (err) {
     if (err instanceof ReconnectTargetLost) return { kind: "revoked" };
+    if (err instanceof ReconnectAuthorityLost) {
+      return { kind: "authority_unresolved", liveGrants: err.liveGrants };
+    }
     throw err;
   }
   const expiresAt = now + ENROLLMENT_TTL_MS;
@@ -444,22 +464,31 @@ export function createReconnectEnrollment(opts: {
   };
 }
 
+type ReconnectAuthority =
+  | { kind: "ok"; webAdmin: boolean }
+  | { kind: "unresolved"; liveGrants: number };
+
 /**
- * The authority a reconnect's fresh web grant inherits: the registration's
- * current grant flag. A registration always has a grant row (the exchange
- * creates one); if it somehow has none it is treated like the desktop
- * pairing default (full admin) rather than silently downgrading a device
- * that already holds that authority.
+ * Resolve the authority a reconnect may restore: the registration's single
+ * LIVE web grant (`revoked_at IS NULL`; 0 counts as live everywhere else in
+ * this module, so it is treated as live here too and lands in the ambiguous
+ * branch rather than being silently ignored). Exactly one live grant is the
+ * invariant the enrollment exchange maintains and
+ * `idx_web_grants_live_registration` enforces; anything else means the stored
+ * state is damaged, and the caller must refuse instead of inventing an
+ * authority.
  */
-function existingGrantAdminFlag(d: Database, hostId: string): boolean {
-  const row = d
+function resolveReconnectAuthority(d: Database, hostId: string): ReconnectAuthority {
+  const live = d
     .query<{ admin: number }, [string]>(
-      `SELECT admin FROM web_grants WHERE registration_id = ?
-        ORDER BY created_at DESC, id DESC LIMIT 1`,
+      `SELECT admin FROM web_grants
+        WHERE registration_id = ? AND (revoked_at IS NULL OR revoked_at = 0)
+        ORDER BY created_at DESC, id DESC`,
     )
-    .get(hostId);
-  if (!row) return true;
-  return row.admin === 1;
+    .all(hostId);
+  const only = live.length === 1 ? live[0] : undefined;
+  if (!only) return { kind: "unresolved", liveGrants: live.length };
+  return { kind: "ok", webAdmin: only.admin === 1 };
 }
 
 function insertEnrollmentRow(
@@ -567,8 +596,21 @@ export type ExchangeOutcome =
       kind: "ok";
       response: MobileEnrollmentExchangeResponse;
       hostId: string;
-      /** Web sessions revoked by this exchange (reconnect); empty for a new
-       *  installation. The route closes their live WebSockets after commit. */
+      /**
+       * True when this exchange ROTATED an existing registration's
+       * credentials (a reconnect QR) rather than installing a new device.
+       *
+       * The route keys its post-commit socket sweep on THIS flag, never on
+       * the session list: a rotation invalidates every credential of the
+       * registration, and a live socket can outlive its web_sessions row, so
+       * inferring "was this a reconnect?" from revokedSessionIds would leave
+       * sockets streaming under a rotated credential.
+       */
+      rotated: boolean;
+      /** Web sessions the rotation revoked (empty for a new install, and
+       *  legitimately empty for a reconnect whose device never bootstrapped a
+       *  cookie session). Used for the per-session close + tests, never to
+       *  decide whether the registration must be swept. */
       revokedSessionIds: string[];
     }
   | { kind: "not_found" }
@@ -672,7 +714,7 @@ function exchangeNewEnrollment(
     displayName: opts.displayName,
     clientType: "android",
   };
-  return { kind: "ok", response, hostId: registrationId, revokedSessionIds: [] };
+  return { kind: "ok", response, hostId: registrationId, rotated: false, revokedSessionIds: [] };
 }
 
 /**
@@ -760,7 +802,7 @@ function exchangeReconnectEnrollment(
     displayName: opts.displayName,
     clientType: registration.client_type,
   };
-  return { kind: "ok", response, hostId, revokedSessionIds };
+  return { kind: "ok", response, hostId, rotated: true, revokedSessionIds };
 }
 
 /**
@@ -820,6 +862,13 @@ class ExchangeClaimLost extends Error {
 class ReconnectTargetLost extends Error {
   constructor() {
     super("reconnect target registration is no longer live");
+  }
+}
+
+/** Thrown when a reconnect QR's authority stopped being resolvable mid-create. */
+class ReconnectAuthorityLost extends Error {
+  constructor(readonly liveGrants: number) {
+    super("reconnect authority is no longer resolvable (expected exactly one live web grant)");
   }
 }
 
