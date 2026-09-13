@@ -708,7 +708,7 @@ evidence gap.
 
 LAMA-337 baseline (this worktree): repo gates green — `bun x tsc --noEmit`,
 `bun run build:web-ui` (still one self-contained `index.html`), `bun test`
-**1748 pass / 0 fail** (the ~70 added for this change cover both the feature and
+**1749 pass / 0 fail** (the ~70 added for this change cover both the feature and
 its review round), `bun run scripts/check-skill-drift.ts --strict` OK (162 API
 rows / 163 server routes — the new reconnect route documented), and `bun run
 build` (all five distributables). Android `assembleDebug` OK, `lintDebug`
@@ -725,8 +725,10 @@ leaving the old bearer/grant/session valid; a successful exchange keeping the
 host id while rotating both authorities, killing the old cookie session and
 live WebSocket (real HTTP + WS harness), and refreshing device metadata without
 touching destinations, uploads or `created_at`; the review's socket regression —
-a rotation with ZERO live session rows still closes the registration's open
-socket (verified to fail against the previous session-count inference); replay
+two shapes of "zero live sessions by the query but a socket the server accepts
+as live" (the row deleted outright, and a row stamped revoked_at = 0) still
+close the registration's open socket on a rotation (both verified to fail
+against the previous session-count inference); replay
 and concurrent exchanges yielding one winner; QR-supersession scoped to kind
 and host; revoke killing a pending reconnect QR; and the UI action/modal copy,
 including state-machine tests proving expired/superseded QRs read "device
