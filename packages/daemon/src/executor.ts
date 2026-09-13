@@ -403,12 +403,12 @@ async function applyResolvedConflicts(
         const exit = await proc.exited;
         if (exit !== 0) throw new Error(stderr.slice(-500));
       } else if (c.resolution === "both") {
-        const suffix = `.conflict-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
-        Bun.spawnSync(["mv", localFile, `${localFile}${suffix}`]);
-        const proc = Bun.spawn(["rclone", "copyto", remoteFile, localFile, "--config", configPath, "-v"], { stdout: "pipe", stderr: "pipe" });
-        const stderr = await new Response(proc.stderr).text();
-        const exit = await proc.exited;
-        if (exit !== 0) throw new Error(stderr.slice(-500));
+        // Same checked keep-both as the automatic path: `mv` used to be run
+        // through Bun.spawnSync with its exit status ignored, so a failed
+        // rename still pulled the remote file over the local one and then
+        // acknowledged the conflict as resolved.
+        keepLocalConflictCopy(localFile);
+        await rcloneCopyto(remoteFile, localFile, configPath);
       }
       applied += 1;
       try {
@@ -460,6 +460,37 @@ export function pickConflictAction(
   return { kind: "keep_both" };
 }
 
+/**
+ * LAMA-336: move the local side of a keep-both conflict aside.
+ *
+ * Returns the path the copy landed on, or null when there was no local copy to
+ * preserve (the caller then only pulls the remote version). A failed move
+ * throws: the caller pulls the remote version into the original path on the
+ * next line, so a keep-both that could not actually keep the local copy must
+ * abort instead of overwriting it.
+ *
+ * If the move succeeds but the pull then fails, the local copy is safe under
+ * the returned path and the original path is free, so a retry pulls the remote
+ * version without losing it (the conflict is only acknowledged after both
+ * steps succeed).
+ *
+ * The date-only suffix collides for two conflicts on the same path on the same
+ * day, so the target gets an incrementing counter (same guard as
+ * `archiveBisyncState`). `now` is injectable for tests.
+ */
+export function keepLocalConflictCopy(localFile: string, now: Date = new Date()): string | null {
+  if (!existsSync(localFile)) return null;
+  const base = `${localFile}.conflict-${now.toISOString().slice(0, 10).replace(/-/g, "")}`;
+  let target = base;
+  let n = 1;
+  while (existsSync(target)) {
+    target = `${base}.${n}`;
+    n += 1;
+  }
+  renameSync(localFile, target);
+  return target;
+}
+
 async function applyAutomaticConflicts(
   conflicts: ParsedConflict[],
   strategy: ConflictStrategy,
@@ -481,10 +512,9 @@ async function applyAutomaticConflicts(
       } else if (action.kind === "remote_wins") {
         await rcloneCopyto(remoteFile, localFile, configPath);
       } else if (action.kind === "keep_both") {
-        if (existsSync(localFile)) {
-          const suffix = `.conflict-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
-          renameSync(localFile, `${localFile}${suffix}`);
-        }
+        // Checked move first: it throws when the local copy cannot be set
+        // aside, which aborts before the pull below can overwrite it.
+        keepLocalConflictCopy(localFile);
         await rcloneCopyto(remoteFile, localFile, configPath);
       }
       resolved += 1;

@@ -3,7 +3,7 @@
 // filesystem only.
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, relative } from "path";
 import { randomBytes } from "node:crypto";
@@ -17,6 +17,7 @@ import {
   appTarExclude,
   captureAppSnapshot,
   isRecoverableAppTarResult,
+  keepLocalConflictCopy,
   runAppTarCapture,
   archiveBisyncState,
   buildRcloneCommand,
@@ -724,6 +725,67 @@ describe("archiveBisyncState (LAMA-308)", () => {
       expect(existsSync(stateDir)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// LAMA-336: the manual keep-both path ran `mv` through Bun.spawnSync and
+// ignored its exit status, then pulled the remote file into the original path.
+// A failed rename therefore overwrote the local copy and still reported the
+// conflict resolved. The move is now a checked rename that throws first.
+describe("keepLocalConflictCopy (LAMA-336)", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "lamasync-keep-both-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const at = new Date("2026-09-13T10:20:30Z");
+
+  test("moves the local copy aside and frees the original path", () => {
+    const localFile = join(dir, "notes.txt");
+    writeFileSync(localFile, "local version");
+    const moved = keepLocalConflictCopy(localFile, at);
+    expect(moved).toBe(`${localFile}.conflict-20260913`);
+    expect(existsSync(localFile)).toBe(false);
+    expect(existsSync(moved!)).toBe(true);
+  });
+
+  test("a second same-day conflict gets its own name instead of replacing the first", () => {
+    const localFile = join(dir, "notes.txt");
+    writeFileSync(localFile, "local version");
+    const first = keepLocalConflictCopy(localFile, at);
+    writeFileSync(localFile, "local version again");
+    const second = keepLocalConflictCopy(localFile, at);
+
+    expect(first).toBe(`${localFile}.conflict-20260913`);
+    expect(second).toBe(`${localFile}.conflict-20260913.1`);
+    expect(existsSync(first!)).toBe(true);
+    expect(existsSync(second!)).toBe(true);
+  });
+
+  test("nothing to preserve returns null (the caller only pulls the remote side)", () => {
+    expect(keepLocalConflictCopy(join(dir, "absent.txt"), at)).toBeNull();
+  });
+
+  test("a failed move throws and leaves the local copy untouched", () => {
+    // Make the destination directory unwritable so the rename cannot land.
+    // The caller must abort instead of pulling the remote file over the local
+    // one: the local file is still exactly where it was, with its content.
+    const lockedDir = join(dir, "locked");
+    mkdirSync(lockedDir, { recursive: true });
+    const localFile = join(lockedDir, "notes.txt");
+    writeFileSync(localFile, "local version");
+    chmodSync(lockedDir, 0o500);
+    try {
+      expect(() => keepLocalConflictCopy(localFile, at)).toThrow();
+      expect(readFileSync(localFile, "utf8")).toBe("local version");
+    } finally {
+      chmodSync(lockedDir, 0o700);
     }
   });
 });
