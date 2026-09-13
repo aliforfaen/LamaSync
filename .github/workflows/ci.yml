@@ -140,7 +140,7 @@ jobs:
           ./android/gradlew -p android assembleRelease -PlamasyncVersionName="$VERSION"
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk dist/lamasync-android.apk
-          sha256sum dist/lamasync-android.apk > dist/lamasync-android.apk.sha256
+          sha256sum dist/lamasync-android.apk | sed 's|  dist/|  |' > dist/lamasync-android.apk.sha256
 
       - name: Download server binary
         uses: actions/download-artifact@v4

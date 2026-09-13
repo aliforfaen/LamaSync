@@ -167,7 +167,7 @@ Release APKs require the ignored local signing credentials and a stable
 release version:
 
 ```bash
-./android/gradlew -p android assembleRelease -PlamasyncVersionName=0.3.10
+./android/gradlew -p android assembleRelease -PlamasyncVersionName=0.3.11
 ```
 
 ### Stage-2 automatic protection (permissions, scheduling, tests)

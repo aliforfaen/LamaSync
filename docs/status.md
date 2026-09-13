@@ -6,7 +6,7 @@ Older release notes and completed work are in
 
 ## Current release
 
-v0.3.7 is deployed; the source tree is at v0.3.10 pending release. The server,
+v0.3.7 is deployed; the source tree is at v0.3.11 pending release. The server,
 daemon, CLI, web UI, agent skill, and deploy agent build from the same Bun
 workspace. CI runs type-check, web build, tests, strict skill drift, and
 distributable binary build.

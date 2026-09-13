@@ -56,7 +56,7 @@ keyPassword=...
 To make a manual signed APK after the credential files exist:
 
 ```bash
-./android/gradlew -p android assembleRelease -PlamasyncVersionName=0.3.10
+./android/gradlew -p android assembleRelease -PlamasyncVersionName=0.3.11
 sha256sum android/app/build/outputs/apk/release/app-release.apk
 ```
 
