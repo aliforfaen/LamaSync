@@ -562,6 +562,119 @@ describe("apps storage destinations (LAMA-324)", () => {
     expect(rows[0]?.backendName).toBe("local-dest");
   });
 
+  // LAMA-336: partial destination updates used `??`, which treats an
+  // explicitly supplied null as "absent" and re-applied the stored value. The
+  // UI's own destination controls always send both fields, so this made
+  // "clear the destination" a silent no-op and made switching from s3 to a
+  // local backend fail validation with the stale bucket.
+  test("an explicit null backend clears the s3 bucket and returns to the server archive", async () => {
+    templateId = await createTemplate();
+    const s3BackendId = insertS3Backend();
+    const enroll = await postJson("/api/v1/apps/protections", {
+      templateId,
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "apps-bucket",
+    });
+    expect(enroll.status).toBe(201);
+    const prot = (await enroll.json()) as { id: string };
+
+    const cleared = await putJson(`/api/v1/apps/protections/${prot.id}`, { backendId: null });
+    expect(cleared.status).toBe(200);
+    const body = (await cleared.json()) as {
+      backendId: string | null;
+      s3Bucket: string | null;
+      destination: string;
+    };
+    expect(body.backendId).toBeNull();
+    expect(body.s3Bucket).toBeNull();
+    expect(body.destination).toBe("server_archive");
+
+    const row = db
+      .query<{ backend_id: string | null; s3_bucket: string | null }, [string]>(
+        "SELECT backend_id, s3_bucket FROM application_protections WHERE id = ?",
+      )
+      .get(prot.id);
+    expect(row?.backend_id).toBeNull();
+    expect(row?.s3_bucket).toBeNull();
+
+    // The next capture lands in the server archive again.
+    const snap = await upload(prot.id, "after-clear");
+    expect(snap.status).toBe(201);
+    expect(((await snap.json()) as { backendId: string | null }).backendId).toBeNull();
+  });
+
+  test("an explicit null backend clears a stale bucket on a server-archive protection", async () => {
+    templateId = await createTemplate();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    const prot = (await enroll.json()) as { id: string };
+    // A row can carry a bucket with no backend (older data, direct edits):
+    // clearing the destination must not be rejected for its own leftover.
+    db.run("UPDATE application_protections SET s3_bucket = 'stale-bucket' WHERE id = ?", [prot.id]);
+
+    const cleared = await putJson(`/api/v1/apps/protections/${prot.id}`, { backendId: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { s3Bucket: string | null }).s3Bucket).toBeNull();
+  });
+
+  test("an explicit null bucket is honoured when the destination changes kind", async () => {
+    templateId = await createTemplate();
+    const s3BackendId = insertS3Backend();
+    const localBackendId = insertLocalBackend("/tmp/lamasync-apps-test-kind-change");
+    const enroll = await postJson("/api/v1/apps/protections", {
+      templateId,
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "apps-bucket",
+    });
+    const prot = (await enroll.json()) as { id: string };
+
+    // This is exactly what the web UI sends when the destination changes.
+    const changed = await putJson(`/api/v1/apps/protections/${prot.id}`, {
+      backendId: localBackendId,
+      s3Bucket: null,
+    });
+    expect(changed.status).toBe(200);
+    const body = (await changed.json()) as { backendId: string | null; s3Bucket: string | null };
+    expect(body.backendId).toBe(localBackendId);
+    expect(body.s3Bucket).toBeNull();
+  });
+
+  test("an omitted destination field keeps the stored value", async () => {
+    templateId = await createTemplate();
+    const s3BackendId = insertS3Backend();
+    const enroll = await postJson("/api/v1/apps/protections", {
+      templateId,
+      hostId: "host-a",
+      backendId: s3BackendId,
+      s3Bucket: "apps-bucket",
+    });
+    const prot = (await enroll.json()) as { id: string };
+
+    const renamed = await putJson(`/api/v1/apps/protections/${prot.id}`, { name: "renamed" });
+    expect(renamed.status).toBe(200);
+    const body = (await renamed.json()) as {
+      backendId: string | null;
+      s3Bucket: string | null;
+      name: string;
+    };
+    expect(body.name).toBe("renamed");
+    expect(body.backendId).toBe(s3BackendId);
+    expect(body.s3Bucket).toBe("apps-bucket");
+  });
+
+  test("a contradictory clear (null backend plus a bucket) is rejected", async () => {
+    templateId = await createTemplate();
+    const enroll = await postJson("/api/v1/apps/protections", { templateId, hostId: "host-a" });
+    const prot = (await enroll.json()) as { id: string };
+
+    const contradictory = await putJson(`/api/v1/apps/protections/${prot.id}`, {
+      backendId: null,
+      s3Bucket: "apps-bucket",
+    });
+    expect(contradictory.status).toBe(400);
+  });
+
   test("relay failure leaves no snapshot row (502, nothing orphaned)", async () => {
     templateId = await createTemplate();
     const s3BackendId = insertS3Backend();

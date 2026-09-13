@@ -482,7 +482,11 @@ interface DestinationChoice {
 
 /** Validate a protection destination choice (LAMA-324). NULL backend =
  *  server archive; else the backend must exist, be of an allowed kind
- *  (s3/local/nfs — never restic), and s3 kinds require a bucket. */
+ *  (s3/local/nfs — never restic), and s3 kinds require a bucket.
+ *
+ *  Partial updates pass the request's own null through (LAMA-336): null means
+ *  "clear", undefined means "keep the stored value". Callers resolve the
+ *  stored value before calling, so this function never has to guess. */
 function validateDestination(body: { backendId?: string | null; s3Bucket?: string | null }): DestinationChoice {
   const backendId = body.backendId ?? null;
   if (backendId === null || backendId.trim() === "") {
@@ -982,9 +986,20 @@ export const appsRoutes = new Elysia({ prefix: "/api/v1" })
         // LAMA-324: destination changes affect FUTURE captures only. The
         // backend is validated like enrollment; snapshots keep their own
         // immutable recorded location and history stays intact.
+        //
+        // LAMA-336: an explicitly supplied null is a clear, not an omission.
+        // `??` treated both null and undefined as absent, so
+        // `{ backendId: null }` silently re-applied the old backend (a no-op
+        // the UI reported as success) and `{ s3Bucket: null }` re-applied the
+        // old bucket, which then failed validation for the new kind.
         const destination = validateDestination({
-          backendId: body.backendId ?? existing.backend_id,
-          s3Bucket: body.s3Bucket ?? existing.s3_bucket,
+          backendId: body.backendId === undefined ? existing.backend_id : body.backendId,
+          s3Bucket:
+            body.s3Bucket !== undefined
+              ? body.s3Bucket
+              : body.backendId === null
+                ? null // moving to the server archive drops the bucket with it
+                : existing.s3_bucket,
         });
         if (destination.error) {
           set.status = 400;
