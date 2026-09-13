@@ -489,10 +489,13 @@ export function enrollmentOutcomeCopy(state: EnrollmentCardState, reconnect: boo
         ? "This device's access was revoked, so reconnecting it is not offered — pair it again with a fresh pairing QR to restore access."
         : "Pair the device again with a fresh QR to restore access.";
     case "qr-expired":
+      return reconnect
+        ? "The phone keeps signing in with its current credentials until you show and scan a new reconnect QR."
+        : "No device was paired. Generate a new QR when you are ready to pair one.";
     case "qr-superseded":
       return reconnect
-        ? "The phone keeps signing in with its current credentials until a new QR is scanned; generating one also voids this device's earlier pending QR."
-        : "Any still-pending older QR is voided the moment you generate a new one.";
+        ? "The phone keeps signing in with its current credentials. This QR was replaced by a newer one, so show the newest QR instead."
+        : "This QR was replaced by a newer one — show the newest QR instead. A still-pending older QR is voided the moment you generate a new one.";
     case "pending":
       return "";
   }

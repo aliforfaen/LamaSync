@@ -167,7 +167,6 @@ describe("terminal card copy — reconnect", () => {
     expect(enrollmentOutcomeCopy(state, true)).toContain("keeps signing in with its current credentials");
     expect(enrollmentOutcomeCopy(state, true)).not.toContain("re-pair");
   });
-
   it("a superseded reconnect QR (newer QR shown) says the device is unchanged", () => {
     const state = enrollmentCardState({ status: "revoked", expiredLocally: false, host: host() });
     const html = renderOutcome(state, RECONNECT, host());
@@ -175,6 +174,7 @@ describe("terminal card copy — reconnect", () => {
     expect(html).toContain("The device is unchanged and still works");
     expect(html).not.toContain("Access revoked");
     expect(html).not.toContain("can no longer sign in");
+    expect(enrollmentOutcomeCopy(state, true)).toContain("replaced by a newer one");
   });
 
   it("only a revoked registration is reported as revoked access", () => {
@@ -205,7 +205,7 @@ describe("terminal card copy — pairing (audited for the same conflation)", () 
     expect(html).toContain("No device was paired");
     expect(html).not.toContain("Access revoked");
     expect(html).not.toContain("can no longer sign in");
-    expect(enrollmentOutcomeCopy(state, false)).toContain("still-pending older QR is voided");
+    expect(enrollmentOutcomeCopy(state, false)).toContain("No device was paired");
   });
 
   it("a superseded pairing QR never claims revoked access", () => {
@@ -213,6 +213,7 @@ describe("terminal card copy — pairing (audited for the same conflation)", () 
     const html = renderOutcome(state, null, null);
     expect(html).toContain("This QR is no longer valid");
     expect(html).not.toContain("Access revoked");
+    expect(enrollmentOutcomeCopy(state, false)).toContain("show the newest QR instead");
   });
 
   it("a revoked registration still reads as revoked access", () => {
