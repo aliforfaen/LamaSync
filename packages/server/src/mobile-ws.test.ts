@@ -194,6 +194,36 @@ function sessionIdOf(secret: string): string {
   return row.id;
 }
 
+/**
+ * Drive the REAL reconnect routes (admin create, then the public exchange)
+ * over HTTP and require the given already-open socket to close with the
+ * rotation reason. Shared by the zero-session regressions so both exercise the
+ * exact production path rather than a simulation of it.
+ */
+async function expectReconnectClosesSocket(hostId: string, socket: WsHarness): Promise<void> {
+  const master = process.env.LAMASYNC_API_KEY!;
+  const base = `http://127.0.0.1:${httpPort}`;
+  const created = await fetch(
+    `${base}/api/v1/mobile/registrations/${hostId}/reconnect-enrollment`,
+    { method: "POST", headers: { Authorization: `Bearer ${master}` } },
+  );
+  expect(created.status).toBe(201);
+  const qr = (await created.json()) as { enrollmentId: string; secret: string };
+  const exchanged = await fetch(
+    `${base}/api/v1/mobile/enrollments/${qr.enrollmentId}/exchange`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret: qr.secret, displayName: "Pixel 9", appVersion: "2.0.0" }),
+    },
+  );
+  expect(exchanged.status).toBe(200);
+  await waitFor(() =>
+    socket.messages.some((m) => m.includes("credentials rotated by reconnect")),
+  );
+  await socket.closed;
+}
+
 describe("WebSocket mobile session upgrades", () => {
   test("bearer subprotocol (master key) still connects (legacy contract)", async () => {
     const master = process.env.LAMASYNC_API_KEY!;
@@ -365,27 +395,38 @@ describe("WebSocket mobile session upgrades", () => {
       .get(hostId);
     expect(remaining?.n).toBe(0);
 
-    const master = process.env.LAMASYNC_API_KEY!;
-    const base = `http://127.0.0.1:${httpPort}`;
-    const created = await fetch(
-      `${base}/api/v1/mobile/registrations/${hostId}/reconnect-enrollment`,
-      { method: "POST", headers: { Authorization: `Bearer ${master}` } },
-    );
-    expect(created.status).toBe(201);
-    const qr = (await created.json()) as { enrollmentId: string; secret: string };
-    const exchanged = await fetch(
-      `${base}/api/v1/mobile/enrollments/${qr.enrollmentId}/exchange`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ secret: qr.secret, displayName: "Pixel 9", appVersion: "2.0.0" }),
-      },
-    );
-    expect(exchanged.status).toBe(200);
+    await expectReconnectClosesSocket(hostId, oldSocket);
+  });
 
-    await waitFor(() =>
-      oldSocket.messages.some((m) => m.includes("credentials rotated by reconnect")),
-    );
-    await oldSocket.closed;
+  test("reconnect closes a live socket whose session row is not revoked_at IS NULL", async () => {
+    // The same inference, with a shape the server itself accepts as LIVE: a
+    // session row stamped revoked_at = 0 (isRowRevoked treats 0 as unrevoked,
+    // so the upgrade succeeds) is invisible to a `revoked_at IS NULL` count,
+    // which made the old code skip the sweep on a rotation it had just
+    // performed.
+    const { cookieSecret, hostId } = seedPairedSession();
+    db.run("UPDATE web_sessions SET revoked_at = 0 WHERE session_hash = ?", [
+      hashSecret(cookieSecret),
+    ]);
+    const oldSocket = await open({
+      Origin: TEST_ORIGIN,
+      Cookie: `__Host-lamasync-mobile=${cookieSecret}`,
+    });
+    // The upgrade only succeeds because the server considers that row live.
+    await waitFor(() => oldSocket.messages.some((m) => m.includes('"hello"')));
+    const liveByIsNull = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM web_sessions WHERE registration_id = ? AND revoked_at IS NULL",
+      )
+      .get(hostId);
+    expect(liveByIsNull?.n).toBe(0);
+    const liveByApp = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM web_sessions WHERE registration_id = ? AND (revoked_at IS NULL OR revoked_at = 0)",
+      )
+      .get(hostId);
+    expect(liveByApp?.n).toBe(1);
+
+    await expectReconnectClosesSocket(hostId, oldSocket);
   });
 });
