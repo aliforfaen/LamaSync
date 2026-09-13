@@ -592,6 +592,16 @@ CREATE TABLE IF NOT EXISTS web_grants (
 );
 CREATE INDEX IF NOT EXISTS idx_web_grants_registration
     ON web_grants(registration_id);
+-- LAMA-337: at most ONE live grant per registration. The rotation revokes the
+-- superseded grant before inserting the fresh one, so a reconnect never needs
+-- two live rows at once — this index makes that invariant the database's
+-- rather than the code's. A revoked_at of 0 counts as live in the
+-- application's isRowRevoked(), which the partial predicate deliberately does
+-- not cover: such a row cannot smuggle a second grant in, because the
+-- reconnect authority resolver counts it as live and refuses the ambiguous
+-- registration instead of minting authority.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_web_grants_live_registration
+    ON web_grants(registration_id) WHERE revoked_at IS NULL;
 
 -- LAMA-296: hashed session secrets issued by the web-session bootstrap. The
 -- client cookie holds the random session secret; the server stores only its
@@ -848,6 +858,11 @@ export const MIGRATIONS: string[] = [
   "CREATE TABLE IF NOT EXISTS mobile_registrations (host_id TEXT PRIMARY KEY REFERENCES hosts(id), client_type TEXT NOT NULL DEFAULT 'android', display_name TEXT NOT NULL, app_version TEXT NOT NULL, native_token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER, revoked_at INTEGER, revoked_reason TEXT)",
   "CREATE TABLE IF NOT EXISTS web_grants (id TEXT PRIMARY KEY, grant_hash TEXT NOT NULL UNIQUE, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, revoked_at INTEGER, revoked_reason TEXT)",
   "CREATE INDEX IF NOT EXISTS idx_web_grants_registration ON web_grants(registration_id)",
+  // LAMA-337: one LIVE grant per registration (a rotation revokes before it
+  // inserts). On a database whose rows already contradict that, this create
+  // fails and is swallowed like every other migration — the reconnect
+  // authority resolver refuses such a registration instead of guessing.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_web_grants_live_registration ON web_grants(registration_id) WHERE revoked_at IS NULL",
   "CREATE TABLE IF NOT EXISTS web_sessions (id TEXT PRIMARY KEY, session_hash TEXT NOT NULL UNIQUE, registration_id TEXT NOT NULL REFERENCES mobile_registrations(host_id), grant_id TEXT NOT NULL REFERENCES web_grants(id), admin INTEGER NOT NULL DEFAULT 0, issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER)",
   "CREATE INDEX IF NOT EXISTS idx_web_sessions_registration ON web_sessions(registration_id)",
   "CREATE INDEX IF NOT EXISTS idx_web_sessions_grant ON web_sessions(grant_id)",

@@ -30,9 +30,18 @@ distributable binary build.
   one transaction, rotates `native_token_hash`, refreshes display name/app
   version/last-seen plus the host heartbeat, revokes the previous web grant and
   every web session, issues a fresh grant and returns the **same host id**.
-  Live WebSockets of that registration are closed after commit, so the old
-  native bearer, old grant and every old cookie session are dead the moment the
-  reconnect lands. Credential history is now auditable: `mobile_enrollments`
+  Live WebSockets of that registration are closed after commit — the sweep is
+  keyed on the rotation itself, never on how many session rows the transaction
+  happened to see, so a socket that outlived its session row (or a device that
+  never bootstrapped one) cannot keep streaming under the replaced credential —
+  and the old native bearer, old grant and every old cookie session are dead the
+  moment the reconnect lands. The fresh grant restores the device's **current
+  live** authority, resolved from the single live `web_grants` row: a
+  registration whose authority cannot be resolved (no live grant, or more than
+  one) is refused with a 500 rather than minted an admin grant, and
+  `idx_web_grants_live_registration` now makes "exactly one live grant per
+  registration" the database's invariant too. Credential history is now
+  auditable: `mobile_enrollments`
   keeps one row per QR shown (`kind` = `new` | `reconnect`, no more
   `UNIQUE(host_id)`) and `web_grants` keeps the superseded grant with its
   revoke reason (no more `UNIQUE(registration_id)`); a guarded one-time rebuild
@@ -45,7 +54,12 @@ distributable binary build.
   QR rendering, countdown, polling and accessibility — with copy that says the
   device keeps its identity, that scanning rotates credentials and signs out
   the old session, and that closing the window or letting the QR expire changes
-  nothing. The projection is refreshed as soon as the phone claims the QR.
+  nothing. The projection is refreshed as soon as the phone claims the QR. The
+  card's terminal states separate the QR from the device: an expired or
+  superseded QR now reads "this QR is no longer valid, the device is unchanged"
+  in both flows (the pairing flow's expired case lost the wrong "Access
+  revoked" label too), and only the registration's own revocation is reported
+  as lost access.
   *Android:* the same v1 QR is parsed by the same parser, and the existing
   different-enrollment replacement path already handles a same-origin reconnect
   (it clears local auth, exchanges, and stores the host id the server returns —
@@ -694,20 +708,27 @@ evidence gap.
 
 LAMA-337 baseline (this worktree): repo gates green — `bun x tsc --noEmit`,
 `bun run build:web-ui` (still one self-contained `index.html`), `bun test`
-**1730 pass / 0 fail** (+~50 for this change), `bun run
-scripts/check-skill-drift.ts --strict` OK (162 API rows / 163 server routes —
-the new reconnect route documented), and `bun run build` (all five
-distributables). Android `assembleDebug` OK, `lintDebug` **0 errors**,
-`testDebugUnitTest` **245/245** (one added: the same-origin reconnect path in
-`CompanionRepositoryFlowTest`); no instrumented run was made (no Kotlin main
-source changed, and the reconnect vertical needs a live HTTPS server). New
-coverage: admin-only create with 404/409 for unknown/revoked targets; the
-guarded `initDb` rebuild of legacy `mobile_enrollments` (UNIQUE(host_id)) and
-`web_grants` (UNIQUE(registration_id)) preserving rows; abandoned + expired
-reconnect QRs leaving the old bearer/grant/session valid; a successful exchange
-keeping the host id while rotating both authorities, killing the old cookie
-session and live WebSocket (real HTTP + WS harness), and refreshing device
-metadata without touching destinations, uploads or `created_at`; replay and
-concurrent exchanges yielding one winner; QR-supersession scoped to kind and
-host; revoke killing a pending reconnect QR; and the UI action/modal copy
-(reconnect row present on active rows only, QR payload/countdown unchanged).
+**1748 pass / 0 fail** (the ~70 added for this change cover both the feature and
+its review round), `bun run scripts/check-skill-drift.ts --strict` OK (162 API
+rows / 163 server routes — the new reconnect route documented), and `bun run
+build` (all five distributables). Android `assembleDebug` OK, `lintDebug`
+**0 errors**, `testDebugUnitTest` **245/245** (one added: the same-origin
+reconnect path in `CompanionRepositoryFlowTest`); no instrumented run was made
+(no Kotlin main source changed, and the reconnect vertical needs a live HTTPS
+server). New coverage: admin-only create with 404/409 for unknown/revoked
+targets and 500 when the live web authority cannot be resolved (no live grant,
+two live grants, revoked history alongside one live row); the guarded `initDb`
+rebuild of legacy `mobile_enrollments` (UNIQUE(host_id)) and `web_grants`
+(UNIQUE(registration_id)) preserving rows, plus the partial unique index that
+now enforces one live grant per registration; abandoned + expired reconnect QRs
+leaving the old bearer/grant/session valid; a successful exchange keeping the
+host id while rotating both authorities, killing the old cookie session and
+live WebSocket (real HTTP + WS harness), and refreshing device metadata without
+touching destinations, uploads or `created_at`; the review's socket regression —
+a rotation with ZERO live session rows still closes the registration's open
+socket (verified to fail against the previous session-count inference); replay
+and concurrent exchanges yielding one winner; QR-supersession scoped to kind
+and host; revoke killing a pending reconnect QR; and the UI action/modal copy,
+including state-machine tests proving expired/superseded QRs read "device
+unchanged" while only a revoked registration reads "access revoked" (both
+modes).

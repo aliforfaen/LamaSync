@@ -14,10 +14,42 @@
 
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { EnrollmentNotice, enrollmentModalTitle } from "./AndroidEnrollmentModal.tsx";
+import type { MobilePairedHostSummary } from "@lamasync/core";
+import {
+  EnrollmentNotice,
+  EnrollmentOutcomeNotice,
+  enrollmentCardState,
+  enrollmentModalTitle,
+  enrollmentOutcomeCopy,
+} from "./AndroidEnrollmentModal.tsx";
 
 function renderNotice(reconnect: { hostId: string; displayName: string } | null): string {
   return renderToStaticMarkup(<EnrollmentNotice reconnect={reconnect} />);
+}
+
+function host(over: Partial<MobilePairedHostSummary> = {}): MobilePairedHostSummary {
+  return {
+    hostId: "host-pixel-9",
+    displayName: "Pixel 9",
+    clientType: "android",
+    appVersion: "2.0.0",
+    createdAt: 1_784_000_000_000,
+    lastSeenAt: 1_784_000_100_000,
+    revokedAt: null,
+    ...over,
+  };
+}
+
+const RECONNECT = { hostId: "host-pixel-9", displayName: "Pixel 9" };
+
+function renderOutcome(
+  state: ReturnType<typeof enrollmentCardState>,
+  reconnect: { hostId: string; displayName: string } | null,
+  h: MobilePairedHostSummary | null,
+): string {
+  return renderToStaticMarkup(
+    <EnrollmentOutcomeNotice state={state} reconnect={reconnect} host={h} />,
+  );
 }
 
 describe("AndroidEnrollmentModal — reconnect mode copy", () => {
@@ -59,5 +91,140 @@ describe("AndroidEnrollmentModal — reconnect mode copy", () => {
     // No reconnect wording leaks into the pairing flow.
     expect(html).not.toContain("rotates this device's credentials");
     expect(html).not.toContain("Nothing happens until a phone scans");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LAMA-337 review: enrollment lifecycle vs DEVICE access
+// ---------------------------------------------------------------------------
+describe("enrollmentCardState — QR outcomes never mean lost access", () => {
+  it("a pending QR is pending until it locally expires", () => {
+    expect(enrollmentCardState({ status: "pending", expiredLocally: false, host: null })).toBe(
+      "pending",
+    );
+    expect(enrollmentCardState({ status: "pending", expiredLocally: true, host: null })).toBe(
+      "qr-expired",
+    );
+  });
+
+  it("an expired enrollment is a QR outcome, whatever the device is doing", () => {
+    expect(enrollmentCardState({ status: "expired", expiredLocally: false, host: null })).toBe(
+      "qr-expired",
+    );
+    // Even for a reconnect QR whose device is live (host is null while pending
+    // or expired, but the classification must not depend on that).
+    expect(enrollmentCardState({ status: "expired", expiredLocally: false, host: host() })).toBe(
+      "qr-expired",
+    );
+  });
+
+  it("a used enrollment is paired only while the registration is live", () => {
+    expect(enrollmentCardState({ status: "used", expiredLocally: false, host: host() })).toBe(
+      "paired",
+    );
+    // The device was revoked after it paired: that IS lost access.
+    expect(
+      enrollmentCardState({
+        status: "used",
+        expiredLocally: false,
+        host: host({ revokedAt: 1_784_000_200_000 }),
+      }),
+    ).toBe("device-revoked");
+    // …and so is a used enrollment whose registration no longer exists.
+    expect(enrollmentCardState({ status: "used", expiredLocally: false, host: null })).toBe(
+      "device-revoked",
+    );
+  });
+
+  it("a revoked ENROLLMENT with a live device is superseded, not revoked access", () => {
+    expect(enrollmentCardState({ status: "revoked", expiredLocally: false, host: host() })).toBe(
+      "qr-superseded",
+    );
+    expect(enrollmentCardState({ status: "revoked", expiredLocally: false, host: null })).toBe(
+      "qr-superseded",
+    );
+    // …unless the device itself was revoked (a device revoke also revokes the
+    // enrollment rows it produced).
+    expect(
+      enrollmentCardState({
+        status: "revoked",
+        expiredLocally: false,
+        host: host({ revokedAt: 1_784_000_200_000 }),
+      }),
+    ).toBe("device-revoked");
+  });
+});
+
+describe("terminal card copy — reconnect", () => {
+  it("an expired reconnect QR says the device is unchanged", () => {
+    const state = enrollmentCardState({ status: "expired", expiredLocally: false, host: null });
+    const html = renderOutcome(state, RECONNECT, null);
+    expect(html).toContain("This QR expired before a phone scanned it");
+    expect(html).toContain("The device is unchanged and still works");
+    // The old bug: QR outcomes were rendered as revoked access.
+    expect(html).not.toContain("Access revoked");
+    expect(html).not.toContain("can no longer sign in");
+    expect(enrollmentOutcomeCopy(state, true)).toContain("keeps signing in with its current credentials");
+    expect(enrollmentOutcomeCopy(state, true)).not.toContain("re-pair");
+  });
+
+  it("a superseded reconnect QR (newer QR shown) says the device is unchanged", () => {
+    const state = enrollmentCardState({ status: "revoked", expiredLocally: false, host: host() });
+    const html = renderOutcome(state, RECONNECT, host());
+    expect(html).toContain("This QR is no longer valid");
+    expect(html).toContain("The device is unchanged and still works");
+    expect(html).not.toContain("Access revoked");
+    expect(html).not.toContain("can no longer sign in");
+  });
+
+  it("only a revoked registration is reported as revoked access", () => {
+    const state = enrollmentCardState({
+      status: "used",
+      expiredLocally: false,
+      host: host({ revokedAt: 1_784_000_200_000 }),
+    });
+    const html = renderOutcome(state, RECONNECT, host({ revokedAt: 1_784_000_200_000 }));
+    expect(html).toContain("Access revoked");
+    expect(html).toContain("Pixel 9");
+    expect(html).toContain("can no longer sign in");
+    // Reconnect is not offered for a revoked device; the copy says what to do.
+    expect(enrollmentOutcomeCopy(state, true)).toContain("pair it again with a fresh pairing QR");
+  });
+
+  it("a paired card never renders a terminal notice", () => {
+    expect(renderOutcome("paired", RECONNECT, host())).toBe("");
+    expect(renderOutcome("pending", RECONNECT, null)).toBe("");
+  });
+});
+
+describe("terminal card copy — pairing (audited for the same conflation)", () => {
+  it("an expired pairing QR never claims revoked access", () => {
+    const state = enrollmentCardState({ status: "expired", expiredLocally: false, host: null });
+    const html = renderOutcome(state, null, null);
+    expect(html).toContain("This QR expired before a phone scanned it");
+    expect(html).toContain("No device was paired");
+    expect(html).not.toContain("Access revoked");
+    expect(html).not.toContain("can no longer sign in");
+    expect(enrollmentOutcomeCopy(state, false)).toContain("still-pending older QR is voided");
+  });
+
+  it("a superseded pairing QR never claims revoked access", () => {
+    const state = enrollmentCardState({ status: "revoked", expiredLocally: false, host: null });
+    const html = renderOutcome(state, null, null);
+    expect(html).toContain("This QR is no longer valid");
+    expect(html).not.toContain("Access revoked");
+  });
+
+  it("a revoked registration still reads as revoked access", () => {
+    const revokedHost = host({ revokedAt: 1_784_000_200_000 });
+    const state = enrollmentCardState({
+      status: "used",
+      expiredLocally: false,
+      host: revokedHost,
+    });
+    const html = renderOutcome(state, null, revokedHost);
+    expect(html).toContain("Access revoked");
+    expect(html).toContain("can no longer sign in");
+    expect(enrollmentOutcomeCopy(state, false)).toContain("Pair the device again with a fresh QR");
   });
 });

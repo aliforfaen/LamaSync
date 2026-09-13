@@ -123,6 +123,7 @@ describe("LAMA-296 mobile schema", () => {
       "idx_mobile_enrollments_status_expires",
       "idx_mobile_enrollments_host_id",
       "idx_web_grants_registration",
+      "idx_web_grants_live_registration",
       "idx_web_sessions_registration",
       "idx_web_sessions_grant",
     ]) {
@@ -305,7 +306,7 @@ describe("LAMA-296 mobile schema", () => {
       revoked_reason  TEXT
     )`;
 
-  test("initDb drops the legacy UNIQUE(registration_id) on web_grants so a rotation keeps both grants", () => {
+  test("initDb drops the legacy UNIQUE(registration_id) on web_grants and keeps one live grant", () => {
     const path = `/tmp/lamasync-mobile-grants-${process.pid}-${Date.now()}.sqlite`;
     const cleanup = (): void => {
       for (const suffix of ["", "-journal", "-wal", "-shm"]) {
@@ -329,7 +330,7 @@ describe("LAMA-296 mobile schema", () => {
          VALUES ('grant-old', 'h-old-grant', 'host-g', 1, ?)`,
         [NOW],
       );
-      // The legacy constraint is real: a second grant is refused.
+      // The legacy constraint is real: a second grant row is refused.
       expect(() =>
         seed.run(
           `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at)
@@ -342,35 +343,64 @@ describe("LAMA-296 mobile schema", () => {
 
       const db = initDb(path);
       try {
+        // The legacy constraint is gone and the target shape is in place.
         expect(hasUniqueIndexOn(db, "web_grants", "registration_id")).toBe(false);
-        // The historical grant survived…
+        expect(hasLiveGrantIndex(db)).toBe(true);
+        // The historical grant survived untouched.
         const kept = db
           .query<{ id: string; grant_hash: string; admin: number }, []>(
             "SELECT id, grant_hash, admin FROM web_grants",
           )
           .get();
         expect(kept).toEqual({ id: "grant-old", grant_hash: "h-old-grant", admin: 1 });
-        // …and the rotation's fresh grant row can coexist with it.
+
+        const insertGrant = (id: string, hash: string, at: number): void => {
+          db.run(
+            `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at)
+             VALUES (?, ?, 'host-g', 1, ?)`,
+            [id, hash, at],
+          );
+        };
+        // ONE live grant per registration is now the database's invariant: a
+        // second live row is refused even though the legacy constraint is gone…
+        expect(() => insertGrant("grant-new", "h-new-grant", NOW + 1000)).toThrow();
+
+        // …and a rotation (revoke, then issue) is the only way to replace it —
+        // the superseded row survives with its reason.
         db.run(
-          `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at, revoked_at, revoked_reason)
-           VALUES ('grant-2', 'h-new-grant', 'host-g', 1, ?, ?, 'credentials rotated by reconnect')`,
-          [NOW + 1000, NOW + 1000],
+          "UPDATE web_grants SET revoked_at = ?, revoked_reason = ? WHERE id = 'grant-old'",
+          [NOW + 2000, "credentials rotated by reconnect"],
         );
+        insertGrant("grant-new", "h-new-grant", NOW + 2000);
         const grants = db
           .query<{ id: string; revoked_reason: string | null }, []>(
             "SELECT id, revoked_reason FROM web_grants ORDER BY created_at",
           )
           .all();
         expect(grants).toEqual([
-          { id: "grant-old", revoked_reason: null },
-          { id: "grant-2", revoked_reason: "credentials rotated by reconnect" },
+          { id: "grant-old", revoked_reason: "credentials rotated by reconnect" },
+          { id: "grant-new", revoked_reason: null },
         ]);
-        const index = db
-          .query<{ name: string }, []>(
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_web_grants_registration'",
-          )
+        const live = db
+          .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_grants WHERE revoked_at IS NULL")
           .get();
-        expect(index?.name).toBe("idx_web_grants_registration");
+        expect(live?.n).toBe(1);
+        // A fourth, unrelated registration still gets its own slot.
+        db.run(
+          `INSERT INTO mobile_registrations
+             (host_id, client_type, display_name, app_version, native_token_hash, created_at)
+           VALUES ('host-h', 'android', 'Tablet', '1.0.0', 'h-native-2', ?)`,
+          [NOW],
+        );
+        db.run(
+          `INSERT INTO web_grants (id, grant_hash, registration_id, admin, created_at)
+           VALUES ('grant-h', 'h-grant-h', 'host-h', 1, ?)`,
+          [NOW],
+        );
+        const liveAll = db
+          .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_grants WHERE revoked_at IS NULL")
+          .get();
+        expect(liveAll?.n).toBe(2);
       } finally {
         db.close();
       }
@@ -379,13 +409,14 @@ describe("LAMA-296 mobile schema", () => {
     }
   });
 
-  /** True when the table carries a UNIQUE index covering exactly `column`. */
+  /** True when the table carries the legacy (non-partial) UNIQUE constraint
+   *  on `column`. The new partial live-grant index is excluded on purpose. */
   function hasUniqueIndexOn(db: Database, table: string, column: string): boolean {
     const indexes = db
-      .query<{ name: string; unique: number }, []>(`PRAGMA index_list(${table})`)
+      .query<{ name: string; unique: number; partial: number }, []>(`PRAGMA index_list(${table})`)
       .all();
     return indexes.some((index) => {
-      if (index.unique !== 1) return false;
+      if (index.unique !== 1 || index.partial === 1) return false;
       return (
         db
           .query<{ name: string }, []>(`PRAGMA index_info(${index.name})`)
@@ -394,6 +425,17 @@ describe("LAMA-296 mobile schema", () => {
           .join(",") === column
       );
     });
+  }
+
+  /** True when the partial live-grant index exists (LAMA-337 target shape). */
+  function hasLiveGrantIndex(db: Database): boolean {
+    return (
+      db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_web_grants_live_registration'",
+        )
+        .get() !== null
+    );
   }
 
   /** True when the table carries the legacy UNIQUE(host_id) constraint. */

@@ -197,6 +197,15 @@ export function AndroidEnrollmentModal({
   // revoke affordance differ.
   const reconnectTarget = reconnect ?? null;
   const reconnecting = reconnectTarget !== null;
+  // LAMA-337 review: the enrollment's lifecycle and the DEVICE's access are
+  // two different things. An expired QR, or one superseded by a newer QR,
+  // leaves a perfectly working registration behind, so the card must not call
+  // that "access revoked"; only the registration's own revokedAt does.
+  const outcome = enrollmentCardState({
+    status: effectiveStatus,
+    expiredLocally,
+    host,
+  });
 
   // Tell the panel once when the device has claimed a reconnect QR, so the
   // device row (last-seen, app version, display name) refreshes immediately.
@@ -288,7 +297,7 @@ export function AndroidEnrollmentModal({
             </>
           ) : (
             <>
-              {effectiveStatus === "used" && !revoked && host ? (
+              {outcome === "paired" && host ? (
                 <div className="pairing-claimed">
                   <span className="badge badge-success">
                     {reconnecting ? "device reconnected" : "device paired"}
@@ -300,40 +309,16 @@ export function AndroidEnrollmentModal({
                   </span>
                 </div>
               ) : (
-                <div className="android-notice android-notice--revoked" role="status">
-                  <strong>Access revoked.</strong>{" "}
-                  {host
-                    ? `${host.displayName} (${host.hostId}) can no longer sign in or reach the fleet.`
-                    : "This enrollment can no longer be used."}
-                  {effectiveStatus === "expired" || expiredLocally
-                    ? " The QR expired before a phone scanned it."
-                    : ""}
-                </div>
+                <EnrollmentOutcomeNotice
+                  state={outcome}
+                  reconnect={reconnectTarget}
+                  host={host}
+                />
               )}
 
               {host ? <PairedDeviceDetails host={host} /> : null}
 
-              {effectiveStatus === "used" && !revoked ? (
-                reconnecting ? (
-                  <p className="muted">
-                    The device keeps its inboxes and upload history. The old
-                    session — on that phone or anywhere else — no longer
-                    signs in.
-                  </p>
-                ) : (
-                  <p className="muted">
-                    Revoking cuts the phone’s full web administration AND its
-                    native identity immediately. The app must re-pair with a new
-                    QR before it can sign in again.
-                  </p>
-                )
-              ) : (
-                <p className="muted">
-                  {reconnecting
-                    ? "Show a new reconnect QR — this device's earlier pending QR is voided the moment you generate one."
-                    : "Pair the device again with a fresh QR. Any still-pending older QR is voided the moment you generate one."}
-                </p>
-              )}
+              <p className="muted">{enrollmentOutcomeCopy(outcome, reconnecting)}</p>
             </>
           )}
 
@@ -374,7 +359,7 @@ export function AndroidEnrollmentModal({
               </button>
               {/* Revoke stays on the device row in reconnect mode: this card
                   exists to restore the identity, not to destroy it. */}
-              {!reconnecting && effectiveStatus === "used" && !revoked && host ? (
+              {!reconnecting && outcome === "paired" && host ? (
                 <button
                   type="button"
                   className="action danger"
@@ -404,6 +389,113 @@ export function AndroidEnrollmentModal({
 /** Modal title for each mode (exported so the copy is covered by tests). */
 export function enrollmentModalTitle(reconnect: ReconnectTarget | null): string {
   return reconnect ? "Reconnect Android device" : "Add Android device";
+}
+
+/**
+ * Where an enrollment card has ended up. Two of these are about the QR and two
+ * are about the DEVICE — the distinction the LAMA-337 review caught: an expired
+ * or superseded QR leaves a live registration untouched, so it must never be
+ * reported as revoked access.
+ *
+ *   pending        the QR is on screen, waiting for a scan
+ *   paired         claimed, and the registration is live
+ *   qr-expired     the QR expired (or locally did) before a scan — nothing changed
+ *   qr-superseded  the QR was voided (a newer QR replaced it) — nothing changed
+ *   device-revoked the REGISTRATION's access was revoked (or the registration
+ *                  is gone entirely)
+ */
+export type EnrollmentCardState =
+  | "pending"
+  | "paired"
+  | "qr-expired"
+  | "qr-superseded"
+  | "device-revoked";
+
+/**
+ * Classify the card from server truth. `host.revokedAt` is the ONLY signal that
+ * means the device lost access; the enrollment's own revoked/expired status
+ * says something about the QR, not about the phone.
+ */
+export function enrollmentCardState(opts: {
+  status: MobileEnrollmentStatus;
+  expiredLocally: boolean;
+  host: MobilePairedHostSummary | null;
+}): EnrollmentCardState {
+  if (opts.status === "pending") return opts.expiredLocally ? "qr-expired" : "pending";
+  if (opts.status === "expired") return "qr-expired";
+  if ((opts.host?.revokedAt ?? null) !== null) return "device-revoked";
+  if (opts.status === "used") {
+    // Used with no registration row left (the host was deleted) — the device
+    // really is gone, so this is a device-level outcome, not a QR one.
+    return opts.host === null ? "device-revoked" : "paired";
+  }
+  // A revoked enrollment row whose device is still live: this QR was voided.
+  return "qr-superseded";
+}
+
+/**
+ * Terminal-state notice for the card. A QR-level outcome is explicitly
+ * harmless ("the device is unchanged"), while a device-level one says the
+ * registration can no longer sign in. Presentational + exported so both modes'
+ * copy is tested without a DOM.
+ */
+export function EnrollmentOutcomeNotice({
+  state,
+  reconnect,
+  host,
+}: {
+  state: EnrollmentCardState;
+  reconnect: ReconnectTarget | null;
+  host: MobilePairedHostSummary | null;
+}) {
+  if (state === "pending" || state === "paired") return null;
+  if (state === "device-revoked") {
+    return (
+      <div className="android-notice android-notice--revoked" role="status">
+        <strong>Access revoked.</strong>{" "}
+        {host
+          ? `${host.displayName} (${host.hostId}) can no longer sign in or reach the fleet.`
+          : "This device is no longer registered on the fleet."}
+      </div>
+    );
+  }
+  const expired = state === "qr-expired";
+  return (
+    <div className="android-notice" role="status">
+      <strong>
+        {expired ? "This QR expired before a phone scanned it." : "This QR is no longer valid."}
+      </strong>{" "}
+      {reconnect
+        ? "The device is unchanged and still works — show a new reconnect QR when you want to rotate its credentials."
+        : "No device was paired, and nothing else changed."}
+    </div>
+  );
+}
+
+/**
+ * The guidance line under a terminal card. Kept in sync with the notice above:
+ * only `device-revoked` talks about losing access, and the QR-level outcomes
+ * always state that the device keeps working (reconnect) or that nothing was
+ * paired (new installation).
+ */
+export function enrollmentOutcomeCopy(state: EnrollmentCardState, reconnect: boolean): string {
+  switch (state) {
+    case "paired":
+      return reconnect
+        ? "The device keeps its inboxes and upload history. The old session — on that phone or anywhere else — no longer signs in."
+        : "Revoking cuts the phone's full web administration AND its native identity immediately. The app must re-pair with a new QR before it can sign in again.";
+    case "device-revoked":
+      return reconnect
+        ? "This device's access was revoked, so reconnecting it is not offered — pair it again with a fresh pairing QR to restore access."
+        : "Pair the device again with a fresh QR to restore access.";
+    case "qr-expired":
+    case "qr-superseded":
+      return reconnect
+        ? "The phone keeps signing in with its current credentials until a new QR is scanned; generating one also voids this device's earlier pending QR."
+        : "Any still-pending older QR is voided the moment you generate a new one.";
+    case "pending":
+      return "";
+  }
 }
 
 /**

@@ -44,6 +44,7 @@ interface TableRebuild {
 interface IndexListRow {
   name: string;
   unique: number;
+  partial: number;
 }
 
 const REBUILDS: readonly TableRebuild[] = [
@@ -100,6 +101,7 @@ const REBUILDS: readonly TableRebuild[] = [
     addedColumns: [],
     indexes: [
       "CREATE INDEX IF NOT EXISTS idx_web_grants_registration ON web_grants(registration_id)",
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_web_grants_live_registration ON web_grants(registration_id) WHERE revoked_at IS NULL",
     ],
     dropUniqueOn: "registration_id",
   },
@@ -132,13 +134,19 @@ function columnsOf(db: Database, table: string): string[] {
     .map((c) => c.name);
 }
 
-/** True when any UNIQUE index on `table` covers exactly `column` — the legacy
- *  single-row constraint (its SQLite auto-index is not named by us, so
- *  indexes are inspected rather than matched by name). */
-function hasUniqueIndexOn(db: Database, table: string, column: string): boolean {
+/** True when any NON-partial UNIQUE index on `table` covers exactly `column`
+ *  — the legacy single-row constraint LAMA-296 declared with UNIQUE(column).
+ *
+ *  Partial indexes are excluded on purpose: LAMA-337 adds
+ *  `idx_web_grants_live_registration`, a partial UNIQUE index over
+ *  registration_id WHERE revoked_at IS NULL. It covers the same column but is
+ *  the target shape, not a legacy constraint — counting it here would rebuild
+ *  the table on every single boot.
+ */
+function hasLegacyUniqueIndexOn(db: Database, table: string, column: string): boolean {
   const indexes = db.query<IndexListRow, []>(`PRAGMA index_list(${table})`).all();
   return indexes.some((index) => {
-    if (index.unique !== 1) return false;
+    if (index.unique !== 1 || index.partial === 1) return false;
     const columns = db
       .query<{ name: string }, []>(`PRAGMA index_info(${index.name})`)
       .all()
@@ -151,7 +159,7 @@ function hasUniqueIndexOn(db: Database, table: string, column: string): boolean 
  *  legacy UNIQUE column, is missing a column the target shape adds, or lacks
  *  one of the target indexes. */
 function needsRebuild(db: Database, rebuild: TableRebuild): boolean {
-  if (hasUniqueIndexOn(db, rebuild.table, rebuild.dropUniqueOn)) return true;
+  if (hasLegacyUniqueIndexOn(db, rebuild.table, rebuild.dropUniqueOn)) return true;
   const columns = columnsOf(db, rebuild.table);
   if (rebuild.addedColumns.some((column) => !columns.includes(column))) return true;
   return rebuild.indexes.some((index) => {
