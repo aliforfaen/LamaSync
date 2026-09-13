@@ -1180,6 +1180,52 @@ export function appArchiveTransforms(sourceMember: string, archivePath: string):
   ];
 }
 
+/** Translate an absolute/home-relative capture exclude into tar's `-C /`
+ * member namespace. Relative/glob-only patterns retain GNU tar's native
+ * matching semantics. */
+export function appTarExclude(pattern: string): string {
+  const resolved = expandHomePath(pattern);
+  return sourceArchiveMember(resolved) ?? pattern;
+}
+
+/** GNU tar exits 1 when a live source changes while it is read. The archive
+ * is still usable in that narrow case, but every other non-zero outcome must
+ * remain fatal. LC_ALL=C on the child keeps these diagnostics stable. */
+export function isRecoverableAppTarResult(exitCode: number, stderr: string): boolean {
+  if (exitCode === 0) return true;
+  if (exitCode !== 1) return false;
+  const lines = stderr.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((line) =>
+    /^tar: .+: file changed as we read it$/.test(line) ||
+    /^tar: .+: socket ignored$/.test(line)
+  );
+}
+
+/** One app capture's tar invocation, split from the report plumbing so the
+ * live-tree exit-code contract can be regression-tested against real GNU tar.
+ * `excludes` are logical patterns and are normalized here. */
+export interface AppTarCapture {
+  tarball: string;
+  archiveInputs: string[];
+  transforms: string[];
+  excludes: string[];
+}
+
+export interface AppTarResult {
+  exitCode: number;
+  stderr: string;
+}
+
+export async function runAppTarCapture(capture: AppTarCapture): Promise<AppTarResult> {
+  const excludeArgs = capture.excludes.flatMap((pattern) => ["--exclude", appTarExclude(pattern)]);
+  const tar = Bun.spawn(
+    ["tar", "czf", capture.tarball, "-C", "/", ...excludeArgs, ...capture.transforms, "--", ...capture.archiveInputs],
+    { stdout: "pipe", stderr: "pipe", env: { ...process.env, LC_ALL: "C" } },
+  );
+  const stderr = await new Response(tar.stderr).text();
+  return { exitCode: await tar.exited, stderr };
+}
+
 /**
  * Capture one explicit application protection. This intentionally has no
  * FolderAssignment dependency: an application protection is its own
@@ -1231,12 +1277,14 @@ export async function captureAppSnapshot(opts: AppCaptureOptions): Promise<Opera
   const tmpDir = join(tmpdir(), `lamasync-dotfile-${process.pid}-${start}`);
   mkdirSync(tmpDir, { recursive: true });
   const tarball = join(tmpDir, `${start}.tar.gz`);
-  const excludeArgs = (app.excludes ?? []).flatMap((e) => ["--exclude", e]);
   try {
-    const tar = Bun.spawn(["tar", "czf", tarball, "-C", "/", ...excludeArgs, ...transforms, "--", ...archiveInputs], { stdout: "pipe", stderr: "pipe" });
-    const tarStderr = await new Response(tar.stderr).text();
-    const tarExit = await tar.exited;
-    if (tarExit !== 0) {
+    const { exitCode: tarExit, stderr: tarStderr } = await runAppTarCapture({
+      tarball,
+      archiveInputs,
+      transforms,
+      excludes: app.excludes ?? [],
+    });
+    if (!isRecoverableAppTarResult(tarExit, tarStderr)) {
       return appCaptureReport(hostId, "failed", start, {
         summary: `app archive failed (exit ${tarExit})`,
         details: { protectionId: app.protectionId, tarStderr: tail(tarStderr, 1000) },

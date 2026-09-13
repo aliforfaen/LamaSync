@@ -2,14 +2,22 @@
 // LAMA-309). Mostly pure functions; the mkdir / archive helpers touch the
 // filesystem only.
 
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { homedir, tmpdir } from "os";
+import { join, relative } from "path";
+import { randomBytes } from "node:crypto";
+import { createServer } from "node:net";
+import type { Server } from "node:net";
+import { LamaSyncApiClient } from "@lamasync/core";
 import type { EffectivePause, FolderAssignment } from "@lamasync/core";
 import {
   appArchivePath,
   appArchiveTransforms,
+  appTarExclude,
+  captureAppSnapshot,
+  isRecoverableAppTarResult,
+  runAppTarCapture,
   archiveBisyncState,
   buildRcloneCommand,
   classifyRcloneExit,
@@ -44,6 +52,213 @@ describe("appArchiveTransforms", () => {
       "--transform=s|^tmp/lamasync/foo/|home/.config/foo/|",
       "--transform=s|^tmp/lamasync/foo$|home/.config/foo|",
     ]);
+  });
+});
+
+describe("app tar capture helpers", () => {
+  test("normalizes home and absolute excludes into tar's root-relative namespace", () => {
+    expect(appTarExclude("~/.hermes/backups")).toBe(
+      `${homedir().slice(1)}/.hermes/backups`,
+    );
+    expect(appTarExclude("/var/lib/app/*.sock")).toBe("var/lib/app/*.sock");
+    expect(appTarExclude("node_modules")).toBe("node_modules");
+  });
+
+  test("accepts only the known live-tree tar warnings at exit 1", () => {
+    expect(isRecoverableAppTarResult(0, "")).toBe(true);
+    expect(isRecoverableAppTarResult(1, [
+      "tar: home/alice/.hermes/state.db: file changed as we read it",
+      "tar: home/alice/.hermes/gateway.sock: socket ignored",
+    ].join("\n"))).toBe(true);
+    expect(isRecoverableAppTarResult(1, "tar: home/alice/.hermes/private: Cannot open: Permission denied\n")).toBe(false);
+    expect(isRecoverableAppTarResult(2, "tar: Error is not recoverable: exiting now\n")).toBe(false);
+    expect(isRecoverableAppTarResult(1, "")).toBe(false);
+  });
+});
+
+// LAMA-336: the exit-code contract above only matters if real GNU tar
+// produces those diagnostics. These tests drive the production tar seam
+// (runAppTarCapture) and the full capture path against a live tree
+// containing an actual changing file and an actual Unix socket.
+const MEGABYTE = 1024 * 1024;
+
+function liveBinary(sizeBytes: number): Buffer {
+  const chunk = randomBytes(MEGABYTE);
+  return Buffer.concat(Array.from({ length: sizeBytes / MEGABYTE }, () => chunk));
+}
+
+function listArchiveMembers(tarball: string): string[] {
+  const listed = Bun.spawnSync(["tar", "tzf", tarball], { stdout: "pipe", stderr: "pipe" });
+  if (listed.exitCode !== 0) throw new Error(`tar tzf failed: ${new TextDecoder().decode(listed.stderr)}`);
+  return new TextDecoder().decode(listed.stdout).split("\n").filter(Boolean);
+}
+
+describe("app tar capture against real GNU tar (LAMA-336)", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "lamasync-app-tar-"));
+  });
+
+  afterEach(() => {
+    // A permission-denied fixture has to be repaired before it can be removed.
+    const locked = join(root, "locked");
+    if (existsSync(locked)) chmodSync(locked, 0o700);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  async function listenOnUnixSocket(path: string): Promise<Server> {
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(path, resolve);
+    });
+    return server;
+  }
+
+  /** Keep appending for as long as the capture runs, so tar re-stats the
+   * member after reading it and reports a changed file. */
+  function appendWhile<T>(promise: Promise<T>, file: string): Promise<T> {
+    const timer = setInterval(() => appendFileSync(file, "x"), 1);
+    return promise.finally(() => clearInterval(timer));
+  }
+
+  test("a socket and a file changing during the read are recoverable", async () => {
+    const appDir = join(root, "app");
+    mkdirSync(appDir, { recursive: true });
+    writeFileSync(join(appDir, "keep.txt"), "keep");
+    const live = join(appDir, "live.bin");
+    writeFileSync(live, liveBinary(8 * MEGABYTE));
+    const socket = await listenOnUnixSocket(join(appDir, "gateway.sock"));
+    const tarball = join(root, "out.tar.gz");
+
+    try {
+      const result = await appendWhile(
+        runAppTarCapture({
+          tarball,
+          archiveInputs: [relative("/", appDir)],
+          transforms: [],
+          excludes: [],
+        }),
+        live,
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("file changed as we read it");
+      expect(result.stderr).toContain("socket ignored");
+      expect(isRecoverableAppTarResult(result.exitCode, result.stderr)).toBe(true);
+
+      // The archive is still usable: it holds the regular file, and the
+      // socket is skipped rather than stored as a broken entry.
+      const members = listArchiveMembers(tarball);
+      expect(members).toContain(relative("/", join(appDir, "keep.txt")));
+      expect(members.some((member) => member.endsWith("gateway.sock"))).toBe(false);
+    } finally {
+      socket.close();
+    }
+  });
+
+  test("permission denied stays fatal", async () => {
+    const locked = join(root, "locked");
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, "secret.txt"), "secret");
+    chmodSync(locked, 0o000);
+
+    const result = await runAppTarCapture({
+      tarball: join(root, "out.tar.gz"),
+      archiveInputs: [relative("/", locked)],
+      transforms: [],
+      excludes: [],
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Permission denied");
+    expect(isRecoverableAppTarResult(result.exitCode, result.stderr)).toBe(false);
+  });
+
+  test("captureAppSnapshot uploads a live tree and honours absolute excludes", async () => {
+    const appDir = join(root, "app");
+    mkdirSync(appDir, { recursive: true });
+    writeFileSync(join(appDir, "keep.txt"), "keep");
+    writeFileSync(join(appDir, "skip.txt"), "skip");
+    const live = join(appDir, "live.bin");
+    writeFileSync(live, liveBinary(8 * MEGABYTE));
+    const socket = await listenOnUnixSocket(join(appDir, "gateway.sock"));
+
+    let uploaded: Uint8Array | null = null;
+    const client = new LamaSyncApiClient("http://localhost:8080", "key", {
+      fetchImpl: (async (_input: unknown, init?: RequestInit) => {
+        const body = init?.body;
+        if (body instanceof FormData) {
+          const tarball = body.get("tarball");
+          if (tarball instanceof Blob) uploaded = new Uint8Array(await tarball.arrayBuffer());
+        }
+        return new Response(JSON.stringify({ id: "snap-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch,
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    try {
+      const report = await appendWhile(
+        captureAppSnapshot({
+          hostId: "dev-vm",
+          client,
+          app: {
+            appName: "hermes",
+            hostId: "dev-vm",
+            protectionId: "p1",
+            paths: [appDir],
+            excludes: [join(appDir, "skip.txt")],
+          },
+        }),
+        live,
+      );
+      expect(report.status).toBe("success");
+      expect(report.summary).toContain("app capture ok");
+    } finally {
+      socket.close();
+    }
+
+    // Re-read the uploaded archive to prove the exclude reached tar and the
+    // live-tree warning did not silently truncate the payload.
+    expect(uploaded).not.toBeNull();
+    const received = join(root, "received.tar.gz");
+    writeFileSync(received, uploaded ?? new Uint8Array());
+    const members = listArchiveMembers(received);
+    const archiveRoot = appArchivePath(appDir);
+    expect(archiveRoot).not.toBeNull();
+    expect(members).toContain(`${archiveRoot}/keep.txt`);
+    expect(members.some((member) => member.endsWith("skip.txt"))).toBe(false);
+    expect(members.some((member) => member.endsWith("live.bin"))).toBe(true);
+  });
+
+  test("captureAppSnapshot reports a permission-denied tree as failed without uploading", async () => {
+    const locked = join(root, "locked");
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, "secret.txt"), "secret");
+    chmodSync(locked, 0o000);
+
+    let uploads = 0;
+    const client = new LamaSyncApiClient("http://localhost:8080", "key", {
+      fetchImpl: (() => {
+        uploads += 1;
+        return Promise.resolve(new Response(JSON.stringify({ id: "snap-1" }), { status: 200 }));
+      }) as unknown as typeof fetch,
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    });
+
+    const report = await captureAppSnapshot({
+      hostId: "dev-vm",
+      client,
+      app: { appName: "hermes", hostId: "dev-vm", protectionId: "p1", paths: [locked] },
+    });
+    expect(report.status).toBe("failed");
+    expect(report.summary).toContain("app archive failed");
+    expect(report.details).toContain("Permission denied");
+    expect(uploads).toBe(0);
   });
 });
 
