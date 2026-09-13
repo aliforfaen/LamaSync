@@ -13,6 +13,7 @@ import { homedir, tmpdir } from "os";
 import type { AppCaptureAssignment, ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { resolveDestination } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
+import { writeFileAtomic } from "./atomic-file.ts";
 import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
 import { getRemoteName } from "./rclone.ts";
@@ -872,7 +873,9 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
     !runResult.aborted
   ) {
     try {
-      writeFileSync(gitignoreHashFile, pendingGitignoreHash);
+      // LAMA-336: atomic — a truncated hash file would tell the next run
+      // that its filter snapshot is current and skip the resync.
+      writeFileAtomic(gitignoreHashFile, pendingGitignoreHash);
     } catch (err) {
       console.warn(
         `[executor] folder=${folder.id} could not persist gitignore filter snapshot: ${err instanceof Error ? err.message : String(err)}`,

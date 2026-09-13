@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import type { LamaSyncApiClient, OperationReport } from "@lamasync/core";
+import { PRIVATE_FILE_MODE, writeFileAtomic } from "./atomic-file.ts";
 
 export interface ReportQueue {
   enqueue(report: OperationReport): void;
@@ -45,9 +46,13 @@ export function createReportQueue(
 
   const writeLines = (lines: string[]): void => {
     ensureDir();
-    const tmp = `${queuePath}.tmp`;
-    writeFileSync(tmp, lines.length ? `${lines.join("\n")}\n` : "", { mode: 0o600 });
-    renameSync(tmp, queuePath);
+    // LAMA-336: the same atomic writer the other state files use, rather than
+    // a second write-then-rename implementation.
+    writeFileAtomic(
+      queuePath,
+      lines.length ? `${lines.join("\n")}\n` : "",
+      PRIVATE_FILE_MODE,
+    );
   };
 
   const trim = (): void => {

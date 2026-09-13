@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import type { HostConfig } from "@lamasync/core";
 import { expandConfigPaths } from "./config.ts";
+import { PRIVATE_FILE_MODE, writeFileAtomic } from "./atomic-file.ts";
 
 /**
  * Cache of the last host config fetched from the server. Lets the daemon keep
@@ -19,30 +20,32 @@ export const CACHE_PATH = join(
 /**
  * Read the cached host config. Returns null when no cache exists yet — the
  * daemon simply skips the local-only behaviour in that case and pulls from the
- * server.
+ * server. `cachePath` is injectable for tests.
  */
-export function loadCache(): HostConfig | null {
-  if (!existsSync(CACHE_PATH)) return null;
+export function loadCache(cachePath: string = CACHE_PATH): HostConfig | null {
+  if (!existsSync(cachePath)) return null;
   try {
-    const text = readFileSync(CACHE_PATH, "utf8");
+    const text = readFileSync(cachePath, "utf8");
     // LAMA-309: expand `~` assignment local paths on read too, so a cache
     // written by a pre-fix daemon still yields absolute paths for every
     // consumer. Idempotent for paths that are already absolute.
     return expandConfigPaths(JSON.parse(text) as HostConfig);
   } catch (err) {
     console.warn(
-      `[config-cache] failed to parse ${CACHE_PATH}: ${err instanceof Error ? err.message : String(err)}`,
+      `[config-cache] failed to parse ${cachePath}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return null;
   }
 }
 
 /**
- * Persist the host config atomically (write-then-rename would be nicer, but
- * Bun's `writeFileSync` is good enough for a single-writer cache).
+ * Persist the host config atomically (LAMA-336). This file is the daemon's
+ * only offline scheduling source, and it is read back on the next start — a
+ * truncated write would silently drop every cached assignment, so the write
+ * goes through the shared atomic writer instead of straight to disk.
  */
-export function saveCache(config: HostConfig): void {
-  const dir = dirname(CACHE_PATH);
+export function saveCache(config: HostConfig, cachePath: string = CACHE_PATH): void {
+  const dir = dirname(cachePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(CACHE_PATH, JSON.stringify(config, null, 2));
+  writeFileAtomic(cachePath, JSON.stringify(config, null, 2), PRIVATE_FILE_MODE);
 }
