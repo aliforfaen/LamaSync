@@ -18,6 +18,7 @@ import type {
   Conflict,
   Folder,
   FolderAssignment,
+  FolderWithAssignments,
   RetentionEvaluation,
   RetentionPolicy,
   RetentionRule,
@@ -40,6 +41,8 @@ import type {
   ServerDeployJob,
   StorageReport,
   FolderSize,
+  LiveSyncProgress,
+  LiveSyncProgressList,
   BrowseRef,
   BrowseJob,
   BrowsePrefixSizeResult,
@@ -763,7 +766,9 @@ export const api = {
     apiDelete(`/hosts/${encodeURIComponent(hostId)}`),
   getConfig: (hostId: string) =>
     apiGet<HostConfig>(`/config/${encodeURIComponent(hostId)}`),
-  listFolders: () => apiGet<Folder[]>("/folders"),
+  // LAMA-328: the folder list carries each folder's assignments, so the page no
+  // longer needs one request per folder.
+  listFolders: () => apiGet<FolderWithAssignments[]>("/folders"),
   listAssignments: (folderId: string) =>
     apiGet<FolderAssignment[]>(`/folders/${encodeURIComponent(folderId)}/assignments`),
   createFolder: (body: Partial<Folder>) => apiPost<Folder>("/folders", body),
@@ -980,6 +985,10 @@ export const api = {
       `/operations?hostId=${encodeURIComponent(hostId)}&limit=${limit}`,
     ),
   listLocks: () => apiGet<LockInfo[]>("/operations/locks"),
+  // LAMA-327: hydration read for the Running-now surface — every active
+  // non-terminal live sync run, newest first.
+  listSyncProgress: () =>
+    apiGet<LiveSyncProgressList>("/sync-progress").then((r) => r.runs),
   listConflicts: (status = "pending") =>
     apiGet<Conflict[]>(`/conflicts?status=${encodeURIComponent(status)}`),
   resolveConflict: (id: string, resolution: "local" | "remote" | "both") =>
@@ -1152,14 +1161,17 @@ export const api = {
   // LAMA-224: storage statistics.
   storageReport: (refresh = false) =>
     apiGet<StorageReport>(`/stats/storage${refresh ? "?refresh=1" : ""}`),
-  // LAMA-269: bulk last-known working-set sizes for the storage donut.
-  folderSizes: () =>
-    apiGet<Record<string, FolderSize>>("/folders/sizes"),
-  // LAMA-269: per-backend size time series for the growth sparkline.
-  storageHistory: () =>
+  // LAMA-269/328: bulk last-known working-set sizes for the storage donut and
+  // the Folders page. Never measures on the request; `refresh` asks the server
+  // for a bounded background re-measurement.
+  folderSizes: (refresh = false) =>
+    apiGet<Record<string, FolderSize>>(`/folders/sizes${refresh ? "?refresh=1" : ""}`),
+  // LAMA-269/328: per-backend size time series for the growth sparkline.
+  // Bounded server-side: a 90-day window, one point per backend per UTC day.
+  storageHistory: (days = 90) =>
     apiGet<{
       backends: Record<string, Array<{ measuredAt: number; bytes: number | null }>>;
-    }>("/stats/storage/history"),
+    }>(`/stats/storage/history?days=${days}`),
   folderSize: (id: string) =>
     apiGet<FolderSize>(`/folders/${encodeURIComponent(id)}/size`),
   listShares: () => apiGet<Share[]>("/shares"),

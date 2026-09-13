@@ -903,6 +903,38 @@ table.data tbody tr:last-child td {
   color: var(--accent-ok);
 }
 
+/* LAMA-327 — Running-now live phase badges. Enumeration gets the warn
+ * accent (it is the "long, no counters yet" state to watch for); transfers
+ * get the ok accent. All other live phases use badge-started (info). */
+.badge-enumerating {
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
+.badge-transferring {
+  background: var(--accent-ok-bg);
+  color: var(--accent-ok);
+}
+
+/* LAMA-327 — Running-now panel layout bits. */
+.live-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.live-head h2 {
+  margin: 0;
+}
+
+.live-hint {
+  display: block;
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  margin-top: 0.25rem;
+}
+
 .badge-ok,
 .badge-s3,
 .badge-local,
@@ -1253,6 +1285,14 @@ table.data tbody tr:last-child td {
 
 .muted {
   color: var(--text-muted);
+}
+
+/* LAMA-328: a folder size that is stale or being refreshed — visible, but
+   clearly not presented as a current measurement. */
+.size-stale {
+  color: var(--warning, var(--text-muted));
+  font-size: 0.85em;
+  white-space: nowrap;
 }
 
 button.action,
@@ -4446,6 +4486,25 @@ html[data-motion="reduce"] .signal-tile:hover { transform: none; }
   .data.data-list > tbody > tr > td[colspan],
   .data.data-list > tbody > tr.empty-row > td {
     display: block;
+    grid-column: 1 / -1;
+  }
+
+  /* --- Running now ------------------------------------------------------ */
+  /* Keep the run identity and its changing state; the operation is already
+     conveyed by the panel context and is omitted at phone width. */
+  .data-running-now > tbody > tr > td:nth-child(1),
+  .data-running-now > tbody > tr > td:nth-child(2),
+  .data-running-now > tbody > tr > td:nth-child(4),
+  .data-running-now > tbody > tr > td:nth-child(5),
+  .data-running-now > tbody > tr > td:nth-child(6),
+  .data-running-now > tbody > tr > td:nth-child(7) {
+    display: block;
+  }
+
+  .data-running-now > tbody > tr > td:nth-child(1),
+  .data-running-now > tbody > tr > td:nth-child(2),
+  .data-running-now > tbody > tr > td:nth-child(6),
+  .data-running-now > tbody > tr > td:nth-child(7) {
     grid-column: 1 / -1;
   }
 

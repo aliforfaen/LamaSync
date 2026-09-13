@@ -652,8 +652,8 @@ export async function startBrowseCopyMove(
       appendOperationLog(db, job, hostId);
       // A browse op changes what's on disk/S3 — drop cached sizes.
       invalidateStorageReport();
-      if (src.kind === "s3" && src.folderId) invalidateFolderSize(src.folderId);
-      if (dst.kind === "s3" && dst.folderId) invalidateFolderSize(dst.folderId);
+      if (src.kind === "s3" && src.folderId) invalidateFolderSize(db, src.folderId);
+      if (dst.kind === "s3" && dst.folderId) invalidateFolderSize(db, dst.folderId);
     } catch (error) {
       job.status = "failed";
       job.error = error instanceof Error ? error.message : String(error);
@@ -749,7 +749,7 @@ export async function startBrowseRename(
       writeJob(db, job);
       emit(db, job);
       appendOperationLog(db, job, hostId);
-      if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(ref.folderId);
+      if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(db, ref.folderId);
       invalidateStorageReport();
     } catch (error) {
       job.status = "failed";
@@ -884,7 +884,7 @@ export async function startBrowseDelete(
       appendOperationLog(db, job, hostId, deleteOpMeta(ref, names, "done"));
       dropFolderPrefixSizes(ref);
       invalidateStorageReport();
-      if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(ref.folderId);
+      if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(db, ref.folderId);
     } catch (error) {
       job.status = "failed";
       job.error = error instanceof Error ? error.message : String(error);
@@ -1150,7 +1150,7 @@ export async function startBrowseMkdir(
       writeJob(db, job);
       emit(db, job);
       appendOperationLog(db, job, hostId);
-      if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(ref.folderId);
+      if (ref.kind === "s3" && ref.folderId) invalidateFolderSize(db, ref.folderId);
     } catch (error) {
       job.status = "failed";
       job.error = error instanceof Error ? error.message : String(error);
@@ -1275,7 +1275,7 @@ export async function startBrowseUpload(
       writeJob(db, job);
       emit(db, job);
       appendOperationLog(db, job, hostId);
-      if (dst.kind === "s3" && dst.folderId) invalidateFolderSize(dst.folderId);
+      if (dst.kind === "s3" && dst.folderId) invalidateFolderSize(db, dst.folderId);
       invalidateStorageReport();
     } catch (error) {
       job.status = "failed";

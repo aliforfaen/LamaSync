@@ -325,6 +325,86 @@ describe("GET /api/v1/folders — s3 credentials stay off the folder (LAMA-178, 
     expect(JSON.stringify(body)).not.toContain("KEY");
   });
 
+  test("GET /folders embeds assignments instead of requiring a request per folder (LAMA-328)", async () => {
+    const id = await createS3Folder();
+    db.run("INSERT INTO hosts (id, hostname) VALUES ('host-embed', 'embed-host')");
+    const assignRes = await postJson(`/api/v1/folders/${id}/assign`, {
+      hostId: "host-embed",
+      role: "both",
+      localPath: "/local/embed",
+    });
+    expect([200, 201]).toContain(assignRes.status);
+
+    const res = await app.handle(request("/api/v1/folders"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{
+      id: string;
+      assignments: Array<{ hostId: string; localPath: string }>;
+    }>;
+    const folder = body.find((f) => f.id === id);
+    expect(folder?.assignments).toHaveLength(1);
+    expect(folder?.assignments[0]?.hostId).toBe("host-embed");
+    expect(folder?.assignments[0]?.localPath).toBe("/local/embed");
+
+    // A folder with no assignments carries an empty array, never undefined.
+    const other = body.find((f) => f.id !== id);
+    if (other) expect(other.assignments).toEqual([]);
+
+    // LAMA-328 review: the embedded rows are summaries — they match the
+    // per-folder route's full rows minus the secret-bearing fields, which
+    // is exactly the negative assertion below.
+    const single = await app.handle(request(`/api/v1/folders/${id}/assignments`));
+    const fullRows = (await single.json()) as Array<
+      { hostId: string; localPath: string } & { resticPassword?: string | null }
+    >;
+    const summaries = fullRows.map(({ resticPassword: _secret, ...rest }) => rest);
+    expect(folder?.assignments).toEqual(summaries);
+  });
+
+  test("GET /folders never embeds a seeded restic password (LAMA-328 review)", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h1','h1')`);
+    const folderId = await createS3Folder();
+    const assignRes = await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h1",
+      role: "both",
+      localPath: "/local/h1",
+    });
+    expect([200, 201]).toContain(assignRes.status);
+    const seedRes = await app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h1`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          resticRepository: "sftp:nas:/srv/restic/h1",
+          resticPassword: "h1-private-pw",
+        }),
+      }),
+    );
+    expect(seedRes.status).toBe(200);
+
+    // The list response must not carry the password — neither the embedded
+    // summary nor anywhere else in the payload. The per-folder route keeps
+    // the full row (it is the surface the editor round-trips through).
+    const listRes = await app.handle(request("/api/v1/folders"));
+    expect(listRes.status).toBe(200);
+    const listText = await listRes.text();
+    expect(listText).not.toContain("h1-private-pw");
+    const list = JSON.parse(listText) as Array<{
+      id: string;
+      assignments: Array<{ resticRepository?: string | null; resticPassword?: string | null }>;
+    }>;
+    const embedded = list.find((f) => f.id === folderId)?.assignments ?? [];
+    expect(embedded[0]?.resticRepository).toBe("sftp:nas:/srv/restic/h1");
+    expect("resticPassword" in (embedded[0] ?? {})).toBe(false);
+
+    const singleRes = await app.handle(request(`/api/v1/folders/${folderId}/assignments`));
+    const single = (await singleRes.json()) as Array<{ resticPassword?: string | null }>;
+    expect(single[0]?.resticPassword).toBe("h1-private-pw");
+  });
+
   test("GET /folders/:id returns the backend reference, not credentials", async () => {
     const id = await createS3Folder();
     const res = await app.handle(request(`/api/v1/folders/${id}`));
