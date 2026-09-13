@@ -1,6 +1,6 @@
 # Status & work queue — LamaSync
 
-Updated 2026-09-11. This is the current state, not an append-only changelog.
+Updated 2026-09-13. This is the current state, not an append-only changelog.
 Older release notes and completed work are in
 [`archive/status-2026-08-through-2026-09-03.md`](archive/status-2026-08-through-2026-09-03.md).
 
@@ -12,6 +12,44 @@ workspace. CI runs type-check, web build, tests, strict skill drift, and
 distributable binary build.
 
 ## Recently shipped
+
+- **LAMA-337 — Reconnect with QR for an existing Android device.** A phone
+  whose local credentials were lost (reset, reinstall, wiped vault) used to
+  have exactly one way back in: pair again, which mints a **new** host id and
+  quietly orphans everything bound to the old one — upload inboxes, upload
+  history, device-scoped state. The enrollment secret is one-time and only its
+  hash is stored, so the original QR can never be re-shown; the fix is a new
+  one that names the device it belongs to.
+  *Server:* `POST /api/v1/mobile/registrations/:hostId/reconnect-enrollment`
+  (admin, `no-store`) creates a fresh 10-minute single-use enrollment for an
+  existing **live** registration — 404 unknown, 409 revoked, and creating it
+  changes nothing, so an abandoned or expired reconnect QR leaves the working
+  device exactly as it was. The QR payload is the unchanged
+  `lamasync.android.enroll` v1 shape; the exchange branches on the enrollment
+  row: a pairing QR still creates a host, a reconnect QR claims the QR and, in
+  one transaction, rotates `native_token_hash`, refreshes display name/app
+  version/last-seen plus the host heartbeat, revokes the previous web grant and
+  every web session, issues a fresh grant and returns the **same host id**.
+  Live WebSockets of that registration are closed after commit, so the old
+  native bearer, old grant and every old cookie session are dead the moment the
+  reconnect lands. Credential history is now auditable: `mobile_enrollments`
+  keeps one row per QR shown (`kind` = `new` | `reconnect`, no more
+  `UNIQUE(host_id)`) and `web_grants` keeps the superseded grant with its
+  revoke reason (no more `UNIQUE(registration_id)`); a guarded one-time rebuild
+  in `initDb` migrates existing databases without dropping rows. Supersession
+  is scoped rather than global: showing a new pairing QR voids the earlier
+  pending pairing QR, and a reconnect QR voids only that same device's earlier
+  pending reconnect QR.
+  *Desktop:* active device rows in the Android-devices panel gain a
+  "Reconnect QR" action (revoked rows do not), reusing the pairing modal — same
+  QR rendering, countdown, polling and accessibility — with copy that says the
+  device keeps its identity, that scanning rotates credentials and signs out
+  the old session, and that closing the window or letting the QR expire changes
+  nothing. The projection is refreshed as soon as the phone claims the QR.
+  *Android:* the same v1 QR is parsed by the same parser, and the existing
+  different-enrollment replacement path already handles a same-origin reconnect
+  (it clears local auth, exchanges, and stores the host id the server returns —
+  the same one); a unit test now pins that path.
 
 - **LAMA-336 — live-tree app captures, destination updates and the audit
   batch around them.** A `dev-vm` Hermes protection was enabled, scheduled and
@@ -340,14 +378,25 @@ distributable binary build.
 
 ## Active follow-ups
 
-1. **LAMA-336 — release and live confirmation.** The code for every finding is
+1. **LAMA-337 — release, and the one device-path question it leaves open.**
+   The reconnect flow is code-complete on `aliforfaen/app-updates` with the
+   repo gates green; the release and the production deploy are the operator's,
+   not the worktree's. One deliberate non-change needs an owner call: the
+   Android app has **no QR entry point while it is already paired** (the
+   scanner is reachable from Welcome, i.e. a fresh install or after a local
+   wipe), so a phone that still holds credentials reaches reconnect through its
+   own stored grant. Adding a paired-state "Scan reconnect QR" entry is a
+   Kotlin UI change, deliberately left out of this server/web pass — see
+   *Known limitations*.
+
+2. **LAMA-336 — release and live confirmation.** The code for every finding is
    on `aliforfaen/app-updates`; the release, the `dev-vm` update and the
    check that the next Hermes capture produces a verified snapshot in the
    server archive are the operator's, not the worktree's. Nothing in the
    change set is deployed yet, so the original five failing attempts are still
    the live behaviour until it ships.
 
-2. **LAMA-296 stage 2 — real-device soak.** Automatic camera protection is
+3. **LAMA-296 stage 2 — real-device soak.** Automatic camera protection is
    emulator-verified (see
    [`report-296-stage-2-auto-protection.md`](report-296-stage-2-auto-protection.md));
    the remaining evidence is a one-day real-phone run (Doze/battery,
@@ -355,7 +404,7 @@ distributable binary build.
    paths, a real partial-access selection, and a server restart mid-
    transfer).
 
-3. **LAMA-315 — path classification and recommendation UX.** The design
+4. **LAMA-315 — path classification and recommendation UX.** The design
    handoff is [`handoff-315-path-classification.md`](
    handoff-315-path-classification.md) (taxonomy, data model, staged
    delivery). Stage 1 — annotation provenance, the deterministic classifier,
@@ -367,18 +416,18 @@ distributable binary build.
    plan, optional denormalization) remain. Known contract gap: `excludes` is a
    raw `string[]` with no class or rationale, so review surfaces list exclude
    patterns verbatim and associate no classification with them.
-4. **Application setup/restore executor.** Build the target-side wizard:
+5. **Application setup/restore executor.** Build the target-side wizard:
    preflight, dry-run/change plan, populated-target decisions, revalidation
    before writes, rollback artifact, and execution journal. Direct app restore
    remains intentionally unavailable until this exists.
-5. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
+6. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
   validation are complete; production-client rollout/acceptance on `cachy`
   remains pending because it requires an explicit restart/update authority.
-6. **LAMA-321 follow-up — trash retention.** Optional per-folder
+7. **LAMA-321 follow-up — trash retention.** Optional per-folder
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
-7. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
+8. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
    close.** Phases 3–7 shipped; see **Recently shipped**. What remains is
    verification that needs a human or a device, not more code:
    - **TalkBack** over the shell and the mobile nav: focus order, the
@@ -406,7 +455,7 @@ distributable binary build.
      browser belong to this sweep. The review's fixes are covered by tests: the
      raw-fetch transport signals, the shared sign-out ordering, and
      service-worker activation pruning only `lamasync-shell-*`.
-8. **LAMA-332 — Android WebView fleet administration is forbidden after a
+9. **LAMA-332 — Android WebView fleet administration is forbidden after a
    fresh re-pair.** On the physical device, the embedded management UI returns
    `Forbidden` for fleet data while the native shell reports `Connected`. The
    operator signed out, removed the registration from LamaSync, and paired
@@ -432,6 +481,19 @@ distributable binary build.
 
 ## Known limitations
 
+- **LAMA-337 reconnect is a desktop-initiated flow, and the phone cannot scan
+  one while it is still paired.** The Android app reaches the scanner from
+  Welcome — a fresh install, a cleared vault, or after its own local
+  disconnect — which is exactly the case that needs a reconnect QR (the
+  device that still holds credentials re-issues its web session from the
+  stored grant instead). A paired phone therefore has no "scan a reconnect
+  QR" entry, and adding one is a Kotlin UI change left to the Android pass.
+  Two smaller edges follow from the same design: a reconnect QR lives 10
+  minutes and is single-use (a consumed-but-unseen exchange — the response
+  lost in flight — needs a newly generated QR, which is now cheap and
+  non-destructive), and only one live web grant exists per registration
+  (the previous one is revoked with the reason `credentials rotated by
+  reconnect`, and every session built on it stops working immediately).
 - The Android (LAMA-296 phase 1) flow requires an HTTPS front door and
   `LAMASYNC_ORIGIN` set to that canonical `https://` origin — enrollment
   exchange and web-session bootstrap 503 without it. Existing HTTP tailnet
@@ -629,3 +691,23 @@ stage-2 auto-protect vertical incl. the real completion-reconcile path); the
 two permission negatives validated per shell-prepared state (all revoked →
 NOT_GRANTED; selected-only → PARTIAL). Real-phone soak remains the open
 evidence gap.
+
+LAMA-337 baseline (this worktree): repo gates green — `bun x tsc --noEmit`,
+`bun run build:web-ui` (still one self-contained `index.html`), `bun test`
+**1730 pass / 0 fail** (+~50 for this change), `bun run
+scripts/check-skill-drift.ts --strict` OK (162 API rows / 163 server routes —
+the new reconnect route documented), and `bun run build` (all five
+distributables). Android `assembleDebug` OK, `lintDebug` **0 errors**,
+`testDebugUnitTest` **245/245** (one added: the same-origin reconnect path in
+`CompanionRepositoryFlowTest`); no instrumented run was made (no Kotlin main
+source changed, and the reconnect vertical needs a live HTTPS server). New
+coverage: admin-only create with 404/409 for unknown/revoked targets; the
+guarded `initDb` rebuild of legacy `mobile_enrollments` (UNIQUE(host_id)) and
+`web_grants` (UNIQUE(registration_id)) preserving rows; abandoned + expired
+reconnect QRs leaving the old bearer/grant/session valid; a successful exchange
+keeping the host id while rotating both authorities, killing the old cookie
+session and live WebSocket (real HTTP + WS harness), and refreshing device
+metadata without touching destinations, uploads or `created_at`; replay and
+concurrent exchanges yielding one winner; QR-supersession scoped to kind and
+host; revoke killing a pending reconnect QR; and the UI action/modal copy
+(reconnect row present on active rows only, QR payload/countdown unchanged).
