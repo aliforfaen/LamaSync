@@ -184,7 +184,7 @@ export function RunningNowPanel() {
       ) : runs.length === 0 ? (
         <div className="empty-row">No syncs running right now</div>
       ) : (
-        <table className="data">
+        <table className="data data-list data-running-now">
           <thead>
             <tr>
               <th>Device</th>
@@ -199,16 +199,16 @@ export function RunningNowPanel() {
           <tbody>
             {runs.map((run) => (
               <tr key={run.runId}>
-                <td className="muted">{run.hostname ?? run.hostId}</td>
-                <td className="muted">{run.folderName ?? run.folderId ?? "—"}</td>
-                <td className="mono">{run.operation}</td>
-                <td>
+                <td className="muted" data-label="Device">{run.hostname ?? run.hostId}</td>
+                <td className="muted" data-label="Folder">{run.folderName ?? run.folderId ?? "—"}</td>
+                <td className="mono" data-label="Operation">{run.operation}</td>
+                <td data-label="Phase">
                   <span className={`badge ${phaseBadgeClass(run.phase)}`}>
                     {PHASE_LABEL[run.phase] ?? run.phase}
                   </span>
                 </td>
-                <td className="num mono">{formatElapsed(run.startedAt, nowMs)}</td>
-                <td className="num mono">
+                <td className="num mono" data-label="Elapsed">{formatElapsed(run.startedAt, nowMs)}</td>
+                <td className="num mono" data-label="Progress">
                   {run.transfers !== null && run.transfers !== undefined
                     ? `${run.transfers} files`
                     : "—"}
@@ -216,7 +216,7 @@ export function RunningNowPanel() {
                     ? ` · ${formatBytes(run.bytes)}`
                     : ""}
                 </td>
-                <td className="muted">
+                <td className="muted" data-label="Detail">
                   <span>{run.detail ?? "running"}</span>
                   {showEnumerationHint(run) ? (
                     <span className="live-hint">

@@ -4489,6 +4489,25 @@ html[data-motion="reduce"] .signal-tile:hover { transform: none; }
     grid-column: 1 / -1;
   }
 
+  /* --- Running now ------------------------------------------------------ */
+  /* Keep the run identity and its changing state; the operation is already
+     conveyed by the panel context and is omitted at phone width. */
+  .data-running-now > tbody > tr > td:nth-child(1),
+  .data-running-now > tbody > tr > td:nth-child(2),
+  .data-running-now > tbody > tr > td:nth-child(4),
+  .data-running-now > tbody > tr > td:nth-child(5),
+  .data-running-now > tbody > tr > td:nth-child(6),
+  .data-running-now > tbody > tr > td:nth-child(7) {
+    display: block;
+  }
+
+  .data-running-now > tbody > tr > td:nth-child(1),
+  .data-running-now > tbody > tr > td:nth-child(2),
+  .data-running-now > tbody > tr > td:nth-child(6),
+  .data-running-now > tbody > tr > td:nth-child(7) {
+    grid-column: 1 / -1;
+  }
+
   /* --- Activity ---------------------------------------------------------- */
   /* The sentence rendered by `operationSentence` already names the device and
      the folder and carries the relative time and the status word, so those
