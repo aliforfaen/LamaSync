@@ -136,7 +136,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          test "$VERSION" = "$(node -p \"require('./package.json').version\")"
+          test "$VERSION" = "$(node -p 'require("./package.json").version')"
           ./android/gradlew -p android assembleRelease -PlamasyncVersionName="$VERSION"
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk dist/lamasync-android.apk
