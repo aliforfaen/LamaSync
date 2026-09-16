@@ -43,7 +43,7 @@ export function daemonUsage(): string {
     "  lamasyncd --mount <folderId>    mount a folder in the foreground",
     "  lamasyncd --mount=<folderId>    same as above, alternate syntax",
     "  lamasyncd --check-update        print current vs latest release, then exit",
-    "  lamasyncd --update              self-update the binary via the release proxy",
+    "  lamasyncd --update              self-update the binary and reconcile the systemd user unit",
     "  lamasyncd --update skill        refresh the agent-skill bundle (lockstep with the binary version)",
     "",
     "Flags:",

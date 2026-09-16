@@ -156,6 +156,24 @@ The daemon self-updates (`ExecStartPre=--check-update`, or `lamasyncd
   and its fleet credentials as the deliberate trust boundary. Genuine
   filesystem permission errors still need to be fixed at the path/filesystem
   level.
+- **A client that updated its binary may still run under a pre-fix unit.**
+  `~/.config/systemd/user/lamasyncd.service` is only *written* by
+  `install.sh`, so before LAMA-311 it never changed on a binary update. Since
+  LAMA-311, `lamasyncd --update` and the remote `update_daemon` action
+  reconcile an already-installed unit — removing just the obsolete
+  `ProtectHome=` / `ReadWritePaths=` lines and preserving everything else
+  (custom `ExecStartPre`/`ExecReload`, binary and socket paths, drop-ins are
+  left alone) — even when the binary is already current. Apply it with:
+  ```bash
+  lamasyncd --update
+  systemctl --user restart lamasyncd.service
+  systemctl --user show lamasyncd -p ProtectHome -p ReadWritePaths   # expect empty
+  ```
+  Run it from a normal shell: a daemon whose old unit sandbox is actually
+  effective cannot rewrite its own unit (`$HOME` is read-only for it), which is
+  exactly the case the remote action reports as a failure with this
+  instruction. `--update` exits non-zero when the unit could not be reconciled;
+  re-running `install.sh` (which rewrites the whole unit) is the fallback.
 - App-protection capture **hard-fails the whole run if any listed path is
   missing** on the host — keep per-host capture specs host-specific
   (protections are already bound to one host at enrollment), or use

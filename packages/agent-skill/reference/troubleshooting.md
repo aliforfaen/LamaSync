@@ -71,6 +71,38 @@ lamasyncd --update
 ```
 Or re-run the installer; it downloads the latest matching binaries.
 
+## Symptom: a host keeps a stale `lamasyncd.service` (e.g. sync writes fail with EROFS in a `$HOME` path)
+
+**Cause.** The systemd user unit is only ever *written* by
+`packaging/install/install.sh`. Before LAMA-311 nothing else touched it, so a
+host that updated its **binary** could keep running under an **old unit** —
+including one carrying `ProtectHome=read-only` and a static `ReadWritePaths=`
+allowlist. On a host where that sandbox is effective, any assignment targeting
+an unlisted `$HOME/<name>` fails with `EROFS` (read-only file system) when the
+daemon creates or writes the local directory.
+
+**Fix.** `lamasyncd --update` (and the remote `update_daemon` action) now
+reconciles that unit even when the binary is already current:
+
+```bash
+lamasyncd --update            # removes the obsolete directives, daemon-reload
+systemctl --user restart lamasyncd.service
+systemctl --user show lamasyncd -p ProtectHome -p ReadWritePaths   # expect empty
+```
+
+Why `--update` from a shell and not the remote action: a daemon running *under*
+the effective pre-fix unit has `$HOME` read-only, so it cannot rewrite
+`~/.config/systemd/user/lamasyncd.service` itself. The remote `update_daemon`
+reports this as `failed` with this exact instruction (`run lamasyncd --update
+from a shell`); your shell is not sandboxed, so the same call succeeds there.
+
+If `--update` prints `systemd unit unchanged: … has drop-ins …`, or the unit is
+a symlink or does not carry the shipped `Description=LamaSync Daemon` +
+`SyslogIdentifier=lamasyncd` markers, the daemon refuses to rewrite it on
+purpose — apply the two-line change to that file (or its drop-in) yourself, or
+re-run `packaging/install/install.sh` (which rewrites the whole unit and will
+discard local edits).
+
 ## Symptom: `lamasync local status` → `local daemon socket not reachable`
 
 **Cause.** Same as the `socket: daemon` row in `doctor` — `lamasyncd` is not

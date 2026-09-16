@@ -443,14 +443,32 @@ distributable binary build.
    preflight, dry-run/change plan, populated-target decisions, revalidation
    before writes, rollback artifact, and execution journal. Direct app restore
    remains intentionally unavailable until this exists.
-6. **LAMA-311 — daemon home-path sandbox.** The unit contract and local/Docker
-  validation are complete; production-client rollout/acceptance on `cachy`
-  remains pending because it requires an explicit restart/update authority.
-7. **LAMA-321 follow-up — trash retention.** Optional per-folder
+6. **LAMA-311 — daemon home-path sandbox.** The unit contract, the queued-action
+  config refresh, and the unit reconciliation shipped; only production-client
+  rollout remains. `lamasyncd --update` and the remote `update_daemon` action now
+  migrate an already-installed unit (removing the obsolete
+  `ProtectHome=`/`ReadWritePaths=` lines only) even when the binary is already
+  current — which is how `dev-vm`, running a post-fix v0.3.11 binary under an
+  Aug-6 unit, actually gets fixed. A daemon whose old unit sandbox is
+  *effective* cannot rewrite its own unit, so the remote action reports that
+  case as `failed` with the manual `lamasyncd --update` instruction; running it
+  from a shell is the reliable remedy. Live acceptance (binary update was
+  already rolled out on `dev-vm`, but the unit was not) still needs an explicit
+  restart/update authority, because a unit migration requires
+  `systemctl --user restart lamasyncd.service`. See `docs/agent-start.md` for the
+  rollout command set.
+7. **Dispatcher race (filed separately from LAMA-311).** The refresh-once fix
+  covers "the named folder is missing from a cache that the server has already
+  superseded". The broader race — a claimed action is executed against a config
+  revision that changes mid-flight, a host-wide trigger resolves against an
+  empty stale cache, and `STALE_TAKEN_MS` (10 min) can flip a long-running
+trigger back to `pending` and re-claim it while it is still running — is its own
+issue with its own fix (revision-pinned selection or a bounded re-check).
+8. **LAMA-321 follow-up — trash retention.** Optional per-folder
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
-8. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
+9. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
    close.** Phases 3–7 shipped; see **Recently shipped**. What remains is
    verification that needs a human or a device, not more code:
    - **TalkBack** over the shell and the mobile nav: focus order, the
@@ -478,7 +496,7 @@ distributable binary build.
      browser belong to this sweep. The review's fixes are covered by tests: the
      raw-fetch transport signals, the shared sign-out ordering, and
      service-worker activation pruning only `lamasync-shell-*`.
-9. **LAMA-332 — Android WebView fleet administration is forbidden after a
+10. **LAMA-332 — Android WebView fleet administration is forbidden after a
    fresh re-pair.** On the physical device, the embedded management UI returns
    `Forbidden` for fleet data while the native shell reports `Connected`. The
    operator signed out, removed the registration from LamaSync, and paired
@@ -501,7 +519,7 @@ distributable binary build.
    physical dashboard no longer reports Forbidden; separately improve the
    native cookie-presence indicator so it does not claim verified fleet
    authority.
-10. **size_history retention.** LAMA-328 bounds and downsamples history reads,
+11. **size_history retention.** LAMA-328 bounds and downsamples history reads,
     but successful measurements still append indefinitely. Add pruning to the
     existing daily maintenance pass once an operator-approved retention
     horizon is chosen.

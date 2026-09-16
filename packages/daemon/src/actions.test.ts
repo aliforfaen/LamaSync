@@ -7,11 +7,13 @@ import { describe, expect, test } from "bun:test";
 import type { FolderAssignment, QueuedAction } from "@lamasync/core";
 import {
   isDryRunRequested,
+  selectActionTargets,
   selectAssignmentsForSyncAction,
   summarizeBatchSync,
   summarizeConfigRefresh,
   summarizeReportForAction,
   summarizeUpdateCheck,
+  unassignedFolderCompletion,
   validateActionShape,
 } from "./actions.ts";
 
@@ -350,5 +352,144 @@ describe("validateActionShape", () => {
     expect(validateActionShape({ ...baseAction(), id: 5 })).toBeNull();
     expect(validateActionShape({ ...baseAction(), hostId: 5 })).toBeNull();
     expect(validateActionShape({ ...baseAction(), createdAt: "1" })).toBeNull();
+  });
+});
+
+// LAMA-311: the action poller shares its 30 s tick with the heartbeat's
+// config-revision check, so a claimed action can be resolved against a cache
+// the server has already superseded. `selectActionTargets` refreshes once and
+// re-selects before the dispatcher may declare a named folder unassigned.
+describe("selectActionTargets (LAMA-311)", () => {
+  type FolderType = "sync" | "backup" | "mount" | "dotfile" | "git";
+
+  function source(options: {
+    initial: readonly FolderAssignment[];
+    fresh?: readonly FolderAssignment[];
+    types?: ReadonlyMap<string, FolderType>;
+    freshTypes?: ReadonlyMap<string, FolderType>;
+    refreshResult?: boolean;
+    onRefresh?: () => void;
+  }): {
+    assignments: () => readonly FolderAssignment[];
+    folderTypes: () => ReadonlyMap<string, FolderType>;
+    refreshConfig: () => Promise<boolean>;
+    refreshes: () => number;
+  } {
+    let current = options.initial;
+    let currentTypes = options.types ?? new Map();
+    let refreshes = 0;
+    return {
+      assignments: () => current,
+      folderTypes: () => currentTypes,
+      refreshConfig: async () => {
+        refreshes += 1;
+        options.onRefresh?.();
+        const ok = options.refreshResult ?? true;
+        if (ok) {
+          current = options.fresh ?? options.initial;
+          currentTypes = options.freshTypes ?? currentTypes;
+        }
+        return ok;
+      },
+      refreshes: () => refreshes,
+    };
+  }
+
+  test("stale cache → refresh once → reselect finds the folder", async () => {
+    const deps = source({ initial: [A], fresh: [A, B] });
+    const outcome = await selectActionTargets(
+      { folderId: "f2" },
+      { backupOnly: false, ...deps },
+    );
+    expect(outcome).toEqual({ targets: [B], refreshed: true, refreshFailed: false });
+    expect(deps.refreshes()).toBe(1);
+  });
+
+  test("still absent after a successful refresh → empty, caller fails", async () => {
+    const deps = source({ initial: [A], fresh: [A] });
+    const outcome = await selectActionTargets(
+      { folderId: "ghost" },
+      { backupOnly: false, ...deps },
+    );
+    expect(outcome).toEqual({ targets: [], refreshed: true, refreshFailed: false });
+    expect(deps.refreshes()).toBe(1);
+  });
+
+  test("refresh failure → refreshFailed, no second attempt", async () => {
+    const deps = source({ initial: [A], refreshResult: false });
+    const outcome = await selectActionTargets(
+      { folderId: "f2" },
+      { backupOnly: false, ...deps },
+    );
+    expect(outcome).toEqual({ targets: [], refreshed: true, refreshFailed: true });
+    expect(deps.refreshes()).toBe(1);
+  });
+
+  test("an already-matching folder does not refresh", async () => {
+    const deps = source({ initial: ALL });
+    const outcome = await selectActionTargets(
+      { folderId: "f1" },
+      { backupOnly: false, ...deps },
+    );
+    expect(outcome).toEqual({ targets: [A], refreshed: false, refreshFailed: false });
+    expect(deps.refreshes()).toBe(0);
+  });
+
+  test("host-wide payload (no folderId) never refreshes", async () => {
+    const deps = source({ initial: [A] });
+    const outcome = await selectActionTargets(null, { backupOnly: false, ...deps });
+    expect(outcome).toEqual({ targets: [A], refreshed: false, refreshFailed: false });
+    expect(deps.refreshes()).toBe(0);
+  });
+
+  test("backup filter is applied against the FRESH folder types", async () => {
+    // Initially f2 is a plain sync folder (no backup match), so the selection
+    // is empty and triggers the refresh; the fresh config says backup.
+    const deps = source({
+      initial: [B],
+      types: new Map([["f2", "sync"]]),
+      fresh: [B],
+      freshTypes: new Map([["f2", "backup"]]),
+    });
+    const outcome = await selectActionTargets(
+      { folderId: "f2" },
+      { backupOnly: true, ...deps },
+    );
+    expect(outcome.targets).toEqual([B]);
+    expect(outcome.refreshed).toBe(true);
+    expect(outcome.refreshFailed).toBe(false);
+  });
+
+  test("backup host-wide filter still excludes non-backup folders after a miss", async () => {
+    const deps = source({
+      initial: [A],
+      fresh: [A, B],
+      freshTypes: new Map([["f1", "backup"], ["f2", "sync"]]),
+    });
+    const outcome = await selectActionTargets(
+      { folderId: "f2" },
+      { backupOnly: true, ...deps },
+    );
+    // f2 exists but is a sync folder — the explicit-match rule keeps it only
+    // when the type is unknown, so a known non-backup type is filtered out.
+    expect(outcome.targets).toEqual([]);
+  });
+
+  test("refresh is attempted at most once even for a backup miss", async () => {
+    const deps = source({ initial: [], refreshResult: true, fresh: [] });
+    await selectActionTargets({ folderId: "f9" }, { backupOnly: true, ...deps });
+    expect(deps.refreshes()).toBe(1);
+  });
+
+  test("unassignedFolderCompletion names a refresh failure distinctly", () => {
+    const clean = unassignedFolderCompletion("f1", "host-a", { refreshFailed: false });
+    expect(clean).toEqual({
+      status: "failed",
+      result: "folderId=f1 not assigned to host=host-a",
+    });
+    const stale = unassignedFolderCompletion("f1", "host-a", { refreshFailed: true });
+    expect(stale.status).toBe("failed");
+    expect(stale.result).toContain("not assigned to host=host-a");
+    expect(stale.result).toContain("config refresh failed");
   });
 });

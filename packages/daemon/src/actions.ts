@@ -101,6 +101,110 @@ export function selectAssignmentsForSyncAction(
 }
 
 /**
+ * Outcome of resolving a queued sync/backup action into the assignments to
+ * run, including whether the cached config had to be re-fetched.
+ */
+export interface ActionSelectionOutcome {
+  /** Assignments the action should run (empty = nothing to do). */
+  targets: FolderAssignment[];
+  /**
+   * True when the cached config did not contain the requested folder and a
+   * refresh was attempted (and selection re-run). Host-wide payloads
+   * (`folderId` absent) never refresh.
+   */
+  refreshed: boolean;
+  /**
+   * True when a refresh `refreshed` was attempted but failed (control plane
+   * unreachable). The re-selection then still ran against the stale cache.
+   */
+  refreshFailed: boolean;
+}
+
+/**
+ * Resolve a `trigger_sync` / `trigger_backup` payload into the assignments
+ * to run, self-healing a stale config cache once before giving up.
+ *
+ * The action poller and the heartbeat config-revision check run on the same
+ * 30 s tick, and the server bumps the revision the moment an operator assigns
+ * a folder. A claimed action can therefore be resolved against a cache that
+ * is already superseded — on `dev-vm` (2026-09-16) a manual "sync now" was
+ * claimed at revision 81, refreshed to revision 82 in the same second, and
+ * terminally acked `failed: folderId=… not assigned to host=…` for a folder
+ * that *was* assigned. Nothing retried it, so `ensureLocalDirectory` never
+ * ran and the local directory stayed missing.
+ *
+ * `runOnce` and the socket `onSyncRequest` handler already refresh on an
+ * unknown folder; this helper gives the action dispatcher the same behaviour,
+ * in one place, bounded to a single refresh:
+ *
+ *   - a folder-scoped payload whose folder is absent from the cache → refresh
+ *     once, then re-select against the fresh assignments + folder types;
+ *   - a payload that still finds nothing after a successful refresh, or a
+ *     host-wide payload (no `folderId`), → the caller's existing failure /
+ *     no-work branch;
+ *   - a failed refresh → the caller reports the folder as unassigned *and*
+ *     names the refresh failure, so an operator can tell "wrong folderId"
+ *     apart from "control plane unreachable".
+ *
+ * Pure except for the injected callbacks, so the four branches are unit
+ * testable without a network or server.
+ */
+export async function selectActionTargets(
+  payload: Record<string, unknown> | null,
+  options: {
+    backupOnly: boolean;
+    /** Snapshot of the currently cached assignments. */
+    assignments: () => readonly FolderAssignment[];
+    /** Snapshot of the currently cached folder types (for `backupOnly`). */
+    folderTypes: () => ReadonlyMap<string, FolderType>;
+    /** Pull a fresh config; resolves `true` on success. */
+    refreshConfig: () => Promise<boolean>;
+  },
+): Promise<ActionSelectionOutcome> {
+  const folderIdRaw = payload?.["folderId"];
+  const folderId = typeof folderIdRaw === "string" ? folderIdRaw : null;
+  const select = (): FolderAssignment[] =>
+    selectAssignmentsForSyncAction(options.assignments(), payload, {
+      backupOnly: options.backupOnly,
+      folderTypes: options.folderTypes(),
+    });
+
+  const initial = select();
+  // Host-wide payloads have nothing folder-scoped to look up, and a match is
+  // already a match — only the "named folder is missing" case can be a stale
+  // cache.
+  if (folderId === null || initial.length > 0) {
+    return { targets: initial, refreshed: false, refreshFailed: false };
+  }
+
+  const refreshedOk = await options.refreshConfig();
+  return {
+    targets: select(),
+    refreshed: true,
+    refreshFailed: !refreshedOk,
+  };
+}
+
+/**
+ * Build the `failed` completion for a folder-scoped action whose folder is
+ * not in the (possibly refreshed) cache. Kept here so the wording — including
+ * the distinct refresh-failure variant — is uniform and testable.
+ */
+export function unassignedFolderCompletion(
+  folderId: string,
+  hostId: string,
+  options: { refreshFailed: boolean },
+): ActionCompletion {
+  const suffix = options.refreshFailed
+    ? " (config refresh failed; the folder may be assigned once the control plane is reachable)"
+    : "";
+  return {
+    status: "failed",
+    result: `folderId=${folderId} not assigned to host=${hostId}${suffix}`,
+  };
+}
+
+/**
  * Map an OperationReport into the wire-side completion the action poller
  * writes back. "skipped: …" failures are upgraded to a `done` completion
  * because a lock-contention skip is not an error from the user's POV — the

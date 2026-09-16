@@ -475,6 +475,35 @@ The daemon checks for updates against GitHub Releases on startup and exposes
 release metadata without direct GitHub access. The `packaging/install/update.sh`
 script is a standalone `curl | bash` updater for clients.
 
+**Systemd unit reconcile (LAMA-311):** the daemon's user unit
+(`~/.config/systemd/user/lamasyncd.service`) is only ever *written* by
+`packaging/install/install.sh`, so a unit-content fix never reached a client
+that updated its binary (dev-vm ran a post-fix v0.3.11 binary under an Aug-6
+unit still carrying `ProtectHome=read-only` and a static `ReadWritePaths`
+allowlist). `lamasyncd --update` and the remote `update_daemon` action now
+reconcile an already-installed unit before release metadata is fetched and
+before the “already current” short-circuit. The migration is deliberately
+line-surgical: it removes only the obsolete `ProtectHome=` / `ReadWritePaths=`
+directives and preserves every other line, so a custom `ExecStartPre` /
+`ExecReload`, non-default binary or socket paths, operator comments, and extra
+hardening survive untouched. Units that are symlinks, carry `*.conf` drop-ins,
+or do not start `lamasyncd` are refused (`skipped`) with the exact manual
+command, and `systemctl --user daemon-reload` runs after a rewrite. A daemon
+whose *old* unit is actually effective has `$HOME` read-only and cannot
+rewrite its own unit; that attempt fails and returns the escape hatch
+(`lamasyncd --update` from a shell, no sandbox).
+
+**Manual action queue (LAMA-198/LAMA-232/LAMA-311):** admin-triggered
+`trigger_sync` / `trigger_backup` / `update_daemon` actions are claimed from
+`GET /actions/pending` and completed exactly once via
+`POST /actions/:id/complete` (a blind UPDATE plus an `operation_log` row, so a
+second ack overwrites the first). Because a claim can be resolved against a
+config cache the server has already superseded, the dispatcher re-fetches the
+config once and re-selects before declaring a named folder unassigned.
+`update_daemon` decides its single terminal ack — including whether a service
+restart is needed — before requesting the restart, so systemd tearing the
+process down can never leave a stale or contradictory outcome.
+
 **Mount lifecycle (LAMA-130/LAMA-113):**
 
 - Daemon owns the rclone process and tracks its PID in

@@ -19,7 +19,12 @@ one owner call on the Android paired-state QR entry — see follow-up 1. The
 next product work is LAMA-315 path classification (design handoff ready in
 `docs/handoff-315-path-classification.md`; stages 1–2 are implemented), the
 separate safe application setup/restore executor, and the LAMA-321
-trash-retention follow-up.
+trash-retention follow-up. LAMA-311's two dev-vm fixes are implemented in the
+worktree — the queued `trigger_sync`/`trigger_backup` dispatcher now refreshes
+and re-selects before failing a folder absent from the cache, and
+`lamasyncd --update` / `update_daemon` reconcile a stale systemd user unit even
+when the binary is current. Both await a client rollout that restarts
+`lamasyncd.service` (see follow-up 6 in [status.md](status.md)).
 See [status.md](status.md) and the assigned Multica issue for scope; do not use
 archived handoffs as a current specification.
 

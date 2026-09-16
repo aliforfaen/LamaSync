@@ -235,6 +235,37 @@ lamasyncd --update
 lamasyncd --update skill
 ```
 
+Since LAMA-311 step 2 also reconciles the daemon's systemd **user unit**, even
+when the binary is already current: a unit written before the sandbox fix (it
+still contains `ProtectHome=read-only` and a static `ReadWritePaths=`) loses
+just those two directives, and `--update` prints
+`refreshed the systemd user unit; run \`systemctl --user restart lamasyncd.service\` to apply it`.
+
+```bash
+# 4. Apply a migrated unit.
+systemctl --user daemon-reload            # --update already ran this; harmless
+systemctl --user restart lamasyncd.service
+systemctl --user show lamasyncd -p ProtectHome -p ReadWritePaths   # expect empty
+```
+
+Notes:
+
+- `--update` never restarts the service itself (that is the operator's call);
+  the remote `update_daemon` action does, but only after its completion has
+  been recorded.
+- The reconcile refuses to touch a unit that is a symlink, carries `*.conf`
+  drop-ins, does not start `lamasyncd`, or does not carry the shipped
+  `Description=LamaSync Daemon` + `SyslogIdentifier=lamasyncd` markers — it
+  prints what to fix by hand instead.
+- A daemon running **under** an effective pre-fix unit cannot rewrite its own
+  unit (`~/.config/systemd/user` is inside the read-only `/home`). That is why
+  this recipe, run from a normal shell, is the reliable remedy; the remote
+  `update_daemon` action reports `failed` with this same instruction when it
+  hits that wall.
+- Exit code is non-zero if the unit could not be reconciled (`already at
+  latest` plus a `systemd unit not refreshed: …` line); re-run the installer
+  (`packaging/install/install.sh`) as the fallback.
+
 ## Recipe 9 — Run the Web UI
 
 The CLI is the local/agent surface, but the Web UI is friendlier for

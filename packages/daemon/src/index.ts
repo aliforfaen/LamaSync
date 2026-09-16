@@ -18,10 +18,11 @@ import { LamaSyncApiClient, VERSION, canonicalDestinationKey, defaultSocketPath,
 import { locateSkillAsset, SKILL_DIR, downloadSkillBundle, readInstalledSkillVersion } from "./skill-update.ts";
 import {
   isDryRunRequested,
-  selectAssignmentsForSyncAction,
+  selectActionTargets,
   summarizeConfigRefresh,
   summarizeReportForAction,
   summarizeUpdateCheck,
+  unassignedFolderCompletion,
 } from "./actions.ts";
 import { expandConfigPaths, loadConfig, missingAssignmentPaths } from "./config.ts";
 import { CACHE_PATH, loadCache, saveCache } from "./config-cache.ts";
@@ -66,6 +67,7 @@ import {
   disableMountUnit,
   isMountUnitActive,
   isSystemdAvailable,
+  reconcileDaemonServiceUnit,
   removeMountUnit,
   restartDaemonService,
   startMountUnit,
@@ -74,7 +76,12 @@ import {
   writeMountUnit,
 } from "./systemd.ts";
 import { downloadAndReplace, isNewer, resolveSelfBinaryPath } from "./self-update.ts";
-import { performDaemonUpdate, scrubForOutcome } from "./daemon-update.ts";
+import {
+  performDaemonUpdate,
+  runDaemonUpdateAction,
+  scrubForOutcome,
+  summarizeUnitReconcile,
+} from "./daemon-update.ts";
 import { DAEMON_KNOWN_FLAGS, daemonUsage } from "./usage.ts";
 import { createLinuxInotifyFactory } from "./folder-watch.ts";
 import { WatchCoordinator } from "./watch-control.ts";
@@ -654,6 +661,17 @@ async function main(): Promise<void> {
     }
   };
 
+  // LAMA-311: folder id → folder type for the `backupOnly` filter. Built from
+  // the *current* cache on every call so a refresh inside the action dispatcher
+  // re-selects against the fresh folder types, not a pre-refresh snapshot.
+  const folderTypesFor = (): Map<string, Folder["type"]> => {
+    const types = new Map<string, Folder["type"]>();
+    for (const folder of hostConfig?.folders ?? []) {
+      types.set(folder.id, folder.type);
+    }
+    return types;
+  };
+
   const recordOperation = (report: OperationReport): void => {
     const entry: OperationLog = {
       id: operations.length + 1,
@@ -985,51 +1003,60 @@ async function main(): Promise<void> {
    * takes down the poll loop.
    */
   async function executeAction(action: QueuedAction): Promise<void> {
+    // LAMA-311: the return value matters to callers that must not take an
+    // irreversible local step (the `update_daemon` restart) before the
+    // completion is durably recorded. Callers that don't care ignore it.
     const ack = async (
       status: QueuedActionStatus,
       result: string | null,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       try {
         await client.completeAction(action.id, {
           status: status === "done" ? "done" : "failed",
           result,
         });
+        return true;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[action] failed to ack ${action.id}: ${msg}`);
+        return false;
       }
     };
 
     const payload = action.payload ?? {};
-    const folderTypes = new Map<string, Folder["type"]>();
-    for (const f of hostConfig?.folders ?? []) {
-      folderTypes.set(f.id, f.type);
-    }
     try {
       switch (action.type) {
         case "trigger_sync": {
-          const assignments = hostConfig?.assignments ?? [];
-          const targets = selectAssignmentsForSyncAction(assignments, payload, {
+          // LAMA-311: a claimed action can be resolved against a cache the
+          // server has already superseded (the poller and the heartbeat
+          // revision check share a tick). Refresh once and re-select before
+          // declaring a named folder unassigned.
+          const selection = await selectActionTargets(payload, {
             backupOnly: false,
-            folderTypes,
+            assignments: () => hostConfig?.assignments ?? [],
+            folderTypes: folderTypesFor,
+            refreshConfig,
           });
+          if (selection.refreshed && !selection.refreshFailed) {
+            recordRevision(hostConfig);
+          }
           const dryRun = isDryRunRequested(payload);
           const folderId = typeof payload["folderId"] === "string" ? payload["folderId"] : null;
-          if (folderId && targets.length === 0) {
-            await ack(
-              "failed",
-              `folderId=${folderId} not assigned to host=${hostId}`,
-            );
+          if (folderId && selection.targets.length === 0) {
+            const outcome = unassignedFolderCompletion(folderId, hostId, {
+              refreshFailed: selection.refreshFailed,
+            });
+            await ack(outcome.status, outcome.result);
             return;
           }
-          if (targets.length === 0) {
+          if (selection.targets.length === 0) {
             await ack("done", "no assignments configured");
             return;
           }
           // One action = one completion: aggregate per-assignment outcomes
           // (each assignment also writes its own operation_log via runOnce).
           const outcomes: { status: "done" | "failed"; result: string }[] = [];
-          for (const assignment of targets) {
+          for (const assignment of selection.targets) {
             const report = await runOnce(assignment, { dryRun, triggerOrigin: "manual" });
             outcomes.push(
               summarizeReport(report, `synced folder=${assignment.folderId}`),
@@ -1043,30 +1070,36 @@ async function main(): Promise<void> {
           return;
         }
         case "trigger_backup": {
-          const assignments = hostConfig?.assignments ?? [];
-          const targets = selectAssignmentsForSyncAction(assignments, payload, {
+          // LAMA-311: same refresh-once re-selection as `trigger_sync`; the
+          // `backupOnly` filter is applied against the fresh folder types.
+          const selection = await selectActionTargets(payload, {
             backupOnly: true,
-            folderTypes,
+            assignments: () => hostConfig?.assignments ?? [],
+            folderTypes: folderTypesFor,
+            refreshConfig,
           });
+          if (selection.refreshed && !selection.refreshFailed) {
+            recordRevision(hostConfig);
+          }
           const folderId = typeof payload["folderId"] === "string" ? payload["folderId"] : null;
           // App protections are first-class backups, not dotfile folder
           // assignments. A host-wide backup trigger includes every enabled
           // protection; a folder-scoped trigger deliberately does not guess
           // which application the caller meant.
           const appTargets = folderId === null ? (hostConfig?.apps ?? []) : [];
-          if (folderId && targets.length === 0) {
-            await ack(
-              "failed",
-              `folderId=${folderId} not assigned to host=${hostId}`,
-            );
+          if (folderId && selection.targets.length === 0) {
+            const outcome = unassignedFolderCompletion(folderId, hostId, {
+              refreshFailed: selection.refreshFailed,
+            });
+            await ack(outcome.status, outcome.result);
             return;
           }
-          if (targets.length === 0 && appTargets.length === 0) {
+          if (selection.targets.length === 0 && appTargets.length === 0) {
             await ack("done", "no backup assignments configured");
             return;
           }
           const outcomes: { status: "done" | "failed"; result: string }[] = [];
-          for (const assignment of targets) {
+          for (const assignment of selection.targets) {
             const report = await runOnce(assignment, { triggerOrigin: "manual" });
             outcomes.push(
               summarizeReport(report, `backed up folder=${assignment.folderId}`),
@@ -1124,35 +1157,24 @@ async function main(): Promise<void> {
               }
             },
             checkRestartAvailable: isSystemdAvailable,
+            reconcileUnit: () => reconcileDaemonServiceUnit(),
             downloadAndReplace,
           });
-          if (!outcome.ok) {
-            await ack("failed", `${outcome.phase}: ${outcome.summary}`);
-            return;
-          }
-          if (!outcome.changed) {
-            await ack("done", `already at v${outcome.currentVersion}`);
-            return;
-          }
-          // Durable ack BEFORE requesting restart: when systemd tears this
-          // process down the action must not be left orphaned in 'taken'.
-          await ack(
-            "done",
-            `installed v${outcome.latestVersion}; service restart requested`,
-          );
-          const restarted = restartDaemonService();
-          if (!restarted.ok) {
-            await ack(
-              "failed",
-              `installed v${outcome.latestVersion} but service restart failed ` +
-                `(${scrubForOutcome(restarted.reason ?? "unknown")}); ` +
-                "run `systemctl --user restart lamasyncd.service`",
-            );
-            return;
-          }
-          console.log(
-            `[action] update_daemon installed v${outcome.latestVersion}; restart issued`,
-          );
+          // LAMA-311: decide the single terminal ack (and whether a restart
+          // must follow it) with a pure planner, then delegate the ordering
+          // — ack first, restart only after a durable ack — to the testable
+          // `runDaemonUpdateAction` helper. The server's completion endpoint
+          // is a blind UPDATE plus an `operation_log` insert, so the previous
+          // "ack done, restart, ack failed on restart error" sequence wrote
+          // two contradictory outcomes for one action.
+          await runDaemonUpdateAction(outcome, {
+            ack: (status, result) => ack(status, result),
+            systemdAvailable: isSystemdAvailable,
+            restart: restartDaemonService,
+            log: (message) => console.log(message),
+            logError: (message) => console.error(message),
+            scrub: (message) => scrubForOutcome(message),
+          });
           return;
         }
         default: {
@@ -1657,7 +1679,25 @@ if (import.meta.main) {
     // LAMASYNC_UPDATE_ASSET override and a systemd-free environment are
     // allowed here, and no restart is requested.
     (async () => {
-      const config = loadConfig();
+      // LAMA-311: the local unit migration must not depend on a readable
+      // client.toml. Without a config there is nothing to update server-side,
+      // but the unit can still be reconciled — and on a client whose old unit
+      // sandbox is effective, `lamasyncd --update` from a shell is the only
+      // path that can do it. So reconcile first, report it, then exit non-zero
+      // for the missing config.
+      let config: ReturnType<typeof loadConfig> | null = null;
+      let configError: string | null = null;
+      try {
+        config = loadConfig();
+      } catch (err) {
+        configError = err instanceof Error ? err.message : String(err);
+      }
+      if (!config) {
+        const note = summarizeUnitReconcile(reconcileDaemonServiceUnit());
+        console.error(`lamasyncd --update failed: ${configError}`);
+        if (note) console.error(`lamasyncd --update: ${note}`);
+        process.exit(1);
+      }
       const client = new LamaSyncApiClient(config.serverUrl, config.apiKey);
       const outcome = await performDaemonUpdate({
         config: { serverUrl: config.serverUrl, apiKey: config.apiKey },
@@ -1672,22 +1712,36 @@ if (import.meta.main) {
         },
         // The CLI does not restart the service — the operator does.
         checkRestartAvailable: () => true,
+        // LAMA-311: reconcile a stale systemd user unit even when the binary
+        // is already current. This path runs outside the daemon's sandbox, so
+        // it is the one that can rewrite a unit whose explicit
+        // ProtectHome=read-only makes ~/.config/systemd/user read-only for the
+        // running daemon.
+        reconcileUnit: () => reconcileDaemonServiceUnit(),
         downloadAndReplace,
         envAssetName: process.env.LAMASYNC_UPDATE_ASSET,
       });
+      // The operator restarts the service, so do not claim a restart here.
+      const unitNote = summarizeUnitReconcile(outcome.unit);
       if (!outcome.ok) {
         console.error(`lamasyncd --update: ${outcome.phase}: ${outcome.summary}`);
+        if (unitNote) console.error(`lamasyncd --update: ${unitNote}`);
         process.exit(1);
       }
       if (!outcome.changed) {
         console.log(`lamasyncd --update: already at latest (v${outcome.currentVersion})`);
-        process.exit(0);
+        if (unitNote) console.log(`lamasyncd --update: ${unitNote}`);
+        // A unit that could not be reconciled (sandboxed daemon, unwritable
+        // unit path) leaves the client unreconciled: non-zero so scripts and
+        // agents notice, with the exact manual command already printed.
+        process.exit(outcome.unit?.status === "failed" ? 1 : 0);
       }
       console.log(
         `lamasyncd --update: replaced ${resolveSelfBinaryPath()} with ${outcome.asset} ` +
           `(now v${outcome.latestVersion}; restart the service to pick it up)`,
       );
-      process.exit(0);
+      if (unitNote) console.log(`lamasyncd --update: ${unitNote}`);
+      process.exit(outcome.unit?.status === "failed" ? 1 : 0);
     })().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`lamasyncd --update failed: ${msg}`);
