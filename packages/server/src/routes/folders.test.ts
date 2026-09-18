@@ -756,6 +756,38 @@ describe("per-host mount/sync override (LAMA-239)", () => {
     expect(list[0]?.mode).toBe("mount");
   });
 
+  test("PATCH /assign/:hostId updates and clears sync and mount ignore paths", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
+    const folderId = await setupSyncFolder();
+    await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "h",
+      role: "both",
+      localPath: "/tmp/v",
+    });
+
+    const patch = (body: object) => app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/h`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+    const set = await patch({ ignorePath: ".lamasyncignore", mountIgnorePath: ".lamasyncmountignore" });
+    expect(set.status).toBe(200);
+    const configured = (await set.json()) as { ignorePath?: string | null; mountIgnorePath?: string | null };
+    expect(configured.ignorePath).toBe(".lamasyncignore");
+    expect(configured.mountIgnorePath).toBe(".lamasyncmountignore");
+
+    const cleared = await patch({ ignorePath: null, mountIgnorePath: null });
+    expect(cleared.status).toBe(200);
+    const reset = (await cleared.json()) as { ignorePath?: string | null; mountIgnorePath?: string | null };
+    expect(reset.ignorePath).toBeNull();
+    expect(reset.mountIgnorePath).toBeNull();
+  });
+
   test("PATCH mode: null resets to inherit", async () => {
     db.run(`INSERT INTO hosts (id, hostname) VALUES ('h','h')`);
     const folderId = await setupSyncFolder();

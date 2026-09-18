@@ -109,7 +109,7 @@ All paths are under `/api/v1/` unless noted.
 | DELETE   | `/folders/:id`                             | Delete folder + cascade assignments              |
 | POST     | `/folders/:id/assign`                      | Assign folder to a host. `syncExpr` is validated with the daemon's own scheduler grammar (5-field cron, `@reboot`, `@login`, `@hourly`/`@daily`/`@weekly`/`@monthly`/`@yearly`/`@annually`); a non-empty value the daemon could not arm is a 400, `null`/empty means no schedule (LAMA-336) |
 | GET      | `/folders/:id/assignments`                 | List assignments for a folder                    |
-| PATCH    | `/folders/:id/assign/:hostId`              | Update one assignment (master/admin); device may change only its own `mode`. `syncExpr` follows the same validated schedule grammar as assignment creation (LAMA-336) |
+| PATCH    | `/folders/:id/assign/:hostId`              | Update one assignment (master/admin), including `ignorePath` / `mountIgnorePath` (string to set, `null` to clear); device may change only its own `mode`. `syncExpr` follows the same validated schedule grammar as assignment creation (LAMA-336) |
 | DELETE   | `/folders/:id/assign/:hostId`              | Unassign                                         |
 | PUT      | `/assignments/:id`                         | Intentional 405 — assignments are addressed by folder+host; use `/folders/:folderId/assign/:hostId` |
 | PATCH    | `/assignments/:id`                         | Intentional 405 — use `/folders/:folderId/assign/:hostId` |

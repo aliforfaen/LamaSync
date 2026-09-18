@@ -46,6 +46,8 @@ interface EditorState {
   availableSpaceThreshold: string;
   preSyncCmd: string;
   postSyncCmd: string;
+  ignorePath: string;
+  mountIgnorePath: string;
   bandwidthSchedule: string;
   // LAMA-302: event-triggered sync. Only shown when the assignment has
   // effective `sync` mode (see showWatch below).
@@ -69,6 +71,8 @@ function stateFromAssignment(a: FolderAssignment): EditorState {
     availableSpaceThreshold: toStr(a.availableSpaceThreshold),
     preSyncCmd: toStr(a.preSyncCmd),
     postSyncCmd: toStr(a.postSyncCmd),
+    ignorePath: toStr(a.ignorePath),
+    mountIgnorePath: toStr(a.mountIgnorePath),
     bandwidthSchedule: toStr(a.bandwidthSchedule),
     watchEnabled: a.watchEnabled === true,
     watchQuietSec: toStr(a.watchQuietSec),
@@ -179,6 +183,8 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
       ["conflictStrategy", state.conflictStrategy, assignment.conflictStrategy],
       ["preSyncCmd", state.preSyncCmd, assignment.preSyncCmd],
       ["postSyncCmd", state.postSyncCmd, assignment.postSyncCmd],
+      ["ignorePath", state.ignorePath, assignment.ignorePath],
+      ["mountIgnorePath", state.mountIgnorePath, assignment.mountIgnorePath],
       ["bandwidthSchedule", state.bandwidthSchedule, assignment.bandwidthSchedule],
     ] as const;
     for (const [key, raw, initialValue] of text) {
@@ -434,6 +440,22 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
 
       <details className="assignment-editor-advanced">
         <summary>Advanced</summary>
+        <label>
+          Sync ignore file
+          <input
+            value={state.ignorePath}
+            placeholder=".lamasyncignore (relative to local folder)"
+            onChange={(e) => set({ ignorePath: e.target.value })}
+          />
+        </label>
+        <label>
+          Mount ignore file
+          <input
+            value={state.mountIgnorePath}
+            placeholder="Optional; defaults to sync ignore file"
+            onChange={(e) => set({ mountIgnorePath: e.target.value })}
+          />
+        </label>
         <label>
           Timeout (seconds)
           <input

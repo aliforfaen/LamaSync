@@ -1053,6 +1053,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         preSyncCmd?: string | null;
         postSyncCmd?: string | null;
         conflictStrategy?: string | null;
+        ignorePath?: string | null;
+        mountIgnorePath?: string | null;
         timeoutSec?: number | null;
         maxRetries?: number | null;
         availableSpaceThreshold?: number | null;
@@ -1132,6 +1134,14 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       if (b.postSyncCmd !== undefined) {
         sets.push("post_sync_cmd = ?");
         args.push(b.postSyncCmd);
+      }
+      if (b.ignorePath !== undefined) {
+        sets.push("ignore_path = ?");
+        args.push(b.ignorePath);
+      }
+      if (b.mountIgnorePath !== undefined) {
+        sets.push("mount_ignore_path = ?");
+        args.push(b.mountIgnorePath);
       }
       if (b.conflictStrategy !== undefined) {
         sets.push("conflict_strategy = ?");
@@ -1270,6 +1280,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         ),
         preSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
         postSyncCmd: t.Optional(t.Union([t.String(), t.Null()])),
+        ignorePath: t.Optional(t.Union([t.String(), t.Null()])),
+        mountIgnorePath: t.Optional(t.Union([t.String(), t.Null()])),
         conflictStrategy: t.Optional(t.Union([t.String(), t.Null()])),
         timeoutSec: t.Optional(t.Union([t.Number(), t.Null()])),
         maxRetries: t.Optional(t.Union([t.Number(), t.Null()])),
