@@ -1,4 +1,5 @@
 import { pruneOperationLog } from "./routes/admin.ts";
+import { sweepFolderPlans } from "./routes/folder-health.ts";
 import { reapExpiredFolderLocks } from "./routes/operations.ts";
 import { sweepExpiredPairingSessions } from "./routes/pairing.ts";
 import { setPeerServerForRateLimit } from "./mobile-store.ts";
@@ -101,6 +102,9 @@ const pruneTimer = setInterval(() => {
     if (out.deleted > 0) {
       console.log(`[retention] pruned ${out.deleted} operation_log entries`);
     }
+    // LAMA-345: reviewed folder sync plans are short-lived. Clear the expired
+    // backlog with the same daily pass instead of a timer of its own.
+    sweepFolderPlans();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[retention] prune failed: ${msg}`);

@@ -22,6 +22,7 @@ import { appsRoutes } from "./routes/apps.ts";
 import { retentionRoutes } from "./routes/retention.ts";
 import { reportRoutes } from "./routes/report.ts";
 import { syncProgressRoutes } from "./routes/sync-progress.ts";
+import { folderHealthRoutes } from "./routes/folder-health.ts";
 import { sharesRoutes } from "./routes/shares.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { resticRoutes } from "./routes/restic.ts";
@@ -97,6 +98,11 @@ export function createServerApp() {
             {
               name: "Folders",
               description: "Folder and assignment management",
+            },
+            {
+              name: "Folder Health",
+              description:
+                "LAMA-345 managed-folder health: assignment-level state and reasons, bounded history, and reviewed sync plans (the daemon reports; admins read).",
             },
             {
               name: "Health",
@@ -193,6 +199,7 @@ export function createServerApp() {
     .use(retentionRoutes)
     .use(reportRoutes)
     .use(syncProgressRoutes)
+    .use(folderHealthRoutes)
     .use(sharesRoutes)
     .use(adminRoutes)
     .use(resticRoutes)

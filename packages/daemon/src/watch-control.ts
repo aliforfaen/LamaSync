@@ -37,6 +37,15 @@ export class WatchCoordinator {
     },
   ) {}
 
+  /**
+   * LAMA-345: is a watcher actually running for this assignment right now?
+   * Used by the health probe so `watcher.enabled` (what was asked for) and
+   * `watcher.running` (what is live) are never conflated.
+   */
+  isRunning(assignmentId: string): boolean {
+    return this.controllers.has(assignmentId);
+  }
+
   /** Bring the controller set in line with the current config. Idempotent. */
   reconcile(): void {
     const { getAssignments, getFolders } = this.opts;

@@ -275,3 +275,17 @@ export function listActiveLiveProgress(timestamp: number = now()): LiveSyncProgr
 export function liveProgressSize(): number {
   return registry.size;
 }
+
+/**
+ * LAMA-345: is a run currently live for this assignment? Used by the folder
+ * health read so a device that is mid-sync reports `active` without the
+ * daemon having to claim it in its own report.
+ */
+export function isLiveProgressForAssignment(folderId: string, hostId: string): boolean {
+  for (const entry of registry.values()) {
+    if (entry.progress.folderId === folderId && entry.progress.hostId === hostId) {
+      return true;
+    }
+  }
+  return false;
+}

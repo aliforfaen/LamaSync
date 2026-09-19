@@ -1201,3 +1201,70 @@ describe("assignment schedule validation (LAMA-336)", () => {
     expect(((await cleared.json()) as { syncExpr: string | null }).syncExpr).toBeNull();
   });
 });
+
+// LAMA-345 stage 4: the Advanced settings surface is a typed, validated
+// allowlist — never a free-form rclone arguments field. These two options are
+// the new "safe bisync/mount tuning" pair.
+describe("allowlisted assignment tuning (LAMA-345)", () => {
+  async function makeFolder(name: string): Promise<string> {
+    const folder = (await (await postJson("/api/v1/folders", { name, type: "sync" })).json()) as { id: string };
+    return folder.id;
+  }
+
+  async function patch(folderId: string, body: Record<string, unknown>): Promise<Response> {
+    return app.handle(
+      new Request(`http://localhost/api/v1/folders/${folderId}/assign/a`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.LAMASYNC_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  test("a bisync deletion cap round-trips and rejects out-of-range values", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    const folderId = await makeFolder("tuning-cap");
+    await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "a",
+      role: "both",
+      localPath: "/tmp/tuning-cap",
+      bisyncMaxDelete: 50,
+    });
+
+    const row = db
+      .query<{ bisync_max_delete: number | null }, [string]>(
+        "SELECT bisync_max_delete FROM folder_assignments WHERE folder_id = ?",
+      )
+      .get(folderId);
+    expect(row?.bisync_max_delete).toBe(50);
+
+    const bad = await patch(folderId, { bisyncMaxDelete: -1 });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toContain("bisyncMaxDelete must be");
+
+    const cleared = await patch(folderId, { bisyncMaxDelete: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { bisyncMaxDelete: number | null }).bisyncMaxDelete).toBeNull();
+  });
+
+  test("a mount cache mode round-trips and rejects anything outside the allowlist", async () => {
+    db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
+    const folderId = await makeFolder("tuning-cache");
+    await postJson(`/api/v1/folders/${folderId}/assign`, {
+      hostId: "a",
+      role: "both",
+      localPath: "/tmp/tuning-cache",
+    });
+
+    const ok = await patch(folderId, { mountCacheMode: "writes" });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { mountCacheMode: string | null }).mountCacheMode).toBe("writes");
+
+    // The schema union rejects a non-allowlisted literal before the handler.
+    const bad = await patch(folderId, { mountCacheMode: "turbo" });
+    expect(bad.status).toBe(422);
+  });
+});

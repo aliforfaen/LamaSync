@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs
 import { isAbsolute, join, resolve } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
-import type { FilterMode } from "@lamasync/core";
+import type { FilterMode, FolderType } from "@lamasync/core";
 
 /**
  * Load filter patterns from a `.lamasyncignore` / `.lamasyncmountignore` file.
@@ -68,6 +68,26 @@ export function loadIgnorePatterns(
   baseLocalPath: string,
 ): string[] {
   return loadFilterPatterns(ignorePath, baseLocalPath);
+}
+
+/**
+ * Produce the rclone filter rules used for an assignment. Git metadata must
+ * be excluded at transfer time when requested; watcher-side suppression alone
+ * cannot prevent bisync from copying it.
+ *
+ * LAMA-345: lives here (rather than in the executor) so the health probe can
+ * compute the exact same filter universe without importing the executor.
+ * `executor.ts` re-exports it for its existing callers and tests.
+ */
+export function effectiveSyncFilterPatterns(
+  configuredPatterns: readonly string[],
+  folderType: FolderType,
+  ignoreGitMetadata: boolean | null | undefined,
+): string[] {
+  if (ignoreGitMetadata && folderType === "sync") {
+    return ["- .git/**", ...configuredPatterns];
+  }
+  return [...configuredPatterns];
 }
 
 /**

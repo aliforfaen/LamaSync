@@ -212,7 +212,7 @@ export function unassignedFolderCompletion(
  * already in flight").
  */
 export function summarizeReportForAction(
-  reportStatus: "success" | "failed" | "conflict" | "retry" | "recovery" | "started" | "deferred",
+  reportStatus: "success" | "failed" | "conflict" | "retry" | "recovery" | "started" | "deferred" | "cancelled",
   reportSummary: string | null,
   fallback: string,
 ): ActionCompletion {
@@ -224,6 +224,12 @@ export function summarizeReportForAction(
   // deferral — no transfer started, so it must not surface as a permanent
   // failure.
   if (reportStatus === "deferred") {
+    return { status: "done", result: summary };
+  }
+  // LAMA-345: a deliberate cancellation is not a fault. The action did what
+  // it was asked (stop the run), so it acks `done` with a distinct result
+  // line while the operation_log row keeps `cancelled` as its status.
+  if (reportStatus === "cancelled") {
     return { status: "done", result: summary };
   }
   return {
@@ -354,7 +360,10 @@ export function validateActionShape(
     type !== "trigger_backup" &&
     type !== "check_update" &&
     type !== "refresh_config" &&
-    type !== "update_daemon"
+    type !== "update_daemon" &&
+    type !== "diagnose_folder" &&
+    type !== "plan_folder" &&
+    type !== "folder_intervention"
   ) {
     return null;
   }

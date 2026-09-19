@@ -348,3 +348,88 @@ describe("LAMA-232 — orphaned 'taken' action reclaim", () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
 });
+
+// LAMA-345: the managed-folder diagnose/plan/intervention actions are a new
+// control-plane surface, so the enqueue boundary must reject anything that is
+// not the allowlisted grammar. This is the server half of the "no arbitrary
+// rclone argv/config" rule; the daemon re-validates at dispatch.
+describe("LAMA-345 — folder health actions enqueue validation", () => {
+  test("diagnose_folder accepts exactly a folderId", async () => {
+    const ok = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "diagnose_folder",
+      payload: { folderId: "f1" },
+    });
+    expect(ok.status).toBe(201);
+
+    const bad = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "diagnose_folder",
+      payload: { folderId: "f1", rcloneArgs: ["-v"] },
+    });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toBe("unsupported field: rcloneArgs");
+  });
+
+  test("plan_folder requires an explicit, matching authority", async () => {
+    const ok = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "plan_folder",
+      payload: { folderId: "f1", intervention: "seed", authority: "local" },
+    });
+    expect(ok.status).toBe(201);
+
+    const wrongSide = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "plan_folder",
+      payload: { folderId: "f1", intervention: "seed", authority: "remote" },
+    });
+    expect(wrongSide.status).toBe(400);
+  });
+
+  test("folder_intervention demands a reviewed plan and an explicit confirm", async () => {
+    const noPlan = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: { folderId: "f1", intervention: "initialize", authority: "remote" },
+    });
+    expect(noPlan.status).toBe(400);
+    expect(((await noPlan.json()) as { error: string }).error).toBe(
+      "initialize requires a reviewed planId",
+    );
+
+    const ok = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "initialize",
+        authority: "remote",
+        planId: "plan-1",
+        confirm: true,
+      },
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  test("a bare cancel is accepted without authority or plan", async () => {
+    const res = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: { folderId: "f1", intervention: "cancel", confirm: true },
+    });
+    expect(res.status).toBe(201);
+  });
+
+  test("an argv-shaped payload is refused before it is ever stored", async () => {
+    const res = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "resync",
+        authority: "local",
+        planId: "plan-1",
+        confirm: true,
+        config: "/etc/rclone.conf",
+      },
+    });
+    expect(res.status).toBe(400);
+    const stored = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM queued_actions")
+      .get();
+    expect(stored?.n).toBe(0);
+  });
+});

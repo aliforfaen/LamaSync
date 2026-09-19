@@ -13,6 +13,9 @@ import {
   type QueuedActionStatus,
   type QueuedActionType,
   type WSEvent,
+  parseFolderDiagnosePayload,
+  parseFolderInterventionPayload,
+  parseFolderPlanRequestPayload,
 } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
 import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
@@ -27,6 +30,12 @@ const ACTION_TYPES: QueuedActionType[] = [
   // and picks its own supported asset. Older daemons ack it as an unknown
   // action; the web UI gates the button on REMOTE_DAEMON_UPDATE_MIN_VERSION.
   "update_daemon",
+  // LAMA-345: managed-folder diagnose/plan/intervention. `diagnose_folder`
+  // and `plan_folder` are read-only; `folder_intervention` carries the
+  // bounded allowlisted grammar from @lamasync/core/folder-health.
+  "diagnose_folder",
+  "plan_folder",
+  "folder_intervention",
 ];
 
 const PENDING_TAKE_LIMIT = 10;
@@ -137,6 +146,32 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: "update_daemon does not accept a payload" };
       }
+      // LAMA-345: validate the folder-health action payloads with the SAME
+      // shared grammar the daemon re-checks at dispatch. A malformed or
+      // over-broad payload is a 400 here rather than a daemon-side surprise,
+      // and there is deliberately no free-form field to smuggle rclone flags
+      // through.
+      if (type === "diagnose_folder") {
+        const parsed = parseFolderDiagnosePayload(payload ?? {});
+        if (!parsed.ok) {
+          set.status = 400;
+          return { error: parsed.error };
+        }
+      }
+      if (type === "plan_folder") {
+        const parsed = parseFolderPlanRequestPayload(payload ?? {});
+        if (!parsed.ok) {
+          set.status = 400;
+          return { error: parsed.error };
+        }
+      }
+      if (type === "folder_intervention") {
+        const parsed = parseFolderInterventionPayload(payload ?? {});
+        if (!parsed.ok) {
+          set.status = 400;
+          return { error: parsed.error };
+        }
+      }
       const host = activeDb
         .query<{ id: string }, [string]>("SELECT id FROM hosts WHERE id = ?")
         .get(params.hostId);
@@ -176,6 +211,10 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
           t.Literal("check_update"),
           t.Literal("refresh_config"),
           t.Literal("update_daemon"),
+          // LAMA-345: managed-folder diagnose / plan / intervention.
+          t.Literal("diagnose_folder"),
+          t.Literal("plan_folder"),
+          t.Literal("folder_intervention"),
         ]),
         payload: t.Optional(
           t.Union([t.Record(t.String(), t.Unknown()), t.Null()]),
@@ -186,7 +225,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Actions"],
         responses: {
           201: { description: "Action queued" },
-          400: { description: "Invalid action type" },
+          400: { description: "Invalid action type or payload" },
           404: { description: "Host not found" },
           401: { description: "Unauthorized" },
         },

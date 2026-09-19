@@ -1,5 +1,9 @@
 // Public surface of @lamasync/core.
 export * from "./types.ts";
+// LAMA-345: managed-folder health contract, state derivation, staleness and
+// the allowlisted intervention payload grammar. Dependency-free on purpose so
+// the web UI can import it without pulling node built-ins into the bundle.
+export * from "./folder-health.ts";
 export * from "./retention.ts";
 export { SERVER_SCHEMA, MIGRATIONS, LEGACY_S3_DROP_MIGRATIONS } from "./db/schema.ts";
 export { initDb } from "./db/client.ts";

@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     watch_quiet_sec     INTEGER,
     ignore_git_metadata INTEGER NOT NULL DEFAULT 0,
     respect_gitignore   INTEGER NOT NULL DEFAULT 0,
+    -- LAMA-345 stage 4: allowlisted typed tuning options. bisync_max_delete
+    -- is rclone --max-delete (NULL => rclone's default, no cap);
+    -- mount_cache_mode is rclone --vfs-cache-mode for mount assignments.
+    bisync_max_delete   INTEGER,
+    mount_cache_mode    TEXT,
     demo                INTEGER NOT NULL DEFAULT 0,
     UNIQUE(folder_id, host_id)
 );
@@ -374,6 +379,59 @@ CREATE INDEX IF NOT EXISTS idx_operation_log_host_ts
 -- batch makes SQLite abort before the ALTER TABLE migration can run.
 CREATE INDEX IF NOT EXISTS idx_dotfile_versions_manifest_ts
     ON dotfile_versions(manifest_id, timestamp);
+
+-- LAMA-345: latest assignment-level health report. One row per assignment,
+-- replacing the previous report in place; the bounded history lives in
+-- folder_health_history. The facts column is the JSON FolderHealthFacts blob
+-- (already bounded by the daemon: no credentials, no rclone argv, no config
+-- paths).
+CREATE TABLE IF NOT EXISTS folder_health (
+    assignment_id   TEXT PRIMARY KEY,
+    folder_id       TEXT NOT NULL,
+    host_id         TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    reasons         TEXT NOT NULL,
+    facts           TEXT NOT NULL,
+    reported_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_folder_health_folder ON folder_health(folder_id);
+CREATE INDEX IF NOT EXISTS idx_folder_health_host ON folder_health(host_id);
+
+-- LAMA-345: bounded useful history (state transitions, not every heartbeat).
+-- The server only appends when the state or reason set changed, then prunes
+-- to FOLDER_HEALTH_HISTORY_LIMIT rows per assignment.
+CREATE TABLE IF NOT EXISTS folder_health_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id   TEXT NOT NULL,
+    folder_id       TEXT NOT NULL,
+    host_id         TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    reasons         TEXT NOT NULL,
+    reported_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_folder_health_history_assignment
+    ON folder_health_history(assignment_id, reported_at);
+
+-- LAMA-345: reviewed sync plans produced by a daemon dry run. A plan is an
+-- intent with a short TTL, invalidated by config revision, filter fingerprint
+-- or baseline change — never a standing grant.
+CREATE TABLE IF NOT EXISTS folder_sync_plans (
+    id                   TEXT PRIMARY KEY,
+    folder_id            TEXT NOT NULL,
+    host_id              TEXT NOT NULL,
+    assignment_id        TEXT NOT NULL,
+    intervention         TEXT NOT NULL,
+    authority            TEXT NOT NULL,
+    summary              TEXT NOT NULL,
+    changes              TEXT NOT NULL,
+    config_revision      INTEGER NOT NULL,
+    filter_fingerprint   TEXT,
+    baseline_fingerprint TEXT,
+    created_at           INTEGER NOT NULL,
+    expires_at           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_folder_sync_plans_assignment
+    ON folder_sync_plans(assignment_id, created_at);
 
 -- LAMA-294: locks are keyed by the canonical destination/repository key so
 -- two assignments that write the same physical destination (or share a Restic
@@ -916,6 +974,17 @@ export const MIGRATIONS: string[] = [
   // LAMA-325: retention policies owned by the protected resource.
   "ALTER TABLE application_protections ADD COLUMN retention_policy TEXT",
   "ALTER TABLE folders ADD COLUMN retention_policy TEXT",
+  // LAMA-345 stage 4: allowlisted typed tuning options on the assignment.
+  "ALTER TABLE folder_assignments ADD COLUMN bisync_max_delete INTEGER",
+  "ALTER TABLE folder_assignments ADD COLUMN mount_cache_mode TEXT",
+  // LAMA-345 stage 1/2: assignment health, bounded history and reviewed plans.
+  "CREATE TABLE IF NOT EXISTS folder_health (assignment_id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, state TEXT NOT NULL, reasons TEXT NOT NULL, facts TEXT NOT NULL, reported_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_health_folder ON folder_health(folder_id)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_health_host ON folder_health(host_id)",
+  "CREATE TABLE IF NOT EXISTS folder_health_history (id INTEGER PRIMARY KEY AUTOINCREMENT, assignment_id TEXT NOT NULL, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, state TEXT NOT NULL, reasons TEXT NOT NULL, reported_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_health_history_assignment ON folder_health_history(assignment_id, reported_at)",
+  "CREATE TABLE IF NOT EXISTS folder_sync_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, intervention TEXT NOT NULL, authority TEXT NOT NULL, summary TEXT NOT NULL, changes TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_sync_plans_assignment ON folder_sync_plans(assignment_id, created_at)",
 ];
 
 /**

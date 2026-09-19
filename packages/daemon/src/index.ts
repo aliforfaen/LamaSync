@@ -6,6 +6,7 @@ import type {
   AppCaptureAssignment,
   Folder,
   FolderAssignment,
+  FolderHealthDeepMeasurement,
   HostConfig,
   OperationLog,
   OperationReport,
@@ -14,7 +15,18 @@ import type {
   ResticRestoreJob,
   TriggerOrigin,
 } from "@lamasync/core";
-import { LamaSyncApiClient, VERSION, canonicalDestinationKey, defaultSocketPath, effectiveFolderType, resolveDestination } from "@lamasync/core";
+import {
+  LamaSyncApiClient,
+  VERSION,
+  canonicalDestinationKey,
+  defaultSocketPath,
+  effectiveFolderType,
+  parseFolderDiagnosePayload,
+  parseFolderInterventionPayload,
+  parseFolderPlanRequestPayload,
+  resolveDestination,
+  resolveWatchQuietSec,
+} from "@lamasync/core";
 import { locateSkillAsset, SKILL_DIR, downloadSkillBundle, readInstalledSkillVersion } from "./skill-update.ts";
 import {
   isDryRunRequested,
@@ -24,7 +36,7 @@ import {
   summarizeUpdateCheck,
   unassignedFolderCompletion,
 } from "./actions.ts";
-import { expandConfigPaths, loadConfig, missingAssignmentPaths } from "./config.ts";
+import { expandConfigPaths, expandHomePath, loadConfig, missingAssignmentPaths } from "./config.ts";
 import { CACHE_PATH, loadCache, saveCache } from "./config-cache.ts";
 import {
   UPDATE_CHECK_COOLDOWN_MS,
@@ -32,6 +44,18 @@ import {
   withinUpdateCooldown,
 } from "./update-check.ts";
 import { captureAppSnapshot, executeAssignment, executeResticRestore, isPauseActive } from "./executor.ts";
+import { diagnoseFolder, measureLocalTree, probeFolderHealth } from "./folder-health.ts";
+import {
+  buildSyncPlan,
+  runControlFor,
+  verifyPlanAgainstLive,
+} from "./intervention.ts";
+import {
+  baselineFingerprint,
+  bisyncStateDir,
+  inspectBisyncBaseline,
+} from "./bisync-baseline.ts";
+import { liveFilterFingerprint } from "./folder-health.ts";
 import { createSyncProgressReporter } from "./live-progress.ts";
 import { Scheduler } from "./scheduler.ts";
 import {
@@ -611,6 +635,22 @@ async function main(): Promise<void> {
   let hostConfig: HostConfig | null = loadCache();
   const operations: OperationLog[] = [];
   let lastHeartbeatAt = 0;
+  // LAMA-345: per-assignment health runtime state. All bounded by the
+  // assignment count and never produced by a tree walk on the heartbeat path.
+  const lastRunByFolder = new Map<
+    string,
+    { status: string; summary: string | null; at: number | null }
+  >();
+  const measurementByFolder = new Map<string, FolderHealthDeepMeasurement>();
+  // LAMA-345: assign the health-report closure once the watch coordinator
+  // exists (below). Runs call it through this hook; until it is assigned the
+  // calls are no-ops, which is correct during boot.
+  // LAMA-345: in-flight rclone runs, keyed by folder id, so the deliberate
+  // `cancel` intervention can abort exactly one run and report it distinctly.
+  const activeRuns = new Map<string, AbortController>();
+  let requestHealthReport:
+    | ((opts?: { folderIds?: string[]; readCounts?: boolean; measure?: boolean }) => Promise<void>)
+    | null = null;
   // LAMA-225: last hostname the server returned for this daemon, so the
   // rename log line fires once per change instead of every refresh.
   let lastServerHostname = clientConfig.hostname;
@@ -794,6 +834,9 @@ async function main(): Promise<void> {
     progress?.report({ phase: "lock", detail: "destination lock acquired" });
 
     const abortController = new AbortController();
+    // LAMA-345: expose the live run so the `cancel` intervention can abort
+    // exactly this assignment's run with a distinct reason.
+    activeRuns.set(folder.id, abortController);
     const heartbeatTimer = setInterval(() => {
       void (async () => {
         const hb = await heartbeatLock(client, assignment.folderId, hostId, lock);
@@ -860,6 +903,9 @@ async function main(): Promise<void> {
     } finally {
       clearInterval(heartbeatTimer);
       cleanup();
+      if (activeRuns.get(folder.id) === abortController) {
+        activeRuns.delete(folder.id);
+      }
     }
   };
 
@@ -900,9 +946,25 @@ async function main(): Promise<void> {
     // Capture the (now-narrowed) host config: TS won't preserve the null-out
     // narrowing across the closure, and `hostConfig` is a mutable `let`.
     const config = hostConfig;
-    return await runMutex.run(assignment.folderId, () =>
+    const result = await runMutex.run(assignment.folderId, () =>
       runLocked(assignment, folder, effectiveFolder, config, opts, attachOrigin),
     );
+    // LAMA-345: remember the latest outcome for this assignment and refresh
+    // its health report (deep measurement included, since a run just touched
+    // the tree). Fire-and-forget: health must never delay the next run.
+    if (result) {
+      lastRunByFolder.set(assignment.folderId, {
+        status: result.status,
+        summary: result.summary ?? null,
+        at: Date.now(),
+      });
+      void requestHealthReport?.({
+        folderIds: [assignment.folderId],
+        readCounts: true,
+        measure: true,
+      });
+    }
+    return result;
   };
 
   /** Run one explicit application protection without a legacy folder bridge. */
@@ -1177,6 +1239,191 @@ async function main(): Promise<void> {
           });
           return;
         }
+        case "diagnose_folder": {
+          // LAMA-345: read-only. Never runs rclone; refreshes the cached deep
+          // measurement and reports the richer diagnosis as the ack result.
+          const parsed = parseFolderDiagnosePayload(payload);
+          if (!parsed.ok) {
+            await ack("failed", parsed.error);
+            return;
+          }
+          const target = resolveInterventionTarget(parsed.folderId);
+          if (!target.ok) {
+            await ack("failed", target.error);
+            return;
+          }
+          const localPath = expandHomePath(target.assignment.localPath);
+          const measurement =
+            effectiveFolderType(target.folder, target.assignment) === "sync" &&
+            existsSync(localPath)
+              ? measureLocalTree(localPath)
+              : null;
+          if (measurement) measurementByFolder.set(parsed.folderId, measurement);
+          const diagnosis = diagnoseFolder(
+            probeInputsFor(target.assignment, target.folder, true),
+          );
+          await requestHealthReport?.({ folderIds: [parsed.folderId], readCounts: true });
+          const headline = diagnosis.reasons[0];
+          await ack(
+            "done",
+            `${diagnosis.state}: ${headline?.message ?? "no issues found"}${
+              headline?.remediation ? ` — ${headline.remediation}` : ""
+            }`,
+          );
+          return;
+        }
+        case "plan_folder": {
+          // LAMA-345: read-only dry run against the real workdir. The plan is
+          // stored server-side and its id is the only way to execute the
+          // matching intervention.
+          const parsed = parseFolderPlanRequestPayload(payload);
+          if (!parsed.ok) {
+            await ack("failed", parsed.error);
+            return;
+          }
+          const target = resolveInterventionTarget(parsed.payload.folderId);
+          if (!target.ok) {
+            await ack("failed", target.error);
+            return;
+          }
+          const config = hostConfig;
+          if (!config) {
+            await ack("failed", "no host config cached");
+            return;
+          }
+          const { configPath, cleanup } = writeRcloneConfig(config.rcloneConfig);
+          try {
+            const plan = await buildSyncPlan({
+              assignment: target.assignment,
+              folder: target.folder,
+              effectiveType: effectiveFolderType(target.folder, target.assignment),
+              hostConfig: config,
+              client,
+              hostId,
+              configPath,
+              intervention: parsed.payload.intervention,
+              authority: parsed.payload.authority,
+              ...(parsed.payload.maxDelete !== undefined
+                ? { maxDelete: parsed.payload.maxDelete }
+                : {}),
+            });
+            await client.reportFolderPlan(plan);
+            await ack("done", `plan=${plan.id} ${plan.summary}`);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await ack("failed", `planning failed: ${msg}`);
+          } finally {
+            cleanup();
+          }
+          return;
+        }
+        case "folder_intervention": {
+          // LAMA-345 stage 3: the only mutating folder action, and the only
+          // way to reach it is a reviewed plan plus an explicit authority.
+          const parsed = parseFolderInterventionPayload(payload);
+          if (!parsed.ok) {
+            await ack("failed", parsed.error);
+            return;
+          }
+          const instruction = parsed.payload;
+          const target = resolveInterventionTarget(instruction.folderId);
+          if (!target.ok) {
+            await ack("failed", target.error);
+            return;
+          }
+          if (instruction.intervention === "cancel") {
+            const active = activeRuns.get(instruction.folderId);
+            if (!active) {
+              await ack("done", `nothing to cancel for folder=${instruction.folderId}`);
+              return;
+            }
+            active.abort("cancelled");
+            console.log(`[intervention] folder=${instruction.folderId} cancel requested`);
+            await ack("done", `cancel requested for folder=${instruction.folderId}`);
+            return;
+          }
+
+          // Guarded interventions must be backed by a plan the operator
+          // actually reviewed. The daemon re-checks it against its own live
+          // revision, filter fingerprint and baseline.
+          if (instruction.planId) {
+            const stored = await client.getFolderPlan(instruction.planId);
+            const plan = stored?.plan ?? null;
+            if (!plan) {
+              await ack("failed", "the reviewed plan no longer exists — plan again");
+              return;
+            }
+            const stateDir = bisyncStateDir(instruction.folderId);
+            const filter = liveFilterFingerprint(
+              target.assignment,
+              effectiveFolderType(target.folder, target.assignment),
+            );
+            const verdict = verifyPlanAgainstLive(plan, {
+              assignmentId: target.assignment.id,
+              hostId,
+              folderId: instruction.folderId,
+              configRevision: hostConfig?.host.configRevision ?? 0,
+              filterFingerprint: filter.fingerprint,
+              baselineFingerprint: baselineFingerprint(
+                inspectBisyncBaseline(stateDir),
+              ),
+            });
+            if (!verdict.ok) {
+              await ack("failed", `plan is stale: ${verdict.message}`);
+              return;
+            }
+          }
+
+          const config = hostConfig;
+          if (!config) {
+            await ack("failed", "no host config cached");
+            return;
+          }
+          const control = runControlFor(instruction.intervention, {
+            ...(instruction.authority ? { authority: instruction.authority } : {}),
+            ...(instruction.maxDelete !== undefined
+              ? { maxDelete: instruction.maxDelete }
+              : {}),
+          });
+          const { configPath, cleanup } = writeRcloneConfig(config.rcloneConfig);
+          try {
+            const report = await executeAssignment({
+              assignment: target.assignment,
+              folder: {
+                ...target.folder,
+                type: effectiveFolderType(target.folder, target.assignment),
+              },
+              hostConfig: config,
+              client,
+              hostId,
+              configPath,
+              bisync: control,
+            });
+            lastRunByFolder.set(instruction.folderId, {
+              status: report.status,
+              summary: report.summary ?? null,
+              at: Date.now(),
+            });
+            await reportOperation(report);
+            void requestHealthReport?.({
+              folderIds: [instruction.folderId],
+              readCounts: true,
+              measure: true,
+            });
+            const outcome = summarizeReportForAction(
+              report.status,
+              report.summary ?? null,
+              `intervention ${instruction.intervention} finished`,
+            );
+            await ack(outcome.status, outcome.result);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await ack("failed", `intervention threw: ${msg}`);
+          } finally {
+            cleanup();
+          }
+          return;
+        }
         default: {
           await ack("failed", `unknown action type: ${String(action.type)}`);
           return;
@@ -1240,6 +1487,84 @@ async function main(): Promise<void> {
     },
     log: (msg) => console.log(msg),
   });
+
+  // LAMA-345: the health reporter. Lightweight by default (the heartbeat
+  // path); `readCounts` and `measure` are opt-in and only used after a run or
+  // for an explicit diagnose. Failures are logged at most once per call and
+  // never block the run that triggered them.
+  const watcherFactsFor = (assignment: FolderAssignment) => ({
+    enabled: assignment.watchEnabled === true,
+    running: watchCoordinator.isRunning(assignment.id),
+    quietSec: resolveWatchQuietSec(assignment.watchQuietSec ?? null),
+  });
+
+  const probeInputsFor = (
+    assignment: FolderAssignment,
+    folder: Folder,
+    readCounts: boolean,
+  ) => ({
+    assignment,
+    effectiveType: effectiveFolderType(folder, assignment),
+    enabled: assignment.enabled !== false,
+    paused: isPauseActive(hostConfig?.pause ?? null),
+    runInProgress: activeRuns.has(assignment.folderId),
+    activePhase: null,
+    rcloneAvailable: Bun.which("rclone") !== null,
+    pendingConflicts: 0,
+    watcher: watcherFactsFor(assignment),
+    lastRun: lastRunByFolder.get(assignment.folderId) ?? null,
+    measurement: measurementByFolder.get(assignment.folderId) ?? null,
+    readCounts,
+  });
+
+  /** Resolve one folder id to this host's assignment, or explain the failure. */
+  const resolveInterventionTarget = (
+    folderId: string,
+  ):
+    | { ok: true; assignment: FolderAssignment; folder: Folder }
+    | { ok: false; error: string } => {
+    const assignment = (hostConfig?.assignments ?? []).find(
+      (a) => a.folderId === folderId,
+    );
+    if (!assignment) {
+      return { ok: false, error: `folderId=${folderId} is not assigned to this host` };
+    }
+    const folder = (hostConfig?.folders ?? []).find((f) => f.id === folderId);
+    if (!folder) {
+      return { ok: false, error: `folderId=${folderId} is unknown to this host` };
+    }
+    return { ok: true, assignment, folder };
+  };
+
+  requestHealthReport = async (opts) => {
+    const assignments = hostConfig?.assignments ?? [];
+    const folders = hostConfig?.folders ?? [];
+    const folderFilter = opts?.folderIds ? new Set(opts.folderIds) : null;
+    for (const assignment of assignments) {
+      if (folderFilter !== null && !folderFilter.has(assignment.folderId)) continue;
+      const folder = folders.find((f) => f.id === assignment.folderId);
+      if (!folder) continue;
+      const effectiveType = effectiveFolderType(folder, assignment);
+      const localPath = expandHomePath(assignment.localPath);
+      if (opts?.measure === true && effectiveType === "sync" && existsSync(localPath)) {
+        try {
+          measurementByFolder.set(assignment.folderId, measureLocalTree(localPath));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[health] folder=${assignment.folderId} measurement failed: ${msg}`);
+        }
+      }
+      const probe = probeFolderHealth(
+        probeInputsFor(assignment, folder, opts?.readCounts === true),
+      );
+      try {
+        await client.reportFolderHealth(probe.report);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[health] folder=${assignment.folderId} report failed: ${msg}`);
+      }
+    }
+  };
 
   setSwitchContext({
     // LAMA-239: thread the daemon's hostId into the switch context so the
@@ -1307,6 +1632,9 @@ async function main(): Promise<void> {
   // 5-min refresh. (refreshConfig() above already triggers one for the
   // fresh-boot path; this covers the cached-config path.)
   void reconcileMountsOnRefresh(() => hostConfig);
+  // LAMA-345: one health report at boot so the Folders page has assignment
+  // state immediately instead of waiting for the first 30 s heartbeat.
+  void requestHealthReport?.({ readCounts: true });
 
   // LAMA-232: actions the previous daemon incarnation claimed but never
   // acked are stuck in 'taken'. A freshly booted daemon has no in-flight
@@ -1367,6 +1695,11 @@ async function main(): Promise<void> {
         });
         lastHeartbeatAt = now;
         await reportQueue.flush();
+
+        // LAMA-345: lightweight assignment health rides the heartbeat. It is
+        // stat/readdir only — never a tree walk (the deep measurement is
+        // refreshed after a run or on an explicit diagnose).
+        await requestHealthReport?.();
 
         // LAMA-198: config-revision check on every heartbeat. If the
         // server's revision has moved past what we last cached, pull a

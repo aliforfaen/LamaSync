@@ -124,6 +124,12 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   { method: "POST", pattern: "/api/v1/report" },
   // LAMA-327: live sync phase reports (own host only — enforced in the route)
   { method: "POST", pattern: "/api/v1/sync-progress" },
+  // LAMA-345: assignment-level health + reviewed-plan reports (own host only —
+  // enforced in the route), and the own-plan read the daemon uses to validate
+  // a queued intervention against the plan it was approved for.
+  { method: "POST", pattern: "/api/v1/folder-health" },
+  { method: "POST", pattern: "/api/v1/folder-plans" },
+  { method: "GET", pattern: "/api/v1/folder-plans/*" },
   // its own config (embeds assignments, pause state, dotfile manifests)
   { method: "GET", pattern: "/api/v1/config/*" },
   // folder operation locks (own host only — enforced in the route)

@@ -1,5 +1,11 @@
 // Core wire/DB types — single source of truth for the whole system.
 
+// LAMA-345: managed-folder health contract. `folder-health.ts` is
+// dependency-free and never imports this file, so this is a one-way edge.
+import type { FolderHealthRecord, FolderSyncPlan } from "./folder-health.ts";
+
+export type { FolderHealthRecord, FolderSyncPlan };
+
 export type HostStatus = "online" | "offline" | "degraded" | "unknown";
 
 // LAMA-298: host "class" — what kind of device this is. Drives per-class
@@ -28,7 +34,11 @@ export type OperationStatus =
   | "conflict"
   | "recovery"  // bisync state was corrupted and recovered
   | "retry"     // transient failure, will retry
-  | "deferred"; // lock contention or control-plane outage; no transfer started, will retry
+  | "deferred" // lock contention or control-plane outage; no transfer started, will retry
+  // LAMA-345: an operator deliberately stopped an in-flight run. Distinct
+  // from `failed` because no transfer was lost to an error — the baseline is
+  // left recoverable, and the UI must not present it as a fault.
+  | "cancelled";
 
 // LAMA-222: first-class reusable backend (S3 today; local/nfs/restic future).
 export type BackendKind = "s3" | "local" | "nfs" | "restic";
@@ -143,6 +153,12 @@ export interface ErrorResponse {
 // rclone VFS cache profiles for mount type
 export type CacheProfile = "normal" | "media" | "minimal";
 
+/** LAMA-345: allowlisted mount VFS cache modes, mirroring rclone's
+ *  `--vfs-cache-mode` values. Exposed as a typed select in Advanced folder
+ *  settings so an operator never types a raw rclone flag. */
+export const MOUNT_CACHE_MODES = ["off", "minimal", "writes", "full"] as const;
+export type MountCacheMode = (typeof MOUNT_CACHE_MODES)[number];
+
 // Active lock state for concurrent sync prevention
 export interface LockInfo {
   folderId: string;
@@ -215,7 +231,14 @@ export type QueuedActionType =
   // release proxy and picks its own supported asset. Older daemons report
   // this as an unknown action type, so the UI gates the button on
   // REMOTE_DAEMON_UPDATE_MIN_VERSION (see ./remote-update.ts).
-  | "update_daemon";
+  | "update_daemon"
+  // LAMA-345: managed-folder health and intervention actions. `diagnose_folder`
+  // and `plan_folder` are read-only. `folder_intervention` carries the bounded
+  // allowlisted grammar in ./folder-health.ts — never an rclone flag, config
+  // path or command. Older daemons ack all three as unknown action types.
+  | "diagnose_folder"
+  | "plan_folder"
+  | "folder_intervention";
 
 export type QueuedActionStatus = "pending" | "taken" | "done" | "failed";
 
@@ -349,6 +372,14 @@ export interface FolderAssignment {
   watchQuietSec?: number | null; // null => 30; validated range 10-300 seconds
   ignoreGitMetadata?: boolean;   // default false; exclude .git/
   respectGitignore?: boolean;    // default false; apply Git ignore semantics
+  // LAMA-345 stage 4: allowlisted, typed tuning options. Both are ordinary
+  // rclone flags the daemon builds itself — never a free-form arguments
+  // field. `bisyncMaxDelete` caps how many deletions a single bisync run may
+  // propagate before aborting (rclone `--max-delete`, -1/omitted = no cap),
+  // and `mountCacheMode` selects the mount VFS cache mode
+  // (rclone `--vfs-cache-mode`).
+  bisyncMaxDelete?: number | null;
+  mountCacheMode?: MountCacheMode | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +907,13 @@ export type WSEvent =
   // LAMA-327: live non-terminal rclone sync phase. Sent on phase transitions
   // and throttled counter snapshots; a terminal phase (success/failed) is
   // broadcast once and then the entry is removed from the server registry.
-  | { kind: "sync_progress"; progress: LiveSyncProgress };
+  | { kind: "sync_progress"; progress: LiveSyncProgress }
+  // LAMA-345: managed-folder health. `folder_health` carries the latest
+  // persisted record for one assignment after a daemon report; `folder_plan`
+  // carries a newly-reported sync plan. Both are advisory UI updates — the
+  // REST reads stay authoritative.
+  | { kind: "folder_health"; record: FolderHealthRecord }
+  | { kind: "folder_plan"; plan: FolderSyncPlan };
 
 export interface PruneResult {
   deleted: number;

@@ -140,6 +140,10 @@ export const reportRoutes = new Elysia({ prefix: "/api/v1" }).post(
         t.Literal("conflict"),
         t.Literal("retry"),
         t.Literal("recovery"),
+        t.Literal("deferred"),
+        // LAMA-345: an operator deliberately stopped the run; distinct from
+        // `failed` so it is never presented as a fault.
+        t.Literal("cancelled"),
       ]),
       summary: t.Optional(t.Union([t.String(), t.Null()])),
       details: t.Optional(t.Union([t.String(), t.Null()])),

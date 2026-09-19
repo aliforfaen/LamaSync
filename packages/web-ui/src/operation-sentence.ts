@@ -122,6 +122,7 @@ const STATUS_WORD: Record<OperationStatus, string> = {
   recovery: "recovered",
   retry: "retrying",
   deferred: "deferred",
+  cancelled: "cancelled",
 };
 
 function titleCase(s: string): string {

@@ -14,10 +14,30 @@ import type { AppCaptureAssignment, ConflictStrategy, EffectivePause, Folder, Fo
 import { resolveDestination } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
 import { writeFileAtomic } from "./atomic-file.ts";
-import { loadFilterPatterns, resolveFilterPath, writeExcludeFile } from "./ignore.ts";
+import {
+  effectiveSyncFilterPatterns,
+  loadFilterPatterns,
+  resolveFilterPath,
+  writeExcludeFile,
+} from "./ignore.ts";
 import { startLanPeerSession, type LanPeerSession } from "./lan-peer.ts";
 import { getRemoteName } from "./rclone.ts";
 import { materialiseGitignoreFilter } from "./gitignore.ts";
+import {
+  baselineFingerprint,
+  bisyncStateDir,
+  effectiveFilterFingerprint,
+  gitignoreOnlyFingerprint,
+  inspectBisyncBaseline,
+  readAcknowledgedFingerprint,
+  reconcileFingerprint,
+  RESYNC_REQUIRED_FILENAME,
+  FILTER_FINGERPRINT_FILENAME,
+} from "./bisync-baseline.ts";
+
+// LAMA-345: `effectiveSyncFilterPatterns` moved to ./ignore.ts so the health
+// probe can share it; re-exported here for the existing callers and tests.
+export { effectiveSyncFilterPatterns } from "./ignore.ts";
 import { expandHomePath } from "./config.ts";
 import {
   BoundedTail,
@@ -42,6 +62,26 @@ export interface ExecuteOptions {
   // rclone phase transitions through it. Progress failures never block the
   // run (the reporter itself is non-blocking and swallows errors).
   progress?: SyncProgressReporter;
+  // LAMA-345 stage 3: explicit, reviewed bisync control. Only ever produced
+  // by the allowlisted queued-action grammar — the executor still derives
+  // every rclone argv element itself.
+  bisync?: BisyncRunControl;
+}
+
+/** LAMA-345: how one bisync run should treat the existing baseline. */
+export interface BisyncRunControl {
+  /** `normal` = automated (first-run / filter-change resync rules apply). */
+  mode: "normal" | "initialize" | "seed" | "resync";
+  /**
+   * Which side wins when the run is a resync. The command places the remote
+   * at Path 1 and the local tree at Path 2, so `remote` → `--resync-mode
+   * path1` and `local` → `--resync-mode path2`.
+   */
+  authority?: "remote" | "local";
+  /** Allowlisted deletion cap for this run (rclone `--max-delete`). */
+  maxDelete?: number;
+  /** The reviewed plan this execution was approved against. */
+  planId?: string;
 }
 
 interface TransferStats {
@@ -604,20 +644,9 @@ export function isPauseActive(
 }
 
 /**
- * Produce the rclone filter rules used for an assignment. Git metadata must
- * be excluded at transfer time when requested; watcher-side suppression alone
- * cannot prevent bisync from copying it.
+ * LAMA-345: the executor owns the single definition of the effective filter
+ * universe (see ./ignore.ts) so the health probe cannot drift from it.
  */
-export function effectiveSyncFilterPatterns(
-  configuredPatterns: readonly string[],
-  folderType: FolderType,
-  ignoreGitMetadata: boolean | null | undefined,
-): string[] {
-  if (ignoreGitMetadata && folderType === "sync") {
-    return ["- .git/**", ...configuredPatterns];
-  }
-  return [...configuredPatterns];
-}
 
 export async function executeAssignment(opts: ExecuteOptions): Promise<OperationReport> {
   const { assignment, folder, hostConfig, hostId, client } = opts;
@@ -673,13 +702,42 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   let command: string[];
   let timeoutSec: number;
   const dry = opts.dryRun === true;
-  // LAMA-302: `respectGitignore` builds a deterministic Git-ignore filter
-  // snapshot and, if the snapshot changed, forces a safe bisync resync (the
-  // synchronization universe changed).
-  let gitignoreFilter: { path: string; cleanup: () => void } | null = null;
-  let gitignoreResync = false;
-  let gitignoreHashFile: string | null = null;
-  let pendingGitignoreHash: string | null = null;
+  // LAMA-302/LAMA-345: `respectGitignore` builds a deterministic Git-ignore
+  // filter snapshot and, if the effective filter universe changed, forces a
+  // safe bisync resync. LAMA-345 generalises this from "the Git-ignore rules
+  // changed" to "the effective filter universe changed" (Git rules + the
+  // .lamasyncignore patterns) and persists an explicit pending marker so a
+  // failed resync can never silently acknowledge a new fingerprint.
+  let gitignoreFilter: { path: string; cleanup: () => void; rules: string[] } | null = null;
+  let filterResync = false;
+  let filterFingerprintFile: string | null = null;
+  let pendingFilterFingerprint: string | null = null;
+  let resyncMarkerFile: string | null = null;
+  // LAMA-345 stage 3: explicit, reviewed intervention control. `normal` keeps
+  // the automated behaviour; everything else is only ever produced by the
+  // allowlisted queued-action grammar (never by a caller-supplied argv).
+  const bisync = opts.bisync ?? { mode: "normal" as const };
+  const resyncRequested = bisync.mode === "initialize" || bisync.mode === "seed" || bisync.mode === "resync";
+  let baselineStateDir: string | null = null;
+  let baselineVerdict: { ready: boolean; error: boolean; present: boolean } | null = null;
+  // The live effective-filter fingerprint, computed once so a planned change
+  // list and an executed run agree on what "the filter universe" is.
+  let liveFilterFingerprint: string | null = null;
+  if (folder.type === "sync") {
+    let gitignoreRules: string[] | null = null;
+    if (assignment.respectGitignore) {
+      const gf = materialiseGitignoreFilter(assignment.localPath, patterns);
+      if (gf) {
+        gitignoreFilter = gf;
+        gitignoreRules = gf.rules;
+      } else {
+        gitignoreRules = [];
+      }
+    }
+    if (gitignoreRules !== null || patterns.length > 0) {
+      liveFilterFingerprint = effectiveFilterFingerprint(gitignoreRules, patterns);
+    }
+  }
 
   switch (folder.type) {
     case "sync": {
@@ -689,37 +747,85 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           console.warn(`[executor] folder=${folder.id} applying resolved conflicts had errors: ${resolved.errors.join("; ")}`);
         }
       }
+      const maxDelete = bisync.maxDelete ?? assignment.bisyncMaxDelete ?? null;
       if (dry) {
-        command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--dry-run"];
+        if (opts.bisync) {
+          // LAMA-345: a *planned* dry run is executed against the real
+          // workdir so the change list reflects the actual baseline (and the
+          // reviewed authority). The legacy preview path (no bisync control)
+          // keeps its stateless shape.
+          const sd = bisyncStateDir(folder.id);
+          baselineStateDir = sd;
+          mkdirSync(sd, { recursive: true });
+          command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--dry-run", "--workdir", sd, "--max-lock", "10m"];
+          if (maxDelete !== null) command.push("--max-delete", String(maxDelete));
+          if (resyncRequested) {
+            command.push("--resync", "--resync-mode", bisync.authority === "local" ? "path2" : "path1");
+          }
+        } else {
+          command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--dry-run"];
+        }
         timeoutSec = DRY_RUN_TIMEOUT_SEC;
       } else {
-        const sd = join(homedir(), ".local", "share", "lamasync", "bisync", folder.id);
-        const first = !existsSync(join(sd, "bisync.state"));
+        const sd = bisyncStateDir(folder.id);
+        baselineStateDir = sd;
         mkdirSync(sd, { recursive: true });
+        // LAMA-345: "is this the first run?" is decided by the presence of a
+        // complete, ready listing pair — NOT by a `bisync.state` sentinel
+        // (rclone never wrote that file, so every run looked like a first run
+        // and was pushed into an implicit Path 1 = remote resync).
+        const inspection = inspectBisyncBaseline(sd);
+        baselineVerdict = { ready: inspection.ready, error: inspection.error, present: inspection.present };
+        const first = !inspection.ready;
         command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--workdir", sd, "--resilient", "--recover", "--max-lock", "10m"];
-        // LAMA-302: respectGitignore → Git ignore semantics via a filter
-        // snapshot (never pass .gitignore straight to rclone). The snapshot is
-        // merged with any .lamasyncignore patterns and, on change, forces a
-        // safe --resync rather than trusting stale bisync listings.
-        if (assignment.respectGitignore) {
-          const gf = materialiseGitignoreFilter(assignment.localPath, patterns);
-          if (gf) {
-            gitignoreFilter = gf;
-            const hashFile = join(sd, ".filter-snapshot.hash");
-            const prev = existsSync(hashFile)
-              ? readFileSync(hashFile, "utf8").trim()
-              : null;
-            if (prev !== gf.hash) {
-              gitignoreResync = true;
-              gitignoreHashFile = hashFile;
-              pendingGitignoreHash = gf.hash;
+        // LAMA-345 stage 4: allowlisted deletion cap (rclone --max-delete).
+        if (maxDelete !== null) command.push("--max-delete", String(maxDelete));
+
+        // LAMA-345: the effective filter universe = Git-ignore rules (when
+        // respectGitignore is on) + the .lamasyncignore patterns. A change to
+        // EITHER source moves the universe and must force a resync. The
+        // fingerprint itself was computed above (shared with the plan path).
+        if (liveFilterFingerprint !== null) {
+          const fingerprintFile = join(sd, FILTER_FINGERPRINT_FILENAME);
+          const stored = readAcknowledgedFingerprint(sd);
+          const liveFingerprint = liveFilterFingerprint;
+          const legacy = gitignoreFilter === null
+            ? null
+            : gitignoreOnlyFingerprint(gitignoreFilter.rules);
+          const verdict = reconcileFingerprint(stored, liveFingerprint, legacy);
+          filterResync = verdict.changed;
+          filterFingerprintFile = fingerprintFile;
+          pendingFilterFingerprint = verdict.acknowledge;
+          if (filterResync) {
+            resyncMarkerFile = join(sd, RESYNC_REQUIRED_FILENAME);
+            console.warn(
+              `[executor] folder=${folder.id} effective filter changed; forcing safe resync`,
+            );
+          }
+        }
+
+        if (resyncRequested) {
+          // LAMA-345 stage 3: archive the prior listing pair before a reseed
+          // instead of deleting it, then pin the authority explicitly. With
+          // the command's remote=Path 1 / local=Path 2 shape, `remote` uses
+          // Path 1 authority and `local` uses Path 2 authority.
+          if (inspection.present || inspection.error) {
+            try {
+              const archived = archiveBisyncState(sd);
+              console.warn(`[executor] folder=${folder.id} archived prior bisync state to ${archived}`);
+              mkdirSync(sd, { recursive: true });
+            } catch (err) {
               console.warn(
-                `[executor] folder=${folder.id} gitignore filter snapshot changed; forcing safe resync`,
+                `[executor] folder=${folder.id} could not archive prior bisync state: ${err instanceof Error ? err.message : String(err)}`,
               );
             }
           }
+          command.push("--resync");
+          command.push("--resync-mode", bisync.authority === "local" ? "path2" : "path1");
+        } else if (first || filterResync) {
+          command.push("--resync");
+          command.push("--resync-mode", "path1");
         }
-        if (first || gitignoreResync) command.push("--resync");
         timeoutSec = assignment.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
       }
       break;
@@ -745,6 +851,10 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         });
       }
       command = ["mount", remotePath, assignment.localPath, "--config", opts.configPath, "--daemon"];
+      // LAMA-345 stage 4: allowlisted mount VFS cache mode.
+      if (assignment.mountCacheMode) {
+        command.push("--vfs-cache-mode", assignment.mountCacheMode);
+      }
       timeoutSec = MOUNT_TIMEOUT_SEC;
       break;
     }
@@ -905,22 +1015,59 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   // Do not acknowledge a changed filter until the forced resync actually
   // succeeded. Otherwise a transient failure would leave old bisync listings
   // paired with a new hash and the next run could incorrectly omit --resync.
-  if (
-    gitignoreResync &&
-    pendingGitignoreHash !== null &&
-    gitignoreHashFile !== null &&
+  // LAMA-345: verify that the intended baseline was actually established —
+  // a zero exit code is not evidence. Read the listing pair back from the
+  // workdir and require a complete, ready pair (no `.lst-err`, no in-flight
+  // `.lst-new`). A run that "succeeded" without leaving a usable pair is
+  // reported as a failure of the intervention, and the pending marker keeps
+  // the assignment in `resync_required`.
+  const runSucceeded =
     (runResult.exitCode === 0 || runResult.exitCode === 9) &&
     !runResult.timedOut &&
-    !runResult.aborted
-  ) {
+    !runResult.aborted;
+  let baselineVerified: boolean | null = null;
+  let baselineCounts: { path1: number; path2: number } | null = null;
+  if (folder.type === "sync" && !dry && baselineStateDir !== null) {
+    const after = inspectBisyncBaseline(baselineStateDir, { readCounts: true });
+    baselineCounts = {
+      path1: after.path1Count ?? 0,
+      path2: after.path2Count ?? 0,
+    };
+    baselineVerified = after.ready;
+  }
+  const baselineEstablished = baselineVerified !== false;
+
+  // Acknowledge the new filter universe only after a run that both exited
+  // cleanly AND left a usable baseline. Otherwise a transient failure would
+  // pair old listings with a new fingerprint and the next run could
+  // incorrectly omit --resync.
+  if (filterResync && runSucceeded && baselineEstablished) {
+    if (pendingFilterFingerprint !== null && filterFingerprintFile !== null) {
+      try {
+        // LAMA-336: atomic — a truncated file would tell the next run that its
+        // filter snapshot is current and skip the resync.
+        writeFileAtomic(filterFingerprintFile, pendingFilterFingerprint);
+      } catch (err) {
+        console.warn(
+          `[executor] folder=${folder.id} could not persist filter fingerprint: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (resyncMarkerFile !== null) {
+      try {
+        rmSync(resyncMarkerFile, { force: true });
+      } catch {
+        // The marker is only an advisory flag; leaving it just forces one more
+        // resync rather than risking a silent acknowledgement.
+      }
+    }
+  } else if (filterResync && resyncMarkerFile !== null && pendingFilterFingerprint !== null) {
+    // Record the outstanding pending fingerprint so the health probe can
+    // explain exactly which universe is waiting to be acknowledged.
     try {
-      // LAMA-336: atomic — a truncated hash file would tell the next run
-      // that its filter snapshot is current and skip the resync.
-      writeFileAtomic(gitignoreHashFile, pendingGitignoreHash);
-    } catch (err) {
-      console.warn(
-        `[executor] folder=${folder.id} could not persist gitignore filter snapshot: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      writeFileAtomic(resyncMarkerFile, pendingFilterFingerprint);
+    } catch {
+      // Non-fatal: the marker is derived state.
     }
   }
 
@@ -990,22 +1137,39 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           details: { resolved: auto.resolved, errors: auto.errors, unresolved: auto.unresolved, paths },
         });
       }
-      const ok = !runResult.timedOut && !runResult.aborted;
-      const status: OperationStatus = ok ? (isRecovery ? "recovery" : "success") : "failed";
+      const cancelled = runResult.aborted && runResult.abortReason === "cancelled";
+      const ok = !runResult.timedOut && !runResult.aborted && baselineEstablished;
+      const status: OperationStatus = cancelled
+        ? "cancelled"
+        : ok
+          ? (isRecovery ? "recovery" : "success")
+          : "failed";
       const summary = `${conflicts.length} conflict(s) auto-resolved (${strategy})`;
       return report(hostId, folder.id, folder.type, status, start, {
         summary,
-        details: { conflicts, strategy, rclone: runResult.stats, exitCode: runResult.exitCode, timedOut: runResult.timedOut, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, lanPeer: lanPeer.detail },
+        details: { conflicts, strategy, rclone: runResult.stats, exitCode: runResult.exitCode, timedOut: runResult.timedOut, cancelled, baselineEstablished, baselineCounts, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, lanPeer: lanPeer.detail },
       });
     }
   }
 
   // LAMA-294: exit 9 (NoFilesTransferred) is success, not a failure.
-  const ok = !runResult.timedOut && !runResult.aborted && (runResult.exitCode === 0 || runResult.exitCode === 9);
-  const status: OperationStatus = ok ? (isRecovery ? "recovery" : "success") : "failed";
-  const summary = buildSummary(folder.type, runResult, start, postHookMs, dry);
+  // LAMA-345: an operator cancellation is its own outcome (never `failed`),
+  // and a run that left no usable baseline is not a success either.
+  const cancelled = runResult.aborted && runResult.abortReason === "cancelled";
+  const ok =
+    !runResult.timedOut &&
+    !runResult.aborted &&
+    (runResult.exitCode === 0 || runResult.exitCode === 9) &&
+    baselineEstablished;
+  const status: OperationStatus = cancelled
+    ? "cancelled"
+    : ok
+      ? (isRecovery ? "recovery" : "success")
+      : "failed";
+  const baseSummary = buildSummary(folder.type, runResult, start, postHookMs, dry);
+  const summary = baselineEstablished ? baseSummary : `${baseSummary} — baseline not established (no usable listing pair)`;
   const exitCategory = classifyRcloneExit(runResult.exitCode, folder.type);
-  return report(hostId, folder.id, folder.type, status, start, { summary, details: { rclone: runResult.stats, exitCode: runResult.exitCode, exitCategory, retryable: !ok && exitCategory === "retryable", timedOut: runResult.timedOut, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, wouldCopy: runResult.wouldCopy, wouldDelete: runResult.wouldDelete, wouldMkdir: runResult.wouldMkdir, lanPeer: lanPeer.detail } });
+  return report(hostId, folder.id, folder.type, status, start, { summary, details: { rclone: runResult.stats, exitCode: runResult.exitCode, exitCategory, retryable: !ok && exitCategory === "retryable", timedOut: runResult.timedOut, cancelled, baselineEstablished, baselineCounts, baselineBefore: baselineVerdict, bisyncMode: bisync.mode, bisyncAuthority: bisync.authority ?? null, planId: bisync.planId ?? null, filterResync, filterFingerprint: liveFilterFingerprint, stderrTail: runResult.stderrTail, durationMs: runResult.durationMs, attempts, isRecovery, wouldCopy: runResult.wouldCopy, wouldDelete: runResult.wouldDelete, wouldMkdir: runResult.wouldMkdir, lanPeer: lanPeer.detail } });
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,7 +1378,12 @@ export function archiveBisyncState(stateDir: string, now: Date = new Date()): st
 function buildSummary(type: FolderType, r: CommandResult, t0: number, postMs: number, dry?: boolean): string {
   const total = Date.now() - t0;
   if (dry) { const p: string[] = []; if (r.wouldCopy.length) p.push(`${r.wouldCopy.length} would-copy`); if (r.wouldDelete.length) p.push(`${r.wouldDelete.length} would-delete`); if (r.wouldMkdir.length) p.push(`${r.wouldMkdir.length} would-mkdir`); return `dry-run: ${p.length ? p.join(", ") : "0 changes"}`; }
-  if (r.aborted) return `${type} aborted: ${r.abortReason ?? "lock lost"}`;
+  if (r.aborted) {
+    // LAMA-345: an operator cancellation is reported as itself, never as a
+    // lock-loss abort or a generic failure.
+    if (r.abortReason === "cancelled") return `${type} cancelled by operator`;
+    return `${type} aborted: ${r.abortReason ?? "lock lost"}`;
+  }
   if (r.timedOut) return `${type} timed out after ${Math.round(r.durationMs / 1000)}s`;
   // LAMA-294: exit 9 = NoFilesTransferred — succeeded with nothing to copy.
   if (r.exitCode === 9) return `${type} ok: no files transferred`;

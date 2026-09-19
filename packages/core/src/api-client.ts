@@ -45,6 +45,14 @@ import type {
   FolderSize,
   LiveSyncProgressUpdate,
 } from "./types.ts";
+// LAMA-345: folder health/plan contract (kept in its own dependency-free
+// module so the web UI can import it without node built-ins).
+import type {
+  FolderHealthReport,
+  FolderHealthResponse,
+  FolderPlanWithValidity,
+  FolderSyncPlan,
+} from "./folder-health.ts";
 
 export class LamaSyncApiError extends Error {
   status: number;
@@ -323,6 +331,50 @@ export class LamaSyncApiClient {
       "/api/v1/sync-progress",
       JSON.stringify(body),
       "application/json",
+    );
+  }
+
+  // LAMA-345: managed-folder health + reviewed sync plans. The daemon is the
+  // only writer; admins read the same records through `listFolderHealth` /
+  // `listFolderPlans`. The bodies are the shared core contract — never an
+  // rclone argv, config path or credential.
+  reportFolderHealth(body: FolderHealthReport): Promise<void> {
+    return this.request<void>(
+      "POST",
+      "/api/v1/folder-health",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  reportFolderPlan(body: FolderSyncPlan): Promise<FolderSyncPlan> {
+    return this.request<FolderSyncPlan>(
+      "POST",
+      "/api/v1/folder-plans",
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  // Own-plan read for the daemon (the route also admits admins).
+  getFolderPlan(planId: string): Promise<FolderPlanWithValidity> {
+    return this.request<FolderPlanWithValidity>(
+      "GET",
+      `/api/v1/folder-plans/${encodeURIComponent(planId)}`,
+    );
+  }
+
+  listFolderHealth(folderId: string): Promise<FolderHealthResponse> {
+    return this.request<FolderHealthResponse>(
+      "GET",
+      `/api/v1/folders/${encodeURIComponent(folderId)}/health`,
+    );
+  }
+
+  listFolderPlans(folderId: string, limit = 10): Promise<FolderPlanWithValidity[]> {
+    return this.request<FolderPlanWithValidity[]>(
+      "GET",
+      `/api/v1/folders/${encodeURIComponent(folderId)}/plans?limit=${limit}`,
     );
   }
 
