@@ -5,9 +5,13 @@ Read this after `AGENTS.md` when entering a coding worktree.
 ## Current work
 
 LAMA-345's follow-up (Dashboard fleet-health summary with the evidence-based
-update verdict, one derived health read path, and the far-future-cron scheduler
-fix) is implemented in this worktree too, with a reusable isolated integration
-harness in `scripts/lama345-integration.ts`. dev-vm still runs the released
+update verdict, one derived health read path, the far-future-cron scheduler fix,
+and the in-page scroll + Folders deep-link corrections) is implemented in this
+worktree too, with a reusable isolated integration harness in
+`scripts/lama345-integration.ts`. Two UI entry points are now load-bearing and
+easy to break: the Dashboard urgent row is a plain button (never a fragment
+Link, which HashRouter corrupts) and `/folders?folder=&host=` is consumed by
+`folder-deep-link.ts`. dev-vm still runs the released
 v0.3.11 daemon, so its Projects folder keeps resyncing on every run (the
 `bisync.state` sentinel has never existed there — the paired
 `*.path1.lst`/`*.path2.lst` files are on disk). Deployment gate and the

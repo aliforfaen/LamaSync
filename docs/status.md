@@ -46,6 +46,21 @@ distributable binary build.
   after it fires would have synced continuously. `planTimerDelay` now parks the
   timer and re-evaluates; both cron paths use it, with behavioural tests that
   fail against the pre-fix code.
+  *Review corrections (browser-proven):* the Dashboard's urgent row is a real
+  in-page **button** that scrolls and focuses the Fleet health section — as a
+  Link to `/#fleet-health-heading` under HashRouter it became
+  `/#/#fleet-health-heading`, changed the route and never scrolled. Scroll
+  behaviour lives in `scroll-to-section.ts` and honours the existing
+  reduced-motion gate. Folder links from the health card now actually do
+  something: `folder-deep-link.ts` (pure, tested) opens the requested folder,
+  marks the assignment and scrolls/focuses its health card, with fallbacks for a
+  missing device (first assignment + explanation) and an unknown/removed folder
+  (stale highlight cleared + explanation), without ever filtering the table. The
+  apply guard is keyed on the navigation, so repeat clicks and back/forward
+  work, and focus only ever lands on a connected node (a ref callback fires
+  during the commit, so the effect can still hold the previous target).
+  `hostClassFromRow`/`hostStatusFromRow` use explicit switches instead of inline
+  casts.
   *Evidence:* `scripts/lama345-integration.ts` runs a fully isolated server
   (random port, mktemp data dir, generated key, `HOME` redirected) plus an
   isolated daemon and exercises heartbeat → folder-health report → `/health`
