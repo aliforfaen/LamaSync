@@ -275,10 +275,10 @@ The states and what they mean:
 | State | Meaning | What to do |
 |---|---|---|
 | `Healthy` | A paired `*.path1.lst` + `*.path2.lst` baseline exists and the last run agreed | Nothing |
-| `Not initialised` | This device has never completed a bisync | Plan + approve **Initialize this host from remote** (or **Seed remote from this host** if this device is the source) |
-| `Resync required` | The ignore/filter universe changed, a listing is missing, or a sibling device sees far more entries on the same shared remote | **Plan sync** on the reseeding operation you want, then approve |
-| `Recoverable` | The last run was interrupted or failed, but the baseline is intact | **Resume**, or **Sync now** |
-| `Unsafe` | rclone wrote an `.lst-err` marker; a normal run would refuse anyway | Review a plan, then **Reseed baseline** |
+| `Not initialised` | This device has never completed a bisync | Preview and approve **Set up this device from the remote** (or **Fill the remote from this device** if this device is the source) |
+| `Resync required` | The ignore/filter universe changed, a listing is missing, or a sibling device sees far more entries on the same shared remote | Preview the reseeding operation you want, then approve |
+| `Recoverable` | The last run was interrupted or failed, but the baseline is intact | **Continue the interrupted sync**, or **Sync now** |
+| `Unsafe` | rclone wrote an `.lst-err` marker; a normal run would refuse anyway | Preview, then **Rebuild the sync baseline** |
 | `Blocked` | A precondition fails: missing/unwritable local dir, no disk space, paused, disabled, or rclone absent | The card names the exact fix |
 | `Running` | A run is in flight | Wait, or **Cancel** to stop it deliberately |
 
@@ -286,15 +286,32 @@ The states and what they mean:
 Never hand-edit rclone listings or invoke rclone on the device: the reviewed
 plan is what makes the authority explicit and archives prior state.
 
-## Symptom: a `folder_intervention` action acks `failed: plan is stale`
+**What the "winning side" does and does not do.** Choosing the remote (Path 1)
+or this device (Path 2) only decides which version is kept when the SAME file
+was modified on both sides. Files that exist on only one side are copied to the
+other side either way, and nothing is deleted merely because of the choice —
+the preview's own change list is the only statement about deletions. Read it
+before approving.
 
-A plan is a reviewed intent with a 30-minute life. It is invalidated by an
-assignment change (config-revision bump), an ignore/filter change, or any
-rewrite of the listing pair — including a sync that landed between planning
-and approval.
+**The deletion threshold is a PERCENTAGE.** `--max-delete` for `rclone bisync`
+is the share of a side's files the run may delete before it aborts. Leaving it
+unset uses rclone's own default, currently **50%** — it is never "no limit".
+A threshold of `0` aborts on any deletion at all.
 
-**Fix.** Re-run `plan_folder` and approve the fresh `plan.id`. This is the
-guard working, not a bug.
+## Symptom: a `folder_intervention` action acks `failed: plan refused — …` or `plan is stale`
+
+A plan is a reviewed intent with a 30-minute life, and it is bound to WHAT was
+reviewed. It is refused when:
+
+- it expired (30 minutes), the assignment changed (config-revision bump), the
+  ignore/filter set changed, or the listing pair was rewritten — including by a
+  sync that landed between planning and approval;
+- the request disagrees with the plan: a different intervention, a different
+  winning side, or a different `maxDeletePercent`. A plan reviewed as "seed
+  from this host at 10%" will not run as a remote-authority resync at 90%.
+
+**Fix.** Re-run `plan_folder` for the operation and threshold you actually
+want, then approve the fresh `plan.id`. This is the guard working, not a bug.
 
 ## Symptom: a sync reports `cancelled` instead of `failed`
 

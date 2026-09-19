@@ -59,7 +59,7 @@ interface EditorState {
   respectGitignore: boolean;
   // LAMA-345 stage 4: allowlisted typed tuning. Both travel as ordinary
   // validated fields — there is no free-form rclone arguments input.
-  bisyncMaxDelete: string;
+  bisyncMaxDeletePercent: string;
   mountCacheMode: string;
 }
 
@@ -84,7 +84,7 @@ function stateFromAssignment(a: FolderAssignment): EditorState {
     watchQuietSec: toStr(a.watchQuietSec),
     ignoreGitMetadata: a.ignoreGitMetadata === true,
     respectGitignore: a.respectGitignore === true,
-    bisyncMaxDelete: toStr(a.bisyncMaxDelete),
+    bisyncMaxDeletePercent: toStr(a.bisyncMaxDeletePercent),
     mountCacheMode: a.mountCacheMode ?? "",
   };
 }
@@ -246,20 +246,20 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
       if (state.respectGitignore !== (assignment.respectGitignore === true)) {
         body.respectGitignore = state.respectGitignore;
       }
-      // LAMA-345: allowlisted deletion cap. null/empty means "no cap"; the
-      // server re-validates the range and the daemon turns it into
-      // `--max-delete` itself.
-      const capRaw = toNumOrNull(state.bisyncMaxDelete);
+      // LAMA-345: allowlisted deletion threshold, a rclone bisync
+      // `--max-delete` PERCENTAGE. Empty means "rclone's default (50%)" — it
+      // is never "no cap". The server re-validates the 0-100 range.
+      const capRaw = toNumOrNull(state.bisyncMaxDeletePercent);
       if (Number.isNaN(capRaw)) {
-        setError("Deletion cap must be a number");
+        setError("Deletion threshold must be a number");
         return;
       }
-      if (capRaw !== null && (!Number.isInteger(capRaw) || capRaw < 0 || capRaw > 1_000_000)) {
-        setError("Deletion cap must be between 0 and 1000000");
+      if (capRaw !== null && (!Number.isInteger(capRaw) || capRaw < 0 || capRaw > 100)) {
+        setError("Deletion threshold must be a percentage between 0 and 100");
         return;
       }
-      if ((capRaw ?? null) !== (assignment.bisyncMaxDelete ?? null)) {
-        body.bisyncMaxDelete = capRaw;
+      if ((capRaw ?? null) !== (assignment.bisyncMaxDeletePercent ?? null)) {
+        body.bisyncMaxDeletePercent = capRaw;
       }
     }
 
@@ -548,26 +548,35 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
             the only knobs added; there is deliberately no free-form rclone
             arguments or configuration field. */}
         {showWatch ? (
-          <label>
-            Deletion safety cap
+          <label htmlFor="assignment-max-delete-percent">
+            Deletion threshold (per cent)
             <input
+              id="assignment-max-delete-percent"
+              name="assignment-max-delete-percent"
               type="number"
               min={0}
-              max={1_000_000}
-              placeholder="no cap"
-              value={state.bisyncMaxDelete}
-              onChange={(e) => set({ bisyncMaxDelete: e.target.value })}
+              max={100}
+              step={1}
+              autoComplete="off"
+              inputMode="numeric"
+              placeholder="rclone default (50%)"
+              value={state.bisyncMaxDeletePercent}
+              onChange={(e) => set({ bisyncMaxDeletePercent: e.target.value })}
             />
             <HintText>
-              Abort a sync that would delete more than this many files. Leave
-              empty for no cap. A resync plan can also set its own cap.
+              A safety brake: this sync stops before deleting more than this
+              share of a side&rsquo;s files. Leave empty to use rclone&rsquo;s
+              own limit, which is 50% — it never means &ldquo;no limit&rdquo;.
+              A rebuild-from-a-plan can also set its own threshold.
             </HintText>
           </label>
         ) : null}
         {showMount ? (
-          <label>
+          <label htmlFor="assignment-mount-cache-mode">
             Mount cache mode
             <select
+              id="assignment-mount-cache-mode"
+              name="assignment-mount-cache-mode"
               value={state.mountCacheMode}
               onChange={(e) => set({ mountCacheMode: e.target.value })}
             >
@@ -578,8 +587,10 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
               <option value="full">full — cache reads and writes</option>
             </select>
             <HintText>
-              How the read-only mount caches files locally. "full" makes edits
-              work but needs disk space; "off" is the safest for space.
+              How the read-only mount caches files locally. &ldquo;full&rdquo;
+              makes edits work but needs disk space; &ldquo;off&rdquo; is the
+              safest for space. This applies to the mount itself, including its
+              restarts.
             </HintText>
           </label>
         ) : null}

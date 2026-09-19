@@ -44,12 +44,30 @@ distributable binary build.
   0. The effective filter fingerprint now covers BOTH the Git-ignore snapshot
   and `.lamasyncignore`, with a persisted pending marker so a failed resync
   never acknowledges a new fingerprint. `OperationStatus` gained `cancelled`.
+  *Review corrections:* execution is now bound to the reviewed plan's
+  semantics — intervention, authoritative side AND the reviewed `--max-delete`
+  percentage must match, and the daemon executes the plan's own values, so a
+  remote request can never ride a local plan. `rclone bisync --max-delete` is a
+  PERCENTAGE, not a file count: the field is `bisyncMaxDeletePercent` /
+  `maxDeletePercent`, validated 0-100, where blank means rclone's default
+  (50%) and never "no cap". A planned dry run uses the assignment's own timeout
+  instead of the 60-second ad-hoc preview budget, so a Projects-scale folder
+  can be planned at all. `mountCacheMode` now actually reaches the mount:
+  it is threaded through `startMount`/`buildRcloneArgs`, retained across
+  restarts and re-applied by reconcile when it changes. `resume` requires the
+  same explicit confirmation as every other mutation. The authority wording no
+  longer claims unique files are deleted — it decides the winner only for a
+  file modified on both sides, and deletions are read from the dry run alone.
   *Stage 4:* the Folders page gained a per-assignment Folder health card
-  (state, freshness, stale measurement, baseline readiness, filter status,
-  exact remediation), contextual actions, a guided approve modal with the
-  dry-run summary and explicit authority wording plus plan-staleness
-  protection, and an Advanced section of typed allowlisted controls
-  (`bisyncMaxDelete` → `--max-delete`, `mountCacheMode` → `--vfs-cache-mode`).
+  (state, freshness, stale measurement, sync-record readiness, ignore-set
+  status, exact remediation), plain-language contextual actions (no
+  context-free "plan" button — planning is attached to the operation it
+  previews), a four-step guided wizard (choose the winning side → preview
+  running → review totals plus a bounded sample → run it) that refuses a plan
+  built for a different side or threshold, a "What do these terms mean?"
+  glossary, and an Advanced section of typed allowlisted controls
+  (`bisyncMaxDeletePercent` → `--max-delete`, `mountCacheMode` →
+  `--vfs-cache-mode`).
   There is no free-form rclone arguments or configuration field anywhere.
 
 - **LAMA-327/328 — live sync progress and fast persisted statistics.** Active

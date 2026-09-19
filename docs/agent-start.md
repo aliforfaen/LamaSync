@@ -9,10 +9,12 @@ implemented in this worktree across all four planned stages — the shared healt
 contract, the lightweight daemon probe and server persistence, the read-only
 diagnose/plan actions, the guarded initialize/seed/resync/resume/cancel
 interventions with the paired-`*.path1.lst`/`*.path2.lst` baseline fix, and the
-Web UI health card, guided approve modal and advanced typed settings. It awaits
-review and release; see the status entry in [status.md](status.md). The
-two-file listing pair replaces the old `bisync.state` sentinel, and filter
-changes are acknowledged only by a resync that actually established a baseline.
+Web UI health card, four-step guided wizard and advanced typed settings. It
+awaits review and release; see the status entry in [status.md](status.md). The
+two-file listing pair replaces the old `bisync.state` sentinel, filter changes
+are acknowledged only by a resync that actually established a baseline, and
+execution is bound to the reviewed plan's semantics (intervention, winning side
+and `--max-delete` percentage) rather than to the request that follows it.
 
 LAMA-316's app-backup data contract, LAMA-324 storage destinations, LAMA-325
 retention, and the LAMA-302 real-worktree soak are complete. LAMA-327 live
