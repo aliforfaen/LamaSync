@@ -265,8 +265,16 @@ export interface FolderHealthResponse {
 /**
  * Explicit bootstrap authority. The daemon's bisync command places the remote
  * at Path 1 and the local tree at Path 2, so:
- *   - `remote` (Path 1): remote wins; used to initialize this host.
- *   - `local`  (Path 2): this host wins; used to seed an incomplete remote.
+ *   - `remote` (Path 1): the remote wins a content CONFLICT; used to
+ *     initialize this host.
+ *   - `local`  (Path 2): this host wins a content conflict; used to seed an
+ *     incomplete remote.
+ *
+ * Authority is NOT a licence to delete: bisync normally copies every unique
+ * file to the other side regardless of which side is authoritative, and the
+ * authority only resolves the winner for a path that exists on both sides
+ * with different content. Any deletion must be read from the plan's own dry
+ * run, never inferred from the authority.
  */
 export type FolderBootstrapAuthority = "remote" | "local";
 
@@ -279,6 +287,14 @@ export interface FolderSyncPlan {
    *  three reseeding operations — a resumable run needs no review. */
   intervention: "initialize" | "seed" | "resync";
   authority: FolderBootstrapAuthority;
+  /**
+   * The reviewed `rclone bisync --max-delete` threshold, as a PERCENTAGE of
+   * the files rclone may delete on one side before it aborts. `null` means the
+   * plan was built with rclone's own default (currently 50%), NOT "no cap".
+   * Execution must match this value, so a plan reviewed at 10% can never be
+   * executed at 90%.
+   */
+  maxDeletePercent: number | null;
   /** One bounded human-readable summary of what will happen. */
   summary: string;
   /** Bounded, human-readable change list (capped by the daemon). */
@@ -319,6 +335,96 @@ export interface FolderPlanWithValidity {
   validity: FolderPlanValidity;
 }
 
+/** What a queued intervention asks to execute. */
+export interface PlanSemanticRequest {
+  intervention: FolderIntervention;
+  authority?: FolderBootstrapAuthority | null;
+  maxDeletePercent?: number | null;
+}
+
+/**
+ * The exact execution parameters a reviewed plan authorizes. Execution is
+ * ALWAYS driven from these values, never from the request — a request can only
+ * be refused, never widen what was reviewed.
+ */
+export interface FolderPlanExecution {
+  intervention: "initialize" | "seed" | "resync";
+  authority: FolderBootstrapAuthority;
+  maxDeletePercent: number | null;
+}
+
+export interface PlanSemanticVerdict {
+  ok: boolean;
+  message: string | null;
+  /** Present only when `ok` — the values the run must use. */
+  execution: FolderPlanExecution | null;
+}
+
+/**
+ * Bind an execution to the reviewed plan's semantics.
+ *
+ * A plan is not just a permission slip with an expiry: it encodes WHAT was
+ * reviewed — the intervention, the authoritative side, and the deletion
+ * threshold. A plan reviewed as "seed from this host at 10%" must never
+ * authorize a remote-authority resync, a different intervention, or a 90%
+ * threshold. Returns the plan's own values so the caller can execute from them
+ * rather than from the request.
+ */
+export function checkPlanSemantics(
+  plan: Pick<FolderSyncPlan, "intervention" | "authority" | "maxDeletePercent">,
+  requested: PlanSemanticRequest,
+): PlanSemanticVerdict {
+  if (requested.intervention !== plan.intervention) {
+    return {
+      ok: false,
+      message: `This plan was reviewed as "${plan.intervention}", not "${requested.intervention}". Plan again for the operation you want.`,
+      execution: null,
+    };
+  }
+  // initialize/seed imply their side; resync requires the request to name one.
+  const wantedAuthority = requested.authority ?? requiredAuthority(plan.intervention);
+  if (wantedAuthority !== null && wantedAuthority !== plan.authority) {
+    return {
+      ok: false,
+      message: `This plan was reviewed with ${
+        plan.authority === "remote" ? "the remote" : "this device"
+      } authoritative, not ${
+        wantedAuthority === "remote" ? "the remote" : "this device"
+      }. Plan again with the side you want to win.`,
+      execution: null,
+    };
+  }
+  if (
+    requested.maxDeletePercent !== undefined &&
+    requested.maxDeletePercent !== null &&
+    requested.maxDeletePercent !== plan.maxDeletePercent
+  ) {
+    return {
+      ok: false,
+      message: `This plan was reviewed with a ${formatDeletePercent(
+        plan.maxDeletePercent,
+      )} deletion threshold, not ${formatDeletePercent(
+        requested.maxDeletePercent,
+      )}. Plan again with the threshold you want.`,
+      execution: null,
+    };
+  }
+  return {
+    ok: true,
+    message: null,
+    execution: {
+      intervention: plan.intervention,
+      authority: plan.authority,
+      maxDeletePercent: plan.maxDeletePercent,
+    },
+  };
+}
+
+/** Human wording for a `--max-delete` percentage (null = rclone's default). */
+export function formatDeletePercent(percent: number | null): string {
+  return percent === null ? "rclone's default (50%)" : `${percent}%`;
+}
+
 // ---------------------------------------------------------------------------
 // Limits
 // ---------------------------------------------------------------------------
@@ -342,23 +448,30 @@ export const FOLDER_PLAN_CHANGE_CAP = 20;
 // Allowlisted assignment tuning (LAMA-345 stage 4)
 // ---------------------------------------------------------------------------
 
-/** rclone `--max-delete` bounds. 0 is meaningful ("abort on any deletion"). */
-export const BISYNC_MAX_DELETE_MIN = 0;
-export const BISYNC_MAX_DELETE_MAX = 1_000_000;
+/**
+ * rclone bisync `--max-delete` is a PERCENTAGE, not a file count: the run
+ * aborts when more than this share of a side's files would be deleted. The
+ * default is 50 (%). Passing `-1` disables the check, which LamaSync
+ * deliberately never does.
+ */
+export const BISYNC_MAX_DELETE_PERCENT_MIN = 0;
+export const BISYNC_MAX_DELETE_PERCENT_MAX = 100;
+/** rclone's own default when the flag is absent. */
+export const BISYNC_MAX_DELETE_PERCENT_DEFAULT = 50;
 
 /**
- * Validate the allowlisted bisync deletion cap. Returns a human-readable
- * error or null. `null` means "no cap" (rclone's own default) and is valid.
+ * Validate the allowlisted bisync deletion threshold. Returns a human-readable
+ * error or null. `null` is valid and means "use rclone's default (50%)".
  */
-export function validateBisyncMaxDelete(value: unknown): string | null {
+export function validateBisyncMaxDeletePercent(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (
     typeof value !== "number" ||
     !Number.isInteger(value) ||
-    value < BISYNC_MAX_DELETE_MIN ||
-    value > BISYNC_MAX_DELETE_MAX
+    value < BISYNC_MAX_DELETE_PERCENT_MIN ||
+    value > BISYNC_MAX_DELETE_PERCENT_MAX
   ) {
-    return `bisyncMaxDelete must be null or an integer between ${BISYNC_MAX_DELETE_MIN} and ${BISYNC_MAX_DELETE_MAX}`;
+    return `bisyncMaxDeletePercent must be null or an integer between ${BISYNC_MAX_DELETE_PERCENT_MIN} and ${BISYNC_MAX_DELETE_PERCENT_MAX}`;
   }
   return null;
 }
@@ -633,22 +746,29 @@ export function folderHealthStaleness(
 }
 
 /**
- * Which of the two sides a state implies for the operator. Used for the
- * "exact remediation" sentence and the guided modal wording.
+ * Plain-language description of the authoritative side.
+ *
+ * Deliberately does NOT claim that unique files are deleted: bisync copies
+ * every file that exists on only one side to the other, and the authority
+ * only decides the winner when the SAME path has been modified on both sides
+ * (`--resync-mode path1|path2`). Any deletion is whatever the plan's dry run
+ * actually reported, and is never inferred from the authority.
  */
 export function describeBootstrapAuthority(
   authority: FolderBootstrapAuthority,
-): { short: string; long: string } {
+): { short: string; long: string; conflict: string } {
   return authority === "remote"
     ? {
-        short: "Remote wins",
+        short: "Remote wins conflicts",
         long:
-          "The shared remote is authoritative. Files that exist only on this device are removed locally to match it.",
+          "Files that exist on only one side are copied to the other side. When the same file was changed on both sides, the remote's version is kept and this device's version is set aside.",
+        conflict: "Same file changed on both sides → the remote's version is kept.",
       }
     : {
-        short: "This device wins",
+        short: "This device wins conflicts",
         long:
-          "This device is authoritative. Its files are uploaded to the remote, and anything on the remote that this device does not have is removed there.",
+          "Files that exist on only one side are copied to the other side. When the same file was changed on both sides, this device's version is kept and the remote's version is set aside.",
+        conflict: "Same file changed on both sides → this device's version is kept.",
       };
 }
 
@@ -678,7 +798,9 @@ export function describeFolderHealthAction(action: FolderHealthActionId): string
     case "diagnose":
       return "Diagnose now";
     case "plan":
-      return "Plan sync";
+      // Plans are never context-free: the UI builds one as the first step of
+      // Initialize / Seed / Reseed, so this label is only a fallback.
+      return "Preview changes";
     case "sync":
       return "Sync now";
     case "initialize":
@@ -719,7 +841,9 @@ export interface FolderInterventionPayload {
   authority?: FolderBootstrapAuthority;
   planId?: string;
   confirm?: true;
-  maxDelete?: number;
+  /** Reviewed `--max-delete` PERCENTAGE (0-100); omitted means "use the plan
+   *  and/or rclone's default (50%)". Never a file count. */
+  maxDeletePercent?: number;
 }
 
 export type FolderInterventionParseResult =
@@ -733,6 +857,12 @@ export function interventionRequiresAuthority(
   return intervention === "initialize" || intervention === "seed" || intervention === "resync";
 }
 
+/**
+ * Interventions that must carry an explicit operator confirmation. Everything
+ * except `cancel` mutates something, and `resume` is included on purpose: it
+ * continues a run that previously stopped, which deserves the same deliberate
+ * acknowledgement as a reseed.
+ */
 export function interventionRequiresConfirm(intervention: FolderIntervention): boolean {
   return intervention !== "cancel";
 }
@@ -792,7 +922,7 @@ export function parseFolderInterventionPayload(
     "authority",
     "planId",
     "confirm",
-    "maxDelete",
+    "maxDeletePercent",
   ]);
   for (const key of Object.keys(value)) {
     if (!allowedKeys.has(key)) {
@@ -835,18 +965,24 @@ export function parseFolderInterventionPayload(
   if (interventionRequiresPlan(kind) && planId === undefined) {
     return { ok: false, error: `${kind} requires a reviewed planId` };
   }
+  if (!interventionRequiresPlan(kind) && planId !== undefined) {
+    return { ok: false, error: `${kind} does not take a planId` };
+  }
 
   if (interventionRequiresConfirm(kind) && value["confirm"] !== true) {
     return { ok: false, error: `${kind} requires confirm: true` };
   }
 
-  let maxDelete: number | undefined;
-  if (value["maxDelete"] !== undefined) {
-    const raw = value["maxDelete"];
-    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > 1_000_000) {
-      return { ok: false, error: "maxDelete must be an integer between 0 and 1000000" };
+  let maxDeletePercent: number | undefined;
+  if (value["maxDeletePercent"] !== undefined) {
+    const raw = value["maxDeletePercent"];
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > 100) {
+      return {
+        ok: false,
+        error: "maxDeletePercent must be an integer between 0 and 100",
+      };
     }
-    maxDelete = raw;
+    maxDeletePercent = raw;
   }
 
   return {
@@ -857,7 +993,7 @@ export function parseFolderInterventionPayload(
       ...(authority ? { authority } : {}),
       ...(planId ? { planId } : {}),
       ...(value["confirm"] === true ? { confirm: true as const } : {}),
-      ...(maxDelete !== undefined ? { maxDelete } : {}),
+      ...(maxDeletePercent !== undefined ? { maxDeletePercent } : {}),
     },
   };
 }
@@ -867,7 +1003,7 @@ export interface FolderPlanRequestPayload {
   folderId: string;
   intervention: "initialize" | "seed" | "resync";
   authority: FolderBootstrapAuthority;
-  maxDelete?: number;
+  maxDeletePercent?: number;
 }
 
 export type FolderPlanRequestParseResult =
@@ -904,23 +1040,28 @@ export function parseFolderPlanRequestPayload(value: unknown): FolderPlanRequest
           : "seed requires local authority (this host is authoritative)",
     };
   }
-  const allowedKeys = new Set(["folderId", "intervention", "authority", "maxDelete"]);
+  const allowedKeys = new Set([
+    "folderId",
+    "intervention",
+    "authority",
+    "maxDeletePercent",
+  ]);
   for (const key of Object.keys(value)) {
     if (!allowedKeys.has(key)) return { ok: false, error: `unsupported field: ${key}` };
   }
-  let maxDelete: number | undefined;
-  if (value["maxDelete"] !== undefined) {
-    const error = validateBisyncMaxDelete(value["maxDelete"]);
-    if (error) return { ok: false, error };
-    maxDelete = value["maxDelete"] as number;
-  }
+  const error = validateBisyncMaxDeletePercent(value["maxDeletePercent"]);
+  if (error) return { ok: false, error };
+  const maxDeletePercent =
+    typeof value["maxDeletePercent"] === "number"
+      ? (value["maxDeletePercent"] as number)
+      : undefined;
   return {
     ok: true,
     payload: {
       folderId,
       intervention,
       authority,
-      ...(maxDelete !== undefined ? { maxDelete } : {}),
+      ...(maxDeletePercent !== undefined ? { maxDeletePercent } : {}),
     },
   };
 }

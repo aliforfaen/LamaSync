@@ -1224,30 +1224,39 @@ describe("allowlisted assignment tuning (LAMA-345)", () => {
     );
   }
 
-  test("a bisync deletion cap round-trips and rejects out-of-range values", async () => {
+  test("a bisync deletion PERCENTAGE round-trips and rejects out-of-range values", async () => {
     db.run(`INSERT INTO hosts (id, hostname) VALUES ('a','a')`);
     const folderId = await makeFolder("tuning-cap");
     await postJson(`/api/v1/folders/${folderId}/assign`, {
       hostId: "a",
       role: "both",
       localPath: "/tmp/tuning-cap",
-      bisyncMaxDelete: 50,
+      bisyncMaxDeletePercent: 20,
     });
 
     const row = db
-      .query<{ bisync_max_delete: number | null }, [string]>(
-        "SELECT bisync_max_delete FROM folder_assignments WHERE folder_id = ?",
+      .query<{ bisync_max_delete_percent: number | null }, [string]>(
+        "SELECT bisync_max_delete_percent FROM folder_assignments WHERE folder_id = ?",
       )
       .get(folderId);
-    expect(row?.bisync_max_delete).toBe(50);
+    expect(row?.bisync_max_delete_percent).toBe(20);
 
-    const bad = await patch(folderId, { bisyncMaxDelete: -1 });
+    const bad = await patch(folderId, { bisyncMaxDeletePercent: -1 });
     expect(bad.status).toBe(400);
-    expect(((await bad.json()) as { error: string }).error).toContain("bisyncMaxDelete must be");
+    expect(((await bad.json()) as { error: string }).error).toContain(
+      "bisyncMaxDeletePercent must be",
+    );
 
-    const cleared = await patch(folderId, { bisyncMaxDelete: null });
+    // A file count is not a percentage.
+    const tooBig = await patch(folderId, { bisyncMaxDeletePercent: 500 });
+    expect(tooBig.status).toBe(400);
+
+    const cleared = await patch(folderId, { bisyncMaxDeletePercent: null });
     expect(cleared.status).toBe(200);
-    expect(((await cleared.json()) as { bisyncMaxDelete: number | null }).bisyncMaxDelete).toBeNull();
+    expect(
+      ((await cleared.json()) as { bisyncMaxDeletePercent: number | null })
+        .bisyncMaxDeletePercent,
+    ).toBeNull();
   });
 
   test("a mount cache mode round-trips and rejects anything outside the allowlist", async () => {

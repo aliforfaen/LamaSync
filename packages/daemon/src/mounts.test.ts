@@ -173,6 +173,35 @@ describe("allow-other preflight (LAMA-320)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // LAMA-345: mountCacheMode must actually reach the mount argv. Storing and
+  // rendering it was not enough — the persistent unit and every restart build
+  // their args here.
+  test("(e) a per-assignment cache mode replaces the profile's --vfs-cache-mode", () => {
+    const base = {
+      remotePath: "remote:backup",
+      mountPath: "/mnt/backup",
+      configPath: "/cfg/rclone.conf",
+      cacheProfile: "normal" as const,
+      cacheMaxSize: "1G",
+      cacheDir: "/cache/vfs/x",
+      allowOther: false,
+    };
+    const profileDefault = buildRcloneArgs(base);
+    const index = profileDefault.indexOf("--vfs-cache-mode");
+    // profile "normal" is `full`
+    expect(profileDefault[index + 1]).toBe("full");
+
+    const overridden = buildRcloneArgs({ ...base, cacheMode: "minimal" });
+    const overriddenIndex = overridden.indexOf("--vfs-cache-mode");
+    expect(overridden[overriddenIndex + 1]).toBe("minimal");
+    // The rest of the profile (max-age / max-size) still applies.
+    expect(overridden).toContain("--vfs-cache-max-age");
+    expect(overridden[overridden.indexOf("--vfs-cache-max-size") + 1]).toBe("1G");
+
+    const off = buildRcloneArgs({ ...base, cacheMode: "off" });
+    expect(off[off.indexOf("--vfs-cache-mode") + 1]).toBe("off");
+  });
 });
 
 describe("startMount surfaces early rclone failures (LAMA-320)", () => {

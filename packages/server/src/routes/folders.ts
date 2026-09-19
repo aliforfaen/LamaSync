@@ -16,7 +16,7 @@ import {
   resolveDestination,
   isValidWatchQuietSec,
   normalizeWatchQuietSec,
-  validateBisyncMaxDelete,
+  validateBisyncMaxDeletePercent,
   validateMountCacheMode,
   validateScheduleExpression,
 } from "@lamasync/core";
@@ -176,7 +176,7 @@ interface AssignmentRow {
   ignore_git_metadata: number;
   respect_gitignore: number;
   // LAMA-345: allowlisted typed tuning options.
-  bisync_max_delete: number | null;
+  bisync_max_delete_percent: number | null;
   mount_cache_mode: string | null;
 }
 
@@ -221,7 +221,7 @@ const ASSIGNMENT_COLUMNS = `id, folder_id, host_id, role, local_path, remote_nam
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password,
                   watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore,
-                  bisync_max_delete, mount_cache_mode`;
+                  bisync_max_delete_percent, mount_cache_mode`;
 
 function rowToAssignment(r: AssignmentRow): FolderAssignment {
   return {
@@ -260,7 +260,7 @@ function rowToAssignment(r: AssignmentRow): FolderAssignment {
     respectGitignore: r.respect_gitignore === 1,
     // LAMA-345 stage 4: allowlisted tuning options. `off` is a real rclone
     // mode, so only NULL means "use rclone's default".
-    bisyncMaxDelete: r.bisync_max_delete,
+    bisyncMaxDeletePercent: r.bisync_max_delete_percent,
     mountCacheMode:
       r.mount_cache_mode === "off" ||
       r.mount_cache_mode === "minimal" ||
@@ -849,7 +849,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         ignoreGitMetadata?: boolean;
         respectGitignore?: boolean;
         // LAMA-345 stage 4: allowlisted typed tuning options.
-        bisyncMaxDelete?: number | null;
+        bisyncMaxDeletePercent?: number | null;
         mountCacheMode?: string | null;
       };
       const host = db
@@ -886,7 +886,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       // same helpers the PATCH route uses, so an out-of-range value can never
       // reach the daemon as an rclone flag.
       const tuneError =
-        validateBisyncMaxDelete(b.bisyncMaxDelete) ??
+        validateBisyncMaxDeletePercent(b.bisyncMaxDeletePercent) ??
         (validateMountCacheMode(b.mountCacheMode)
           ? null
           : "mountCacheMode must be null, off, minimal, writes or full");
@@ -927,7 +927,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
             timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
             cache_profile, cache_max_size, restic_repository, restic_password,
             watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore,
-            bisync_max_delete, mount_cache_mode)
+            bisync_max_delete_percent, mount_cache_mode)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
@@ -960,7 +960,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           b.ignoreGitMetadata === true ? 1 : 0,
           b.respectGitignore === true ? 1 : 0,
           // LAMA-345 stage 4: allowlisted tuning options.
-          b.bisyncMaxDelete ?? null,
+          b.bisyncMaxDeletePercent ?? null,
           b.mountCacheMode ?? null,
         ],
       );
@@ -971,7 +971,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password,
                   watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore,
-                  bisync_max_delete, mount_cache_mode
+                  bisync_max_delete_percent, mount_cache_mode
            FROM folder_assignments WHERE id = ?`,
         )
         .get(id);
@@ -1031,7 +1031,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         respectGitignore: t.Optional(t.Boolean()),
         // LAMA-345 stage 4: allowlisted typed tuning options. The route
         // re-validates with the shared helpers and returns a clean 400.
-        bisyncMaxDelete: t.Optional(t.Union([t.Number(), t.Null()])),
+        bisyncMaxDeletePercent: t.Optional(t.Union([t.Number(), t.Null()])),
         mountCacheMode: t.Optional(
           t.Union([
             t.Literal("off"),
@@ -1143,7 +1143,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         ignoreGitMetadata?: boolean;
         respectGitignore?: boolean;
         // LAMA-345 stage 4: allowlisted typed tuning options.
-        bisyncMaxDelete?: number | null;
+        bisyncMaxDeletePercent?: number | null;
         mountCacheMode?: string | null;
       };
       const sets: string[] = [];
@@ -1295,14 +1295,16 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       }
       // LAMA-345 stage 4: allowlisted typed tuning. Both are validated with
       // the shared core helpers so no out-of-range rclone flag can be stored.
-      if (b.bisyncMaxDelete !== undefined) {
-        const error = validateBisyncMaxDelete(b.bisyncMaxDelete);
+      if (b.bisyncMaxDeletePercent !== undefined) {
+        const error = validateBisyncMaxDeletePercent(b.bisyncMaxDeletePercent);
         if (error) {
           set.status = 400;
           return { error };
         }
-        sets.push("bisync_max_delete = ?");
-        args.push(b.bisyncMaxDelete === null ? null : b.bisyncMaxDelete);
+        sets.push("bisync_max_delete_percent = ?");
+        args.push(
+          b.bisyncMaxDeletePercent === null ? null : b.bisyncMaxDeletePercent,
+        );
       }
       if (b.mountCacheMode !== undefined) {
         if (!validateMountCacheMode(b.mountCacheMode)) {
@@ -1332,7 +1334,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
                   timeout_sec, bandwidth_schedule, max_retries, available_space_threshold,
                   cache_profile, cache_max_size, restic_repository, restic_password,
                   watch_enabled, watch_quiet_sec, ignore_git_metadata, respect_gitignore,
-                  bisync_max_delete, mount_cache_mode
+                  bisync_max_delete_percent, mount_cache_mode
            FROM folder_assignments WHERE folder_id = ? AND host_id = ?`,
         )
         .get(params.id, params.hostId);
@@ -1394,7 +1396,7 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
         respectGitignore: t.Optional(t.Boolean()),
         // LAMA-345 stage 4: allowlisted typed tuning options (validated in
         // the handler with the shared core helpers).
-        bisyncMaxDelete: t.Optional(t.Union([t.Number(), t.Null()])),
+        bisyncMaxDeletePercent: t.Optional(t.Union([t.Number(), t.Null()])),
         mountCacheMode: t.Optional(
           t.Union([
             t.Literal("off"),

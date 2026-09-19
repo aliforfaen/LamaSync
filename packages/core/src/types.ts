@@ -374,11 +374,17 @@ export interface FolderAssignment {
   respectGitignore?: boolean;    // default false; apply Git ignore semantics
   // LAMA-345 stage 4: allowlisted, typed tuning options. Both are ordinary
   // rclone flags the daemon builds itself — never a free-form arguments
-  // field. `bisyncMaxDelete` caps how many deletions a single bisync run may
-  // propagate before aborting (rclone `--max-delete`, -1/omitted = no cap),
-  // and `mountCacheMode` selects the mount VFS cache mode
-  // (rclone `--vfs-cache-mode`).
-  bisyncMaxDelete?: number | null;
+  // field.
+  //
+  // `bisyncMaxDeletePercent` is the rclone bisync `--max-delete` threshold as
+  // a PERCENTAGE (0-100) of the files rclone may delete on one side before it
+  // aborts. It is NOT a file count and NOT "no cap": omitting it (null) means
+  // rclone's own default, currently 50%. LamaSync never disables the check.
+  //
+  // `mountCacheMode` selects the mount VFS cache mode
+  // (rclone `--vfs-cache-mode`) and applies to the persistent mount, not just
+  // a one-shot command.
+  bisyncMaxDeletePercent?: number | null;
   mountCacheMode?: MountCacheMode | null;
 }
 

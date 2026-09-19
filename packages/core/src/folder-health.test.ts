@@ -3,15 +3,18 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  BISYNC_MAX_DELETE_PERCENT_DEFAULT,
   FOLDER_HEALTH_STALE_MS,
   checkFolderPlanValidity,
+  checkPlanSemantics,
   deriveFolderHealth,
   describeBootstrapAuthority,
   folderHealthStaleness,
+  formatDeletePercent,
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
-  validateBisyncMaxDelete,
+  validateBisyncMaxDeletePercent,
   validateMountCacheMode,
   type FolderHealthFacts,
 } from "./folder-health.ts";
@@ -201,9 +204,16 @@ describe("folderHealthStaleness", () => {
 });
 
 describe("describeBootstrapAuthority", () => {
-  test("spells out which side loses files", () => {
-    expect(describeBootstrapAuthority("remote").long).toContain("removed locally");
-    expect(describeBootstrapAuthority("local").long).toContain("removed there");
+  test("describes the conflicting-file winner, not a deletion of unique files", () => {
+    const remote = describeBootstrapAuthority("remote");
+    expect(remote.short).toBe("Remote wins conflicts");
+    expect(remote.long).toContain("copied to the other side");
+    expect(remote.long).toContain("the remote's version is kept");
+    // The old wording wrongly claimed unique files get removed. Bisync copies
+    // every file that exists on only one side.
+    expect(remote.long).not.toContain("removed locally");
+    expect(describeBootstrapAuthority("local").long).not.toContain("removed there");
+    expect(describeBootstrapAuthority("local").long).toContain("this device's version is kept");
   });
 });
 
@@ -283,14 +293,51 @@ describe("parseFolderInterventionPayload", () => {
     expect(parsed).toEqual({ ok: false, error: "unsupported field: rcloneArgs" });
   });
 
-  test("a maxDelete cap is bounded", () => {
+  test("resume requires an explicit confirmation like every other mutation", () => {
+    expect(
+      parseFolderInterventionPayload({ folderId: "f1", intervention: "resume" }),
+    ).toEqual({ ok: false, error: "resume requires confirm: true" });
+    expect(
+      parseFolderInterventionPayload({ folderId: "f1", intervention: "resume", confirm: true }).ok,
+    ).toBe(true);
+  });
+
+  test("a planId is only accepted for the operations that need one", () => {
+    expect(
+      parseFolderInterventionPayload({
+        folderId: "f1",
+        intervention: "resume",
+        confirm: true,
+        planId,
+      }),
+    ).toEqual({ ok: false, error: "resume does not take a planId" });
+  });
+
+  test("the deletion threshold is a percentage, not a file count", () => {
     expect(
       parseFolderInterventionPayload({
         folderId: "f1",
         intervention: "cancel",
-        maxDelete: 1_000_001,
+        maxDeletePercent: 101,
       }),
-    ).toEqual({ ok: false, error: "maxDelete must be an integer between 0 and 1000000" });
+    ).toEqual({ ok: false, error: "maxDeletePercent must be an integer between 0 and 100" });
+    expect(
+      parseFolderInterventionPayload({
+        folderId: "f1",
+        intervention: "cancel",
+        maxDeletePercent: 25,
+      }).ok,
+    ).toBe(true);
+  });
+
+  test("the legacy file-count field name is rejected outright", () => {
+    expect(
+      parseFolderInterventionPayload({
+        folderId: "f1",
+        intervention: "cancel",
+        maxDelete: 5,
+      }),
+    ).toEqual({ ok: false, error: "unsupported field: maxDelete" });
   });
 });
 
@@ -309,6 +356,28 @@ describe("parseFolderPlanRequestPayload", () => {
     });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.payload.authority).toBe("local");
+  });
+
+  test("a plan request carries the reviewed deletion percentage and bounds it", () => {
+    const parsed = parseFolderPlanRequestPayload({
+      folderId: "f1",
+      intervention: "seed",
+      authority: "local",
+      maxDeletePercent: 10,
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.payload.maxDeletePercent).toBe(10);
+    expect(
+      parseFolderPlanRequestPayload({
+        folderId: "f1",
+        intervention: "seed",
+        authority: "local",
+        maxDeletePercent: 500,
+      }),
+    ).toEqual({
+      ok: false,
+      error: "bisyncMaxDeletePercent must be null or an integer between 0 and 100",
+    });
   });
 });
 
@@ -348,14 +417,80 @@ describe("checkFolderPlanValidity", () => {
   });
 });
 
+describe("checkPlanSemantics", () => {
+  const plan = {
+    intervention: "seed" as const,
+    authority: "local" as const,
+    maxDeletePercent: 10 as number | null,
+  };
+
+  test("the exact reviewed operation is authorized, and returns the plan's values", () => {
+    const verdict = checkPlanSemantics(plan, { intervention: "seed", authority: "local" });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.execution).toEqual({
+      intervention: "seed",
+      authority: "local",
+      maxDeletePercent: 10,
+    });
+  });
+
+  test("a remote request can never ride a local plan", () => {
+    const verdict = checkPlanSemantics(plan, { intervention: "seed", authority: "remote" });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.execution).toBeNull();
+    expect(verdict.message).toContain("reviewed with this device authoritative");
+  });
+
+  test("a different intervention is refused", () => {
+    const verdict = checkPlanSemantics(plan, { intervention: "resync", authority: "local" });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.message).toContain('reviewed as "seed"');
+  });
+
+  test("a different deletion threshold is refused", () => {
+    const verdict = checkPlanSemantics(plan, {
+      intervention: "seed",
+      authority: "local",
+      maxDeletePercent: 90,
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.message).toContain("10%");
+    expect(verdict.message).toContain("90%");
+  });
+
+  test("omitting the threshold means 'use the plan', not 'widen it'", () => {
+    const verdict = checkPlanSemantics(plan, { intervention: "seed", authority: "local" });
+    expect(verdict.execution?.maxDeletePercent).toBe(10);
+  });
+
+  test("initialize is bound to remote even when the request omits the side", () => {
+    const initialize = { intervention: "initialize" as const, authority: "remote" as const, maxDeletePercent: null };
+    expect(checkPlanSemantics(initialize, { intervention: "initialize" }).ok).toBe(true);
+    expect(
+      checkPlanSemantics(initialize, { intervention: "initialize", authority: "local" }).ok,
+    ).toBe(false);
+  });
+});
+
+describe("formatDeletePercent", () => {
+  test("null names rclone's default rather than implying no cap", () => {
+    expect(formatDeletePercent(null)).toBe("rclone's default (50%)");
+    expect(formatDeletePercent(0)).toBe("0%");
+    expect(formatDeletePercent(75)).toBe("75%");
+    expect(BISYNC_MAX_DELETE_PERCENT_DEFAULT).toBe(50);
+  });
+});
+
 describe("allowlisted tuning validators", () => {
-  test("bisyncMaxDelete is null or a bounded integer", () => {
-    expect(validateBisyncMaxDelete(null)).toBeNull();
-    expect(validateBisyncMaxDelete(0)).toBeNull();
-    expect(validateBisyncMaxDelete(1_000_000)).toBeNull();
-    expect(validateBisyncMaxDelete(-1)).toContain("bisyncMaxDelete must be");
-    expect(validateBisyncMaxDelete(1_000_001)).toContain("bisyncMaxDelete must be");
-    expect(validateBisyncMaxDelete(1.5)).toContain("bisyncMaxDelete must be");
+  test("bisyncMaxDeletePercent is null or an integer percentage 0-100", () => {
+    expect(validateBisyncMaxDeletePercent(null)).toBeNull();
+    expect(validateBisyncMaxDeletePercent(0)).toBeNull();
+    expect(validateBisyncMaxDeletePercent(100)).toBeNull();
+    expect(validateBisyncMaxDeletePercent(-1)).toContain("bisyncMaxDeletePercent must be");
+    expect(validateBisyncMaxDeletePercent(101)).toContain("bisyncMaxDeletePercent must be");
+    // A file count is not a percentage: 1000000 is out of range.
+    expect(validateBisyncMaxDeletePercent(1_000_000)).toContain("bisyncMaxDeletePercent must be");
+    expect(validateBisyncMaxDeletePercent(1.5)).toContain("bisyncMaxDeletePercent must be");
   });
 
   test("mountCacheMode is one of the four rclone modes", () => {

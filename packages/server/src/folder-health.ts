@@ -56,6 +56,7 @@ interface PlanRow {
   assignment_id: string;
   intervention: string;
   authority: string;
+  max_delete_percent: number | null;
   summary: string;
   changes: string;
   config_revision: number;
@@ -536,6 +537,9 @@ function rowToPlan(row: PlanRow): FolderSyncPlan {
     assignmentId: row.assignment_id,
     intervention: row.intervention as FolderSyncPlan["intervention"],
     authority: row.authority === "local" ? "local" : "remote",
+    // The reviewed deletion threshold is part of the plan's semantics.
+    maxDeletePercent:
+      typeof row.max_delete_percent === "number" ? row.max_delete_percent : null,
     summary: row.summary,
     changes: {
       wouldCopy: list(rec["wouldCopy"]),
@@ -552,16 +556,18 @@ function rowToPlan(row: PlanRow): FolderSyncPlan {
   };
 }
 
-const PLAN_SELECT = `SELECT id, folder_id, host_id, assignment_id, intervention, authority, summary,
-       changes, config_revision, filter_fingerprint, baseline_fingerprint, created_at, expires_at
+const PLAN_SELECT = `SELECT id, folder_id, host_id, assignment_id, intervention, authority,
+       max_delete_percent, summary, changes, config_revision, filter_fingerprint,
+       baseline_fingerprint, created_at, expires_at
   FROM folder_sync_plans`;
 
 export function recordFolderPlan(database: Database, plan: FolderSyncPlan): void {
   database.run(
     `INSERT INTO folder_sync_plans
-       (id, folder_id, host_id, assignment_id, intervention, authority, summary, changes,
-        config_revision, filter_fingerprint, baseline_fingerprint, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (id, folder_id, host_id, assignment_id, intervention, authority, max_delete_percent,
+        summary, changes, config_revision, filter_fingerprint, baseline_fingerprint,
+        created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        summary = excluded.summary,
        changes = excluded.changes,
@@ -577,6 +583,7 @@ export function recordFolderPlan(database: Database, plan: FolderSyncPlan): void
       plan.assignmentId,
       plan.intervention,
       plan.authority,
+      plan.maxDeletePercent,
       plan.summary,
       JSON.stringify(plan.changes),
       plan.configRevision,

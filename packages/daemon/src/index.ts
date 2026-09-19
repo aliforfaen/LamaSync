@@ -9,6 +9,7 @@ import type {
   FolderHealthDeepMeasurement,
   HostConfig,
   OperationLog,
+  MountCacheMode,
   OperationReport,
   QueuedAction,
   QueuedActionStatus,
@@ -49,6 +50,7 @@ import { diagnoseFolder, measureLocalTree, probeFolderHealth } from "./folder-he
 import {
   buildSyncPlan,
   runControlFor,
+  runControlFromExecution,
   verifyPlanAgainstLive,
 } from "./intervention.ts";
 import {
@@ -150,6 +152,8 @@ export interface SwitchContext {
     configPath: string;
     cacheProfile?: "normal" | "media" | "minimal";
     cacheMaxSize?: string;
+    /** LAMA-345: validated per-assignment mount cache mode override. */
+    cacheMode?: MountCacheMode | null;
   }) => Promise<unknown>;
   stopMount: (folderId: string) => Promise<void>;
   getRemoteName: (remoteName: string | null | undefined, folderId: string) => string;
@@ -331,6 +335,7 @@ export async function switchToMount(folderId: string): Promise<SwitchResult> {
         configPath,
         cacheProfile: assignment.cacheProfile ?? undefined,
         cacheMaxSize: assignment.cacheMaxSize ?? undefined,
+        cacheMode: assignment.mountCacheMode ?? null,
       });
     } finally {
       cleanup();
@@ -438,6 +443,8 @@ async function systemdAwareStartMount(opts: {
   configPath: string;
   cacheProfile?: "normal" | "media" | "minimal";
   cacheMaxSize?: string;
+  /** LAMA-345: validated per-assignment mount cache mode override. */
+  cacheMode?: MountCacheMode | null;
 }): Promise<unknown> {
   if (!isSystemdAvailable()) {
     return startMount(opts);
@@ -458,6 +465,8 @@ async function systemdAwareStartMount(opts: {
     let adopted = adoptMount(opts.folderId, {
       mountPath: opts.mountPath,
       cacheProfile: opts.cacheProfile ?? "normal",
+      cacheMode: opts.cacheMode ?? null,
+      cacheMaxSize: opts.cacheMaxSize ?? null,
       remotePath: opts.remotePath,
       configPath: opts.configPath,
     });
@@ -467,6 +476,8 @@ async function systemdAwareStartMount(opts: {
       adopted = adoptMount(opts.folderId, {
         mountPath: opts.mountPath,
         cacheProfile: opts.cacheProfile ?? "normal",
+        cacheMode: opts.cacheMode ?? null,
+        cacheMaxSize: opts.cacheMaxSize ?? null,
         remotePath: opts.remotePath,
         configPath: opts.configPath,
       });
@@ -551,22 +562,37 @@ async function reconcileMountsOnRefresh(
     const effective = effectiveFolderType(folder, assignment);
     const active = isMountUnitActive(assignment.folderId);
     if (effective === "mount") {
+      const wantedCacheMode = assignment.mountCacheMode ?? null;
       if (active) {
         // Already up under systemd — adopt it into the in-process registry
         // so the scheduler and local CLI see it as live.
-        if (listMounts().some((m) => m.folderId === assignment.folderId)) continue;
-        const adopted = adoptMount(assignment.folderId, {
-          mountPath: assignment.localPath,
-          cacheProfile: assignment.cacheProfile ?? "normal",
-          remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${assignment.folderId}`,
-          configPath: "/dev/null",
-        });
-        if (adopted) {
+        const tracked = getInternalMount(assignment.folderId);
+        const trackedMode = tracked?.cacheMode ?? null;
+        // LAMA-345: a changed mount cache mode is a mount-lifecycle change,
+        // not a decoration. An adopted-from-unit process keeps running with
+        // the mode it was started with, so reconcile must restart it.
+        if (tracked && trackedMode !== wantedCacheMode) {
           console.log(
-            `[reconcile] adopted existing mount unit for folder=${assignment.folderId}`,
+            `[reconcile] mount cache mode changed for folder=${assignment.folderId} (${trackedMode ?? "profile"} → ${wantedCacheMode ?? "profile"}); restarting mount`,
           );
+          await systemdAwareStopMount(assignment.folderId);
+        } else {
+          if (tracked) continue;
+          const adopted = adoptMount(assignment.folderId, {
+            mountPath: assignment.localPath,
+            cacheProfile: assignment.cacheProfile ?? "normal",
+            cacheMode: wantedCacheMode,
+            cacheMaxSize: assignment.cacheMaxSize ?? null,
+            remotePath: `${getRemoteName(assignment.remoteName, assignment.folderId)}:${assignment.folderId}`,
+            configPath: "/dev/null",
+          });
+          if (adopted) {
+            console.log(
+              `[reconcile] adopted existing mount unit for folder=${assignment.folderId}`,
+            );
+          }
+          continue;
         }
-        continue;
       }
       // Not running — start it. systemdAwareStartMount writes the unit,
       // starts it, waits, and falls back to in-process when systemd is
@@ -582,6 +608,7 @@ async function reconcileMountsOnRefresh(
             configPath,
             cacheProfile: assignment.cacheProfile ?? undefined,
             cacheMaxSize: assignment.cacheMaxSize ?? undefined,
+            cacheMode: assignment.mountCacheMode ?? null,
           });
           console.log(
             `[reconcile] started mount for folder=${assignment.folderId} (effective=mount)`,
@@ -1313,8 +1340,8 @@ async function main(): Promise<void> {
               hostId,
               intervention: parsed.payload.intervention,
               authority: parsed.payload.authority,
-              ...(parsed.payload.maxDelete !== undefined
-                ? { maxDelete: parsed.payload.maxDelete }
+              ...(parsed.payload.maxDeletePercent !== undefined
+                ? { maxDeletePercent: parsed.payload.maxDeletePercent }
                 : {}),
               runDryRun: (runControl) =>
                 runOnce(target.assignment, {
@@ -1361,9 +1388,18 @@ async function main(): Promise<void> {
             return;
           }
 
-          // Guarded interventions must be backed by a plan the operator
-          // actually reviewed. The daemon re-checks it against its own live
-          // revision, filter fingerprint and baseline.
+          const config = hostConfig;
+          if (!config) {
+            await ack("failed", "no host config cached");
+            return;
+          }
+
+          // LAMA-345: guarded interventions must be backed by a plan the
+          // operator actually reviewed, and execution is driven by the PLAN's
+          // own reviewed semantics — never by the request, which can only be
+          // refused. A plan reviewed as "seed from this host at 10%" cannot
+          // authorize a remote-authority resync or a 90% threshold.
+          let control: BisyncRunControl;
           if (instruction.planId) {
             const stored = await client.getFolderPlan(instruction.planId);
             const plan = stored?.plan ?? null;
@@ -1376,33 +1412,42 @@ async function main(): Promise<void> {
               target.assignment,
               effectiveFolderType(target.folder, target.assignment),
             );
-            const verdict = verifyPlanAgainstLive(plan, {
-              assignmentId: target.assignment.id,
-              hostId,
-              folderId: instruction.folderId,
-              configRevision: hostConfig?.host.configRevision ?? 0,
-              filterFingerprint: filter.fingerprint,
-              baselineFingerprint: baselineFingerprint(
-                inspectBisyncBaseline(stateDir),
-              ),
-            });
-            if (!verdict.ok) {
-              await ack("failed", `plan is stale: ${verdict.message}`);
+            const verdict = verifyPlanAgainstLive(
+              plan,
+              {
+                assignmentId: target.assignment.id,
+                hostId,
+                folderId: instruction.folderId,
+                configRevision: config.host.configRevision ?? 0,
+                filterFingerprint: filter.fingerprint,
+                baselineFingerprint: baselineFingerprint(
+                  inspectBisyncBaseline(stateDir),
+                ),
+              },
+              {
+                intervention: instruction.intervention,
+                ...(instruction.authority ? { authority: instruction.authority } : {}),
+                ...(instruction.maxDeletePercent !== undefined
+                  ? { maxDeletePercent: instruction.maxDeletePercent }
+                  : {}),
+              },
+            );
+            if (!verdict.ok || verdict.execution === null) {
+              console.warn(
+                `[intervention] folder=${instruction.folderId} refused plan=${plan.id}: ${verdict.message}`,
+              );
+              await ack("failed", `plan refused — ${verdict.message}`);
               return;
             }
+            control = runControlFromExecution(verdict.execution);
+            console.log(
+              `[intervention] folder=${instruction.folderId} approved plan=${plan.id} intervention=${control.mode} authority=${control.authority ?? "(none)"} maxDeletePercent=${control.maxDeletePercent ?? "default"}`,
+            );
+          } else {
+            // `resume` is the only mutating intervention without a plan: it
+            // continues a stopped run and discards no listings.
+            control = runControlFor(instruction.intervention, {});
           }
-
-          const config = hostConfig;
-          if (!config) {
-            await ack("failed", "no host config cached");
-            return;
-          }
-          const control = runControlFor(instruction.intervention, {
-            ...(instruction.authority ? { authority: instruction.authority } : {}),
-            ...(instruction.maxDelete !== undefined
-              ? { maxDelete: instruction.maxDelete }
-              : {}),
-          });
           // LAMA-345: run through runOnce so the intervention takes the same
           // destination lock and in-process mutex as any other run, reports
           // its own operation_log row, and refreshes the assignment health.
@@ -1866,6 +1911,9 @@ async function runMountCommand(folderId: string): Promise<void> {
       configPath,
       cacheProfile,
       cacheMaxSize: assignment.cacheMaxSize ?? undefined,
+      // LAMA-345: the persistent mount unit runs `lamasyncd --mount <id>`, so
+      // this is where the reviewed cache mode actually reaches the mount.
+      cacheMode: assignment.mountCacheMode ?? null,
     });
 
     const internal = getInternalMount(folderId);

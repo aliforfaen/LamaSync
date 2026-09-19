@@ -414,6 +414,48 @@ describe("LAMA-345 — folder health actions enqueue validation", () => {
     expect(res.status).toBe(201);
   });
 
+  test("resume requires the same explicit confirmation as any other mutation", async () => {
+    const missing = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: { folderId: "f1", intervention: "resume" },
+    });
+    expect(missing.status).toBe(400);
+    expect(((await missing.json()) as { error: string }).error).toBe("resume requires confirm: true");
+
+    const ok = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: { folderId: "f1", intervention: "resume", confirm: true },
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  test("the deletion threshold is a percentage bounded to 0-100", async () => {
+    const tooBig = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "plan_folder",
+      payload: {
+        folderId: "f1",
+        intervention: "seed",
+        authority: "local",
+        maxDeletePercent: 500,
+      },
+    });
+    expect(tooBig.status).toBe(400);
+    expect(((await tooBig.json()) as { error: string }).error).toContain(
+      "bisyncMaxDeletePercent must be",
+    );
+
+    const ok = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "plan_folder",
+      payload: {
+        folderId: "f1",
+        intervention: "seed",
+        authority: "local",
+        maxDeletePercent: 20,
+      },
+    });
+    expect(ok.status).toBe(201);
+  });
+
   test("an argv-shaped payload is refused before it is ever stored", async () => {
     const res = await postJson("/api/v1/hosts/host-a/actions", {
       type: "folder_intervention",

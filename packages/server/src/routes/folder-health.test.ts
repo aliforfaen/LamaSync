@@ -125,6 +125,7 @@ function planBody(overrides: Record<string, unknown> = {}): Record<string, unkno
     assignmentId: "a1",
     intervention: "initialize",
     authority: "remote",
+    maxDeletePercent: 10,
     summary: "Initialize this host from remote — remote is authoritative.",
     changes: { wouldCopy: ["/a"], wouldDelete: [], wouldMkdir: [], files: 1, bytes: 10 },
     configRevision: 4,
@@ -406,6 +407,35 @@ describe("POST /api/v1/folder-plans and reads", () => {
       }),
     );
     expect(foreign.status).toBe(403);
+  });
+
+  test("the reviewed deletion PERCENTAGE round-trips on the plan", async () => {
+    const created = await reportPlan(deviceAToken, planBody({ maxDeletePercent: 25 }));
+    expect(created.status).toBe(201);
+    const body = (await created.json()) as { maxDeletePercent: number | null };
+    expect(body.maxDeletePercent).toBe(25);
+
+    const read = await app.handle(
+      request("/api/v1/folder-plans/plan-1", {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      }),
+    );
+    const stored = (await read.json()) as {
+      plan: { intervention: string; authority: string; maxDeletePercent: number | null };
+    };
+    // The plan's semantics travel with it so an execution can be bound to them.
+    expect(stored.plan).toMatchObject({
+      intervention: "initialize",
+      authority: "remote",
+      maxDeletePercent: 25,
+    });
+  });
+
+  test("a null threshold is persisted as 'rclone default', not dropped", async () => {
+    const created = await reportPlan(deviceAToken, planBody({ maxDeletePercent: null }));
+    expect(created.status).toBe(201);
+    const body = (await created.json()) as { maxDeletePercent: number | null };
+    expect(body.maxDeletePercent).toBeNull();
   });
 
   test("a plan for an assignment that does not belong to the folder is refused", async () => {

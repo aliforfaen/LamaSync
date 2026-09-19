@@ -75,10 +75,11 @@ CREATE TABLE IF NOT EXISTS folder_assignments (
     watch_quiet_sec     INTEGER,
     ignore_git_metadata INTEGER NOT NULL DEFAULT 0,
     respect_gitignore   INTEGER NOT NULL DEFAULT 0,
-    -- LAMA-345 stage 4: allowlisted typed tuning options. bisync_max_delete
-    -- is rclone --max-delete (NULL => rclone's default, no cap);
+    -- LAMA-345 stage 4: allowlisted typed tuning options.
+    -- bisync_max_delete_percent is rclone bisync --max-delete, a PERCENTAGE
+    -- 0-100 (NULL => rclone's own default, currently 50%; never "no cap").
     -- mount_cache_mode is rclone --vfs-cache-mode for mount assignments.
-    bisync_max_delete   INTEGER,
+    bisync_max_delete_percent INTEGER,
     mount_cache_mode    TEXT,
     demo                INTEGER NOT NULL DEFAULT 0,
     UNIQUE(folder_id, host_id)
@@ -422,6 +423,11 @@ CREATE TABLE IF NOT EXISTS folder_sync_plans (
     assignment_id        TEXT NOT NULL,
     intervention         TEXT NOT NULL,
     authority            TEXT NOT NULL,
+    -- LAMA-345: the reviewed deletion threshold (rclone bisync --max-delete
+    -- PERCENTAGE, 0-100). NULL means the plan used rclone's default (50%).
+    -- Execution must match this value, so a plan reviewed at 10% can never be
+    -- executed at 90%.
+    max_delete_percent   INTEGER,
     summary              TEXT NOT NULL,
     changes              TEXT NOT NULL,
     config_revision      INTEGER NOT NULL,
@@ -975,7 +981,10 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE application_protections ADD COLUMN retention_policy TEXT",
   "ALTER TABLE folders ADD COLUMN retention_policy TEXT",
   // LAMA-345 stage 4: allowlisted typed tuning options on the assignment.
-  "ALTER TABLE folder_assignments ADD COLUMN bisync_max_delete INTEGER",
+  // The earlier unreleased name `bisync_max_delete` was never deployed; the
+  // release-blocking correction is that rclone's bisync --max-delete is a
+  // PERCENTAGE, so the column is named for what it holds.
+  "ALTER TABLE folder_assignments ADD COLUMN bisync_max_delete_percent INTEGER",
   "ALTER TABLE folder_assignments ADD COLUMN mount_cache_mode TEXT",
   // LAMA-345 stage 1/2: assignment health, bounded history and reviewed plans.
   "CREATE TABLE IF NOT EXISTS folder_health (assignment_id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, state TEXT NOT NULL, reasons TEXT NOT NULL, facts TEXT NOT NULL, reported_at INTEGER NOT NULL)",
@@ -983,7 +992,8 @@ export const MIGRATIONS: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_folder_health_host ON folder_health(host_id)",
   "CREATE TABLE IF NOT EXISTS folder_health_history (id INTEGER PRIMARY KEY AUTOINCREMENT, assignment_id TEXT NOT NULL, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, state TEXT NOT NULL, reasons TEXT NOT NULL, reported_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_folder_health_history_assignment ON folder_health_history(assignment_id, reported_at)",
-  "CREATE TABLE IF NOT EXISTS folder_sync_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, intervention TEXT NOT NULL, authority TEXT NOT NULL, summary TEXT NOT NULL, changes TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS folder_sync_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, intervention TEXT NOT NULL, authority TEXT NOT NULL, max_delete_percent INTEGER, summary TEXT NOT NULL, changes TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+  "ALTER TABLE folder_sync_plans ADD COLUMN max_delete_percent INTEGER",
   "CREATE INDEX IF NOT EXISTS idx_folder_sync_plans_assignment ON folder_sync_plans(assignment_id, created_at)",
 ];
 

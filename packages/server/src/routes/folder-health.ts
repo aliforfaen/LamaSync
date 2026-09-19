@@ -245,6 +245,9 @@ export const folderHealthRoutes = new Elysia({ prefix: "/api/v1" })
           t.Literal("resync"),
         ]),
         authority: t.Union([t.Literal("remote"), t.Literal("local")]),
+        // Reviewed rclone bisync --max-delete PERCENTAGE (0-100). null = the
+        // plan used rclone's default (50%). Execution must match this value.
+        maxDeletePercent: t.Union([t.Number(), t.Null()]),
         summary: t.String({ maxLength: 400 }),
         changes: t.Object({
           wouldCopy: t.Array(t.String({ maxLength: 400 }), { maxItems: 20 }),

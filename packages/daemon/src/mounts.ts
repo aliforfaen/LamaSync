@@ -8,7 +8,7 @@ import {
 } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { MountEntry, CacheProfile } from "@lamasync/core";
+import type { MountEntry, CacheProfile, MountCacheMode } from "@lamasync/core";
 
 const HEALTH_CHECK_INTERVAL_MS = 60_000;
 const MOUNT_WAIT_TIMEOUT_MS = 30_000;
@@ -37,6 +37,14 @@ const mounts = new Map<string, MountEntry>();
 export interface InternalMount extends MountEntry {
   remotePath: string;
   configPath: string;
+  /**
+   * LAMA-345: the assignment's validated `--vfs-cache-mode` override (null =
+   * use the cache profile's mode). Retained so a restart and an adopted
+   * systemd mount keep the reviewed setting instead of silently reverting to
+   * the profile default.
+   */
+  cacheMode: MountCacheMode | null;
+  cacheMaxSize: string | null;
   restartTimer: ReturnType<typeof setTimeout> | null;
   proc: Bun.Subprocess | null;
   stoppedByUs: boolean;
@@ -254,6 +262,11 @@ export function buildRcloneArgs(opts: {
   cacheMaxSize: string;
   cacheDir: string;
   allowOther: boolean;
+  /**
+   * LAMA-345: validated per-assignment override. When set it replaces the
+   * cache profile's mode — the profile still supplies max-age/max-size.
+   */
+  cacheMode?: MountCacheMode | null;
 }): string[] {
   const profile = CACHE_PROFILE_DEFAULTS[opts.cacheProfile];
   return [
@@ -263,7 +276,7 @@ export function buildRcloneArgs(opts: {
     "--config",
     opts.configPath,
     "--vfs-cache-mode",
-    profile.mode,
+    opts.cacheMode ?? profile.mode,
     "--vfs-cache-max-age",
     profile.maxAge,
     "--vfs-cache-max-size",
@@ -332,7 +345,10 @@ async function attemptRestart(folderId: string): Promise<void> {
       mountPath: internal.path,
       configPath: internal.configPath,
       cacheProfile: internal.cacheProfile,
-      cacheMaxSize: CACHE_PROFILE_DEFAULTS[internal.cacheProfile].maxSize,
+      cacheMaxSize:
+        internal.cacheMaxSize ?? CACHE_PROFILE_DEFAULTS[internal.cacheProfile].maxSize,
+      // LAMA-345: a restart must not silently drop the reviewed cache mode.
+      cacheMode: internal.cacheMode,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -365,6 +381,8 @@ export function adoptMount(
     cacheProfile: CacheProfile;
     remotePath: string;
     configPath: string;
+    cacheMode?: MountCacheMode | null;
+    cacheMaxSize?: string | null;
   },
 ): MountEntry | null {
   const pid = readPidFile(getPidFilePath(folderId));
@@ -389,6 +407,8 @@ export function adoptMount(
     ...entry,
     remotePath: opts.remotePath,
     configPath: opts.configPath,
+    cacheMode: opts.cacheMode ?? null,
+    cacheMaxSize: opts.cacheMaxSize ?? null,
     restartTimer: null,
     proc: null,
     stoppedByUs: false,
@@ -403,12 +423,15 @@ export async function startMount(opts: {
   configPath: string;
   cacheProfile?: CacheProfile;
   cacheMaxSize?: string;
+  /** LAMA-345: validated per-assignment `--vfs-cache-mode` override. */
+  cacheMode?: MountCacheMode | null;
   /** rclone binary to spawn (default: `rclone` resolved from PATH). Injectable for tests. */
   rcloneBin?: string;
 }): Promise<MountEntry> {
   const cacheProfile: CacheProfile = opts.cacheProfile ?? "normal";
   const profileDefaults = CACHE_PROFILE_DEFAULTS[cacheProfile];
   const cacheMaxSize = opts.cacheMaxSize ?? profileDefaults.maxSize;
+  const cacheMode = opts.cacheMode ?? null;
 
   // Already tracked: return the live entry as-is.
   const existing = mounts.get(opts.folderId);
@@ -443,6 +466,8 @@ export async function startMount(opts: {
         ...entry,
         remotePath: opts.remotePath,
         configPath: opts.configPath,
+        cacheMode,
+        cacheMaxSize: opts.cacheMaxSize ?? null,
         restartTimer: null,
         proc: null,
         stoppedByUs: false,
@@ -488,6 +513,7 @@ export async function startMount(opts: {
     cacheMaxSize,
     cacheDir,
     allowOther,
+    cacheMode,
   });
 
   const rcloneBin = opts.rcloneBin ?? "rclone";
@@ -533,6 +559,8 @@ export async function startMount(opts: {
     ...entry,
     remotePath: opts.remotePath,
     configPath,
+    cacheMode,
+    cacheMaxSize: opts.cacheMaxSize ?? null,
     restartTimer: null,
     proc,
     stoppedByUs: false,

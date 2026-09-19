@@ -30,6 +30,7 @@ import {
   pickConflictAction,
   bisyncResyncPlan,
   shouldAcknowledgeFilter,
+  selectRunTimeoutSec,
 } from "./executor.ts";
 
 describe("appArchivePath", () => {
@@ -862,5 +863,37 @@ describe("shouldAcknowledgeFilter (LAMA-345)", () => {
     expect(
       shouldAcknowledgeFilter({ filterChanged: false, runSucceeded: true, baselineEstablished: true }),
     ).toBe(false);
+  });
+});
+
+// LAMA-345: a planned dry run is a real enumeration of both sides, so it must
+// not be cut off by the legacy 60 s preview budget — that is exactly what
+// would make every plan on a Projects-scale folder time out.
+describe("selectRunTimeoutSec (LAMA-345)", () => {
+  test("a planned dry run uses the assignment timeout", () => {
+    expect(
+      selectRunTimeoutSec({ dryRun: true, planned: true, assignmentTimeoutSec: 3_600 }),
+    ).toBe(3_600);
+  });
+
+  test("a planned dry run with no assignment timeout falls back to the run default, not 60 s", () => {
+    expect(selectRunTimeoutSec({ dryRun: true, planned: true, assignmentTimeoutSec: null })).toBe(
+      600,
+    );
+  });
+
+  test("a legacy ad-hoc preview keeps the short budget", () => {
+    expect(
+      selectRunTimeoutSec({ dryRun: true, planned: false, assignmentTimeoutSec: 3_600 }),
+    ).toBe(60);
+  });
+
+  test("a real run uses the assignment timeout, else the run default", () => {
+    expect(
+      selectRunTimeoutSec({ dryRun: false, planned: false, assignmentTimeoutSec: 120 }),
+    ).toBe(120);
+    expect(
+      selectRunTimeoutSec({ dryRun: false, planned: false, assignmentTimeoutSec: null }),
+    ).toBe(600);
   });
 });

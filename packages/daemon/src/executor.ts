@@ -78,8 +78,12 @@ export interface BisyncRunControl {
    * path1` and `local` → `--resync-mode path2`.
    */
   authority?: "remote" | "local";
-  /** Allowlisted deletion cap for this run (rclone `--max-delete`). */
-  maxDelete?: number;
+  /**
+   * Allowlisted deletion threshold for this run: an rclone bisync
+   * `--max-delete` PERCENTAGE (0-100), not a file count. Omitted means the
+   * assignment's configured percentage, else rclone's own default (50%).
+   */
+  maxDeletePercent?: number;
   /** The reviewed plan this execution was approved against. */
   planId?: string;
 }
@@ -223,6 +227,29 @@ interface CommandResult {
 const DEFAULT_TIMEOUT_SEC = 600;
 const DRY_RUN_TIMEOUT_SEC = 60;
 const MOUNT_TIMEOUT_SEC = 30;
+
+/**
+ * LAMA-345: how long a run may take.
+ *
+ * A *planned* dry run is a real enumeration of both sides against the actual
+ * listings, so it must use the assignment's own timeout — the legacy 60 s
+ * preview budget cannot finish a Projects-scale tree and would make every
+ * plan fail on exactly the folders this feature exists for. A legacy ad-hoc
+ * preview (the `trigger_sync --dry-run` button, which carries no plan) keeps
+ * the short budget so a stray click still returns quickly. A real run uses the
+ * assignment timeout, else the default.
+ *
+ * Pure and exported so the selection is unit-tested without spawning rclone.
+ */
+export function selectRunTimeoutSec(input: {
+  dryRun: boolean;
+  /** True when a reviewed plan/intervention control is attached. */
+  planned: boolean;
+  assignmentTimeoutSec?: number | null;
+}): number {
+  if (input.dryRun && !input.planned) return DRY_RUN_TIMEOUT_SEC;
+  return input.assignmentTimeoutSec ?? DEFAULT_TIMEOUT_SEC;
+}
 const DISK_SPACE_DEFAULT = 1_000_000_000;
 const BISYNC_CORRUPTION_MARKERS = ["bisync aborted", "inconsistent state", "must use --resync", "state corruption"];
 
@@ -797,7 +824,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           console.warn(`[executor] folder=${folder.id} applying resolved conflicts had errors: ${resolved.errors.join("; ")}`);
         }
       }
-      const maxDelete = bisync.maxDelete ?? assignment.bisyncMaxDelete ?? null;
+      const maxDeletePercent =
+        bisync.maxDeletePercent ?? assignment.bisyncMaxDeletePercent ?? null;
       if (dry) {
         if (opts.bisync) {
           // LAMA-345: a *planned* dry run is executed against the real
@@ -808,7 +836,9 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           baselineStateDir = sd;
           mkdirSync(sd, { recursive: true });
           command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--dry-run", "--workdir", sd, "--max-lock", "10m"];
-          if (maxDelete !== null) command.push("--max-delete", String(maxDelete));
+          if (maxDeletePercent !== null) {
+            command.push("--max-delete", String(maxDeletePercent));
+          }
           const dryPlan = bisyncResyncPlan({
             baselineReady: inspectBisyncBaseline(sd).ready,
             filterChanged: false,
@@ -820,7 +850,11 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         } else {
           command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--dry-run"];
         }
-        timeoutSec = DRY_RUN_TIMEOUT_SEC;
+        timeoutSec = selectRunTimeoutSec({
+          dryRun: true,
+          planned: opts.bisync !== undefined,
+          assignmentTimeoutSec: assignment.timeoutSec,
+        });
       } else {
         const sd = bisyncStateDir(folder.id);
         baselineStateDir = sd;
@@ -834,7 +868,9 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         const first = !inspection.ready;
         command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--workdir", sd, "--resilient", "--recover", "--max-lock", "10m"];
         // LAMA-345 stage 4: allowlisted deletion cap (rclone --max-delete).
-        if (maxDelete !== null) command.push("--max-delete", String(maxDelete));
+        if (maxDeletePercent !== null) {
+          command.push("--max-delete", String(maxDeletePercent));
+        }
 
         // LAMA-345: the effective filter universe = Git-ignore rules (when
         // respectGitignore is on) + the .lamasyncignore patterns. A change to

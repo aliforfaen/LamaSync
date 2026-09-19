@@ -7,6 +7,7 @@ import {
   buildPlanSummary,
   parseDryRunChanges,
   runControlFor,
+  runControlFromExecution,
   verifyPlanAgainstLive,
 } from "./intervention.ts";
 
@@ -56,14 +57,16 @@ describe("buildPlanSummary", () => {
   test("names the operation and the authoritative side, in plain language", () => {
     const summary = buildPlanSummary("initialize", "remote", empty, false);
     expect(summary).toContain("Initialize this host from remote");
-    expect(summary).toContain("remote is authoritative");
+    expect(summary).toContain("the remote wins conflicting files");
     expect(summary).toContain("no file changes detected");
+    // Deleting files is never implied by the authority — only the dry run says.
+    expect(summary).not.toContain("removed");
   });
 
-  test("seeding the remote says this host wins", () => {
+  test("seeding the remote says this host wins conflicting files", () => {
     const summary = buildPlanSummary("seed", "local", empty, false);
     expect(summary).toContain("Seed the remote from this host");
-    expect(summary).toContain("this host is authoritative");
+    expect(summary).toContain("this device wins conflicting files");
   });
 
   test("counts the planned work and flags a filter change", () => {
@@ -88,7 +91,11 @@ describe("verifyPlanAgainstLive", () => {
     configRevision: 9,
     filterFingerprint: "fp",
     baselineFingerprint: "base",
+    intervention: "seed" as const,
+    authority: "local" as const,
+    maxDeletePercent: 10 as number | null,
   };
+  const requested = { intervention: "seed" as const, authority: "local" as const };
   const live = {
     assignmentId: "a1",
     hostId: "dev-vm",
@@ -99,30 +106,84 @@ describe("verifyPlanAgainstLive", () => {
     now: 1_000,
   };
 
-  test("a current plan for the right assignment passes", () => {
-    expect(verifyPlanAgainstLive(plan, live).ok).toBe(true);
+  test("a current plan for the right assignment passes and yields the plan's own values", () => {
+    const verdict = verifyPlanAgainstLive(plan, live, requested);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.execution).toEqual({
+      intervention: "seed",
+      authority: "local",
+      maxDeletePercent: 10,
+    });
   });
 
   test("an expired plan is refused with the operator-facing reason", () => {
-    const verdict = verifyPlanAgainstLive(plan, { ...live, now: 2_000 });
+    const verdict = verifyPlanAgainstLive(plan, { ...live, now: 2_000 }, requested);
     expect(verdict.ok).toBe(false);
     expect(verdict.reason).toBe("expired");
+    expect(verdict.execution).toBeNull();
   });
 
   test("a plan for another assignment is refused outright", () => {
-    const verdict = verifyPlanAgainstLive(plan, { ...live, assignmentId: "a2" });
+    const verdict = verifyPlanAgainstLive(plan, { ...live, assignmentId: "a2" }, requested);
     expect(verdict.ok).toBe(false);
     expect(verdict.reason).toBe("missing");
   });
 
   test("a changed filter universe invalidates the plan", () => {
-    const verdict = verifyPlanAgainstLive(plan, { ...live, filterFingerprint: "different" });
+    const verdict = verifyPlanAgainstLive(
+      plan,
+      { ...live, filterFingerprint: "different" },
+      requested,
+    );
     expect(verdict.reason).toBe("filter_changed");
   });
 
   test("a rewritten baseline invalidates the plan", () => {
-    const verdict = verifyPlanAgainstLive(plan, { ...live, baselineFingerprint: "different" });
+    const verdict = verifyPlanAgainstLive(
+      plan,
+      { ...live, baselineFingerprint: "different" },
+      requested,
+    );
     expect(verdict.reason).toBe("baseline_changed");
+  });
+
+  // The release-blocking correction: freshness alone is not enough. A plan is
+  // bound to WHAT was reviewed.
+  test("a local plan can never authorize a remote-authority resync", () => {
+    const verdict = verifyPlanAgainstLive(plan, live, {
+      intervention: "resync",
+      authority: "remote",
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe("semantics");
+    expect(verdict.execution).toBeNull();
+  });
+
+  test("a seed plan can never authorize a different intervention", () => {
+    const verdict = verifyPlanAgainstLive(plan, live, {
+      intervention: "resync",
+      authority: "local",
+    });
+    expect(verdict.reason).toBe("semantics");
+  });
+
+  test("a plan reviewed at 10% can never be executed at 90%", () => {
+    const verdict = verifyPlanAgainstLive(plan, live, {
+      intervention: "seed",
+      authority: "local",
+      maxDeletePercent: 90,
+    });
+    expect(verdict.reason).toBe("semantics");
+    expect(verdict.execution).toBeNull();
+  });
+
+  test("semantics are checked before freshness, so a mismatch reads as a mismatch", () => {
+    const verdict = verifyPlanAgainstLive(
+      plan,
+      { ...live, now: 5_000, filterFingerprint: "different" },
+      { intervention: "seed", authority: "remote" },
+    );
+    expect(verdict.reason).toBe("semantics");
   });
 });
 
@@ -150,11 +211,48 @@ describe("runControlFor", () => {
     expect(runControlFor("cancel", {})).toEqual({ mode: "normal" });
   });
 
-  test("a deletion cap travels with the run when supplied", () => {
-    expect(runControlFor("seed", { maxDelete: 25 })).toEqual({
+  test("a deletion threshold travels with the run as a percentage", () => {
+    expect(runControlFor("seed", { maxDeletePercent: 25 })).toEqual({
       mode: "seed",
       authority: "local",
-      maxDelete: 25,
+      maxDeletePercent: 25,
     });
+  });
+
+  test("null/omitted means 'rclone default', not 'no cap', so no flag is built", () => {
+    expect(runControlFor("seed", { maxDeletePercent: null })).toEqual({
+      mode: "seed",
+      authority: "local",
+    });
+    expect(runControlFor("seed", {})).toEqual({ mode: "seed", authority: "local" });
+  });
+
+  test("resume carries the threshold but never a resync", () => {
+    expect(runControlFor("resume", { maxDeletePercent: 5 })).toEqual({
+      mode: "normal",
+      maxDeletePercent: 5,
+    });
+  });
+});
+
+describe("runControlFromExecution", () => {
+  test("execution follows the reviewed plan values verbatim", () => {
+    expect(
+      runControlFromExecution({
+        intervention: "resync",
+        authority: "local",
+        maxDeletePercent: 10,
+      }),
+    ).toEqual({ mode: "resync", authority: "local", maxDeletePercent: 10 });
+  });
+
+  test("a null threshold becomes 'no flag' rather than an explicit value", () => {
+    expect(
+      runControlFromExecution({
+        intervention: "initialize",
+        authority: "remote",
+        maxDeletePercent: null,
+      }),
+    ).toEqual({ mode: "initialize", authority: "remote" });
   });
 });
