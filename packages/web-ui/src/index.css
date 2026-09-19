@@ -3983,6 +3983,11 @@ html[data-motion="full"] .confetti-bit {
 .text-action { padding: 0; border: 0; background: transparent; font: inherit; cursor: pointer; }
 .needs-list { display: grid; }
 .needs-row { display: grid; grid-template-columns: 1.8rem minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: 0.85rem 0; border-bottom: 1px solid var(--border); color: var(--text); }
+/* LAMA-345 follow-up: a needs-row may be an in-page ACTION (a real button that
+   scrolls to a section) rather than a link. Strip the button chrome so it
+   matches the link rows exactly; the shared :focus-visible ring still applies. */
+button.needs-row { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--border); font: inherit; text-align: left; cursor: pointer; }
+button.needs-row:last-of-type { border-bottom: 0; }
 .needs-row:last-child { border-bottom: 0; }
 .needs-row:hover { text-decoration: none; }
 .needs-row-mark { display: grid; place-items: center; width: 1.6rem; height: 1.6rem; border-radius: 50%; font-weight: 700; }
@@ -5512,4 +5517,20 @@ html[data-density="compact"] .settings-row {
   .fleet-health-item-title {
     overflow-wrap: anywhere;
   }
+}
+
+/* LAMA-345 follow-up — Folders deep-link landing. The requested assignment
+ * gets a restrained accent so it is obvious which one the link meant, and the
+ * wrapper that receives focus stays visually inert. */
+.deep-link-notice {
+  margin: var(--space-2) 0 0;
+}
+
+tr.deep-link-target > td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-info);
+}
+
+.folder-health-anchor:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }

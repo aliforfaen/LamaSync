@@ -8,6 +8,7 @@
 
 import { Link } from "react-router-dom";
 import type { FleetHealthSummary } from "@lamasync/core/fleet-health";
+import { FLEET_HEALTH_SECTION_ID } from "../scroll-to-section.ts";
 import {
   bucketPlain,
   bucketTitle,
@@ -39,7 +40,16 @@ export function FleetHealthSummaryCard({
   const Heading = headingLevel === 2 ? "h2" : "h3";
 
   return (
-    <section className="section fleet-health-summary" aria-labelledby="fleet-health-heading">
+    // `id` + `tabIndex={-1}` make this a focusable landmark. The Dashboard's
+    // "needs attention" row is a button that scrolls and focuses it — a
+    // fragment link would not work under HashRouter. Focus lands here and the
+    // accessible name comes from the heading below.
+    <section
+      id={FLEET_HEALTH_SECTION_ID}
+      tabIndex={-1}
+      className="section fleet-health-summary"
+      aria-labelledby="fleet-health-heading"
+    >
       <div className="section-head">
         <Heading id="fleet-health-heading">Fleet health</Heading>
         <span className="muted fleet-health-generated">

@@ -20,6 +20,8 @@ import { GettingStarted } from "../components/GettingStarted.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 // LAMA-345 follow-up: the server-derived managed-folder + device summary.
 import { FleetHealthSummaryCard } from "../components/FleetHealthSummary.tsx";
+// LAMA-345 follow-up: in-page section navigation for the urgent row.
+import { FLEET_HEALTH_SECTION_ID, scrollToSection } from "../scroll-to-section.ts";
 import { InlineError } from "../components/InlineError.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 import { useTransportHealth } from "../hooks/useTransportHealth.ts";
@@ -618,7 +620,7 @@ export function Dashboard() {
                 {failed.length ? <NeedsRow tone="critical" label={`${failed.length} failed operation${failed.length === 1 ? "" : "s"}`} detail="Review the latest backup or sync result." to="/operations" /> : null}
                 {counts.conflicts ? <NeedsRow tone="warning" label={`${counts.conflicts} pending conflict${counts.conflicts === 1 ? "" : "s"}`} detail={data.pendingConflicts.slice(0, 2).map((c) => folderNameById.get(c.folderId) ?? c.folderId).join(" · ")} to="/conflicts" /> : null}
                 {verificationNeedsAttention ? <NeedsRow tone="warning" label="Backups not verified yet" detail="Run a recovery check before you rely on this destination." to="/backups" /> : null}
-                {urgent > 0 ? <NeedsRow tone="critical" label={`${urgent} folder or device${urgent === 1 ? "" : "s"} needing attention`} detail="Folder health and missing always-on machines — see Fleet health below." to="/#fleet-health-heading" /> : null}
+                {urgent > 0 ? <NeedsRowScrollAction tone="critical" label={`${urgent} folder or device${urgent === 1 ? "" : "s"} needing attention`} detail="Folder health and missing always-on machines — see Fleet health below." targetId={FLEET_HEALTH_SECTION_ID} /> : null}
               </div>
             )}
           </section>
@@ -698,6 +700,43 @@ function PanelHeading({ title, subtitle, action }: { title: string; subtitle: st
 
 function NeedsRow({ tone, label, detail, to }: { tone: "critical" | "warning" | "info"; label: string; detail: string; to: string }) {
   return <Link className={`needs-row needs-row--${tone}`} to={to}><span className="needs-row-mark" aria-hidden="true">{tone === "critical" ? "×" : tone === "warning" ? "!" : "↗"}</span><span><strong>{label}</strong><small>{detail}</small></span><span className="needs-row-arrow" aria-hidden="true">→</span></Link>;
+}
+
+/**
+ * LAMA-345 follow-up: the same row, but for a section on THIS page.
+ *
+ * Deliberately a real `<button>`, not a router Link with a `#fragment`. The app
+ * runs under HashRouter, so `to="/#fleet-health-heading"` becomes
+ * `/#/#fleet-health-heading`: the route changes and the target never scrolls.
+ * Scrolling and focusing are DOM actions, so a button is also the honest
+ * semantic — it does not navigate.
+ *
+ * Exported for its static-markup regression test.
+ */
+export function NeedsRowScrollAction({
+  tone,
+  label,
+  detail,
+  targetId,
+}: {
+  tone: "critical" | "warning" | "info";
+  label: string;
+  detail: string;
+  targetId: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`needs-row needs-row--${tone} needs-row--action`}
+      onClick={() => {
+        scrollToSection(targetId);
+      }}
+    >
+      <span className="needs-row-mark" aria-hidden="true">{tone === "critical" ? "×" : tone === "warning" ? "!" : "↗"}</span>
+      <span><strong>{label}</strong><small>{detail}</small></span>
+      <span className="needs-row-arrow" aria-hidden="true">→</span>
+    </button>
+  );
 }
 
 function ContextCard({ icon, title, body, to }: { icon: ReactNode; title: string; body: string; to: string }) {

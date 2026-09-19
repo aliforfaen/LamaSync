@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Link, useLocation } from "react-router-dom";
@@ -22,6 +22,18 @@ import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 // LAMA-345: the per-assignment health card + its pure presentation rules.
 import { FolderHealthCard } from "../components/FolderHealthCard.tsx";
 import { healthLabel, healthTone } from "../folder-health.ts";
+// LAMA-345 follow-up: honour /folders?folder=<id>&host=<id> links from the
+// Fleet health card.
+import {
+  EMPTY_FOLDERS_DEEP_LINK,
+  applyFolderDeepLink,
+  deepLinkNotice,
+  folderDeepLinkToken,
+  parseFolderDeepLink,
+  resolveFolderDeepLink,
+} from "../folder-deep-link.ts";
+import { focusAndScroll } from "../scroll-to-section.ts";
+import { prefersReducedMotion } from "../motion.ts";
 import { HintText } from "../components/Hint.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { RetentionPanel } from "../components/RetentionPanel.tsx";
@@ -223,6 +235,11 @@ export function Folders() {
   // sibling "Versions" pattern in Dotfiles.tsx. Per-assignment actions live
   // in the expanded sub-row, so the main table row height stays constant.
   const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
+  // LAMA-345 follow-up: deep-link state, plus the two DOM anchors the scroll
+  // effect focuses (the assignment row, and its health card once it loads).
+  const [deepLinkState, setDeepLinkState] = useState(EMPTY_FOLDERS_DEEP_LINK);
+  const [deepLinkRowNode, setDeepLinkRowNode] = useState<HTMLElement | null>(null);
+  const [deepLinkCardNode, setDeepLinkCardNode] = useState<HTMLElement | null>(null);
   // LAMA-325: retention panel for one restic-backed folder.
   const [retentionFolder, setRetentionFolder] = useState<Folder | null>(null);
   // LAMA-345: assignment-level health for the expanded folder, keyed by host.
@@ -341,6 +358,81 @@ export function Folders() {
     };
   }, [expandedFolderId]);
 
+  // LAMA-345 follow-up: resolve `?folder=&host=` against the loaded folders.
+  // `location.key` is the navigation identity, so a second click on the same
+  // link (or back/forward) re-applies while plain re-renders do not.
+  const deepLink = useMemo(() => parseFolderDeepLink(location.search), [location.search]);
+  const deepLinkTarget = useMemo(
+    () => resolveFolderDeepLink(deepLink, items ?? []),
+    [deepLink, items],
+  );
+  const deepLinkToken = useMemo(
+    // The PARSED link, not the resolved target: an unresolvable link is still a
+    // navigation that must clear a stale target and explain itself.
+    () => folderDeepLinkToken(location.key, deepLink),
+    [location.key, deepLink],
+  );
+  useEffect(() => {
+    setDeepLinkState((prev) =>
+      applyFolderDeepLink(prev, {
+        token: deepLinkToken,
+        target: deepLinkTarget,
+        // The folder list loads asynchronously; until it arrives a null target
+        // means "not known yet", so the navigation must not be consumed.
+        ready: items !== null,
+      }),
+    );
+  }, [deepLinkToken, deepLinkTarget, items]);
+
+  // Open the requested folder. The reducer returns the same state object for a
+  // navigation it already handled, so this cannot fight a manual collapse.
+  useEffect(() => {
+    if (deepLinkState.expandedFolderId !== null) {
+      setExpandedFolderId(deepLinkState.expandedFolderId);
+    }
+  }, [deepLinkState.expandedFolderId, deepLinkState.handledToken]);
+
+  // Land on the requested assignment: focus the row immediately (it exists as
+  // soon as the folder opens) and upgrade to the health card once it renders.
+  // A stable callback identity keeps React from re-invoking the ref on every
+  // render, and one "handled" record per token keeps the jump from repeating.
+  const setRowAnchor = useCallback((el: HTMLElement | null) => setDeepLinkRowNode(el), []);
+  const setCardAnchor = useCallback((el: HTMLElement | null) => setDeepLinkCardNode(el), []);
+  const focusedRef = useRef<{ token: string; kind: "row" | "card" } | null>(null);
+  useEffect(() => {
+    const token = deepLinkState.handledToken;
+    if (token === null || deepLinkState.focusHostId === null) return;
+    // `isConnected` matters: a ref callback fires during the commit, so the
+    // state update it schedules is not visible to this effect yet. On a second
+    // deep link in the same mounted page the effect therefore still holds the
+    // PREVIOUS target's node — which the same commit has already detached.
+    // Focusing it blurs to <body>, and recording the token would stop the real
+    // card from ever being focused. Only a live node counts.
+    const card = deepLinkCardNode?.isConnected === true ? deepLinkCardNode : null;
+    const row = card === null && deepLinkRowNode?.isConnected === true ? deepLinkRowNode : null;
+    const node = card ?? row;
+    if (node === null) return;
+    const kind: "row" | "card" = card === null ? "row" : "card";
+    const previous = focusedRef.current;
+    // Row first (always available), then the card once it arrives — but never
+    // back down, and never twice for the same token.
+    if (previous && previous.token === token && (previous.kind === "card" || previous.kind === kind)) {
+      return;
+    }
+    // Focus on the NEXT frame and re-check that the node is still mounted.
+    // `deepLinkState` is updated from a passive effect, so this effect can run
+    // one render before the DOM reflects the new target — still holding the
+    // previous target's node, which that render then removes. Focusing it would
+    // blur focus to <body> and, worse, consume the token so the real card was
+    // never focused. The cleanup cancels a superseded frame.
+    const frame = requestAnimationFrame(() => {
+      if (!node.isConnected) return;
+      focusAndScroll(node, prefersReducedMotion());
+      focusedRef.current = { token, kind };
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [deepLinkCardNode, deepLinkRowNode, deepLinkState]);
+
   // LAMA-235: when the selected host disappears from the host list (or the
   // filter narrows to nothing), don't leave a stale filter behind.
   const hostLabel = (id: string) => hosts.find((h) => h.id === id)?.hostname ?? id;
@@ -348,6 +440,12 @@ export function Folders() {
     (backupMode ? folder.type === "backup" : true) &&
     (hostFilter === null || assignments.some((a) => a.hostId === hostFilter)),
   );
+
+  // A link to a folder the current filter (or the Backups view) hides is a real
+  // dead end; the notice explains it without touching the filter.
+  const deepLinkMessage = deepLinkNotice(deepLink, deepLinkTarget, {
+    visibleFolderIds: filteredItems.map((item) => item.folder.id),
+  });
 
   // LAMA-297: group the list so a folder appears exactly once — under a
   // single host section (assigned to only that host), under "Shared"
@@ -1005,6 +1103,13 @@ export function Folders() {
       </div>
       {error && <div className="error">{error}</div>}
       {syncNote && <div className="banner">{syncNote}</div>}
+      {/* LAMA-345 follow-up: a deep link that could not be honoured says so
+          rather than looking like a dead link. It never filters the table. */}
+      {deepLinkMessage && (
+        <p className="muted deep-link-notice" role="status">
+          {deepLinkMessage}
+        </p>
+      )}
       {showForm && renderForm(form, setForm, onCreate, "Create", () => { setShowForm(false); setForm(DEFAULT_FORM); })}
 
       {editingId && renderForm(editForm, setEditForm, onEdit, "Save", () => setEditingId(null), true)}
@@ -1228,9 +1333,18 @@ export function Folders() {
                             // LAMA-345: the assignment's latest health, when the
                             // expanded read has it.
                             const assignmentHealth = health[assignment.hostId];
+                            // LAMA-345 follow-up: is this the assignment a
+                            // deep link asked for?
+                            const isDeepLinkTarget =
+                              deepLinkState.expandedFolderId === folder.id &&
+                              deepLinkState.focusHostId === assignment.hostId;
                             return (
                             <Fragment key={assignment.id}>
-                            <tr>
+                            <tr
+                              className={isDeepLinkTarget ? "deep-link-target" : undefined}
+                              tabIndex={isDeepLinkTarget ? -1 : undefined}
+                              ref={isDeepLinkTarget ? setRowAnchor : undefined}
+                            >
                               <td>
                                 <span className="assignment-device-name">{hostLabel(assignment.hostId)}</span>
                                 {assignmentHealth ? (
@@ -1326,6 +1440,15 @@ export function Folders() {
                             {assignmentHealth ? (
                               <tr className="folder-health-row">
                                 <td colSpan={6}>
+                                  {/* Focus target for the deep link: a plain
+                                      wrapper so the card itself stays
+                                      presentational, focusable only when it is
+                                      what the operator was sent to. */}
+                                  <div
+                                    className="folder-health-anchor"
+                                    tabIndex={isDeepLinkTarget ? -1 : undefined}
+                                    ref={isDeepLinkTarget ? setCardAnchor : undefined}
+                                  >
                                   <FolderHealthCard
                                     folderId={folder.id}
                                     hostId={assignment.hostId}
@@ -1338,6 +1461,7 @@ export function Folders() {
                                       void refreshHealth(folder.id);
                                     }}
                                   />
+                                  </div>
                                 </td>
                               </tr>
                             ) : null}

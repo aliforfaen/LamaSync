@@ -37,26 +37,40 @@ export interface HostRowLike {
   host_class: string | null;
 }
 
-const VALID_HOST_CLASSES: readonly string[] = [
-  "server",
-  "desktop",
-  "laptop",
-  "nas",
-  "phone",
-  "tablet",
-  "unknown",
-];
-
-const VALID_HOST_STATUSES: readonly string[] = ["online", "offline", "degraded", "unknown"];
-
+/**
+ * Coerce a stored `hosts.host_class` into the wire union.
+ *
+ * An explicit switch, not a membership check plus a cast: the switch narrows
+ * the string to the literal union for the compiler, so an unknown value cannot
+ * slip through and no `as` is needed (AGENTS.md forbids both `any` and inline
+ * casts).
+ */
 export function hostClassFromRow(value: string | null | undefined): HostClass {
-  const v = value ?? "";
-  return VALID_HOST_CLASSES.includes(v) ? (v as HostClass) : "unknown";
+  switch (value) {
+    case "server":
+    case "desktop":
+    case "laptop":
+    case "nas":
+    case "phone":
+    case "tablet":
+    case "unknown":
+      return value;
+    default:
+      return "unknown";
+  }
 }
 
+/** Same shape for `hosts.status`; anything unrecognised reads as `unknown`. */
 export function hostStatusFromRow(value: string | null | undefined): HostStatus {
-  const v = value ?? "";
-  return VALID_HOST_STATUSES.includes(v) ? (v as HostStatus) : "unknown";
+  switch (value) {
+    case "online":
+    case "offline":
+    case "degraded":
+    case "unknown":
+      return value;
+    default:
+      return "unknown";
+  }
 }
 
 /** The release facts needed to evaluate an update, resolved once per request. */
