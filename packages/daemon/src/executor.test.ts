@@ -28,6 +28,8 @@ import {
   executeAssignment,
   isPauseActive,
   pickConflictAction,
+  bisyncResyncPlan,
+  shouldAcknowledgeFilter,
 } from "./executor.ts";
 
 describe("appArchivePath", () => {
@@ -787,5 +789,78 @@ describe("keepLocalConflictCopy (LAMA-336)", () => {
     } finally {
       chmodSync(lockedDir, 0o700);
     }
+  });
+});
+
+// LAMA-345: the bisync resync decision, extracted as a pure function so the
+// two acceptance rules are pinned without invoking rclone.
+describe("bisyncResyncPlan (LAMA-345)", () => {
+  test("a completed run with a ready paired baseline is NOT resynced", () => {
+    expect(
+      bisyncResyncPlan({ baselineReady: true, filterChanged: false, control: undefined }),
+    ).toEqual({ resync: false, resyncMode: null, reason: null });
+  });
+
+  test("no usable listing pair forces a resync with the conservative Path 1 (remote) authority", () => {
+    expect(
+      bisyncResyncPlan({ baselineReady: false, filterChanged: false, control: undefined }),
+    ).toEqual({ resync: true, resyncMode: "path1", reason: "no-baseline" });
+  });
+
+  test("a changed filter universe forces a resync rather than reusing stale listings", () => {
+    expect(
+      bisyncResyncPlan({ baselineReady: true, filterChanged: true, control: undefined }),
+    ).toEqual({ resync: true, resyncMode: "path1", reason: "filter-changed" });
+  });
+
+  test("an explicit intervention always resyncs with the reviewed authority", () => {
+    expect(
+      bisyncResyncPlan({
+        baselineReady: true,
+        filterChanged: false,
+        control: { mode: "initialize", authority: "remote" },
+      }),
+    ).toEqual({ resync: true, resyncMode: "path1", reason: "initialize" });
+    // `seed` — the local tree (Path 2) is authoritative, never the implicit
+    // Path 1 direction the old code fell into.
+    expect(
+      bisyncResyncPlan({
+        baselineReady: true,
+        filterChanged: false,
+        control: { mode: "seed", authority: "local" },
+      }),
+    ).toEqual({ resync: true, resyncMode: "path2", reason: "seed" });
+  });
+
+  test("a resume is a normal run — no resync, no authority", () => {
+    expect(
+      bisyncResyncPlan({ baselineReady: true, filterChanged: false, control: { mode: "normal" } }),
+    ).toEqual({ resync: false, resyncMode: null, reason: null });
+  });
+});
+
+describe("shouldAcknowledgeFilter (LAMA-345)", () => {
+  test("acknowledges only after a clean run that left a usable baseline", () => {
+    expect(
+      shouldAcknowledgeFilter({ filterChanged: true, runSucceeded: true, baselineEstablished: true }),
+    ).toBe(true);
+  });
+
+  test("a failed resync never acknowledges the new fingerprint", () => {
+    expect(
+      shouldAcknowledgeFilter({ filterChanged: true, runSucceeded: false, baselineEstablished: true }),
+    ).toBe(false);
+  });
+
+  test("a run that left no usable pair never acknowledges it either", () => {
+    expect(
+      shouldAcknowledgeFilter({ filterChanged: true, runSucceeded: true, baselineEstablished: false }),
+    ).toBe(false);
+  });
+
+  test("with no filter change there is nothing to acknowledge", () => {
+    expect(
+      shouldAcknowledgeFilter({ filterChanged: false, runSucceeded: true, baselineEstablished: true }),
+    ).toBe(false);
   });
 });

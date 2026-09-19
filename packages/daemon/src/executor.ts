@@ -84,6 +84,56 @@ export interface BisyncRunControl {
   planId?: string;
 }
 
+/**
+ * LAMA-345: decide whether a bisync run is a resync, and with which
+ * authority. Pure so the two acceptance rules are pinned directly:
+ *
+ *   - a completed run whose paired listing set is ready, with an unchanged
+ *     filter universe and no intervention, is NOT given `--resync`;
+ *   - an explicit intervention always resyncs with the authority the operator
+ *     approved (remote = Path 1 = the remote wins; local = Path 2 = this host
+ *     wins), never the command's implicit direction.
+ */
+export function bisyncResyncPlan(input: {
+  baselineReady: boolean;
+  filterChanged: boolean;
+  control?: BisyncRunControl | undefined;
+}): { resync: boolean; resyncMode: "path1" | "path2" | null; reason: string | null } {
+  const control = input.control;
+  if (control && control.mode !== "normal") {
+    return {
+      resync: true,
+      resyncMode: control.authority === "local" ? "path2" : "path1",
+      reason: control.mode,
+    };
+  }
+  if (!input.baselineReady) {
+    // No usable pair: rclone cannot run without a resync, and the remote
+    // (Path 1) is the conservative authority for an unseeded host.
+    return { resync: true, resyncMode: "path1", reason: "no-baseline" };
+  }
+  if (input.filterChanged) {
+    // The synchronization universe moved: stale listings must not be reused.
+    return { resync: true, resyncMode: "path1", reason: "filter-changed" };
+  }
+  return { resync: false, resyncMode: null, reason: null };
+}
+
+/**
+ * LAMA-345: may this run acknowledge the new filter fingerprint?
+ *
+ * Only a run that exited cleanly AND left a usable listing pair may. A
+ * transient failure would otherwise pair old listings with a new fingerprint
+ * and the next run could incorrectly omit `--resync`.
+ */
+export function shouldAcknowledgeFilter(input: {
+  filterChanged: boolean;
+  runSucceeded: boolean;
+  baselineEstablished: boolean;
+}): boolean {
+  return input.filterChanged && input.runSucceeded && input.baselineEstablished;
+}
+
 interface TransferStats {
   files: number; bytes: number; errors: number; checks: number; transfers: number;
 }
@@ -759,8 +809,13 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           mkdirSync(sd, { recursive: true });
           command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--dry-run", "--workdir", sd, "--max-lock", "10m"];
           if (maxDelete !== null) command.push("--max-delete", String(maxDelete));
-          if (resyncRequested) {
-            command.push("--resync", "--resync-mode", bisync.authority === "local" ? "path2" : "path1");
+          const dryPlan = bisyncResyncPlan({
+            baselineReady: inspectBisyncBaseline(sd).ready,
+            filterChanged: false,
+            control: opts.bisync,
+          });
+          if (dryPlan.resync && dryPlan.resyncMode !== null) {
+            command.push("--resync", "--resync-mode", dryPlan.resyncMode);
           }
         } else {
           command = ["bisync", remotePath, assignment.localPath, "--config", opts.configPath, "--use-json-log", "-v", "--dry-run"];
@@ -806,10 +861,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
 
         if (resyncRequested || first || filterResync) {
           // LAMA-345 stage 3: archive the prior listing pair before a reseed
-          // instead of deleting it, then pin the authority explicitly. With
-          // the command's remote=Path 1 / local=Path 2 shape, `remote` uses
-          // Path 1 authority and `local` uses Path 2 authority. A first run
-          // has no pair to archive, so the guard leaves it alone.
+          // instead of deleting it. A first run has no pair to archive, so the
+          // guard leaves it alone.
           if (inspection.present || inspection.error) {
             try {
               const archived = archiveBisyncState(sd);
@@ -822,12 +875,15 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
             }
           }
         }
-        if (resyncRequested) {
-          command.push("--resync");
-          command.push("--resync-mode", bisync.authority === "local" ? "path2" : "path1");
-        } else if (first || filterResync) {
-          command.push("--resync");
-          command.push("--resync-mode", "path1");
+        // LAMA-345: one pure decision for "resync or not, and with which
+        // explicit authority" (remote = Path 1, local = Path 2).
+        const resyncPlan = bisyncResyncPlan({
+          baselineReady: inspection.ready,
+          filterChanged: filterResync,
+          control: opts.bisync,
+        });
+        if (resyncPlan.resync && resyncPlan.resyncMode !== null) {
+          command.push("--resync", "--resync-mode", resyncPlan.resyncMode);
         }
         timeoutSec = assignment.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
       }
@@ -1044,7 +1100,11 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
   // cleanly AND left a usable baseline. Otherwise a transient failure would
   // pair old listings with a new fingerprint and the next run could
   // incorrectly omit --resync.
-  if (filterResync && runSucceeded && baselineEstablished) {
+  if (shouldAcknowledgeFilter({
+    filterChanged: filterResync,
+    runSucceeded,
+    baselineEstablished,
+  })) {
     if (pendingFilterFingerprint !== null && filterFingerprintFile !== null) {
       try {
         // LAMA-336: atomic — a truncated file would tell the next run that its

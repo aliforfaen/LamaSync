@@ -493,3 +493,20 @@ describe("selectActionTargets (LAMA-311)", () => {
     expect(stale.result).toContain("config refresh failed");
   });
 });
+// LAMA-345: a deliberate cancellation is not a fault. The run's
+// operation_log row keeps the distinct `cancelled` status while the action
+// queue acks `done` — the action did exactly what it was asked.
+describe("summarizeReportForAction — cancelled (LAMA-345)", () => {
+  test("maps cancelled to a done completion with the run's own summary", () => {
+    expect(
+      summarizeReportForAction("cancelled", "sync cancelled by operator", "x"),
+    ).toEqual({ status: "done", result: "sync cancelled by operator" });
+  });
+
+  test("still distinguishes a real failure from a cancellation", () => {
+    expect(summarizeReportForAction("failed", "sync failed (exit 3)", "x")).toEqual({
+      status: "failed",
+      result: "sync failed (exit 3)",
+    });
+  });
+});
