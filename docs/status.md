@@ -13,6 +13,46 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-345 follow-up — fleet-health summary, evidence-based update verdict,
+  and a scheduler defect found by integration.** Same branch, awaiting review.
+  *Dashboard:* a server-derived **Fleet health** card buckets device and
+  managed-folder state into "Needs attention now" (red — unsafe/resync-required/
+  blocked folders, or a genuinely missing always-on server/NAS), "Check when
+  next online" (yellow — work to finish, sleeping devices, updates ready to
+  install), "Not heard from" (neutral — stale/never-reported, explicitly not
+  "broken") and a one-line healthy count. A sleeping laptop/phone/tablet/
+  desktop is never red on its own, a red or never-seen device speaks for its own
+  folders (one root cause, one row), and the page shows a single urgency total
+  (the hero and the card agree). The card links every item to its folder or
+  device, keeps the class-policy reasoning behind a disclosure, and stacks to
+  one column at 390px.
+  *Update evidence:* `updateStatus` is now derived in one place
+  (`@lamasync/core/fleet-health`, serialized centrally by the server and shared
+  by `/health`, `/hosts`, `GET /hosts/:hostId`, the notification sweep and the
+  UI). An "update available" claim now *requires evidence*: the device must have
+  checked in at or after the release's `publishedAt` (inclusive boundary, from
+  the cached release). A device offline since before the release reads "Update
+  not checked — not evaluated since before X was released"; a device that has
+  never reported in is "not checked" too; a device on a NEWER build is not
+  nagged. `updateAvailable` is exactly `updateStatus.actionable`.
+  *One read path:* `loadDerivedFolderHealth` is now the only managed-folder
+  health read. The Dashboard summary previously read the daemon's stored
+  `state` column while the folder card re-derived it, so the same folder could
+  be urgent on the dashboard and healthy in its card (found in a browser pass
+  and fixed, with a regression test).
+  *Integration finding (fixed):* a schedule whose next fire is more than
+  ~24.8 days away overflowed `setTimeout` (`TimeoutOverflowWarning … set to 1`)
+  and fired in a tight loop — a yearly cron, `@yearly`, or a monthly cron just
+  after it fires would have synced continuously. `planTimerDelay` now parks the
+  timer and re-evaluates; both cron paths use it, with behavioural tests that
+  fail against the pre-fix code.
+  *Evidence:* `scripts/lama345-integration.ts` runs a fully isolated server
+  (random port, mktemp data dir, generated key, `HOME` redirected) plus an
+  isolated daemon and exercises heartbeat → folder-health report → `/health`
+  summary → dry-run plan → reviewed-plan validation: 54/54 checks, rclone never
+  invoked (asserted from the daemon log). Browser pass at 1440px and 390px with
+  no console or page errors.
+
 - **LAMA-345 — managed-folder health diagnostics and guided bisync
   intervention.** Implemented in
   `feat-lama-345-folder-health-intervention`; awaits review and release. A clean

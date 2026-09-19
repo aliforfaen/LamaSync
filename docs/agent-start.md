@@ -4,6 +4,15 @@ Read this after `AGENTS.md` when entering a coding worktree.
 
 ## Current work
 
+LAMA-345's follow-up (Dashboard fleet-health summary with the evidence-based
+update verdict, one derived health read path, and the far-future-cron scheduler
+fix) is implemented in this worktree too, with a reusable isolated integration
+harness in `scripts/lama345-integration.ts`. dev-vm still runs the released
+v0.3.11 daemon, so its Projects folder keeps resyncing on every run (the
+`bisync.state` sentinel has never existed there — the paired
+`*.path1.lst`/`*.path2.lst` files are on disk). Deployment gate and the
+evidence are in the LAMA-345 comments.
+
 LAMA-345 (managed-folder health diagnostics and guided bisync intervention) is
 implemented in this worktree across all four planned stages — the shared health
 contract, the lightweight daemon probe and server persistence, the read-only
