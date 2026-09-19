@@ -4,6 +4,16 @@ Read this after `AGENTS.md` when entering a coding worktree.
 
 ## Current work
 
+LAMA-345 (managed-folder health diagnostics and guided bisync intervention) is
+implemented in this worktree across all four planned stages — the shared health
+contract, the lightweight daemon probe and server persistence, the read-only
+diagnose/plan actions, the guarded initialize/seed/resync/resume/cancel
+interventions with the paired-`*.path1.lst`/`*.path2.lst` baseline fix, and the
+Web UI health card, guided approve modal and advanced typed settings. It awaits
+review and release; see the status entry in [status.md](status.md). The
+two-file listing pair replaces the old `bisync.state` sentinel, and filter
+changes are acknowledged only by a resync that actually established a baseline.
+
 LAMA-316's app-backup data contract, LAMA-324 storage destinations, LAMA-325
 retention, and the LAMA-302 real-worktree soak are complete. LAMA-327 live
 sync progress and LAMA-328 persisted stale-while-revalidate folder/storage

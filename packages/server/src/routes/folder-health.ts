@@ -10,8 +10,6 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import {
   checkFolderPlanValidity,
-  type FolderHealthReason,
-  type FolderHealthReasonCode,
   type FolderHealthState,
   type FolderSyncPlan,
   type WSEvent,
@@ -19,12 +17,11 @@ import {
 import { broadcast } from "../ws.ts";
 import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
 import {
-  deleteFolderHealthForAssignment,
-  deleteFolderPlansForAssignment,
   getFolderPlan,
   listFolderHealth,
   listFolderPlans,
   normalizeFolderHealthFacts,
+  normalizeFolderHealthReasons,
   pruneExpiredFolderPlans,
   recordFolderHealth,
   recordFolderPlan,
@@ -128,8 +125,7 @@ export const folderHealthRoutes = new Elysia({ prefix: "/api/v1" })
         folderId: assignment.folder_id,
         hostId: report.hostId,
         state: report.state,
-        // Re-normalized inside recordFolderHealth via the shared helper below.
-        reasons: normalizeReasonsForStore(reasons),
+        reasons: normalizeFolderHealthReasons(reasons),
         facts,
         reportedAt,
       });
@@ -367,35 +363,6 @@ export const folderHealthRoutes = new Elysia({ prefix: "/api/v1" })
       },
     },
   );
-
-/**
- * Local re-normalisation of the daemon's reason list. Kept here so the route
- * never stores an unbounded blob; the shape lives in core.
- */
-function normalizeReasonsForStore(value: unknown[]): FolderHealthReason[] {
-  const out: FolderHealthReason[] = [];
-  for (const entry of value.slice(0, 6)) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const rec = entry as Record<string, unknown>;
-    const code = rec["code"];
-    if (typeof code !== "string") continue;
-    const action = rec["action"];
-    out.push({
-      code: code as FolderHealthReasonCode,
-      message: typeof rec["message"] === "string" ? rec["message"].slice(0, 240) : code,
-      remediation:
-        typeof rec["remediation"] === "string" ? rec["remediation"].slice(0, 240) : "Diagnose again.",
-      action: typeof action === "string" ? (action as FolderHealthReason["action"]) : null,
-    });
-  }
-  return out;
-}
-
-/** Assignment deletion cleanup (used by the folders route). */
-export function forgetAssignmentHealth(assignmentId: string): void {
-  deleteFolderHealthForAssignment(activeDb, assignmentId);
-  deleteFolderPlansForAssignment(activeDb, assignmentId);
-}
 
 /** Boot-time housekeeping for plan TTLs. */
 export function sweepFolderPlans(): number {

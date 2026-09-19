@@ -49,6 +49,9 @@ import type {
   DemoState,
   DemoSeedSummary,
   FolderSnapshotsResponse,
+  // LAMA-345: managed-folder health + reviewed plans.
+  FolderHealthResponse,
+  FolderPlanWithValidity,
   MobileClientType,
   MobileEnrollmentCreateRequest,
   MobileEnrollmentCreateResponse,
@@ -1174,6 +1177,17 @@ export const api = {
     }>(`/stats/storage/history?days=${days}`),
   folderSize: (id: string) =>
     apiGet<FolderSize>(`/folders/${encodeURIComponent(id)}/size`),
+  // LAMA-345: assignment-level health for a folder (records + bounded
+  // history). The daemon reports; this is the admin read the Folders page
+  // uses for the health card.
+  folderHealth: (folderId: string) =>
+    apiGet<FolderHealthResponse>(`/folders/${encodeURIComponent(folderId)}/health`),
+  // LAMA-345: reviewed sync plans, newest first, each with the server's
+  // staleness verdict against the live assignment state.
+  folderPlans: (folderId: string, limit = 5) =>
+    apiGet<FolderPlanWithValidity[]>(
+      `/folders/${encodeURIComponent(folderId)}/plans?limit=${limit}`,
+    ),
   listShares: () => apiGet<Share[]>("/shares"),
   listResticSnapshots: () => apiGet<ResticSnapshot[]>("/restic/snapshots"),
   pruneOperations: (olderThanMs: number) =>

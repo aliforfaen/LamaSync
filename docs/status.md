@@ -13,6 +13,45 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-345 — managed-folder health diagnostics and guided bisync
+  intervention.** Implemented in
+  `feat-lama-345-folder-health-intervention`; awaits review and release. A clean
+  rclone exit code is no longer treated as health.
+  *Stage 1:* the shared `@lamasync/core/folder-health` contract
+  (`healthy | new_host | resync_required | recoverable | unsafe | blocked |
+  busy | unknown` plus bounded reason codes with exact remediation), a
+  layered-cost daemon probe whose heartbeat path is stat/access + one statfs +
+  a readdir of the bisync workdir (listing counts only after a run or on
+  demand; a bounded deep measurement only after operations or an explicit
+  diagnose), and server-side persistence of the latest report plus a bounded
+  transition history. Reads re-derive the state with the pending conflict
+  count, live-run activity, and a fleet cross-check of what each host sees on
+  the same shared remote — which is what makes an incomplete shared baseline
+  visible instead of `healthy`.
+  *Stage 2:* `diagnose_folder` and `plan_folder` queued actions; a plan is an
+  explicit dry run against the device's real workdir, stored server-side with
+  a bounded change list, a 30-minute TTL and the config/filter/baseline
+  identity it was built from.
+  *Stage 3:* the concrete defect is fixed — the daemon decided "first run?" by
+  looking for a `bisync.state` file rclone has never written, and rclone
+  persists paired `*.path1.lst` + `*.path2.lst` listings. Baseline readiness
+  is now a complete pair with no `.lst-err` and no in-flight `.lst-new`, so a
+  completed normal bisync no longer receives `--resync` on its next run.
+  `initialize` / `seed` / `resync` / `resume` / `cancel` interventions carry
+  EXPLICIT human-readable authority (remote is Path 1, local is Path 2), are
+  gated on a reviewed plan, archive prior state instead of deleting it, and
+  verify that the intended baseline was established rather than trusting exit
+  0. The effective filter fingerprint now covers BOTH the Git-ignore snapshot
+  and `.lamasyncignore`, with a persisted pending marker so a failed resync
+  never acknowledges a new fingerprint. `OperationStatus` gained `cancelled`.
+  *Stage 4:* the Folders page gained a per-assignment Folder health card
+  (state, freshness, stale measurement, baseline readiness, filter status,
+  exact remediation), contextual actions, a guided approve modal with the
+  dry-run summary and explicit authority wording plus plan-staleness
+  protection, and an Advanced section of typed allowlisted controls
+  (`bisyncMaxDelete` → `--max-delete`, `mountCacheMode` → `--vfs-cache-mode`).
+  There is no free-form rclone arguments or configuration field anywhere.
+
 - **LAMA-327/328 — live sync progress and fast persisted statistics.** Active
   rclone work now reports bounded, non-blocking phases and counters through an
   in-memory server registry, with WebSocket updates and reconnect hydration in

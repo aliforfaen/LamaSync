@@ -10,7 +10,8 @@
     "./schedule": "./src/schedule.ts",
     "./effective-type": "./src/effective-type.ts",
     "./remote-update": "./src/remote-update.ts",
-    "./version-compare": "./src/version-compare.ts"
+    "./version-compare": "./src/version-compare.ts",
+    "./folder-health": "./src/folder-health.ts"
   },
   "scripts": {
     "build": "bun build --compile --outfile dist/lamasync-core src/index.ts"

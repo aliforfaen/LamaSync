@@ -22,6 +22,10 @@ import {
 } from "@lamasync/core";
 import { getBackend } from "../backends.ts";
 import {
+  deleteFolderHealthForAssignment,
+  deleteFolderPlansForAssignment,
+} from "../folder-health.ts";
+import {
   bumpConfigRevision,
   bumpConfigRevisionForFolder,
 } from "../config-revision.ts";
@@ -767,12 +771,13 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
           assignmentIds,
         );
       }
-      db.run("DELETE FROM folder_assignments WHERE folder_id = ?", [params.id]);
       // LAMA-345: health records, bounded history and reviewed plans have no
       // FK to the folder; drop them with it so nothing orphaned lingers.
-      db.run("DELETE FROM folder_health WHERE folder_id = ?", [params.id]);
-      db.run("DELETE FROM folder_health_history WHERE folder_id = ?", [params.id]);
-      db.run("DELETE FROM folder_sync_plans WHERE folder_id = ?", [params.id]);
+      for (const assignmentId of assignmentIds) {
+        deleteFolderHealthForAssignment(db, assignmentId);
+        deleteFolderPlansForAssignment(db, assignmentId);
+      }
+      db.run("DELETE FROM folder_assignments WHERE folder_id = ?", [params.id]);
       // LAMA-328 review: the durable size-invalidation watermark has no FK to
       // folders; drop it with the folder so it cannot linger orphaned.
       db.run("DELETE FROM folder_size_invalidations WHERE folder_id = ?", [params.id]);
@@ -1051,25 +1056,20 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
   .delete(
     "/folders/:id/assign/:hostId",
     ({ params, set }) => {
-      const result = db.run(
-        "DELETE FROM folder_assignments WHERE folder_id = ? AND host_id = ?",
-        [params.id, params.hostId],
-      );
-      if (result.changes === 0) {
+      const assignment = db
+        .query<{ id: string }, [string, string]>(
+          "SELECT id FROM folder_assignments WHERE folder_id = ? AND host_id = ?",
+        )
+        .get(params.id, params.hostId);
+      if (!assignment) {
         set.status = 404;
         return { error: "Assignment not found" };
       }
       // LAMA-345: an unassigned folder keeps no health state or reviewed
       // plan for the host that no longer has it.
-      db.run("DELETE FROM folder_health WHERE folder_id = ? AND host_id = ?", [
-        params.id,
-        params.hostId,
-      ]);
-      db.run("DELETE FROM folder_health_history WHERE folder_id = ? AND host_id = ?", [
-        params.id,
-        params.hostId,
-      ]);
-      db.run("DELETE FROM folder_sync_plans WHERE folder_id = ? AND host_id = ?", [
+      deleteFolderHealthForAssignment(db, assignment.id);
+      deleteFolderPlansForAssignment(db, assignment.id);
+      db.run("DELETE FROM folder_assignments WHERE folder_id = ? AND host_id = ?", [
         params.id,
         params.hostId,
       ]);

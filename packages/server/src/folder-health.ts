@@ -147,7 +147,9 @@ const FILTER_SOURCES: ReadonlySet<string> = new Set([
   "combined",
 ]);
 
-function normalizeReasons(value: unknown): FolderHealthReason[] {
+/** Normalize the daemon's reason list. Exported so the route stores exactly
+ *  the bounded shape this module reads back. */
+export function normalizeFolderHealthReasons(value: unknown): FolderHealthReason[] {
   if (!Array.isArray(value)) return [];
   const out: FolderHealthReason[] = [];
   for (const entry of value.slice(0, 6)) {
@@ -296,7 +298,7 @@ export function recordFolderHealth(
   );
 
   const previousCodes = previous
-    ? normalizeReasons(safeParse(previous.reasons)).map((r) => r.code).sort().join(",")
+    ? normalizeFolderHealthReasons(safeParse(previous.reasons)).map((r) => r.code).sort().join(",")
     : null;
   const changed =
     previous === null ||

@@ -18,6 +18,8 @@ import { validateScheduleExpression } from "@lamasync/core/schedule";
 // web UI stays in lock-step with daemon schedule semantics.
 import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
 import { nextRunSentence } from "../next-run.ts";
+// LAMA-345: shared inline hint component for the advanced tuning controls.
+import { HintText } from "./Hint.tsx";
 
 function toStr(v: string | number | null | undefined): string {
   return v === null || v === undefined ? "" : String(v);
@@ -55,6 +57,10 @@ interface EditorState {
   watchQuietSec: string;
   ignoreGitMetadata: boolean;
   respectGitignore: boolean;
+  // LAMA-345 stage 4: allowlisted typed tuning. Both travel as ordinary
+  // validated fields — there is no free-form rclone arguments input.
+  bisyncMaxDelete: string;
+  mountCacheMode: string;
 }
 
 function stateFromAssignment(a: FolderAssignment): EditorState {
@@ -78,6 +84,8 @@ function stateFromAssignment(a: FolderAssignment): EditorState {
     watchQuietSec: toStr(a.watchQuietSec),
     ignoreGitMetadata: a.ignoreGitMetadata === true,
     respectGitignore: a.respectGitignore === true,
+    bisyncMaxDelete: toStr(a.bisyncMaxDelete),
+    mountCacheMode: a.mountCacheMode ?? "",
   };
 }
 
@@ -107,6 +115,9 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
   // (not mount / backup / dotfile / git). A per-host `mode: mount` override
   // on a sync folder flips effective type to mount → no watch.
   const showWatch = folder !== undefined && effectiveFolderType(folder, assignment) === "sync";
+  // LAMA-345: the mount VFS cache mode only means something for an
+  // effective `mount` assignment.
+  const showMount = folder !== undefined && effectiveFolderType(folder, assignment) === "mount";
   const initial = stateFromAssignment(assignment);
   const [state, setState] = useState<EditorState>(initial);
   const [error, setError] = useState<string | null>(null);
@@ -234,6 +245,29 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
       }
       if (state.respectGitignore !== (assignment.respectGitignore === true)) {
         body.respectGitignore = state.respectGitignore;
+      }
+      // LAMA-345: allowlisted deletion cap. null/empty means "no cap"; the
+      // server re-validates the range and the daemon turns it into
+      // `--max-delete` itself.
+      const capRaw = toNumOrNull(state.bisyncMaxDelete);
+      if (Number.isNaN(capRaw)) {
+        setError("Deletion cap must be a number");
+        return;
+      }
+      if (capRaw !== null && (!Number.isInteger(capRaw) || capRaw < 0 || capRaw > 1_000_000)) {
+        setError("Deletion cap must be between 0 and 1000000");
+        return;
+      }
+      if ((capRaw ?? null) !== (assignment.bisyncMaxDelete ?? null)) {
+        body.bisyncMaxDelete = capRaw;
+      }
+    }
+
+    // LAMA-345: allowlisted mount VFS cache mode (effective mount only).
+    if (showMount) {
+      const current = assignment.mountCacheMode ?? "";
+      if (state.mountCacheMode !== current) {
+        body.mountCacheMode = state.mountCacheMode === "" ? null : state.mountCacheMode;
       }
     }
 
@@ -510,6 +544,45 @@ export function AssignmentEditor({ assignment, folder, folderName, hostName, onS
             onChange={(e) => set({ bandwidthSchedule: e.target.value })}
           />
         </label>
+        {/* LAMA-345 stage 4: allowlisted, typed tuning controls. These are
+            the only knobs added; there is deliberately no free-form rclone
+            arguments or configuration field. */}
+        {showWatch ? (
+          <label>
+            Deletion safety cap
+            <input
+              type="number"
+              min={0}
+              max={1_000_000}
+              placeholder="no cap"
+              value={state.bisyncMaxDelete}
+              onChange={(e) => set({ bisyncMaxDelete: e.target.value })}
+            />
+            <HintText>
+              Abort a sync that would delete more than this many files. Leave
+              empty for no cap. A resync plan can also set its own cap.
+            </HintText>
+          </label>
+        ) : null}
+        {showMount ? (
+          <label>
+            Mount cache mode
+            <select
+              value={state.mountCacheMode}
+              onChange={(e) => set({ mountCacheMode: e.target.value })}
+            >
+              <option value="">Use the cache profile default</option>
+              <option value="off">off — no local caching</option>
+              <option value="minimal">minimal — read cache only</option>
+              <option value="writes">writes — cache writes locally</option>
+              <option value="full">full — cache reads and writes</option>
+            </select>
+            <HintText>
+              How the read-only mount caches files locally. "full" makes edits
+              work but needs disk space; "off" is the safest for space.
+            </HintText>
+          </label>
+        ) : null}
       </details>
 
       <div className="actions">

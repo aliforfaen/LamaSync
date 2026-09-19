@@ -267,6 +267,41 @@ in the same PR that changed the route.
 **Fix.** Update `reference/api.md` and run `bun run scripts/check-skill-drift.ts`
 locally — it must exit 0 before the PR is mergeable.
 
+## Symptom: a folder says `Not initialised`, `Resync required` or `Unsafe`
+
+LAMA-345 replaced "rclone exited 0" with a real assignment-level health state.
+The states and what they mean:
+
+| State | Meaning | What to do |
+|---|---|---|
+| `Healthy` | A paired `*.path1.lst` + `*.path2.lst` baseline exists and the last run agreed | Nothing |
+| `Not initialised` | This device has never completed a bisync | Plan + approve **Initialize this host from remote** (or **Seed remote from this host** if this device is the source) |
+| `Resync required` | The ignore/filter universe changed, a listing is missing, or a sibling device sees far more entries on the same shared remote | **Plan sync** on the reseeding operation you want, then approve |
+| `Recoverable` | The last run was interrupted or failed, but the baseline is intact | **Resume**, or **Sync now** |
+| `Unsafe` | rclone wrote an `.lst-err` marker; a normal run would refuse anyway | Review a plan, then **Reseed baseline** |
+| `Blocked` | A precondition fails: missing/unwritable local dir, no disk space, paused, disabled, or rclone absent | The card names the exact fix |
+| `Running` | A run is in flight | Wait, or **Cancel** to stop it deliberately |
+
+**Fix.** Read `GET /folders/:id/health` and act on `reasons[0].remediation`.
+Never hand-edit rclone listings or invoke rclone on the device: the reviewed
+plan is what makes the authority explicit and archives prior state.
+
+## Symptom: a `folder_intervention` action acks `failed: plan is stale`
+
+A plan is a reviewed intent with a 30-minute life. It is invalidated by an
+assignment change (config-revision bump), an ignore/filter change, or any
+rewrite of the listing pair — including a sync that landed between planning
+and approval.
+
+**Fix.** Re-run `plan_folder` and approve the fresh `plan.id`. This is the
+guard working, not a bug.
+
+## Symptom: a sync reports `cancelled` instead of `failed`
+
+`cancelled` is a deliberate operator stop (`folder_intervention` with
+`intervention: "cancel"`). It is not a fault: the baseline is left
+recoverable, so the next run can `Resume`.
+
 ## See also
 
 - `reference/cli.md` — every command's flags and exit codes.

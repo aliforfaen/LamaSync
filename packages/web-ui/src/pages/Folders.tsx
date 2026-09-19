@@ -10,6 +10,7 @@ import type {
   FolderBackend,
   Host,
 } from "@lamasync/core";
+import type { FolderHealthRecord } from "@lamasync/core/folder-health";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api } from "../api.ts";
 import { validateScheduleExpression } from "@lamasync/core/schedule";
@@ -18,6 +19,9 @@ import { validateScheduleExpression } from "@lamasync/core/schedule";
 import { SCHEDULE_PRESETS, schedulePresetForCron } from "../schedule-presets.ts";
 import { nextRunSentence } from "../next-run.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
+// LAMA-345: the per-assignment health card + its pure presentation rules.
+import { FolderHealthCard } from "../components/FolderHealthCard.tsx";
+import { healthLabel, healthTone } from "../folder-health.ts";
 import { HintText } from "../components/Hint.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
 import { RetentionPanel } from "../components/RetentionPanel.tsx";
@@ -221,9 +225,26 @@ export function Folders() {
   const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
   // LAMA-325: retention panel for one restic-backed folder.
   const [retentionFolder, setRetentionFolder] = useState<Folder | null>(null);
+  // LAMA-345: assignment-level health for the expanded folder, keyed by host.
+  const [health, setHealth] = useState<Record<string, FolderHealthRecord>>({});
   // LAMA-235: host filter in the Folders view — mirrors the "Scope"
   // selector on the Dotfiles page. null = all hosts.
   const [hostFilter, setHostFilter] = useState<string | null>(null);
+
+  /**
+   * LAMA-345: re-read one folder's assignment health. Used by the expansion
+   * effect and by the health card after it queues an action.
+   */
+  async function refreshHealth(folderId: string): Promise<void> {
+    try {
+      const response = await api.folderHealth(folderId);
+      const byHost: Record<string, FolderHealthRecord> = {};
+      for (const rec of response.records) byHost[rec.hostId] = rec;
+      setHealth(byHost);
+    } catch {
+      // Health is auxiliary: a failed read leaves the rows intact.
+    }
+  }
 
   async function refresh() {
     setError(null);
@@ -295,6 +316,30 @@ export function Folders() {
   useEffect(() => {
     refresh();
   }, []);
+
+  // LAMA-345: load the expanded folder's assignment health. One read per
+  // expansion (never per row), and a failed read leaves the rows intact.
+  useEffect(() => {
+    if (expandedFolderId === null) {
+      setHealth({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await api.folderHealth(expandedFolderId);
+        if (cancelled) return;
+        const byHost: Record<string, FolderHealthRecord> = {};
+        for (const rec of response.records) byHost[rec.hostId] = rec;
+        setHealth(byHost);
+      } catch {
+        if (!cancelled) setHealth({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [expandedFolderId]);
 
   // LAMA-235: when the selected host disappears from the host list (or the
   // filter narrows to nothing), don't leave a stale filter behind.
@@ -1180,10 +1225,21 @@ export function Folders() {
                             const effectiveMode = (folder.type === "sync" || folder.type === "mount")
                               ? effectiveFolderType(folder, assignment)
                               : null;
+                            // LAMA-345: the assignment's latest health, when the
+                            // expanded read has it.
+                            const assignmentHealth = health[assignment.hostId];
                             return (
-                            <tr key={assignment.id}>
+                            <Fragment key={assignment.id}>
+                            <tr>
                               <td>
                                 <span className="assignment-device-name">{hostLabel(assignment.hostId)}</span>
+                                {assignmentHealth ? (
+                                  <span
+                                    className={`badge folder-health-state folder-health-state--${healthTone(assignmentHealth.state)}`}
+                                  >
+                                    {healthLabel(assignmentHealth.state)}
+                                  </span>
+                                ) : null}
                                 <span className="assignment-mobile-meta">
                                   <span className="badge badge-unknown">{assignment.role}</span>
                                   <code>{assignment.localPath}</code>
@@ -1267,6 +1323,25 @@ export function Folders() {
                                 </div>
                               </td>
                             </tr>
+                            {assignmentHealth ? (
+                              <tr className="folder-health-row">
+                                <td colSpan={6}>
+                                  <FolderHealthCard
+                                    folderId={folder.id}
+                                    hostId={assignment.hostId}
+                                    record={assignmentHealth}
+                                    onQueued={(message) => {
+                                      setSyncNote(message);
+                                      // Re-read so the card reflects the
+                                      // queued work as soon as the device
+                                      // reports it.
+                                      void refreshHealth(folder.id);
+                                    }}
+                                  />
+                                </td>
+                              </tr>
+                            ) : null}
+                            </Fragment>
                             );
                           })}
                         </tbody>
