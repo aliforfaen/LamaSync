@@ -402,8 +402,15 @@ export function deriveFleetHealth(input: {
   let healthyFolders = 0;
   let healthyHosts = 0;
   let updatesNotEvaluated = 0;
+  let updatesActionable = 0;
   /** Hosts already flagged red, so their folders are not double-reported. */
   const suppressedHostIds = new Set<string>();
+  /**
+   * Host id → the yellow entry that already speaks for it. One device must
+   * never occupy two rows in the same bucket, so an available update is merged
+   * into the existing entry instead of being listed again.
+   */
+  const yellowByHost = new Map<string, WeightedItem>();
 
   for (const host of input.hosts) {
     const down = hostIsDown(host.status);
@@ -427,9 +434,14 @@ export function deriveFleetHealth(input: {
       );
     } else if (isExpectedToSleepClass(host.hostClass) && down) {
       // Explicitly informational: a phone or laptop being asleep is normal.
-      checkWhenOnline.push(
-        hostEntry(host, "This device sleeps by design; nothing to do while it is away.", "info", 2),
+      const entry = hostEntry(
+        host,
+        "This device sleeps by design; nothing to do while it is away.",
+        "info",
+        2,
       );
+      checkWhenOnline.push(entry);
+      yellowByHost.set(host.id, entry);
     } else if (host.status === "online") {
       healthyHosts += 1;
     } else {
@@ -437,9 +449,25 @@ export function deriveFleetHealth(input: {
     }
 
     if (host.updateStatus.actionable) {
-      // Its own kind so the UI can group "updates ready to install" apart from
-      // devices that are simply asleep.
-      updatesAvailable.push(hostEntry(host, host.updateStatus.label, "warning", 1, "update"));
+      updatesActionable += 1;
+      // An update for a machine that is simply MISSING is moot (and would be a
+      // second row for one root cause); for a device that already has a yellow
+      // entry, merge the sentence into that entry.
+      if (!suppressedHostIds.has(host.id)) {
+        const existing = yellowByHost.get(host.id);
+        if (existing) {
+          existing.weight = Math.max(existing.weight, 3);
+          if (!existing.item.detail.includes("update")) {
+            existing.item.detail = `${existing.item.detail} ${host.updateStatus.label}`;
+          }
+        } else {
+          // Its own kind so the UI can group "updates ready to install" apart
+          // from devices that are simply asleep.
+          const entry = hostEntry(host, host.updateStatus.label, "warning", 1, "update");
+          updatesAvailable.push(entry);
+          yellowByHost.set(host.id, entry);
+        }
+      }
     } else if (
       host.updateStatus.kind === "not_evaluated" ||
       host.updateStatus.reason === "no_version_reported"
@@ -529,7 +557,7 @@ export function deriveFleetHealth(input: {
     headline: fleetHeadline(buckets, healthyFolders, healthyHosts),
     buckets,
     healthy: { folders: healthyFolders, hosts: healthyHosts },
-    updatesActionable: updatesAvailable.length,
+    updatesActionable,
     updatesNotEvaluated,
   };
 }

@@ -398,6 +398,69 @@ describe("deriveFleetHealth", () => {
     expect(item.tone).toBe("warning");
   });
 
+  test("one device never occupies two rows in the same bucket", () => {
+    const summary = deriveFleetHealth({
+      hosts: [
+        host({
+          id: "lap",
+          hostname: "lap",
+          hostClass: "laptop",
+          status: "offline",
+          lastSeen: NOW - 60_000,
+          updateStatus: update({ lastSeen: PUBLISHED_AT + 1_000, currentVersion: OLDER }),
+        }),
+      ],
+      folders: [],
+      now: NOW,
+    });
+    // The sleeping-device entry absorbs the update sentence.
+    expect(summary.buckets.checkWhenOnline.total).toBe(1);
+    expect(summary.buckets.checkWhenOnline.items[0]?.kind).toBe("host");
+    expect(summary.buckets.checkWhenOnline.items[0]?.detail).toContain("sleeps by design");
+    expect(summary.buckets.checkWhenOnline.items[0]?.detail).toContain("0.3.11");
+    // …while the metric still counts the actionable update.
+    expect(summary.updatesActionable).toBe(1);
+  });
+
+  test("an update for a missing machine is not listed at all", () => {
+    const summary = deriveFleetHealth({
+      hosts: [
+        host({
+          id: "nas",
+          hostname: "nas",
+          hostClass: "nas",
+          status: "offline",
+          lastSeen: NOW - 60_000,
+          updateStatus: update({ lastSeen: PUBLISHED_AT + 1_000, currentVersion: OLDER }),
+        }),
+      ],
+      folders: [],
+      now: NOW,
+    });
+    expect(summary.buckets.needsIntervention.total).toBe(1);
+    expect(summary.buckets.needsIntervention.items.map((i) => i.kind)).toEqual(["host"]);
+    expect(summary.buckets.checkWhenOnline.total).toBe(0);
+    // The metric is still honest about it being behind.
+    expect(summary.updatesActionable).toBe(1);
+  });
+
+  test("an online host behind the release gets its own update row", () => {
+    const summary = deriveFleetHealth({
+      hosts: [
+        host({
+          id: "srv",
+          hostname: "srv",
+          updateStatus: update({ lastSeen: PUBLISHED_AT + 1_000, currentVersion: OLDER }),
+        }),
+      ],
+      folders: [],
+      now: NOW,
+    });
+    expect(summary.buckets.checkWhenOnline.total).toBe(1);
+    expect(summary.buckets.checkWhenOnline.items[0]?.kind).toBe("update");
+    expect(summary.healthy.hosts).toBe(1);
+  });
+
   test("an update that cannot be evaluated is counted separately and never nagged", () => {
     const summary = deriveFleetHealth({
       hosts: [

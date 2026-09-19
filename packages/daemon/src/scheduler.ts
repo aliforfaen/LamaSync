@@ -4,6 +4,32 @@ import { effectiveFolderType } from "@lamasync/core";
 
 const DEFAULT_REBOOT_DELAY_MS = 30_000;
 
+/**
+ * `setTimeout` accepts only a 32-bit signed millisecond delay (~24.8 days).
+ * Anything larger is NOT re-armed for later — the runtime clamps it to 1 ms and
+ * warns, so a monthly or yearly cron fires in a tight loop. Observed in the
+ * LAMA-345 integration sandbox: a `0 0 1 1 *` assignment produced
+ * `TimeoutOverflowWarning: 8941259725 does not fit into a 32-bit signed integer.
+ * Timeout duration was set to 1.` and then synced continuously.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * Split a delay into a safe timer hop. `fire: false` means "the target is
+ * further away than one timer can express — wait `wait` ms and re-evaluate",
+ * which keeps a far-future cron parked instead of firing early.
+ *
+ * Pure, so the boundary is unit-tested without waiting 24.8 days.
+ */
+export function planTimerDelay(
+  delayMs: number,
+  max: number = MAX_TIMER_DELAY_MS,
+): { wait: number; fire: boolean } {
+  if (!Number.isFinite(delayMs) || delayMs <= 0) return { wait: 0, fire: true };
+  if (delayMs > max) return { wait: max, fire: false };
+  return { wait: delayMs, fire: true };
+}
+
 export interface SchedulerOptions {
   onTick: (assignment: FolderAssignment) => void | Promise<void>;
   getAssignments: () => FolderAssignment[];
@@ -253,7 +279,20 @@ export class Scheduler {
       );
       return;
     }
-    const delay = Math.max(0, next.getTime() - Date.now());
+    // A target beyond one timer's reach is parked, then re-evaluated: firing it
+    // early would be far worse than waiting another hop.
+    const hop = planTimerDelay(next.getTime() - Date.now());
+    if (!hop.fire) {
+      const parked = setTimeout(() => {
+        if (!this.running) return;
+        this.timers.delete(assignment.id);
+        this.scheduleCron(assignment, expr);
+      }, hop.wait);
+      parked.unref?.();
+      this.timers.set(assignment.id, parked);
+      return;
+    }
+    const delay = hop.wait;
     const timer = setTimeout(() => {
       const pause = this.currentPause();
       if (pause) {
@@ -332,6 +371,17 @@ export class Scheduler {
       );
       return;
     }
+    const hop = planTimerDelay(next.getTime() - Date.now());
+    if (!hop.fire) {
+      const parked = setTimeout(() => {
+        if (!this.running) return;
+        this.timers.delete(key);
+        this.scheduleAppCron(app, expr);
+      }, hop.wait);
+      parked.unref?.();
+      this.timers.set(key, parked);
+      return;
+    }
     const timer = setTimeout(() => {
       const pause = this.currentPause();
       if (pause) {
@@ -351,7 +401,7 @@ export class Scheduler {
         .finally(() => {
           if (this.running) this.scheduleApp(app);
         });
-    }, Math.max(0, next.getTime() - Date.now()));
+    }, hop.wait);
     timer.unref?.();
     this.timers.set(key, timer);
   }

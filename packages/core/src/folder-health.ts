@@ -590,7 +590,8 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
   },
   baseline_error: {
     state: "unsafe",
-    message: () => "rclone recorded a critical bisync error for this pair.",
+    message: () =>
+      "The saved sync record is unusable — the last sync stopped with a critical error.",
     remediation: "Preview a rebuild from this card, then approve it.",
     action: "resync",
   },

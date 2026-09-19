@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { AppCaptureAssignment, Folder, FolderAssignment } from "@lamasync/core";
-import { Scheduler } from "./scheduler.ts";
+import { MAX_TIMER_DELAY_MS, Scheduler, planTimerDelay } from "./scheduler.ts";
 
 function makeAssignment(overrides: Partial<FolderAssignment> = {}): FolderAssignment {
   return {
@@ -366,5 +366,91 @@ describe("Scheduler", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(ticks).toEqual(["a1"]);
     scheduler.stop();
+  });
+});
+
+// Observed by the LAMA-345 integration sandbox: a `0 0 1 1 *` assignment
+// produced `TimeoutOverflowWarning: 8941259725 does not fit into a 32-bit
+// signed integer. Timeout duration was set to 1.` and then synced in a tight
+// loop, because setTimeout clamps an out-of-range delay to 1 ms instead of
+// waiting.
+//
+// The hazard is any next-fire more than 2^31-1 ms (~24.8 days) away — a yearly
+// cron, the days right after a monthly cron fires, or `@yearly`. It is a real
+// fleet hazard, not a test artifact: LAMA-345's health reporting would show the
+// resulting run storm as `busy`/`recoverable` while the root cause is here.
+describe("long-delay timer planning (LAMA-345 integration finding)", () => {
+  test("a normal delay waits the full time and fires", () => {
+    expect(planTimerDelay(1_000)).toEqual({ wait: 1_000, fire: true });
+    expect(planTimerDelay(MAX_TIMER_DELAY_MS)).toEqual({ wait: MAX_TIMER_DELAY_MS, fire: true });
+  });
+
+  test("a past or zero delay fires immediately", () => {
+    expect(planTimerDelay(0)).toEqual({ wait: 0, fire: true });
+    expect(planTimerDelay(-5_000)).toEqual({ wait: 0, fire: true });
+  });
+
+  test("a delay beyond one timer's reach parks instead of firing early", () => {
+    expect(planTimerDelay(MAX_TIMER_DELAY_MS + 1)).toEqual({
+      wait: MAX_TIMER_DELAY_MS,
+      fire: false,
+    });
+    // ~9e9 ms is the observed yearly-cron delay.
+    expect(planTimerDelay(8_941_259_725)).toEqual({ wait: MAX_TIMER_DELAY_MS, fire: false });
+  });
+
+  test("a non-finite delay is treated as immediate rather than as a long park", () => {
+    expect(planTimerDelay(Number.POSITIVE_INFINITY)).toEqual({ wait: 0, fire: true });
+    expect(planTimerDelay(Number.NaN)).toEqual({ wait: 0, fire: true });
+  });
+});
+
+describe("far-future schedules stay parked", () => {
+  test("a yearly cron does not fire within a short window", async () => {
+    const ticks: string[] = [];
+    const scheduler = new Scheduler({
+      onTick: (a) => {
+        ticks.push(a.id);
+      },
+      getAssignments: () => [makeAssignment({ id: "yearly", syncExpr: "0 0 1 1 *" })],
+      getFolders: () => [makeFolder()],
+    });
+    scheduler.start();
+    await Bun.sleep(80);
+    scheduler.stop();
+    // Before the fix this ticked immediately (and then continuously).
+    expect(ticks).toEqual([]);
+  });
+
+  test("a monthly cron scheduled weeks away does not fire early either", async () => {
+    const ticks: string[] = [];
+    const scheduler = new Scheduler({
+      onTick: (a) => {
+        ticks.push(a.id);
+      },
+      getAssignments: () => [makeAssignment({ id: "monthly", syncExpr: "0 0 1 * *" })],
+      getFolders: () => [makeFolder()],
+    });
+    scheduler.start();
+    await Bun.sleep(80);
+    scheduler.stop();
+    expect(ticks).toEqual([]);
+  });
+
+  test("a far-future app protection stays parked too", async () => {
+    const captures: string[] = [];
+    const scheduler = new Scheduler({
+      onTick: () => {},
+      onAppTick: (app) => {
+        captures.push(app.protectionId);
+      },
+      getAssignments: () => [],
+      getFolders: () => [],
+      getApps: () => [makeApp({ protectionId: "prot-yearly", schedule: "0 0 1 1 *" })],
+    });
+    scheduler.start();
+    await Bun.sleep(80);
+    scheduler.stop();
+    expect(captures).toEqual([]);
   });
 });
