@@ -431,11 +431,18 @@ export function Dashboard() {
   const newFailed = failed.filter((op) => isNewSince(op.timestamp, lastVisit)).length;
   const newTotal = newConflicts + newFailed;
 
+  // LAMA-345: "needs attention" is the RED set only, matching the Fleet health
+  // card's own count so the page never shows two competing totals. Softer
+  // follow-ups (an available update, a sleeping device, an unseeded folder)
+  // stay visible in the Fleet health card and in the "Worth a look" list below.
+  const softFollowUps = fleetHealth
+    ? fleetHealth.buckets.checkWhenOnline.total + fleetHealth.buckets.unknownOrStale.total
+    : updates.length + offline.length;
   const allQuiet =
-    data !== null && !counts.conflicts && !failed.length && urgent === 0 && !updates.length && !verificationNeedsAttention;
+    data !== null && !counts.conflicts && !failed.length && urgent === 0 && !verificationNeedsAttention;
   // `urgent` already contains every always-on device that is down, so it
   // replaces the old local offline count rather than adding to it.
-  const attentionCount = failed.length + counts.conflicts + urgent + updates.length + (verificationNeedsAttention ? 1 : 0);
+  const attentionCount = failed.length + counts.conflicts + urgent + (verificationNeedsAttention ? 1 : 0);
   const heroTitle =
     data === null
       ? "Checking in with your fleet…"
@@ -454,7 +461,9 @@ export function Dashboard() {
       : data.hosts.length === 0
         ? "Pair a device to start keeping your files in step and recoverable."
         : allQuiet
-          ? "Everything important is moving along. Here’s the latest from your sync fleet."
+          ? softFollowUps > 0
+            ? `Nothing needs you right now. ${softFollowUps} ${softFollowUps === 1 ? "thing can" : "things can"} wait until later.`
+            : "Everything important is moving along. Here’s the latest from your sync fleet."
           : `${attentionCount} ${attentionCount === 1 ? "item needs" : "items need"} a closer look. Start with the next useful action below.`;
   const dashboardHeadline = data?.hosts.length ? "Your sync fleet, at a glance." : "Welcome to LamaSync.";
 
@@ -557,7 +566,9 @@ export function Dashboard() {
             </div>
           </div>
           <div className="hero-summary" aria-label="Current attention summary">
-            <div className="hero-attention-heading">{attentionCount ? "Worth a look" : "A calm moment"}</div>
+            <div className="hero-attention-heading">
+              {attentionCount || softFollowUps ? "Worth a look" : "A calm moment"}
+            </div>
             <div className="hero-attention-list">
               <HeroSignal label="Failed operations" value={failed.length} tone={failed.length ? "critical" : "quiet"} />
               <HeroSignal label="Pending conflicts" value={counts.conflicts} tone={counts.conflicts ? "warning" : "quiet"} />

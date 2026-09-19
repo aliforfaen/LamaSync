@@ -406,6 +406,11 @@ export function deriveFleetHealth(input: {
   /** Hosts already flagged red, so their folders are not double-reported. */
   const suppressedHostIds = new Set<string>();
   /**
+   * Hosts that have never reported in. Their folders' "not heard from" rows
+   * would repeat the same root cause, so the device row speaks for them.
+   */
+  const unheardHostIds = new Set<string>();
+  /**
    * Host id → the yellow entry that already speaks for it. One device must
    * never occupy two rows in the same bucket, so an available update is merged
    * into the existing entry instead of being listed again.
@@ -415,6 +420,7 @@ export function deriveFleetHealth(input: {
   for (const host of input.hosts) {
     const down = hostIsDown(host.status);
     if (host.lastSeen === null && host.status !== "online") {
+      unheardHostIds.add(host.id);
       unknownOrStale.push(
         hostEntry(host, "Registered but has never reported in.", "info", 2),
       );
@@ -477,7 +483,10 @@ export function deriveFleetHealth(input: {
   }
 
   for (const folder of input.folders) {
+    // One root cause, one entry: a red or never-seen device already explains
+    // its own folders.
     if (suppressedHostIds.has(folder.hostId)) continue;
+    if (unheardHostIds.has(folder.hostId)) continue;
     const down = hostIsDown(folder.hostStatus);
     const neverReported = folder.state === "unknown";
     // An old report, or a device that has never reported at all, means the

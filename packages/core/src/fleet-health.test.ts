@@ -336,9 +336,25 @@ describe("deriveFleetHealth", () => {
       folders: [folder({ hostId: "new", hostName: "new", hostStatus: "unknown", hostLastSeen: null })],
       now: NOW,
     });
-    expect(neverSeenHost.buckets.unknownOrStale.total).toBe(2);
+    // The device row speaks for its own folders — one root cause, one entry.
+    expect(neverSeenHost.buckets.unknownOrStale.total).toBe(1);
+    expect(neverSeenHost.buckets.unknownOrStale.items[0]?.kind).toBe("host");
     expect(neverSeenHost.buckets.needsIntervention.total).toBe(0);
     expect(neverSeenHost.buckets.checkWhenOnline.total).toBe(0);
+  });
+
+  test("a folder on a never-seen device is not listed twice", () => {
+    const summary = deriveFleetHealth({
+      hosts: [host({ id: "ghost", hostname: "ghost", status: "unknown", lastSeen: null })],
+      folders: [
+        folder({ hostId: "ghost", hostName: "ghost", hostStatus: "unknown", hostLastSeen: null, state: "unknown" }),
+        folder({ folderId: "f2", folderName: "Other", hostId: "ghost", hostName: "ghost", hostStatus: "unknown", hostLastSeen: null, state: "healthy" }),
+      ],
+      now: NOW,
+    });
+    expect(summary.buckets.unknownOrStale.total).toBe(1);
+    expect(summary.buckets.unknownOrStale.items.map((i) => i.kind)).toEqual(["host"]);
+    expect(summary.healthy.folders).toBe(0);
   });
 
   test("a folder on an offline device waits for the device instead of going red", () => {
@@ -508,7 +524,8 @@ describe("deriveFleetHealth", () => {
     expect(summary.buckets.checkWhenOnline.total).toBe(2);
     expect(summary.healthy.folders).toBe(2); // ok + busy
     expect(summary.healthy.hosts).toBe(2); // srv + phone
-    expect(summary.buckets.unknownOrStale.total).toBe(2); // ghost host + its folder
+    // ghost host only: its folder row is suppressed (one root cause).
+    expect(summary.buckets.unknownOrStale.total).toBe(1);
     expect(summary.headline).toBe("2 things need your attention now.");
 
     // Every reported item carries a link and a plain-language detail.

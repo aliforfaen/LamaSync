@@ -24,14 +24,19 @@
  * (`POST /folder-plans`) that a daemon would otherwise populate from a dry run.
  *
  * Usage:
- *   bun run scripts/lama345-integration.ts [--keep] [--json <path>]
+ *   bun run scripts/lama345-integration.ts [--keep] [--json <path>] [--serve]
+ *
+ * `--serve` keeps the sandbox and the seeded fleet running afterwards and
+ * prints the port + key, so a browser pass can be driven against the exact
+ * state the checks were run against.
  */
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..");
-const KEEP = process.argv.includes("--keep");
+const KEEP = process.argv.includes("--keep") || process.argv.includes("--serve");
+const SERVE = process.argv.includes("--serve");
 const JSON_OUT = (() => {
   const index = process.argv.indexOf("--json");
   return index !== -1 ? process.argv[index + 1] : null;
@@ -296,6 +301,9 @@ const folderSeeds: FolderSeed[] = [
     // Mirrors the core template for baseline_missing verbatim.
     reason: { code: "baseline_missing", message: "This device has no saved sync record yet.", remediation: "Set up this device from the remote, or fill the remote from this device.", action: "initialize" },
     reportedAt: NOW - 60_000,
+    // Facts must agree with the state: the server re-derives the state from
+    // them, so a "no sync record" folder must not report a paired baseline.
+    baseline: { present: false, ready: false, error: false, path1Count: null, path2Count: null, updatedAt: null, fingerprint: "none" },
   },
   {
     key: "stale",
@@ -321,6 +329,7 @@ const folderSeeds: FolderSeed[] = [
     state: "unknown",
     reason: { code: "never_reported", message: "This device has not reported folder health yet.", remediation: "Run Check this device now to collect a first report.", action: "diagnose" },
     reportedAt: NOW - 10_000,
+    baseline: { present: false, ready: false, error: false, path1Count: null, path2Count: null, updatedAt: null, fingerprint: "none" },
   },
 ];
 
@@ -460,8 +469,8 @@ check(
   yellow.join(" · "),
 );
 check(
-  "never-reported folder lands in 'not heard from'",
-  unknown.includes("Vault on phone-1"),
+  "a never-seen device speaks for its own folders (no double-listed root cause)",
+  unknown.includes("phone-1") && !unknown.includes("Vault on phone-1"),
   unknown.join(" · "),
 );
 
@@ -793,6 +802,14 @@ if (JSON_OUT) {
     JSON.stringify({ port: PORT, sandbox, checks, headline: str(summary["headline"]) }, null, 2),
   );
   console.log(`evidence written to ${JSON_OUT}`);
+}
+
+if (SERVE) {
+  console.log("");
+  console.log("=== SERVING (Ctrl+C to stop) ===");
+  console.log(`SERVE url=http://127.0.0.1:${PORT} key=${TEST_KEY} sandbox=${sandbox}`);
+  console.log("Seeded fleet is untouched; the server and the isolated daemon keep running.");
+  await new Promise(() => {});
 }
 
 if (!KEEP) {
