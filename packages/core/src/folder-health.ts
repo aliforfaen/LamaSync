@@ -539,7 +539,7 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
   },
   unsupported_folder_type: {
     state: "healthy",
-    message: (f) => `Folder type "${f.effectiveType}" has no bisync baseline.`,
+    message: (f) => `This is a ${f.effectiveType} folder, so it has no saved sync record to check.`,
     remediation: "Nothing to do — health checks apply to sync folders.",
     action: null,
   },
@@ -578,13 +578,13 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
   },
   baseline_missing: {
     state: "new_host",
-    message: () => "This device has no bisync baseline yet.",
+    message: () => "This device has no saved sync record yet.",
     remediation: "Set up this device from the remote, or fill the remote from this device.",
     action: "initialize",
   },
   baseline_incomplete: {
     state: "resync_required",
-    message: () => "The bisync listing set is incomplete (a path listing is missing).",
+    message: () => "The saved sync record is incomplete — one side's list is missing.",
     remediation: "Preview a rebuild from this card, then approve it.",
     action: "resync",
   },
@@ -1125,7 +1125,7 @@ export function checkFolderPlanValidity(
     return {
       valid: false,
       reason: "baseline_changed",
-      message: "The bisync baseline changed since this plan was built — plan again.",
+      message: "The saved sync record changed since this plan was built — plan again.",
     };
   }
   return { valid: true, reason: null, message: "Plan is current." };

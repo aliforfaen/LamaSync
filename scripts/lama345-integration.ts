@@ -293,7 +293,8 @@ const folderSeeds: FolderSeed[] = [
     name: "Docs",
     hostId: "laptop-1",
     state: "new_host",
-    reason: { code: "baseline_missing", message: "This device has no bisync baseline yet.", remediation: "Set up this device from the remote, or fill the remote from this device.", action: "initialize" },
+    // Mirrors the core template for baseline_missing verbatim.
+    reason: { code: "baseline_missing", message: "This device has no saved sync record yet.", remediation: "Set up this device from the remote, or fill the remote from this device.", action: "initialize" },
     reportedAt: NOW - 60_000,
   },
   {
@@ -471,11 +472,21 @@ check(
     (i) => str(i["href"]).startsWith("/") && str(i["title"]).length > 0 && str(i["detail"]).length > 10,
   ),
 );
+const jargon = allItems.filter((i) => {
+  const detail = str(i["detail"]);
+  return (
+    detail.includes("Path 1") ||
+    detail.includes("Path 2") ||
+    detail.includes("--") ||
+    detail.includes("bisync")
+    // "rclone" is deliberately allowed: it is the real dependency name, and the
+    // honest remediation for a missing binary is to say so.
+  );
+});
 check(
   "no rclone vocabulary leaks into the summary copy",
-  allItems.every(
-    (i) => !str(i["detail"]).includes("Path 1") && !str(i["detail"]).includes("--") && !str(i["detail"]).includes("bisync"),
-  ),
+  jargon.length === 0,
+  jargon.map((i) => `${str(i["title"])}: ${str(i["detail"])}`).join(" || "),
 );
 check(
   "red items carry the health-card action they point at",
@@ -738,7 +749,24 @@ if (daemonHealthy) {
       !JSON.stringify(daemonReport).includes("--resync-mode"),
   );
 }
-check("daemon never spawned rclone", !existsSync(join(sandbox, "trees", "daemon", ".rclone")));
+// Proof, not vibes: the daemon must not have executed anything. A far-future
+// schedule previously overflowed setTimeout and synced in a tight loop (fixed
+// in this branch), so the log is the place to prove it stayed quiet.
+const daemonSpawnedRclone = daemonLines.some(
+  (line) =>
+    line.includes("[run]") ||
+    line.includes("[executor]") ||
+    line.includes("rclone") ||
+    line.includes("TimeoutOverflowWarning"),
+);
+writeFileSync(daemonLog, daemonLines.join("\n"));
+check(
+  "daemon never spawned rclone (no run/executor/overflow lines)",
+  !daemonSpawnedRclone,
+  daemonSpawnedRclone
+    ? daemonLines.filter((l) => l.includes("[run]") || l.includes("rclone")).slice(0, 3).join(" | ")
+    : `${daemonLines.length} log lines, none from a run`,
+);
 
 // The Dashboard summary now includes the daemon's host/folder.
 const health2 = await api("GET", "/health");
