@@ -5303,6 +5303,20 @@ html[data-density="compact"] .settings-row {
   margin-bottom: var(--space-2);
 }
 
+.folder-health-wizard-step > label {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+}
+
+.folder-health-wizard-step > label select,
+.folder-health-wizard-step > label input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 28rem;
+}
+
 .folder-health-totals {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
