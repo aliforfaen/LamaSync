@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import {
-  isNewer,
+  isAlwaysOnClass,
   type Host,
   type HostClass,
   type HostStatus,
@@ -11,7 +11,14 @@ import {
   type NotificationType,
 } from "@lamasync/core";
 import { db as defaultDb } from "./db.ts";
-import { getCachedLatestVersion } from "./release-cache.ts";
+import { getCachedLatestRelease } from "./release-cache.ts";
+import {
+  hostClassFromRow,
+  hostFromRow,
+  hostStatusFromRow,
+  releaseFactsFrom,
+  type ReleaseFacts,
+} from "./fleet-health.ts";
 import { broadcast } from "./ws.ts";
 
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
@@ -199,15 +206,9 @@ const VALID_HOST_CLASSES: readonly string[] = [
   "unknown",
 ];
 
-function hostClassFrom(value: string | null | undefined): HostClass {
-  const v = value ?? "";
-  return VALID_HOST_CLASSES.includes(v) ? (v as HostClass) : "unknown";
-}
-
-function isAlwaysOnClass(hostClass: HostClass): boolean {
-  return hostClass === "server" || hostClass === "nas";
-}
-
+// LAMA-345 follow-up: the class policy (which classes are always-on) and the
+// class/status coercion are shared with the fleet-summary derivation, so the
+// dashboard's red/green verdict and this notification severity cannot drift.
 function hostClassForHost(hostId: string): HostClass {
   try {
     const row = activeDb
@@ -215,7 +216,7 @@ function hostClassForHost(hostId: string): HostClass {
         "SELECT host_class FROM hosts WHERE id = ?",
       )
       .get(hostId);
-    return hostClassFrom(row?.host_class);
+    return hostClassFromRow(row?.host_class);
   } catch {
     return "unknown";
   }
@@ -733,36 +734,19 @@ export function emitNotification(input: NotificationInput): boolean {
   return emitNotificationEvent(input) !== null;
 }
 
+/** Shared coercion (identical rules to the fleet-health read). */
 function hostStatus(value: string | null): HostStatus {
-  switch (value) {
-    case "online":
-    case "offline":
-    case "degraded":
-    case "unknown":
-      return value;
-    default:
-      return "unknown";
-  }
+  return hostStatusFromRow(value);
 }
 
-function rowToHost(row: HostRow, latestVersion: string | null): Host {
-  const version = row.version;
-  const updateAvailable =
-    typeof version === "string" && version.length > 0 && latestVersion !== null
-      ? isNewer(version, latestVersion)
-      : false;
-  return {
-    id: row.id,
-    hostname: row.hostname,
-    tailnetIp: row.tailnet_ip,
-    lanIp: row.lan_ip,
-    lastSeen: row.last_seen,
-    status: hostStatus(row.status),
-    version,
-    updateAvailable,
-    configRevision: row.config_revision ?? 0,
-    hostClass: hostClassFrom(row.host_class),
-  };
+/**
+ * LAMA-345 follow-up: the host shape and the update verdict come from the
+ * shared serialization, so an "update available" notification is subject to
+ * exactly the same evidence rule as the Dashboard badge — a device that has
+ * been offline since before the release was published is never nagged.
+ */
+function rowToHost(row: HostRow, release: ReleaseFacts | null): Host {
+  return hostFromRow(row, release);
 }
 
 function shouldEmitUpdateAvailable(hostId: string, available: boolean): boolean {
@@ -789,9 +773,9 @@ export async function runNotificationSweep(now = Date.now()): Promise<void> {
       )
       .all(cutoff);
 
-    let latestVersion: string | null = null;
+    let release: ReleaseFacts | null = null;
     try {
-      latestVersion = await getCachedLatestVersion();
+      release = releaseFactsFrom(await getCachedLatestRelease());
     } catch (error) {
       console.error(
         `[notifications] release lookup during sweep failed: ${errorMessage(error)}`,
@@ -813,7 +797,7 @@ export async function runNotificationSweep(now = Date.now()): Promise<void> {
         .query<HostRow, [string]>(`${HOST_SELECT} WHERE id = ?`)
         .get(stale.id);
       if (!row) continue;
-      const host = rowToHost(row, latestVersion);
+      const host = rowToHost(row, release);
       broadcast({ kind: "host", host });
       emitNotification({
         type: "host_offline",
@@ -825,17 +809,17 @@ export async function runNotificationSweep(now = Date.now()): Promise<void> {
 
     const hosts = activeDb.query<HostRow, []>(HOST_SELECT).all();
     for (const row of hosts) {
-      const host = rowToHost(row, latestVersion);
-      const available =
-        row.version !== null &&
-        row.version.length > 0 &&
-        host.updateAvailable === true;
+      const host = rowToHost(row, release);
+      // Evidence rule: `updateStatus.actionable` is true only when the device
+      // checked in at/after the release was published AND still reports an
+      // older version.
+      const available = host.updateStatus?.actionable === true;
       if (!shouldEmitUpdateAvailable(row.id, available)) continue;
       emitNotification({
         type: "update_available",
         hostId: row.id,
         message: `Update available for ${row.hostname}`,
-        payload: { currentVersion: row.version, latestVersion },
+        payload: { currentVersion: row.version, latestVersion: release?.version ?? null },
       });
     }
   } catch (error) {

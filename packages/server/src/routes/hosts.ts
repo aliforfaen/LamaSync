@@ -6,7 +6,8 @@ import { isNewer, type Host, type HostClass, type HostStatus } from "@lamasync/c
 import { db as defaultDb } from "../db.ts";
 import { broadcast } from "../ws.ts";
 import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
-import { getCachedLatestVersion } from "../release-cache.ts";
+import { getCachedLatestRelease } from "../release-cache.ts";
+import { hostFromRow, releaseFactsFrom, type ReleaseFacts } from "../fleet-health.ts";
 import {
   bumpConfigRevision,
   bumpConfigRevisionForPeers,
@@ -59,30 +60,12 @@ function hostClassFrom(value: string | null | undefined): HostClass {
 }
 
 /**
- * Map a `hosts` row into the wire/UI `Host` shape. `latestVersion` is the
- * latest GitHub release version (cached); the caller resolves it once per
- * request so the comparison is consistent across all hosts in that response.
+ * LAMA-345 follow-up: the host shape (and the evidence-based update verdict)
+ * comes from the shared serialization in ../fleet-health.ts. `rowToHost` here
+ * is a thin adapter so every existing caller keeps its call shape.
  */
-function rowToHost(row: HostRow, latestVersion: string | null): Host {
-  const version = row.version;
-  const updateAvailable =
-    typeof version === "string" && version.length > 0 && latestVersion !== null
-      ? isNewer(version, latestVersion)
-      : false;
-  return {
-    id: row.id,
-    hostname: row.hostname,
-    tailnetIp: row.tailnet_ip,
-    lanIp: row.lan_ip,
-    lastSeen: row.last_seen,
-    status: (row.status ?? "unknown") as HostStatus,
-    version,
-    updateAvailable,
-    configRevision: row.config_revision ?? 0,
-    os: row.os,
-    storageUsedBytes: row.storage_used_bytes,
-    hostClass: hostClassFrom(row.host_class),
-  };
+function rowToHost(row: HostRow, release: ReleaseFacts | null): Host {
+  return hostFromRow(row, release);
 }
 
 const HOST_SELECT = "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, config_revision, os, storage_used_bytes, host_class, host_class_overridden FROM hosts";
@@ -157,8 +140,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
       const rows = activeDb
         .query<HostRow, []>(`${HOST_SELECT} ORDER BY hostname ASC`)
         .all();
-      const latestVersion = await getCachedLatestVersion();
-      return rows.map((row) => rowToHost(row, latestVersion));
+      const release = releaseFactsFrom(await getCachedLatestRelease());
+      return rows.map((row) => rowToHost(row, release));
     },
     {
       detail: {
@@ -186,8 +169,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Host not found" };
       }
-      const latestVersion = await getCachedLatestVersion();
-      return rowToHost(row, latestVersion);
+      const release = releaseFactsFrom(await getCachedLatestRelease());
+      return rowToHost(row, release);
     },
     {
       params: t.Object({ hostId: t.String() }),
@@ -268,8 +251,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to load host after rename" };
       }
-      const latestVersion = await getCachedLatestVersion();
-      const host = rowToHost(updated, latestVersion);
+      const release = releaseFactsFrom(await getCachedLatestRelease());
+      const host = rowToHost(updated, release);
       // LAMA-225 P1-5: PATCH changes the display label only (the id is
       // still params.hostId). The real `host_renamed` event with
       // oldId != newId is broadcast at re-registration time (see
@@ -331,8 +314,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to load host after class update" };
       }
-      const latestVersion = await getCachedLatestVersion();
-      const host = rowToHost(updated, latestVersion);
+      const release = releaseFactsFrom(await getCachedLatestRelease());
+      const host = rowToHost(updated, release);
       broadcast({ kind: "host", host });
       return host;
     },
@@ -431,8 +414,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 500;
         return { error: "Failed to load host after insert" };
       }
-      const latestVersion = await getCachedLatestVersion();
-      const host = rowToHost(row, latestVersion);
+      const release = releaseFactsFrom(await getCachedLatestRelease());
+      const host = rowToHost(row, release);
       broadcast({ kind: "host", host });
       if (previous?.status === "offline" || previous?.status === "unknown") {
         emitNotification({
@@ -639,8 +622,8 @@ export const hostsRoutes = new Elysia({ prefix: "/api/v1" })
         .query<HostRow, [string]>(`${HOST_SELECT} WHERE id = ?`)
         .get(hostId);
       if (row) {
-        const latestVersion = await getCachedLatestVersion();
-        const host = rowToHost(row, latestVersion);
+        const release = releaseFactsFrom(await getCachedLatestRelease());
+        const host = rowToHost(row, release);
         broadcast({ kind: "host", host });
         if (
           status === "online" &&

@@ -53,7 +53,11 @@ beforeEach(() => {
     }
   }
   __resetNotificationStateForTests();
-  __setCachedLatestVersionForTests("0.2.3");
+  // An explicit, long-past publication time so every host in these tests that
+  // has checked in is eligible for an update verdict (the evidence rule
+  // compares lastSeen with the release time — a real "now" default would make
+  // these tests depend on the wall clock).
+  __setCachedLatestVersionForTests("0.2.3", "2023-01-01T00:00:00Z");
   __setDb(db);
   app = new Elysia().use(getAuthPlugin()).use(notificationsRoutes);
 });
@@ -708,5 +712,61 @@ describe("host staleness sweep", () => {
       "update_available",
       "update_available",
     ]);
+  });
+});
+
+// LAMA-345 follow-up: an "update available" notification must be supported by
+// evidence. A device that has not been heard from since before the release was
+// published cannot have declined to install it, so it must not be nagged.
+describe("update_available respects the release boundary (LAMA-345)", () => {
+  const PUBLISHED_AT = Date.parse("2026-09-10T12:00:00Z");
+
+  test("a device that checked in before the release is never nagged", async () => {
+    __setCachedLatestVersionForTests("0.3.11", new Date(PUBLISHED_AT).toISOString());
+    // One millisecond before publication: suppressed.
+    db.run(
+      `INSERT INTO hosts (id, hostname, last_seen, status, version)
+       VALUES (?, ?, ?, ?, ?)`,
+      ["host-before", "before", PUBLISHED_AT - 1, "offline", "0.3.7"],
+    );
+    await runNotificationSweep(PUBLISHED_AT + 60_000);
+    const events = db
+      .query<{ type: string }, []>(
+        "SELECT type FROM notification_events WHERE host_id = 'host-before'",
+      )
+      .all();
+    expect(events.map((e) => e.type)).not.toContain("update_available");
+  });
+
+  test("a device that checked in exactly at publication is eligible", async () => {
+    __setCachedLatestVersionForTests("0.3.11", new Date(PUBLISHED_AT).toISOString());
+    db.run(
+      `INSERT INTO hosts (id, hostname, last_seen, status, version)
+       VALUES (?, ?, ?, ?, ?)`,
+      ["host-at", "at", PUBLISHED_AT, "online", "0.3.7"],
+    );
+    await runNotificationSweep(PUBLISHED_AT + 60_000);
+    const events = db
+      .query<{ type: string }, []>(
+        "SELECT type FROM notification_events WHERE host_id = 'host-at'",
+      )
+      .all();
+    expect(events.map((e) => e.type)).toContain("update_available");
+  });
+
+  test("a device already on the release is not nagged", async () => {
+    __setCachedLatestVersionForTests("0.3.11", new Date(PUBLISHED_AT).toISOString());
+    db.run(
+      `INSERT INTO hosts (id, hostname, last_seen, status, version)
+       VALUES (?, ?, ?, ?, ?)`,
+      ["host-ok", "ok", PUBLISHED_AT + 60_000, "online", "0.3.11"],
+    );
+    await runNotificationSweep(PUBLISHED_AT + 120_000);
+    const events = db
+      .query<{ type: string }, []>(
+        "SELECT type FROM notification_events WHERE host_id = 'host-ok'",
+      )
+      .all();
+    expect(events.map((e) => e.type)).not.toContain("update_available");
   });
 });

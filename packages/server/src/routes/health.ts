@@ -8,66 +8,39 @@ import {
   type HostStatus,
 } from "@lamasync/core";
 import { db, dbFilePath } from "../db.ts";
-import { getCachedLatestVersion } from "../release-cache.ts";
+import { getCachedLatestRelease } from "../release-cache.ts";
+import {
+  hostFromRow,
+  readFleetHealth,
+  releaseFactsFrom,
+  type HostRowLike,
+} from "../fleet-health.ts";
 
-interface HostRow {
-  id: string;
-  hostname: string;
-  tailnet_ip: string | null;
-  last_seen: number | null;
-  status: string | null;
-  lan_ip: string | null;
-  version: string | null;
-  host_class: string | null;
-}
-
-const VALID_HOST_CLASSES: readonly string[] = [
-  "server",
-  "desktop",
-  "laptop",
-  "nas",
-  "phone",
-  "tablet",
-  "unknown",
-];
-
-function hostClassFrom(value: string | null | undefined): HostClass {
-  const v = value ?? "";
-  return VALID_HOST_CLASSES.includes(v) ? (v as HostClass) : "unknown";
-}
-
-function rowToHost(row: HostRow, latestVersion: string | null): Host {
-  const version = row.version;
-  const updateAvailable =
-    typeof version === "string" && version.length > 0 && latestVersion !== null
-      ? isNewer(version, latestVersion)
-      : false;
-  return {
-    id: row.id,
-    hostname: row.hostname,
-    tailnetIp: row.tailnet_ip,
-    lanIp: row.lan_ip,
-    lastSeen: row.last_seen,
-    status: (row.status ?? "unknown") as HostStatus,
-    version,
-    updateAvailable,
-    hostClass: hostClassFrom(row.host_class),
-  };
-}
+/**
+ * LAMA-345 follow-up: the host shape (and the update verdict) comes from the
+ * shared serialization in ../fleet-health.ts — this route used to carry its own
+ * copy of the logic, which is how "update available" drifted from the Hosts
+ * page.
+ */
+type HostRow = HostRowLike;
 
 export const healthRoutes = new Elysia({ prefix: "/api/v1" }).get(
   "/health",
   async () => {
     const rows = db
       .query<HostRow, []>(
-        "SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version, host_class FROM hosts",
+        `SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip, version,
+                config_revision, os, storage_used_bytes, host_class
+           FROM hosts`,
       )
       .all();
-    // Resolve the cached latest release once so the comparison is
-    // consistent across all hosts in this response (mirrors hosts.ts).
-    const latestVersion = await getCachedLatestVersion();
-    const hosts = rows.map((row) => rowToHost(row, latestVersion));
+    // Resolve the cached latest release ONCE so every host in the response —
+    // and the fleet summary below — is judged against the same release facts.
+    const release = releaseFactsFrom(await getCachedLatestRelease());
+    const now = Date.now();
+    const hosts = rows.map((row) => hostFromRow(row, release, now));
     const onlineCount = hosts.filter((h) => h.status === "online").length;
+    const fleetHealth = readFleetHealth(db, { release, now });
     // UX workstream 4: server self-description for the Admin page. The DB
     // size stat is best-effort (in-memory test DBs have no backing file).
     let dbSizeBytes: number | null = null;
@@ -83,14 +56,19 @@ export const healthRoutes = new Elysia({ prefix: "/api/v1" }).get(
       hosts,
       serverVersion: VERSION,
       dbSizeBytes,
+      fleetHealth,
     };
   },
   {
     detail: {
-      summary: "Fleet health summary",
+      summary:
+        "Fleet health summary: hosts (with the evidence-based update verdict) and the managed-folder/device `fleetHealth` buckets",
       tags: ["Health"],
       responses: {
-        200: { description: "Fleet status with host list" },
+        200: {
+          description:
+            "Fleet status with the host list and the derived `fleetHealth` summary (needs intervention / check when online / healthy / not heard from)",
+        },
         401: { description: "Unauthorized" },
       },
     },

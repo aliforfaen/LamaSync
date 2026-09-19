@@ -11,7 +11,8 @@
     "./effective-type": "./src/effective-type.ts",
     "./remote-update": "./src/remote-update.ts",
     "./version-compare": "./src/version-compare.ts",
-    "./folder-health": "./src/folder-health.ts"
+    "./folder-health": "./src/folder-health.ts",
+    "./fleet-health": "./src/fleet-health.ts"
   },
   "scripts": {
     "build": "bun build --compile --outfile dist/lamasync-core src/index.ts"

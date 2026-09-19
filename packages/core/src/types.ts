@@ -3,8 +3,9 @@
 // LAMA-345: managed-folder health contract. `folder-health.ts` is
 // dependency-free and never imports this file, so this is a one-way edge.
 import type { FolderHealthRecord, FolderSyncPlan } from "./folder-health.ts";
+import type { FleetHealthSummary, UpdateStatus } from "./fleet-health.ts";
 
-export type { FolderHealthRecord, FolderSyncPlan };
+export type { FolderHealthRecord, FolderSyncPlan, FleetHealthSummary, UpdateStatus };
 
 export type HostStatus = "online" | "offline" | "degraded" | "unknown";
 
@@ -204,6 +205,14 @@ export interface Host {
   // assignment, or dotfile change so daemons can detect "config drift" and
   // pull a fresh `/config/:hostId` without waiting for the 5-min refresh.
   configRevision?: number | null;
+  // LAMA-345 follow-up: the EVIDENCE-BASED update verdict. `updateAvailable`
+  // above is kept for wire compatibility and is exactly
+  // `updateStatus.kind === "available"`. The difference matters: a device that
+  // has not been heard from since before the release was published is
+  // `not_evaluated` ("not evaluated — offline since before this release")
+  // rather than being told to update. Derived centrally on the server so the
+  // dashboard, host lists, host detail and the notification sweeps agree.
+  updateStatus?: UpdateStatus;
   // LAMA-282: device OS label + storage used, reported by the daemon on
   // each heartbeat for the device cards. `os` is a display string
   // (e.g. "Linux 6.8.0"); `storageUsedBytes` is the bytes used on the
@@ -676,6 +685,10 @@ export interface HealthResponse {
   // UX workstream 4: server self-description for the Admin page.
   serverVersion: string;
   dbSizeBytes: number | null;
+  // LAMA-345 follow-up: the server-derived managed-folder + device summary the
+  // Dashboard renders. Same request as the fleet summary, so the two can never
+  // disagree, and both are computed from one shared derivation.
+  fleetHealth: FleetHealthSummary;
 }
 
 // UX workstream 4: shape of `GET /api/v1/release/latest` (the server proxies

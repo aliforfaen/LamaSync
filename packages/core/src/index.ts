@@ -4,6 +4,10 @@ export * from "./types.ts";
 // the allowlisted intervention payload grammar. Dependency-free on purpose so
 // the web UI can import it without pulling node built-ins into the bundle.
 export * from "./folder-health.ts";
+// LAMA-345 follow-up: fleet-level aggregation + the evidence-based update
+// verdict, shared by the /health route, the Dashboard and the notification
+// sweeps so they cannot disagree.
+export * from "./fleet-health.ts";
 export * from "./retention.ts";
 export { SERVER_SCHEMA, MIGRATIONS, LEGACY_S3_DROP_MIGRATIONS } from "./db/schema.ts";
 export { initDb } from "./db/client.ts";

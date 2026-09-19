@@ -138,10 +138,17 @@ export function __resetCachedLatestReleaseForTests(): void {
 
 /**
  * Test seam: inject a synthetic cached release so unit tests can exercise
- * `updateAvailable` derivation without a real network fetch. Pass `null` to
- * clear the cache (equivalent to `__resetCachedLatestReleaseForTests`).
+ * `updateAvailable` / `updateStatus` derivation without a real network fetch.
+ *
+ * `publishedAt` matters: the evidence rule for an update warning compares the
+ * host's `lastSeen` with the release's publication time, so tests must be able
+ * to move that boundary. Pass `null` for `version` to clear the cache
+ * (equivalent to `__resetCachedLatestReleaseForTests`).
  */
-export function __setCachedLatestVersionForTests(version: string | null): void {
+export function __setCachedLatestVersionForTests(
+  version: string | null,
+  publishedAt: string | number | null = new Date().toISOString(),
+): void {
   if (version === null) {
     __resetCachedLatestReleaseForTests();
     return;
@@ -150,7 +157,14 @@ export function __setCachedLatestVersionForTests(version: string | null): void {
     release: {
       tag: `v${version}`,
       version,
-      publishedAt: new Date().toISOString(),
+      // Normalize to ISO so the injected value looks exactly like the GitHub
+      // payload the real path stores.
+      publishedAt:
+        publishedAt === null
+          ? ""
+          : typeof publishedAt === "number"
+            ? new Date(publishedAt).toISOString()
+            : publishedAt,
       assets: [],
     },
     fetchedAt: Date.now(),
