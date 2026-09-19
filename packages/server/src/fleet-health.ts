@@ -12,16 +12,15 @@ import type { Database } from "bun:sqlite";
 import {
   deriveFleetHealth,
   deriveUpdateStatus,
-  FOLDER_HEALTH_STALE_MS,
   type FleetHealthFolderInput,
   type FleetHealthHostInput,
   type FleetHealthSummary,
-  type FolderHealthReason,
   type Host,
   type HostClass,
   type HostStatus,
   type UpdateStatus,
 } from "@lamasync/core";
+import { loadDerivedFolderHealth } from "./folder-health.ts";
 
 /** The `hosts` columns every caller reads. */
 export interface HostRowLike {
@@ -129,52 +128,10 @@ const HOSTS_SELECT = `SELECT id, hostname, tailnet_ip, last_seen, status, lan_ip
        config_revision, os, storage_used_bytes, host_class
   FROM hosts`;
 
-interface HealthFolderRow {
-  folder_id: string;
-  host_id: string;
-  state: string;
-  reasons: string;
-  reported_at: number;
-  folder_name: string | null;
-  host_name: string | null;
-  host_status: string | null;
-  host_class: string | null;
-  host_last_seen: number | null;
-}
-
-function safeParse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function reasonCodes(value: unknown): FolderHealthReason[] {
-  if (!Array.isArray(value)) return [];
-  const out: FolderHealthReason[] = [];
-  for (const entry of value.slice(0, 6)) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const rec = entry as Record<string, unknown>;
-    const code = rec["code"];
-    if (typeof code !== "string") continue;
-    const action = rec["action"];
-    out.push({
-      code: code as FleetHealthFolderInput["reasons"][number]["code"],
-      message: typeof rec["message"] === "string" ? rec["message"] : code,
-      remediation: typeof rec["remediation"] === "string" ? rec["remediation"] : "",
-      action: typeof action === "string" ? (action as FleetHealthFolderInput["reasons"][number]["action"]) : null,
-    });
-  }
-  return out;
-}
-
 /**
- * Read everything the summary needs in two bounded queries.
- *
- * `stale` is decided by the shared staleness budget (`FOLDER_HEALTH_STALE_MS`)
- * rather than by trusting the daemon's own report, so a device that stopped
- * reporting cannot keep its folders looking current.
+ * Read everything the summary needs: the hosts, the folder names, and the
+ * shared derived health records (stale decided by the shared staleness budget,
+ * never by the daemon's own opinion).
  */
 export function readFleetHealth(
   database: Database,
@@ -192,34 +149,34 @@ export function readFleetHealth(
     updateStatus: updateStatusForRow(row, options.release),
   }));
 
-  const folderRows = database
-    .query<HealthFolderRow, []>(
-      `SELECT h.folder_id, h.host_id, h.state, h.reasons, h.reported_at,
-              f.name AS folder_name,
-              ho.hostname AS host_name,
-              ho.status AS host_status,
-              ho.host_class AS host_class,
-              ho.last_seen AS host_last_seen
-         FROM folder_health h
-         LEFT JOIN folders f ON f.id = h.folder_id
-         LEFT JOIN hosts ho ON ho.id = h.host_id`,
-    )
-    .all();
+  // ONE read path: the same normalized/re-derived records the folder detail page
+  // and the plans routes use. Reading the stored `state` column here instead
+  // made the dashboard and the folder card disagree about the same folder.
+  const healthRecords = loadDerivedFolderHealth(database, now);
 
-  const folders: FleetHealthFolderInput[] = folderRows.map((row) => ({
-    folderId: row.folder_id,
-    folderName: row.folder_name ?? row.folder_id,
-    hostId: row.host_id,
-    hostName: row.host_name ?? row.host_id,
-    hostClass: hostClassFromRow(row.host_class),
-    hostStatus: hostStatusFromRow(row.host_status),
-    hostLastSeen: row.host_last_seen,
-    state: row.state as FleetHealthFolderInput["state"],
-    reasons: reasonCodes(safeParse(row.reasons)),
-    // The shared budget, not the daemon's own opinion: a device that stopped
-    // reporting cannot keep its folders looking current.
-    stale: now - row.reported_at > FOLDER_HEALTH_STALE_MS,
-  }));
+  const folderNames = new Map<string, string>();
+  for (const row of database
+    .query<{ id: string; name: string }, []>("SELECT id, name FROM folders")
+    .all()) {
+    folderNames.set(row.id, row.name);
+  }
+  const hostRowsById = new Map(hostRows.map((row) => [row.id, row]));
+
+  const folders: FleetHealthFolderInput[] = healthRecords.map((record) => {
+    const hostRow = hostRowsById.get(record.hostId);
+    return {
+      folderId: record.folderId,
+      folderName: folderNames.get(record.folderId) ?? record.folderId,
+      hostId: record.hostId,
+      hostName: hostRow?.hostname ?? record.hostId,
+      hostClass: hostClassFromRow(hostRow?.host_class),
+      hostStatus: hostStatusFromRow(hostRow?.status),
+      hostLastSeen: hostRow?.last_seen ?? null,
+      state: record.state,
+      reasons: record.reasons,
+      stale: record.stale,
+    };
+  });
 
   return deriveFleetHealth({ hosts, folders, now });
 }

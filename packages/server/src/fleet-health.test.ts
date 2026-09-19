@@ -15,6 +15,7 @@ import {
   updateStatusForRow,
   type HostRowLike,
 } from "./fleet-health.ts";
+import { listFolderHealth } from "./folder-health.ts";
 
 let db: Database;
 
@@ -146,25 +147,62 @@ describe("readFleetHealth", () => {
     );
   }
 
+  /**
+   * A facts blob that DERIVES the requested state. The summary now reads the
+   * same derived records as the folder detail page, so a fixture whose stated
+   * state contradicts its facts (the drift the browser pass found) would be
+   * wrong by construction.
+   */
+  function factsJson(kind: "healthy" | "unsafe" | "resync_required" | "new_host" | "unknown"): string {
+    const baseline =
+      kind === "unsafe"
+        ? { present: true, ready: false, error: true, path1Count: null, path2Count: null, updatedAt: 1, fingerprint: "p" }
+        : kind === "resync_required"
+          ? { present: true, ready: false, error: false, path1Count: null, path2Count: null, updatedAt: 1, fingerprint: "p" }
+          : kind === "healthy"
+            ? { present: true, ready: true, error: false, path1Count: 10, path2Count: 10, updatedAt: 1, fingerprint: "p" }
+            : { present: false, ready: false, error: false, path1Count: null, path2Count: null, updatedAt: null, fingerprint: "none" };
+    return JSON.stringify({
+      folderType: "sync",
+      effectiveType: "sync",
+      enabled: true,
+      paused: false,
+      runInProgress: false,
+      rcloneAvailable: true,
+      localDir: "ok",
+      freeSpaceBytes: 10_000_000_000,
+      freeSpaceThresholdBytes: 1_000,
+      watcher: { enabled: false, running: false, quietSec: 30 },
+      filter: { fingerprint: "fp", source: "lamasyncignore", changedSinceBaseline: false },
+      baseline,
+      activePhase: null,
+      pendingConflicts: 0,
+      lastRun: kind === "healthy" ? { status: "success", summary: "ok", at: 1 } : null,
+      measurement: null,
+    });
+  }
+
   function seedFolderHealth(
     over: {
       assignmentId?: string;
       folderId?: string;
       hostId?: string;
-      state?: string;
+      kind?: "healthy" | "unsafe" | "resync_required" | "new_host" | "unknown";
       reasons?: string;
       reportedAt?: number;
     } = {},
   ): void {
+    const kind = over.kind ?? "healthy";
     db.run(
       `INSERT INTO folder_health (assignment_id, folder_id, host_id, state, reasons, facts, reported_at)
-       VALUES (?, ?, ?, ?, ?, '{}', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         over.assignmentId ?? "a1",
         over.folderId ?? "f1",
         over.hostId ?? "dev-vm",
-        over.state ?? "healthy",
+        kind,
         over.reasons ?? "[]",
+        factsJson(kind),
         over.reportedAt ?? Date.now(),
       ],
     );
@@ -184,23 +222,25 @@ describe("readFleetHealth", () => {
     seedHost();
     db.run(`INSERT INTO folders (id, name, type) VALUES ('f1', 'Projects', 'sync')`);
     seedFolderHealth({
-      state: "resync_required",
+      kind: "unsafe",
       reasons: JSON.stringify([
-        { code: "filter_changed", message: "The ignore set changed.", remediation: "Rebuild.", action: "resync" },
+        { code: "baseline_error", message: "The saved sync record is unusable.", remediation: "Rebuild.", action: "resync" },
       ]),
     });
     const summary = readFleetHealth(db, { release: RELEASE, now: NOW });
     expect(summary.buckets.needsIntervention.total).toBe(1);
     const item = summary.buckets.needsIntervention.items[0]!;
     expect(item.title).toBe("Projects on dev-vm");
-    expect(item.detail).toBe("The ignore set changed.");
+    // The detail is the SHARED derived reason, not the stored blob: one source
+    // of copy means the dashboard cannot quote a stale message.
+    expect(item.detail).toContain("saved sync record is unusable");
     expect(item.action).toBe("resync");
   });
 
   test("a report older than the shared budget is stale, not healthy", () => {
     seedHost();
     db.run(`INSERT INTO folders (id, name, type) VALUES ('f1', 'Projects', 'sync')`);
-    seedFolderHealth({ state: "healthy", reportedAt: NOW - 20 * 60_000 });
+    seedFolderHealth({ kind: "healthy", reportedAt: NOW - 20 * 60_000 });
     const summary = readFleetHealth(db, { release: RELEASE, now: NOW });
     expect(summary.buckets.unknownOrStale.total).toBe(1);
     expect(summary.healthy.folders).toBe(0);
@@ -209,7 +249,7 @@ describe("readFleetHealth", () => {
   test("a fresh healthy report inside the budget counts as healthy", () => {
     seedHost();
     db.run(`INSERT INTO folders (id, name, type) VALUES ('f1', 'Projects', 'sync')`);
-    seedFolderHealth({ state: "healthy", reportedAt: NOW - 60_000 });
+    seedFolderHealth({ kind: "healthy", reportedAt: NOW - 60_000 });
     expect(readFleetHealth(db, { release: RELEASE, now: NOW }).healthy.folders).toBe(1);
   });
 
@@ -243,15 +283,36 @@ describe("readFleetHealth", () => {
   test("malformed stored reasons cannot break the read", () => {
     seedHost();
     db.run(`INSERT INTO folders (id, name, type) VALUES ('f1', 'Projects', 'sync')`);
-    seedFolderHealth({ state: "blocked", reasons: "{not json" });
+    seedFolderHealth({ kind: "unsafe", reasons: "{not json" });
     const summary = readFleetHealth(db, { release: RELEASE, now: NOW });
     expect(summary.buckets.needsIntervention.total).toBe(1);
-    expect(summary.buckets.needsIntervention.items[0]?.action).toBeNull();
+    // The reasons come from the shared derivation, not the stored blob, so the
+    // item still carries an actionable suggestion.
+    expect(summary.buckets.needsIntervention.items[0]?.action).toBe("resync");
+  });
+
+  test("the summary agrees with the folder detail read for the same folder", () => {
+    // The regression this guards: the dashboard read the daemon's stored
+    // `state` column while the folder card re-derived it, so a folder the
+    // daemon called `unsafe` with healthy facts showed as urgent on the
+    // dashboard and "Healthy" in its own card.
+    seedHost();
+    db.run(`INSERT INTO folders (id, name, type) VALUES ('f1', 'Projects', 'sync')`);
+    seedFolderHealth({ kind: "healthy", reasons: JSON.stringify([{ code: "baseline_error", message: "stale claim", remediation: "x", action: "resync" }]) });
+
+    const summary = readFleetHealth(db, { release: RELEASE, now: NOW });
+    const detail = listFolderHealth(db, "f1", NOW);
+    expect(detail.records).toHaveLength(1);
+    // The stored `state` column says unsafe; both surfaces must report the
+    // derived state instead.
+    expect(detail.records[0]!.state).toBe("healthy");
+    expect(summary.buckets.needsIntervention.total).toBe(0);
+    expect(summary.healthy.folders).toBe(1);
   });
 
   test("a folder whose host row disappeared reports as not-heard-from, never as a data risk", () => {
     db.run(`INSERT INTO folders (id, name, type) VALUES ('f1', 'Projects', 'sync')`);
-    seedFolderHealth({ state: "unsafe", hostId: "gone" });
+    seedFolderHealth({ kind: "unsafe", hostId: "gone" });
     const summary = readFleetHealth(db, { release: RELEASE, now: NOW });
     // No host evidence at all: the safe reading is "we do not know", which is
     // deliberately distinct from "broken" and never red.

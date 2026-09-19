@@ -284,6 +284,9 @@ const folderSeeds: FolderSeed[] = [
     state: "unsafe",
     reason: { code: "baseline_error", message: "The saved sync record is unusable — the last sync stopped with a critical error.", remediation: "Preview a rebuild from this card, then approve it.", action: "resync" },
     reportedAt: NOW,
+    // Facts first: the server re-derives the state from them, so an "unsafe"
+    // fixture must actually carry an error-marked, unusable pair.
+    baseline: { present: true, ready: false, error: true, path1Count: null, path2Count: null, updatedAt: NOW - 5_000, fingerprint: "base-err" },
   },
   {
     key: "healthy",
@@ -315,12 +318,14 @@ const folderSeeds: FolderSeed[] = [
     reportedAt: NOW - 40 * 60_000,
   },
   {
-    key: "nasrisk",
+    key: "resync",
     name: "Archive",
     hostId: "nas-1",
     state: "resync_required",
     reason: { code: "filter_changed", message: "The effective ignore/filter set changed since the last baseline.", remediation: "Preview a rebuild from this card, then approve it.", action: "resync" },
     reportedAt: NOW - 30_000,
+    // The pending-resync marker is what makes this folder "resync required".
+    baseline: { present: true, ready: true, error: false, path1Count: 120, path2Count: 120, updatedAt: NOW - 40_000, fingerprint: "base-changed" },
   },
   {
     key: "unknown",
@@ -391,7 +396,12 @@ for (const seed of folderSeeds) {
       freeSpaceBytes: 50_000_000_000,
       freeSpaceThresholdBytes: 1_000_000_000,
       watcher: { enabled: true, running: true, quietSec: 30 },
-      filter: { fingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false },
+      filter: {
+        fingerprint: "fp-1",
+        source: "lamasyncignore",
+        // Only the resync-required fixture carries an outstanding marker.
+        changedSinceBaseline: seed.key === "resync",
+      },
       baseline: seed.baseline ?? {
         present: true,
         ready: true,

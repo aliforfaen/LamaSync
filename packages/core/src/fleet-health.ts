@@ -613,7 +613,7 @@ export const FLEET_HEALTH_BUCKET_COPY: Readonly<
   checkWhenOnline: {
     title: "Check when next online",
     plain:
-      "Work to finish, or devices that are asleep. A laptop, phone or tablet being away is normal and never urgent.",
+      "Work to finish, devices that are asleep, or updates ready to install. A laptop, phone or tablet being away is normal and never urgent.",
   },
   healthy: {
     title: "Healthy",

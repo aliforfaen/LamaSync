@@ -422,17 +422,26 @@ function applyFleetBaselineCheck(
 }
 
 /**
- * Read every assignment health record for one folder, with server-derived
- * freshness, pending conflicts, live-run activity and the fleet cross-check.
+ * THE read path for managed-folder health: normalise the stored facts,
+ * re-derive the state with everything only the server knows (pending
+ * conflicts, report age, live runs) and apply the fleet cross-check.
+ *
+ * Every surface must go through this. The Dashboard summary previously read the
+ * daemon's *stored* state column instead, so a folder the daemon called
+ * `unsafe` with healthy-looking facts showed as "needs attention" on the
+ * dashboard while its own card — which re-derives — said "Healthy". One code
+ * path means the two cannot disagree.
  */
-export function listFolderHealth(
+export function loadDerivedFolderHealth(
   database: Database,
-  folderId: string,
   now: number = Date.now(),
-): { records: FolderHealthRecord[]; history: FolderHealthHistoryEntry[] } {
-  const rows = database
-    .query<HealthRow, [string]>(`${HEALTH_SELECT} WHERE h.folder_id = ?`)
-    .all(folderId);
+  folderId?: string,
+): FolderHealthRecord[] {
+  const rows = folderId
+    ? database
+        .query<HealthRow, [string]>(`${HEALTH_SELECT} WHERE h.folder_id = ?`)
+        .all(folderId)
+    : database.query<HealthRow, []>(HEALTH_SELECT).all();
 
   const parsed: { record: FolderHealthRecord; row: HealthRow }[] = [];
   for (const row of rows) {
@@ -479,6 +488,19 @@ export function listFolderHealth(
     return applyFleetBaselineCheck(record, group, now);
   });
   records.sort((a, b) => a.hostId.localeCompare(b.hostId));
+  return records;
+}
+
+/**
+ * Every assignment health record for one folder, with server-derived freshness,
+ * pending conflicts, live-run activity and the fleet cross-check.
+ */
+export function listFolderHealth(
+  database: Database,
+  folderId: string,
+  now: number = Date.now(),
+): { records: FolderHealthRecord[]; history: FolderHealthHistoryEntry[] } {
+  const records = loadDerivedFolderHealth(database, now, folderId);
 
   const historyRows = database
     .query<HistoryRow, [string, number]>(
