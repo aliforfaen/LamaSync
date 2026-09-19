@@ -5361,3 +5361,144 @@ html[data-density="compact"] .settings-row {
   white-space: nowrap;
   border: 0;
 }
+
+/* LAMA-345 follow-up — Dashboard fleet-health summary. */
+.fleet-health-summary {
+  margin-top: var(--space-4);
+}
+
+.fleet-health-generated {
+  font-size: var(--font-size-xs);
+}
+
+.fleet-health-headline {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-lg, 1.15rem);
+  font-weight: 600;
+}
+
+.fleet-health-buckets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+}
+
+.fleet-health-bucket {
+  border: 1px solid var(--badge-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: rgba(var(--text-muted-rgb), 0.06);
+}
+
+.fleet-health-bucket--danger {
+  border-left-color: var(--accent-critical);
+}
+
+.fleet-health-bucket--warning {
+  border-left-color: var(--accent-warn);
+}
+
+.fleet-health-bucket--info {
+  border-left-color: var(--accent-info);
+}
+
+.fleet-health-bucket--ok {
+  border-left-color: var(--accent-ok);
+}
+
+.fleet-health-bucket-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.fleet-health-bucket-count {
+  font-size: var(--font-size-lg, 1.15rem);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-health-bucket-plain {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-xs);
+}
+
+.fleet-health-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.fleet-health-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.fleet-health-item-link {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  text-decoration: none;
+}
+
+.fleet-health-item-kind {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.fleet-health-item-title {
+  font-weight: 600;
+}
+
+.fleet-health-item-detail {
+  font-size: var(--font-size-sm);
+}
+
+.fleet-health-more,
+.fleet-health-healthy {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
+}
+
+.fleet-health-healthy {
+  color: var(--accent-ok);
+  font-weight: 600;
+}
+
+.fleet-health-rules {
+  margin-top: var(--space-3);
+}
+
+/* Narrow screens (390px): stack the buckets and let long titles wrap rather
+ * than pushing the card sideways. */
+@media (max-width: 480px) {
+  .fleet-health-buckets {
+    grid-template-columns: 1fr;
+  }
+
+  .fleet-health-headline {
+    font-size: 1rem;
+  }
+
+  .fleet-health-item-link {
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .fleet-health-item-title {
+    overflow-wrap: anywhere;
+  }
+}

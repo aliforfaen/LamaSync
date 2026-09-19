@@ -11,6 +11,8 @@ import type {
 } from "@lamasync/core";
 import { effectiveFolderType } from "@lamasync/core/effective-type";
 import { api, errorText } from "../api.ts";
+// LAMA-345 follow-up: the shared evidence-based update verdict copy.
+import { updateBadgeCopy } from "../fleet-health.ts";
 import {
   daemonUpdateUiState,
   latestRemoteUpdateAction,
@@ -329,6 +331,10 @@ export function HostDetail() {
     () => (data ? remoteUpdateFollowUp(updateAction, data.host.version) : null),
     [data, updateAction],
   );
+  const detailUpdateBadge = useMemo(
+    () => updateBadgeCopy(data?.host.updateStatus),
+    [data?.host.updateStatus],
+  );
   // Modest poll while an update action is in flight (WS is primary; this
   // is the fallback when the socket is down).
   useEffect(() => {
@@ -450,8 +456,16 @@ export function HostDetail() {
           <dt>Service version</dt>
           <dd>
             <code>v{host.version ?? "—"}</code>
-            {host.updateAvailable ? (
-              <span className="badge badge-update">update available</span>
+            {/* LAMA-345 follow-up: the verdict is the server's evidence-based
+                one. A device that has not been heard from since before the
+                release reads as "not checked", never "out of date". */}
+            {detailUpdateBadge ? (
+              <span
+                className={`badge ${detailUpdateBadge.tone === "warning" ? "badge-update" : "badge-unknown"}`}
+                title={detailUpdateBadge.title}
+              >
+                {detailUpdateBadge.text}
+              </span>
             ) : null}
           </dd>
           <dt>

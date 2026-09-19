@@ -4,6 +4,9 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { Link } from "react-router-dom";
 import type { Host, HostClass, OperationLog } from "@lamasync/core";
 import { api } from "../api.ts";
+// LAMA-345 follow-up: one plain-language update verdict shared with the
+// Dashboard summary (the evidence rule itself is server-side).
+import { updateBadgeCopy } from "../fleet-health.ts";
 import { HostClassIcon } from "../components/icons.tsx";
 import { AddHostGuide } from "../components/AddHostGuide.tsx";
 import { EditableHostname } from "../components/EditableHostname.tsx";
@@ -100,6 +103,11 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 // LAMA-298: manual class override. The card is a Link; the select uses
 // stop-only propagation (no preventDefault) so the native dropdown still
 // opens but the click never bubbles to the anchor and triggers navigation.
+/** The update verdict for a host, or null when there is nothing to say. */
+function hostUpdateBadge(host: Host) {
+  return updateBadgeCopy(host.updateStatus);
+}
+
 function HostClassPicker({ host, onUpdated }: { host: Host; onUpdated: () => void }) {
   const [busy, setBusy] = useState(false);
   const current = host.hostClass ?? "unknown";
@@ -153,6 +161,10 @@ interface DeviceCardProps {
  * trigger navigation.
  */
 function DeviceCard({ host, lastBackup, deleting, onDelete, onRenamed, onClassUpdated }: DeviceCardProps) {
+  // LAMA-345 follow-up: the badge follows the server's evidence-based verdict.
+  // "Update not checked" is deliberately neutral — a device that has not been
+  // heard from since before the release is not known to be out of date.
+  const updateBadge = hostUpdateBadge(host);
   return (
     <Link className="host-card" to={`/hosts/${encodeURIComponent(host.id)}`}>
       <div className="host-card-head">
@@ -207,8 +219,13 @@ function DeviceCard({ host, lastBackup, deleting, onDelete, onRenamed, onClassUp
         ) : null}
         <span>
           v{host.version ?? "—"}
-          {host.updateAvailable ? (
-            <span className="badge badge-update">update</span>
+          {updateBadge ? (
+            <span
+              className={`badge ${updateBadge.tone === "warning" ? "badge-update" : "badge-unknown"}`}
+              title={updateBadge.title}
+            >
+              {updateBadge.text}
+            </span>
           ) : null}
         </span>
         {host.os ? (

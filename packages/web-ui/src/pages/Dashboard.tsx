@@ -5,6 +5,7 @@ import type {
   Backend,
   Conflict,
   DemoState,
+  FleetHealthSummary,
   Folder,
   Host,
   OperationLog,
@@ -17,6 +18,8 @@ import { api } from "../api.ts";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { GettingStarted } from "../components/GettingStarted.tsx";
 import { ConfirmDialog } from "../components/Modal.tsx";
+// LAMA-345 follow-up: the server-derived managed-folder + device summary.
+import { FleetHealthSummaryCard } from "../components/FleetHealthSummary.tsx";
 import { InlineError } from "../components/InlineError.tsx";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 import { useTransportHealth } from "../hooks/useTransportHealth.ts";
@@ -60,6 +63,11 @@ interface DashboardData {
   // Workstream 2: first-run checklist inputs (best-effort).
   backends: Backend[];
   hasAssignments: boolean;
+  // LAMA-345 follow-up: the server's own aggregation of managed-folder and
+  // device health. Server-derived so the Dashboard, the Hosts page and the
+  // notification sweeps agree; arrives with the same /health response as the
+  // host list, so the two can never disagree.
+  fleetHealth: FleetHealthSummary | null;
 }
 
 function mergeEvent(prev: DashboardData, event: WSEvent): DashboardData {
@@ -297,6 +305,7 @@ export function Dashboard() {
           if (cancelled) return;
           setData({
             hosts: health.hosts ?? [],
+            fleetHealth: health.fleetHealth ?? null,
             folders,
             pendingConflicts,
             shares,
@@ -396,7 +405,18 @@ export function Dashboard() {
   const offline = (data?.hosts ?? []).filter(
     (h) => (h.status === "offline" || h.status === "degraded") && isAlwaysOnHost(h),
   );
+  // LAMA-345: `updateAvailable` is now evidence-gated server-side, so a device
+  // that has not been heard from since before the release was published no
+  // longer shows up here at all.
   const updates = (data?.hosts ?? []).filter((h) => h.updateAvailable);
+  const fleetHealth = data?.fleetHealth ?? null;
+  // Red-only severity from the shared derivation: unsafe / resync-required /
+  // blocked folders plus genuinely missing always-on machines. Falling back to
+  // the local always-on offline count keeps the verdict sane if an older
+  // server omits the summary.
+  const urgent = fleetHealth
+    ? fleetHealth.buckets.needsIntervention.total
+    : offline.length;
   const hasResticDestination = data?.backends.some((backend) => backend.kind === "restic") ?? false;
   // Verification is still a separate fact from backup completion, but an
   // available restic destination with no recent proof is important enough to
@@ -412,8 +432,10 @@ export function Dashboard() {
   const newTotal = newConflicts + newFailed;
 
   const allQuiet =
-    data !== null && !counts.conflicts && !failed.length && !offline.length && !updates.length && !verificationNeedsAttention;
-  const attentionCount = failed.length + counts.conflicts + offline.length + updates.length + (verificationNeedsAttention ? 1 : 0);
+    data !== null && !counts.conflicts && !failed.length && urgent === 0 && !updates.length && !verificationNeedsAttention;
+  // `urgent` already contains every always-on device that is down, so it
+  // replaces the old local offline count rather than adding to it.
+  const attentionCount = failed.length + counts.conflicts + urgent + updates.length + (verificationNeedsAttention ? 1 : 0);
   const heroTitle =
     data === null
       ? "Checking in with your fleet…"
@@ -584,9 +606,8 @@ export function Dashboard() {
               <div className="needs-list">
                 {failed.length ? <NeedsRow tone="critical" label={`${failed.length} failed operation${failed.length === 1 ? "" : "s"}`} detail="Review the latest backup or sync result." to="/operations" /> : null}
                 {counts.conflicts ? <NeedsRow tone="warning" label={`${counts.conflicts} pending conflict${counts.conflicts === 1 ? "" : "s"}`} detail={data.pendingConflicts.slice(0, 2).map((c) => folderNameById.get(c.folderId) ?? c.folderId).join(" · ")} to="/conflicts" /> : null}
-                {offline.length ? <NeedsRow tone="warning" label={`${offline.length} device${offline.length === 1 ? "" : "s"} offline or degraded`} detail={offline.map((h) => h.hostname).join(" · ")} to="/hosts" /> : null}
-                {updates.length ? <NeedsRow tone="info" label={`${updates.length} update${updates.length === 1 ? "" : "s"} available`} detail={updates.map((h) => h.hostname).join(" · ")} to="/hosts" /> : null}
                 {verificationNeedsAttention ? <NeedsRow tone="warning" label="Backups not verified yet" detail="Run a recovery check before you rely on this destination." to="/backups" /> : null}
+                {urgent > 0 ? <NeedsRow tone="critical" label={`${urgent} folder or device${urgent === 1 ? "" : "s"} needing attention`} detail="Folder health and missing always-on machines — see Fleet health below." to="/#fleet-health-heading" /> : null}
               </div>
             )}
           </section>
@@ -607,6 +628,11 @@ export function Dashboard() {
             )}
           </section>
         </div>
+      ) : null}
+
+      {/* LAMA-345: managed-folder + device health, aggregated server-side. */}
+      {dashboardTab === "overview" && data && fleetHealth ? (
+        <FleetHealthSummaryCard summary={fleetHealth} />
       ) : null}
 
       {dashboardTab === "sync" ? (
