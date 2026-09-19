@@ -13,10 +13,12 @@ import {
   type QueuedActionStatus,
   type QueuedActionType,
   type WSEvent,
+  checkPlanSemantics,
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
 } from "@lamasync/core";
+import { getFolderPlan } from "../folder-health.ts";
 import { broadcast } from "../ws.ts";
 import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
 
@@ -170,6 +172,32 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         if (!parsed.ok) {
           set.status = 400;
           return { error: parsed.error };
+        }
+        // LAMA-345: a plan is bound to WHAT was reviewed, so an obviously
+        // mismatched request (a remote resync against a local-authority plan,
+        // a different intervention, a different deletion percentage) is
+        // refused here rather than becoming a delayed daemon-side failure. The
+        // daemon re-checks the same rule at dispatch; this is the earliest
+        // boundary the operator can see.
+        if (parsed.payload.planId) {
+          const plan = getFolderPlan(activeDb, parsed.payload.planId);
+          if (!plan) {
+            set.status = 400;
+            return {
+              error: "the reviewed plan no longer exists — preview the change again",
+            };
+          }
+          const semantics = checkPlanSemantics(plan, {
+            intervention: parsed.payload.intervention,
+            ...(parsed.payload.authority ? { authority: parsed.payload.authority } : {}),
+            ...(parsed.payload.maxDeletePercent !== undefined
+              ? { maxDeletePercent: parsed.payload.maxDeletePercent }
+              : {}),
+          });
+          if (!semantics.ok) {
+            set.status = 400;
+            return { error: semantics.message ?? "this plan does not match the requested operation" };
+          }
         }
       }
       const host = activeDb

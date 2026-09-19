@@ -393,6 +393,29 @@ describe("LAMA-345 — folder health actions enqueue validation", () => {
       "initialize requires a reviewed planId",
     );
 
+    // A planId that does not exist is refused at the boundary too.
+    const missingPlan = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "initialize",
+        authority: "remote",
+        planId: "plan-1",
+        confirm: true,
+      },
+    });
+    expect(missingPlan.status).toBe(400);
+
+    // With a real reviewed plan the same request is accepted.
+    db.run(
+      `INSERT INTO folder_sync_plans
+         (id, folder_id, host_id, assignment_id, intervention, authority,
+          max_delete_percent, summary, changes, config_revision,
+          filter_fingerprint, baseline_fingerprint, created_at, expires_at)
+       VALUES ('plan-1', 'f1', 'host-a', 'a1', 'initialize', 'remote', NULL, 'reviewed',
+               '{}', 1, NULL, NULL, ?, ?)`,
+      [Date.now(), Date.now() + 60_000],
+    );
     const ok = await postJson("/api/v1/hosts/host-a/actions", {
       type: "folder_intervention",
       payload: {
@@ -454,6 +477,73 @@ describe("LAMA-345 — folder health actions enqueue validation", () => {
       },
     });
     expect(ok.status).toBe(201);
+  });
+
+  test("a plan can only be approved for what it was reviewed as", async () => {
+    // The plan was reviewed as a seed with this device authoritative at 10%.
+    db.run(
+      `INSERT INTO folder_sync_plans
+         (id, folder_id, host_id, assignment_id, intervention, authority,
+          max_delete_percent, summary, changes, config_revision,
+          filter_fingerprint, baseline_fingerprint, created_at, expires_at)
+       VALUES ('plan-x', 'f1', 'host-a', 'a1', 'seed', 'local', 10, 'reviewed',
+               '{}', 1, NULL, NULL, ?, ?)`,
+      [Date.now(), Date.now() + 60_000],
+    );
+
+    const wrongSide = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "resync",
+        authority: "remote",
+        planId: "plan-x",
+        confirm: true,
+      },
+    });
+    expect(wrongSide.status).toBe(400);
+    expect(((await wrongSide.json()) as { error: string }).error).toContain("reviewed as");
+
+    const wrongThreshold = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "seed",
+        authority: "local",
+        planId: "plan-x",
+        maxDeletePercent: 90,
+        confirm: true,
+      },
+    });
+    expect(wrongThreshold.status).toBe(400);
+    expect(((await wrongThreshold.json()) as { error: string }).error).toContain("90%");
+
+    const ok = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "seed",
+        authority: "local",
+        planId: "plan-x",
+        confirm: true,
+      },
+    });
+    expect(ok.status).toBe(201);
+
+    const missingPlan = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "seed",
+        authority: "local",
+        planId: "nope",
+        confirm: true,
+      },
+    });
+    expect(missingPlan.status).toBe(400);
+    expect(((await missingPlan.json()) as { error: string }).error).toContain(
+      "preview the change again",
+    );
   });
 
   test("an argv-shaped payload is refused before it is ever stored", async () => {
