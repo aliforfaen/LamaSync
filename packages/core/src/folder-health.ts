@@ -507,7 +507,7 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
   never_reported: {
     state: "unknown",
     message: () => "This device has not reported folder health yet.",
-    remediation: "Run Diagnose now to collect a first report.",
+    remediation: "Run Check this device now to collect a first report.",
     action: "diagnose",
   },
   run_in_progress: {
@@ -516,7 +516,7 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
       f.activePhase
         ? `A run is in progress (${f.activePhase}).`
         : "A run is in progress.",
-    remediation: "Wait for it to finish, or cancel it deliberately.",
+    remediation: "Wait for it to finish, or stop it deliberately.",
     action: "cancel",
   },
   assignment_disabled: {
@@ -534,7 +534,7 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
   rclone_missing: {
     state: "blocked",
     message: () => "rclone is not installed or not on PATH on this device.",
-    remediation: "Install rclone on the device, then diagnose again.",
+    remediation: "Install rclone on the device, then check it again.",
     action: "diagnose",
   },
   unsupported_folder_type: {
@@ -552,19 +552,19 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
   local_path_not_directory: {
     state: "blocked",
     message: () => "The local path exists but is not a directory.",
-    remediation: "Point the assignment at a directory, then diagnose again.",
+    remediation: "Point the assignment at a directory, then check this device again.",
     action: "diagnose",
   },
   local_path_unreadable: {
     state: "blocked",
     message: () => "The local folder cannot be read by the daemon.",
-    remediation: "Fix the directory permissions on the device, then diagnose again.",
+    remediation: "Fix the directory permissions on the device, then check it again.",
     action: "diagnose",
   },
   local_path_unwritable: {
     state: "blocked",
     message: () => "The local folder cannot be written by the daemon.",
-    remediation: "Fix the directory permissions on the device, then diagnose again.",
+    remediation: "Fix the directory permissions on the device, then check it again.",
     action: "diagnose",
   },
   disk_space_low: {
@@ -579,19 +579,19 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
   baseline_missing: {
     state: "new_host",
     message: () => "This device has no bisync baseline yet.",
-    remediation: "Initialize this host from remote, or seed the remote from this host.",
+    remediation: "Set up this device from the remote, or fill the remote from this device.",
     action: "initialize",
   },
   baseline_incomplete: {
     state: "resync_required",
     message: () => "The bisync listing set is incomplete (a path listing is missing).",
-    remediation: "Plan a resync so a complete baseline is rebuilt.",
+    remediation: "Preview a rebuild from this card, then approve it.",
     action: "resync",
   },
   baseline_error: {
     state: "unsafe",
     message: () => "rclone recorded a critical bisync error for this pair.",
-    remediation: "Review a plan, then resync to rebuild the baseline.",
+    remediation: "Preview a rebuild from this card, then approve it.",
     action: "resync",
   },
   baseline_not_established: {
@@ -600,25 +600,25 @@ const REASON_TEMPLATES: Readonly<Record<FolderHealthReasonCode, ReasonTemplate>>
       f.baseline.path1Count === 0 && (f.baseline.path2Count ?? 0) > 0
         ? "The remote listing is empty while this host has data — the last baseline was not established."
         : "The paired listings do not cover the intended baseline.",
-    remediation: "Plan and approve a resync with explicit authority.",
+    remediation: "Preview a rebuild and choose which side wins, then approve it.",
     action: "resync",
   },
   filter_changed: {
     state: "resync_required",
     message: () => "The effective ignore/filter set changed since the last baseline.",
-    remediation: "Plan a safe resync so stale listings are not reused.",
+    remediation: "Changing the ignore set moved the file universe; preview a rebuild and approve it.",
     action: "resync",
   },
   interrupted: {
     state: "recoverable",
     message: () => "The last run was interrupted; the baseline is still usable.",
-    remediation: "Resume the recoverable work.",
+    remediation: "Continue the interrupted sync.",
     action: "resume",
   },
   last_run_failed: {
     state: "recoverable",
     message: () => "The last run failed; the baseline is still usable.",
-    remediation: "Retry, or plan a resync if it keeps failing.",
+    remediation: "Continue the sync; if it keeps failing, preview a rebuild.",
     action: "resume",
   },
   conflicts_pending: {
@@ -796,7 +796,9 @@ export function describeFolderHealthState(state: FolderHealthState): string {
 export function describeFolderHealthAction(action: FolderHealthActionId): string {
   switch (action) {
     case "diagnose":
-      return "Diagnose now";
+      // Fallback label only: the Web UI has its own plain-language labels in
+      // packages/web-ui/src/folder-health.ts.
+      return "Check this device now";
     case "plan":
       // Plans are never context-free: the UI builds one as the first step of
       // Initialize / Seed / Reseed, so this label is only a fallback.

@@ -191,6 +191,75 @@ describe("deriveFolderHealth", () => {
   });
 });
 
+describe("reason remediation copy", () => {
+  // The card shows reasons[0].remediation verbatim, so it is primary copy —
+  // it must read as an action an operator can find on the card, not as rclone
+  // vocabulary.
+  const cases: Array<[Parameters<typeof deriveFolderHealth>[0], string]> = [
+    [
+      facts({
+        baseline: {
+          present: false,
+          ready: false,
+          error: false,
+          path1Count: null,
+          path2Count: null,
+          updatedAt: null,
+          fingerprint: "none",
+        },
+      }),
+      "Set up this device from the remote, or fill the remote from this device.",
+    ],
+    [
+      facts({ filter: { fingerprint: "f", source: "combined", changedSinceBaseline: true } }),
+      "Changing the ignore set moved the file universe; preview a rebuild and approve it.",
+    ],
+    [
+      facts({ lastRun: { status: "retry", summary: "x", at: 1 } }),
+      "Continue the interrupted sync.",
+    ],
+    [facts({ runInProgress: true }), "Wait for it to finish, or stop it deliberately."],
+  ];
+
+  test("each remediation names an action the operator can actually take", () => {
+    for (const [input, expected] of cases) {
+      const { reasons } = deriveFolderHealth(input);
+      expect(reasons[0]?.remediation).toBe(expected);
+    }
+  });
+
+  test("no remediation leaks rclone flags or Path 1/Path 2 vocabulary", () => {
+    const inputs: Array<Parameters<typeof deriveFolderHealth>[0]> = [
+      facts(),
+      facts({ localDir: "missing" }),
+      facts({ localDir: "unwritable" }),
+      facts({ enabled: false }),
+      facts({ paused: true }),
+      facts({
+        baseline: { present: true, ready: false, error: true, path1Count: null, path2Count: null, updatedAt: 1, fingerprint: "p" },
+      }),
+      facts({
+        baseline: { present: true, ready: true, error: false, path1Count: 0, path2Count: 5, updatedAt: 1, fingerprint: "p" },
+      }),
+      facts({ pendingConflicts: 2 }),
+      facts({ freeSpaceBytes: 1, freeSpaceThresholdBytes: 1_000 }),
+      facts({ lastRun: { status: "failed", summary: "x", at: 1 } }),
+      ...cases.map(([input]) => input),
+    ];
+    for (const input of inputs) {
+      for (const reason of deriveFolderHealth(input).reasons) {
+        expect(reason.remediation).not.toContain("Path 1");
+        expect(reason.remediation).not.toContain("Path 2");
+        expect(reason.remediation).not.toContain("--");
+        expect(reason.remediation).not.toContain("--resync");
+        if (reason.code !== "rclone_missing") {
+          expect(reason.remediation).not.toContain("rclone");
+        }
+      }
+    }
+  });
+});
+
 describe("folderHealthStaleness", () => {
   test("marks a report older than the budget stale", () => {
     const now = 1_000_000_000;
