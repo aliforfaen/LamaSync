@@ -5489,6 +5489,17 @@ html[data-density="compact"] .settings-row {
     grid-template-columns: 1fr;
   }
 
+  /* The wizard's step chips wrap into a ragged grid on a phone; one chip per
+   * line reads as an ordered list instead. */
+  .folder-health-steps {
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .folder-health-step {
+    justify-content: flex-start;
+  }
+
   .fleet-health-headline {
     font-size: 1rem;
   }
