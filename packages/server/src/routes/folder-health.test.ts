@@ -367,9 +367,10 @@ describe("POST /api/v1/folder-plans and reads", () => {
     expect(list).toHaveLength(1);
     expect(list[0]!.plan.id).toBe("plan-1");
     expect(list[0]!.plan.authority).toBe("remote");
-    // No health report exists yet, so the live identity is unknown.
-    expect(list[0]!.validity.valid).toBe(false);
-    expect(list[0]!.validity.reason).toBe("filter_changed");
+    // No health report exists yet, so there is no live identity to compare
+    // against: expiry and the config revision still apply, and the plan reads
+    // as current rather than falsely stale.
+    expect(list[0]!.validity.valid).toBe(true);
   });
 
   test("a plan is valid once the live health matches what it was built from", async () => {

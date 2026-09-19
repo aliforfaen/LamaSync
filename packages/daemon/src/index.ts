@@ -44,6 +44,7 @@ import {
   withinUpdateCooldown,
 } from "./update-check.ts";
 import { captureAppSnapshot, executeAssignment, executeResticRestore, isPauseActive } from "./executor.ts";
+import type { BisyncRunControl } from "./executor.ts";
 import { diagnoseFolder, measureLocalTree, probeFolderHealth } from "./folder-health.ts";
 import {
   buildSyncPlan,
@@ -783,7 +784,7 @@ async function main(): Promise<void> {
     folder: Folder,
     effectiveFolder: Folder,
     hostConfig: HostConfig,
-    opts: { dryRun?: boolean; triggerOrigin?: TriggerOrigin } | undefined,
+    opts: { dryRun?: boolean; triggerOrigin?: TriggerOrigin; bisync?: BisyncRunControl } | undefined,
     attachOrigin: (report: OperationReport) => OperationReport,
   ): Promise<OperationReport | null> => {
     // LAMA-327: live progress for this run. Created before lock acquisition so
@@ -858,6 +859,10 @@ async function main(): Promise<void> {
         configPath,
         signal: abortController.signal,
         dryRun: opts?.dryRun === true,
+        // LAMA-345: a reviewed intervention rides the SAME locked, mutex'd
+        // path as a scheduled run — it must not race a run on the same
+        // workdir or bypass the destination lock.
+        ...(opts?.bisync ? { bisync: opts.bisync } : {}),
         progress: progress ?? undefined,
       });
       console.log(
@@ -911,7 +916,7 @@ async function main(): Promise<void> {
 
   const runOnce = async (
     assignment: FolderAssignment,
-    opts?: { dryRun?: boolean; triggerOrigin?: TriggerOrigin },
+    opts?: { dryRun?: boolean; triggerOrigin?: TriggerOrigin; bisync?: BisyncRunControl },
   ): Promise<OperationReport | null> => {
     // LAMA-302: attach the trigger origin to every report so the operations
     // view can distinguish watch / schedule / manual runs.
@@ -952,7 +957,8 @@ async function main(): Promise<void> {
     // LAMA-345: remember the latest outcome for this assignment and refresh
     // its health report (deep measurement included, since a run just touched
     // the tree). Fire-and-forget: health must never delay the next run.
-    if (result) {
+    // A dry run is not an outcome — it must not overwrite the last real run.
+    if (result && opts?.dryRun !== true) {
       lastRunByFolder.set(assignment.folderId, {
         status: result.status,
         summary: result.summary ?? null,
@@ -1275,7 +1281,9 @@ async function main(): Promise<void> {
         case "plan_folder": {
           // LAMA-345: read-only dry run against the real workdir. The plan is
           // stored server-side and its id is the only way to execute the
-          // matching intervention.
+          // matching intervention. It runs through runOnce so it shares the
+          // in-process mutex and the destination lock with a real sync — a dry
+          // run must never race a run on the same workdir.
           const parsed = parseFolderPlanRequestPayload(payload);
           if (!parsed.ok) {
             await ack("failed", parsed.error);
@@ -1291,29 +1299,35 @@ async function main(): Promise<void> {
             await ack("failed", "no host config cached");
             return;
           }
-          const { configPath, cleanup } = writeRcloneConfig(config.rcloneConfig);
+          const effectiveType = effectiveFolderType(target.folder, target.assignment);
+          if (effectiveType !== "sync") {
+            await ack("failed", "only sync assignments have a bisync baseline to plan");
+            return;
+          }
           try {
             const plan = await buildSyncPlan({
               assignment: target.assignment,
               folder: target.folder,
-              effectiveType: effectiveFolderType(target.folder, target.assignment),
+              effectiveType,
               hostConfig: config,
-              client,
               hostId,
-              configPath,
               intervention: parsed.payload.intervention,
               authority: parsed.payload.authority,
               ...(parsed.payload.maxDelete !== undefined
                 ? { maxDelete: parsed.payload.maxDelete }
                 : {}),
+              runDryRun: (runControl) =>
+                runOnce(target.assignment, {
+                  dryRun: true,
+                  bisync: runControl,
+                  triggerOrigin: "manual",
+                }),
             });
             await client.reportFolderPlan(plan);
             await ack("done", `plan=${plan.id} ${plan.summary}`);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             await ack("failed", `planning failed: ${msg}`);
-          } finally {
-            cleanup();
           }
           return;
         }
@@ -1340,6 +1354,10 @@ async function main(): Promise<void> {
             active.abort("cancelled");
             console.log(`[intervention] folder=${instruction.folderId} cancel requested`);
             await ack("done", `cancel requested for folder=${instruction.folderId}`);
+            return;
+          }
+          if (effectiveFolderType(target.folder, target.assignment) !== "sync") {
+            await ack("failed", "only sync assignments support baseline interventions");
             return;
           }
 
@@ -1385,43 +1403,21 @@ async function main(): Promise<void> {
               ? { maxDelete: instruction.maxDelete }
               : {}),
           });
-          const { configPath, cleanup } = writeRcloneConfig(config.rcloneConfig);
-          try {
-            const report = await executeAssignment({
-              assignment: target.assignment,
-              folder: {
-                ...target.folder,
-                type: effectiveFolderType(target.folder, target.assignment),
-              },
-              hostConfig: config,
-              client,
-              hostId,
-              configPath,
-              bisync: control,
-            });
-            lastRunByFolder.set(instruction.folderId, {
-              status: report.status,
-              summary: report.summary ?? null,
-              at: Date.now(),
-            });
-            await reportOperation(report);
-            void requestHealthReport?.({
-              folderIds: [instruction.folderId],
-              readCounts: true,
-              measure: true,
-            });
-            const outcome = summarizeReportForAction(
-              report.status,
-              report.summary ?? null,
-              `intervention ${instruction.intervention} finished`,
-            );
-            await ack(outcome.status, outcome.result);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            await ack("failed", `intervention threw: ${msg}`);
-          } finally {
-            cleanup();
-          }
+          // LAMA-345: run through runOnce so the intervention takes the same
+          // destination lock and in-process mutex as any other run, reports
+          // its own operation_log row, and refreshes the assignment health.
+          const report = await runOnce(target.assignment, {
+            bisync: control,
+            triggerOrigin: "manual",
+          });
+          const outcome = summarizeReportForAction(
+            report?.status ?? "failed",
+            report?.summary ?? null,
+            report
+              ? `intervention ${instruction.intervention} finished`
+              : "intervention did not run",
+          );
+          await ack(outcome.status, outcome.result);
           return;
         }
         default: {
@@ -1502,6 +1498,7 @@ async function main(): Promise<void> {
     assignment: FolderAssignment,
     folder: Folder,
     readCounts: boolean,
+    rcloneAvailable: boolean = Bun.which("rclone") !== null,
   ) => ({
     assignment,
     effectiveType: effectiveFolderType(folder, assignment),
@@ -1509,7 +1506,7 @@ async function main(): Promise<void> {
     paused: isPauseActive(hostConfig?.pause ?? null),
     runInProgress: activeRuns.has(assignment.folderId),
     activePhase: null,
-    rcloneAvailable: Bun.which("rclone") !== null,
+    rcloneAvailable,
     pendingConflicts: 0,
     watcher: watcherFactsFor(assignment),
     lastRun: lastRunByFolder.get(assignment.folderId) ?? null,
@@ -1540,6 +1537,8 @@ async function main(): Promise<void> {
     const assignments = hostConfig?.assignments ?? [];
     const folders = hostConfig?.folders ?? [];
     const folderFilter = opts?.folderIds ? new Set(opts.folderIds) : null;
+    // Resolved once per report pass, not once per assignment.
+    const rcloneAvailable = Bun.which("rclone") !== null;
     for (const assignment of assignments) {
       if (folderFilter !== null && !folderFilter.has(assignment.folderId)) continue;
       const folder = folders.find((f) => f.id === assignment.folderId);
@@ -1555,7 +1554,7 @@ async function main(): Promise<void> {
         }
       }
       const probe = probeFolderHealth(
-        probeInputsFor(assignment, folder, opts?.readCounts === true),
+        probeInputsFor(assignment, folder, opts?.readCounts === true, rcloneAvailable),
       );
       try {
         await client.reportFolderHealth(probe.report);

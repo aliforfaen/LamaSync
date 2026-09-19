@@ -21,14 +21,14 @@ import type {
   FolderIntervention,
   FolderSyncPlan,
   HostConfig,
-  LamaSyncApiClient,
+  OperationReport,
 } from "@lamasync/core";
 import {
   checkFolderPlanValidity,
   FOLDER_PLAN_TTL_MS,
   type FolderPlanInvalidReason,
 } from "@lamasync/core";
-import { executeAssignment, type BisyncRunControl } from "./executor.ts";
+import type { BisyncRunControl } from "./executor.ts";
 import {
   baselineFingerprint,
   bisyncStateDir,
@@ -43,15 +43,19 @@ export interface PlanBuildOptions {
   assignment: FolderAssignment;
   folder: Folder;
   /** Folder type after the per-host sync/mount override. */
-  effectiveType: string;
+  effectiveType: Folder["type"];
   hostConfig: HostConfig;
-  client: LamaSyncApiClient;
   hostId: string;
-  configPath: string;
   intervention: FolderSyncPlan["intervention"];
   authority: FolderBootstrapAuthority;
   maxDelete?: number;
   now?: number;
+  /**
+   * Executes the read-only dry run. Injected by the daemon so planning goes
+   * through the SAME in-process mutex + destination lock as a real run: a dry
+   * run writing listing artifacts into the workdir must never race a run.
+   */
+  runDryRun: (control: BisyncRunControl) => Promise<OperationReport | null>;
 }
 
 interface DryRunDetails {
@@ -141,24 +145,12 @@ export async function buildSyncPlan(opts: PlanBuildOptions): Promise<FolderSyncP
     authority: opts.authority,
     ...(opts.maxDelete !== undefined ? { maxDelete: opts.maxDelete } : {}),
   };
-  const report = await executeAssignment({
-    assignment: opts.assignment,
-    folder: opts.folder,
-    hostConfig: opts.hostConfig,
-    client: opts.client,
-    hostId: opts.hostId,
-    configPath: opts.configPath,
-    dryRun: true,
-    bisync: control,
-  });
-  const changes = parseDryRunChanges(report.details);
+  const report = await opts.runDryRun(control);
+  const changes = parseDryRunChanges(report?.details ?? null);
 
   const stateDir = bisyncStateDir(opts.assignment.folderId);
   const inspection = inspectBisyncBaseline(stateDir, { readCounts: true });
-  const filter = liveFilterFingerprint(
-    opts.assignment,
-    opts.effectiveType as Folder["type"],
-  );
+  const filter = liveFilterFingerprint(opts.assignment, opts.effectiveType);
 
   return {
     id: crypto.randomUUID(),

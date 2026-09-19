@@ -804,11 +804,12 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           }
         }
 
-        if (resyncRequested) {
+        if (resyncRequested || first || filterResync) {
           // LAMA-345 stage 3: archive the prior listing pair before a reseed
           // instead of deleting it, then pin the authority explicitly. With
           // the command's remote=Path 1 / local=Path 2 shape, `remote` uses
-          // Path 1 authority and `local` uses Path 2 authority.
+          // Path 1 authority and `local` uses Path 2 authority. A first run
+          // has no pair to archive, so the guard leaves it alone.
           if (inspection.present || inspection.error) {
             try {
               const archived = archiveBisyncState(sd);
@@ -820,6 +821,8 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
               );
             }
           }
+        }
+        if (resyncRequested) {
           command.push("--resync");
           command.push("--resync-mode", bisync.authority === "local" ? "path2" : "path1");
         } else if (first || filterResync) {

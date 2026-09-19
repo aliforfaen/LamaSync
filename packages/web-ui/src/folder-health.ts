@@ -63,6 +63,11 @@ export function availableHealthActions(
   const isBisync = record.facts.effectiveType === "sync";
   if (!isBisync) return actions;
 
+  // A blocked assignment cannot run anything: the precondition (missing or
+  // unwritable path, no disk space, paused, disabled, rclone absent) would
+  // fail the run. Diagnose is the honest offer.
+  if (record.state === "blocked" || record.state === "unknown") return actions;
+
   actions.push("plan");
   if (record.active || record.state === "busy") {
     actions.push("cancel");

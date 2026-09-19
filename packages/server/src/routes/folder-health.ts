@@ -10,6 +10,7 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import {
   checkFolderPlanValidity,
+  type FolderHealthFacts,
   type FolderHealthState,
   type FolderSyncPlan,
   type WSEvent,
@@ -74,6 +75,28 @@ function hostConfigRevision(hostId: string): number {
     )
     .get(hostId);
   return row?.config_revision ?? 0;
+}
+
+/**
+ * Validity of a stored plan against the live assignment state.
+ *
+ * When there is NO health report yet there is no live device identity to
+ * compare against, so the plan's own identity is trusted (a freshly planned
+ * folder that has not reported since must not read as "stale") while expiry
+ * and the config revision — the two facts the server definitely knows — are
+ * still enforced.
+ */
+function planValidityFor(
+  plan: FolderSyncPlan,
+  record: { facts: FolderHealthFacts } | null,
+  now: number,
+): ReturnType<typeof checkFolderPlanValidity> {
+  return checkFolderPlanValidity(plan, {
+    now,
+    configRevision: hostConfigRevision(plan.hostId),
+    filterFingerprint: record?.facts.filter.fingerprint ?? plan.filterFingerprint,
+    baselineFingerprint: record?.facts.baseline.fingerprint ?? plan.baselineFingerprint,
+  });
 }
 
 export const folderHealthRoutes = new Elysia({ prefix: "/api/v1" })
@@ -299,13 +322,7 @@ export const folderHealthRoutes = new Elysia({ prefix: "/api/v1" })
       const { records } = listFolderHealth(activeDb, params.id, now);
       return plans.map((plan) => {
         const record = records.find((r) => r.assignmentId === plan.assignmentId) ?? null;
-        const validity = checkFolderPlanValidity(plan, {
-          now,
-          configRevision: hostConfigRevision(plan.hostId),
-          filterFingerprint: record?.facts.filter.fingerprint ?? null,
-          baselineFingerprint: record?.facts.baseline.fingerprint ?? null,
-        });
-        return { plan, validity };
+        return { plan, validity: planValidityFor(plan, record, now) };
       });
     },
     {
@@ -341,13 +358,7 @@ export const folderHealthRoutes = new Elysia({ prefix: "/api/v1" })
       const now = Date.now();
       const { records } = listFolderHealth(activeDb, plan.folderId, now);
       const record = records.find((r) => r.assignmentId === plan.assignmentId) ?? null;
-      const validity = checkFolderPlanValidity(plan, {
-        now,
-        configRevision: hostConfigRevision(plan.hostId),
-        filterFingerprint: record?.facts.filter.fingerprint ?? null,
-        baselineFingerprint: record?.facts.baseline.fingerprint ?? null,
-      });
-      return { plan, validity };
+      return { plan, validity: planValidityFor(plan, record, now) };
     },
     {
       params: t.Object({ planId: t.String() }),

@@ -132,6 +132,11 @@ describe("availableHealthActions — the intervention gates", () => {
     expect(actions).toEqual(["diagnose", "plan", "cancel"]);
   });
 
+  test("a blocked assignment offers diagnosis only — nothing can run", () => {
+    const actions = availableHealthActions(record({ state: "blocked" }));
+    expect(actions).toEqual(["diagnose"]);
+  });
+
   test("a non-bisync assignment offers diagnosis only — no reseeding", () => {
     const actions = availableHealthActions(
       record({ facts: facts({ effectiveType: "backup", folderType: "backup" }) }),
