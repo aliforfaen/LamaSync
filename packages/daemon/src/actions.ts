@@ -205,6 +205,27 @@ export function unassignedFolderCompletion(
 }
 
 /**
+ * LAMA-345 follow-up: should this claimed action be executed?
+ *
+ * The action poller and the boot reclaim both funnel through here. A row that
+ * is already terminal (done/failed), or an id this process is already
+ * executing, must be a logged no-op — the release-blocking cachy incident
+ * started with a reclaimed in-flight intervention being run a second time.
+ */
+export function actionClaimDecision(
+  action: Pick<QueuedAction, "id" | "status">,
+  inFlight: ReadonlySet<string>,
+): { run: boolean; reason: string | null } {
+  if (action.status === "done" || action.status === "failed") {
+    return { run: false, reason: `already ${action.status}` };
+  }
+  if (inFlight.has(action.id)) {
+    return { run: false, reason: "already in flight" };
+  }
+  return { run: true, reason: null };
+}
+
+/**
  * Map an OperationReport into the wire-side completion the action poller
  * writes back. "skipped: …" failures are upgraded to a `done` completion
  * because a lock-contention skip is not an error from the user's POV — the

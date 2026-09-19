@@ -2,9 +2,12 @@
 // allowlisted run control.
 
 import { describe, expect, test } from "bun:test";
+import type { Folder, FolderAssignment, HostConfig, OperationReport } from "@lamasync/core";
+import { accumulateRcloneJsonLog } from "./executor.ts";
 import {
   PLAN_CHANGE_CAP,
   buildPlanSummary,
+  buildSyncPlan,
   parseDryRunChanges,
   runControlFor,
   runControlFromExecution,
@@ -254,5 +257,118 @@ describe("runControlFromExecution", () => {
         maxDeletePercent: null,
       }),
     ).toEqual({ mode: "initialize", authority: "remote" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Release-blocking regression: a reviewed plan's change list must be truthful.
+//
+// Production cachy: a local-authority resync dry run reported 0 copies /
+// 0 deletes / 0 bytes, the plan was approved, and the real resync then
+// transferred 349 files / 803,465,460 B. Two defects combined: the executor
+// never parsed modern rclone's `skipped` dry-run marker, and a plan whose dry
+// run reported nothing was still executable.
+// ---------------------------------------------------------------------------
+describe("buildSyncPlan — dry-run fidelity (LAMA-345 release-blocking)", () => {
+  const assignment: FolderAssignment = {
+    id: "a1",
+    folderId: "f1",
+    hostId: "dev-vm",
+    role: "source",
+    localPath: "/tmp/lamasync-plan-fidelity",
+    enabled: true,
+  };
+  const folder: Folder = { id: "f1", name: "Projects", type: "sync" };
+  const hostConfig: HostConfig = {
+    host: { id: "dev-vm", hostname: "dev-vm", status: "online" },
+    assignments: [assignment],
+    folders: [folder],
+    apps: [],
+    rcloneConfig: "",
+    serverTailnetIp: null,
+    peers: [],
+    pause: null,
+  };
+  const base = {
+    assignment,
+    folder,
+    effectiveType: "sync" as const,
+    hostConfig,
+    hostId: "dev-vm",
+    intervention: "resync" as const,
+    authority: "local" as const,
+    maxDeletePercent: 10,
+    now: 1_000,
+  };
+
+  /** Real v1.68.2 `--resync --dry-run` lines (see executor-log.test.ts). */
+  const REAL_DRY_RUN = [
+    '{"level":"warning","msg":"Skipped copy as --dry-run is set (size 17)","object":"projects/a.txt","skipped":"copy"}',
+    '{"level":"warning","msg":"Skipped copy as --dry-run is set (size 17)","object":"projects/b.txt","skipped":"copy"}',
+    '{"level":"warning","msg":"Skipped delete as --dry-run is set (size 2)","object":"projects/stale.txt","skipped":"delete"}',
+    '{"level":"warning","msg":"Transferred: 34 B","stats":{"bytes":34,"checks":2,"deletes":1,"errors":0,"transfers":2}}',
+  ].join("\n");
+
+  test("a real dry run yields a non-empty change list (never a phantom 0)", async () => {
+    const acc = accumulateRcloneJsonLog(REAL_DRY_RUN, {
+      files: 0,
+      bytes: 0,
+      errors: 0,
+      checks: 0,
+      transfers: 0,
+      wouldCopy: [],
+      wouldDelete: [],
+      wouldMkdir: [],
+    });
+    const { wouldCopy, wouldDelete, wouldMkdir, ...stats } = acc;
+    const report: OperationReport = {
+      hostId: "dev-vm",
+      folderId: "f1",
+      operation: "sync",
+      status: "success",
+      summary: "dry-run: 2 would-copy, 1 would-delete",
+      details: JSON.stringify({ rclone: stats, wouldCopy, wouldDelete, wouldMkdir }),
+    };
+    const plan = await buildSyncPlan({ ...base, runDryRun: async () => report });
+    expect(plan.changes.wouldCopy).toEqual(["projects/a.txt", "projects/b.txt"]);
+    expect(plan.changes.wouldDelete).toEqual(["projects/stale.txt"]);
+    expect(plan.changes.files).toBe(3);
+    expect(plan.changes.bytes).toBe(34);
+    // The reviewed semantics survive verbatim.
+    expect(plan.intervention).toBe("resync");
+    expect(plan.authority).toBe("local");
+    expect(plan.maxDeletePercent).toBe(10);
+  });
+
+  test("a failed dry run fails planning instead of becoming a 0-change plan", async () => {
+    const failed: OperationReport = {
+      hostId: "dev-vm",
+      folderId: "f1",
+      operation: "sync",
+      status: "failed",
+      summary: "rclone exited 1: cannot find prior listing",
+    };
+    await expect(buildSyncPlan({ ...base, runDryRun: async () => failed })).rejects.toThrow(
+      /did not complete \(failed\)/,
+    );
+  });
+
+  test("a missing dry-run report fails planning", async () => {
+    await expect(buildSyncPlan({ ...base, runDryRun: async () => null })).rejects.toThrow(
+      /did not run/,
+    );
+  });
+
+  test("a deferred dry run (lock unavailable) is not a plan", async () => {
+    const deferred: OperationReport = {
+      hostId: "dev-vm",
+      folderId: "f1",
+      operation: "sync",
+      status: "deferred",
+      summary: "skipped: another run is in flight",
+    };
+    await expect(buildSyncPlan({ ...base, runDryRun: async () => deferred })).rejects.toThrow(
+      /did not complete \(deferred\)/,
+    );
   });
 });

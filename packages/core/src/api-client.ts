@@ -281,6 +281,22 @@ export class LamaSyncApiClient {
     );
   }
 
+  /**
+   * LAMA-345 follow-up: renew the lease on an action this daemon is still
+   * executing. Called periodically while an action is in flight so the
+   * server's stale-taken reaper cannot reclaim (and therefore cannot hand to
+   * another poll for re-execution) work that is still running. Returns the
+   * action row; a non-2xx (409) means the lease was already lost.
+   */
+  renewActionLease(id: string): Promise<QueuedAction> {
+    return this.request<QueuedAction>(
+      "POST",
+      `/api/v1/actions/${encodeURIComponent(id)}/lease`,
+      JSON.stringify({}),
+      "application/json",
+    );
+  }
+
   enqueueAction(
     hostId: string,
     body: { type: QueuedActionType; payload?: Record<string, unknown> | null },

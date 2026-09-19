@@ -1,6 +1,6 @@
 # Status & work queue — LamaSync
 
-Updated 2026-09-13. This is the current state, not an append-only changelog.
+Updated 2026-09-19. This is the current state, not an append-only changelog.
 Older release notes and completed work are in
 [`archive/status-2026-08-through-2026-09-03.md`](archive/status-2026-08-through-2026-09-03.md).
 
@@ -12,6 +12,33 @@ workspace. CI runs type-check, web build, tests, strict skill drift, and
 distributable binary build.
 
 ## Recently shipped
+
+- **LAMA-345 release-blocking plan/execution safety regression (live v0.3.12
+  fleet validation).** Two defects, fixed at the layer that owned each.
+  *Phantom "0 change" plans:* the executor's dry-run accumulator matched
+  invented `"Would copy"` sentences that rclone never emits; modern rclone
+  reports a suppressed operation through the machine-readable
+  `"skipped": "copy|delete|make directory"` JSON field. Every planned dry run
+  therefore reported 0 copies / 0 deletes / 0 bytes while the real resync
+  copied the tree — cachy showed plan 0 then 349 transfers / 803,465,460 B.
+  The accumulator now reads `skipped` (with the sentence as a legacy
+  fallback), rclone's dry-run `transfers`/`deletes`/`bytes` give the true
+  plan totals, and a dry run that does not complete fails planning instead of
+  becoming a "0 change" plan. *Zero-change execution guard:* a reviewed plan
+  whose dry run reported no copies, deletes or mkdirs can no longer be
+  approved into a content-mutating run — refused at the enqueue boundary (400)
+  and again at daemon dispatch. Plan semantics, authority and the reviewed
+  `--max-delete` percentage are untouched. *Duplicate action lifecycle:* a
+  claimed action now holds a **renewable 10-minute lease**
+  (`POST /api/v1/actions/:id/lease`); the daemon renews every in-flight action
+  every minute, so a Projects-scale plan/intervention can no longer outlive a
+  fixed window, get flipped back to `pending` by the stale-taken sweep, and be
+  re-claimed and re-executed concurrently. The daemon also refuses to run an
+  action already in flight or already terminal, the action poller no longer
+  re-enters itself, and `POST /actions/:id/complete` is idempotent (a
+  duplicate ack cannot rewrite a terminal outcome or add a second
+  `operation_log` row). See the LAMA-345 comments for the live evidence and
+  the deployment gate.
 
 - **LAMA-345 follow-up — fleet-health summary, evidence-based update verdict,
   and a scheduler defect found by integration.** Same branch, awaiting review.
@@ -64,7 +91,9 @@ distributable binary build.
   *Evidence:* `scripts/lama345-integration.ts` runs a fully isolated server
   (random port, mktemp data dir, generated key, `HOME` redirected) plus an
   isolated daemon and exercises heartbeat → folder-health report → `/health`
-  summary → dry-run plan → reviewed-plan validation: 54/54 checks, rclone never
+  summary → dry-run plan → reviewed-plan validation, plus the release-blocking
+  follow-up (0-change refusal, renewable lease, idempotent ack): 59/59 checks,
+  rclone never
   invoked (asserted from the daemon log). Browser pass at 1440px and 390px with
   no console or page errors.
 

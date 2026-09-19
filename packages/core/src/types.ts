@@ -263,6 +263,19 @@ export interface QueuedAction {
   result?: string | null;
 }
 
+/**
+ * LAMA-345 follow-up: how long a claimed queued action's lease lasts without a
+ * renewal. A daemon that is still executing an action renews it well inside
+ * this window, so the server's stale-taken reaper only ever reclaims work from
+ * a dead daemon (or an execution that finished without a durable ack) — never
+ * from a live, still-running one. Shared by the server route and the daemon's
+ * renewal timer so the two cannot drift.
+ */
+export const ACTION_LEASE_MS = 10 * 60_000;
+
+/** How often the daemon renews an in-flight action's lease. */
+export const ACTION_LEASE_RENEW_INTERVAL_MS = 60_000;
+
 // LAMA-260: response shape for `POST /folders/:id/files` (multipart
 // upload). Distinct from the browse-job model — this is a synchronous
 // `rclone copyto` pushed onto the folder's destination backend, not an

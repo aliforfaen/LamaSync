@@ -651,6 +651,68 @@ check(
   `${argvShaped.status}: ${str(record(argvShaped.body)["error"])}`,
 );
 
+// LAMA-345 follow-up: a "0 change" plan can never be approved into a content
+// run (the release-blocking cachy incident), and a claimed action holds a
+// renewable lease so a long plan/intervention is never reclaimed mid-run.
+const zeroPlanRes = await api("POST", "/folder-plans", {
+  id: crypto.randomUUID(),
+  hostId: "srv-main",
+  folderId: planFolder,
+  assignmentId: planAssignment,
+  intervention: "resync",
+  authority: "local",
+  maxDeletePercent: 10,
+  summary: "Reseed the baseline — this device wins conflicting files. Dry run: no file changes detected.",
+  changes: { wouldCopy: [], wouldDelete: [], wouldMkdir: [], files: 0, bytes: 0 },
+  configRevision: 1,
+  filterFingerprint: "fp-1",
+  baselineFingerprint: "base-1",
+  createdAt: Date.now(),
+  expiresAt: Date.now() + 30 * 60_000,
+});
+const zeroPlanId = str(record(zeroPlanRes.body)["id"]);
+const zeroApproval = await api("POST", "/hosts/srv-main/actions", {
+  type: "folder_intervention",
+  payload: { folderId: planFolder, intervention: "resync", authority: "local", planId: zeroPlanId, confirm: true },
+});
+check(
+  "a 0-change plan can never be approved into a content run",
+  zeroApproval.status === 400 && str(record(zeroApproval.body)["error"]).includes("no copies, deletes"),
+  `${zeroApproval.status}: ${str(record(zeroApproval.body)["error"])}`,
+);
+
+const leaseActionRes = await api("POST", "/hosts/srv-main/actions", { type: "check_update" });
+const leaseActionId = str(record(leaseActionRes.body)["id"]);
+const claimed = await api("GET", "/actions/pending?hostId=srv-main");
+const claimedIds = list(claimed.body).map((a) => str(record(a)["id"]));
+check(
+  "a queued action is claimed for the host",
+  claimedIds.includes(leaseActionId),
+  `${claimed.status}: claimed=${claimedIds.length}`,
+);
+const leaseRenewed = await api("POST", `/actions/${leaseActionId}/lease`, {});
+check(
+  "a claimed action's lease is renewable while it runs",
+  leaseRenewed.status === 200 && str(record(leaseRenewed.body)["status"]) === "taken",
+  `${leaseRenewed.status}: ${str(record(leaseRenewed.body)["status"])}`,
+);
+const leaseAfterComplete = await api("POST", `/actions/${leaseActionId}/complete`, { status: "done", result: "integration check" });
+const duplicateAck = await api("POST", `/actions/${leaseActionId}/complete`, { status: "failed", result: "must be ignored" });
+check(
+  "a duplicate ack cannot rewrite the terminal outcome",
+  leaseAfterComplete.status === 200 &&
+    duplicateAck.status === 200 &&
+    str(record(duplicateAck.body)["status"]) === "done" &&
+    str(record(duplicateAck.body)["result"]) === "integration check",
+  `${duplicateAck.status}: ${str(record(duplicateAck.body)["status"])}/${str(record(duplicateAck.body)["result"])}`,
+);
+const leaseAfterDone = await api("POST", `/actions/${leaseActionId}/lease`, {});
+check(
+  "a completed action's lease is gone (409)",
+  leaseAfterDone.status === 409,
+  `${leaseAfterDone.status}: ${str(record(leaseAfterDone.body)["error"])}`,
+);
+
 // ---------------------------------------------------------------------------
 // Isolated daemon: real heartbeat + folder-health reporting (no rclone)
 // ---------------------------------------------------------------------------

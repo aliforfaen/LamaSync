@@ -425,6 +425,33 @@ export function formatDeletePercent(percent: number | null): string {
   return percent === null ? "rclone's default (50%)" : `${percent}%`;
 }
 
+/**
+ * Did the reviewed plan's own dry run report any content change?
+ *
+ * The plan is the review artifact: a plan whose dry run reported no copies,
+ * no deletes and no directory creation is a statement that the two sides
+ * already agree. Executing a content-mutating intervention against such a
+ * plan is therefore refused — a real resync cannot be proven to be a no-op
+ * without re-running the dry run, and the release-blocking cachy incident
+ * showed a "0 change" plan executing 349 transfers.
+ *
+ * Any one signal counts as a change: a non-empty sample list, the reported
+ * file count, or the reported byte total. Being conservative here only ever
+ * refuses an operation the operator believed would transfer nothing.
+ */
+export function planHasContentChanges(
+  plan: Pick<FolderSyncPlan, "changes">,
+): boolean {
+  const changes = plan.changes;
+  return (
+    changes.wouldCopy.length > 0 ||
+    changes.wouldDelete.length > 0 ||
+    changes.wouldMkdir.length > 0 ||
+    changes.files > 0 ||
+    changes.bytes > 0
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Limits
 // ---------------------------------------------------------------------------

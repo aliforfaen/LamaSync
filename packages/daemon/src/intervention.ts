@@ -103,13 +103,21 @@ export function parseDryRunChanges(details: string | null | undefined): FolderSy
   const d = parsed as DryRunDetails;
   const stats = isRecord(d.rclone) ? d.rclone : {};
   const wouldCopy = stringList(d.wouldCopy);
+  const wouldDelete = stringList(d.wouldDelete);
+  const wouldMkdir = stringList(d.wouldMkdir);
+  // The lists are deliberately capped on the wire, so their lengths are a
+  // floor. rclone's dry-run accounting counts suppressed copies as transfers
+  // and suppressed deletes as deletes, which gives the true total for a plan
+  // larger than the cap. Fall back to the list lengths when a daemon (or a
+  // failed run) reported no stats.
+  const transfers = numberField(stats["transfers"]);
+  const deletes = numberField(stats["deletes"]);
+  const accounted = transfers + deletes;
   return {
     wouldCopy,
-    wouldDelete: stringList(d.wouldDelete),
-    wouldMkdir: stringList(d.wouldMkdir),
-    // rclone's dry-run stats are not reliable for a plan; the explicit change
-    // list is. Files = the would-copy count, bytes = transfers when reported.
-    files: wouldCopy.length,
+    wouldDelete,
+    wouldMkdir,
+    files: accounted > 0 ? accounted : wouldCopy.length + wouldDelete.length + wouldMkdir.length,
     bytes: numberField(stats["bytes"]),
   };
 }
@@ -157,7 +165,19 @@ export async function buildSyncPlan(opts: PlanBuildOptions): Promise<FolderSyncP
     ...(maxDeletePercent !== null ? { maxDeletePercent } : {}),
   };
   const report = await opts.runDryRun(control);
-  const changes = parseDryRunChanges(report?.details ?? null);
+  // A plan is only as trustworthy as the dry run behind it. A missing or
+  // non-successful dry run must fail planning outright — it must never be
+  // flattened into a "no changes" plan (a failed dry run produced exactly the
+  // zero-change plan the cachy incident approved).
+  if (!report) {
+    throw new Error("the dry run did not run (no report); nothing to review");
+  }
+  if (report.status !== "success") {
+    throw new Error(
+      `the dry run did not complete (${report.status}): ${report.summary ?? "no summary"}`,
+    );
+  }
+  const changes = parseDryRunChanges(report.details ?? null);
 
   const stateDir = bisyncStateDir(opts.assignment.folderId);
   const inspection = inspectBisyncBaseline(stateDir, { readCounts: true });

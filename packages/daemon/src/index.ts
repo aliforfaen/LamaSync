@@ -17,6 +17,7 @@ import type {
   TriggerOrigin,
 } from "@lamasync/core";
 import {
+  ACTION_LEASE_RENEW_INTERVAL_MS,
   LamaSyncApiClient,
   VERSION,
   canonicalDestinationKey,
@@ -25,11 +26,13 @@ import {
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
+  planHasContentChanges,
   resolveDestination,
   resolveWatchQuietSec,
 } from "@lamasync/core";
 import { locateSkillAsset, SKILL_DIR, downloadSkillBundle, readInstalledSkillVersion } from "./skill-update.ts";
 import {
+  actionClaimDecision,
   isDryRunRequested,
   selectActionTargets,
   summarizeConfigRefresh,
@@ -1093,11 +1096,38 @@ async function main(): Promise<void> {
   };
 
   /**
+   * LAMA-345 follow-up: action ids this process is executing right now.
+   * Serves two purposes: the single-flight guard below, and the set of leases
+   * the renewal timer must keep alive while an action is long-running.
+   */
+  const inFlightActions = new Set<string>();
+
+  /**
+   * Execute a queued action exactly once. A duplicate claim (the poll timer
+   * overlapping a long run, or a boot reclaim racing a poll) is a logged
+   * no-op rather than a second real run — the release-blocking cachy incident
+   * began with a reclaimed in-flight intervention.
+   */
+  async function executeAction(action: QueuedAction): Promise<void> {
+    const decision = actionClaimDecision(action, inFlightActions);
+    if (!decision.run) {
+      console.warn(`[action] ignoring ${action.id}: ${decision.reason}`);
+      return;
+    }
+    inFlightActions.add(action.id);
+    try {
+      await executeActionBody(action);
+    } finally {
+      inFlightActions.delete(action.id);
+    }
+  }
+
+  /**
    * Execute a single queued action and ack it back to the server. Errors
    * are caught and surfaced via `status: "failed"` so one bad action never
    * takes down the poll loop.
    */
-  async function executeAction(action: QueuedAction): Promise<void> {
+  async function executeActionBody(action: QueuedAction): Promise<void> {
     // LAMA-311: the return value matters to callers that must not take an
     // irreversible local step (the `update_daemon` restart) before the
     // completion is durably recorded. Callers that don't care ignore it.
@@ -1439,6 +1469,22 @@ async function main(): Promise<void> {
               await ack("failed", `plan refused — ${verdict.message}`);
               return;
             }
+            // LAMA-345 follow-up (release-blocking): the reviewed plan is the
+            // contract. A plan whose own dry run reported no content changes
+            // must never be executed as a content-mutating run — the cachy
+            // incident executed 349 transfers / 803 MB from a "0 change" plan.
+            // The reviewed authority and deletion threshold are untouched;
+            // the operation is simply refused instead of run blind.
+            if (!planHasContentChanges(plan)) {
+              console.warn(
+                `[intervention] folder=${instruction.folderId} refused plan=${plan.id}: plan reported no content changes`,
+              );
+              await ack(
+                "failed",
+                "plan refused — the reviewed plan reported no copies, deletes or directory changes, so a content run is refused. Plan again once the folder state changes.",
+              );
+              return;
+            }
             control = runControlFromExecution(verdict.execution);
             console.log(
               `[intervention] folder=${instruction.folderId} approved plan=${plan.id} intervention=${control.mode} authority=${control.authority ?? "(none)"} maxDeletePercent=${control.maxDeletePercent ?? "default"}`,
@@ -1477,19 +1523,31 @@ async function main(): Promise<void> {
     }
   }
 
+  /**
+   * LAMA-345 follow-up: the 30 s action timer must not stack polls. A long
+   * plan/intervention keeps the previous poll awaiting; without this guard a
+   * re-entrant poll claimed the same reclaimed row and ran it a second time.
+   */
+  let pollingActions = false;
   async function pollActions(): Promise<void> {
-    let pending: QueuedAction[];
+    if (pollingActions) return;
+    pollingActions = true;
     try {
-      pending = await client.listPendingActions(hostId, 10);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[action] poll failed: ${msg}`);
-      return;
-    }
-    if (pending.length === 0) return;
-    console.log(`[action] claimed ${pending.length} action(s)`);
-    for (const action of pending) {
-      await executeAction(action);
+      let pending: QueuedAction[];
+      try {
+        pending = await client.listPendingActions(hostId, 10);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[action] poll failed: ${msg}`);
+        return;
+      }
+      if (pending.length === 0) return;
+      console.log(`[action] claimed ${pending.length} action(s)`);
+      for (const action of pending) {
+        await executeAction(action);
+      }
+    } finally {
+      pollingActions = false;
     }
   }
 
@@ -1679,6 +1737,29 @@ async function main(): Promise<void> {
   // LAMA-345: one health report at boot so the Folders page has assignment
   // state immediately instead of waiting for the first 30 s heartbeat.
   void requestHealthReport?.({ readCounts: true });
+
+  // LAMA-345 follow-up: keep the leases of in-flight actions alive. A
+  // Projects-scale plan/intervention can run far longer than the 10-minute
+  // lease, and the server's reaper would otherwise flip the row back to
+  // 'pending' mid-run so another poll could re-execute it. This timer shares
+  // the event loop with the awaited rclone child, so it fires during the run.
+  // It is started BEFORE the boot reclaim below, so an intervention reclaimed
+  // at boot is covered too.
+  const actionLeaseTimer = setInterval(() => {
+    for (const id of inFlightActions) {
+      void (async () => {
+        try {
+          await client.renewActionLease(id);
+        } catch (err) {
+          // A 409 means the lease was already lost (reclaimed or completed);
+          // the run itself is left alone, but the operator can see why.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[action] lease renewal failed for ${id}: ${msg}`);
+        }
+      })();
+    }
+  }, ACTION_LEASE_RENEW_INTERVAL_MS);
+  actionLeaseTimer.unref?.();
 
   // LAMA-232: actions the previous daemon incarnation claimed but never
   // acked are stuck in 'taken'. A freshly booted daemon has no in-flight

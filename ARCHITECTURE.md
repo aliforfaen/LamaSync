@@ -493,16 +493,27 @@ whose *old* unit is actually effective has `$HOME` read-only and cannot
 rewrite its own unit; that attempt fails and returns the escape hatch
 (`lamasyncd --update` from a shell, no sandbox).
 
-**Manual action queue (LAMA-198/LAMA-232/LAMA-311):** admin-triggered
+**Manual action queue (LAMA-198/LAMA-232/LAMA-311/LAMA-345):** admin-triggered
 `trigger_sync` / `trigger_backup` / `update_daemon` actions are claimed from
-`GET /actions/pending` and completed exactly once via
-`POST /actions/:id/complete` (a blind UPDATE plus an `operation_log` row, so a
-second ack overwrites the first). Because a claim can be resolved against a
-config cache the server has already superseded, the dispatcher re-fetches the
-config once and re-selects before declaring a named folder unassigned.
-`update_daemon` decides its single terminal ack — including whether a service
-restart is needed — before requesting the restart, so systemd tearing the
-process down can never leave a stale or contradictory outcome.
+`GET /actions/pending` and completed via `POST /actions/:id/complete`.
+Completion is idempotent: a duplicate ack of an already-terminal action
+returns the stored outcome and writes nothing, so it can neither rewrite the
+first outcome nor append a second `operation_log` row. Because a claim can be
+resolved against a config cache the server has already superseded, the
+dispatcher re-fetches the config once and re-selects before declaring a named
+folder unassigned. `update_daemon` decides its single terminal ack — including
+whether a service restart is needed — before requesting the restart, so systemd
+tearing the process down can never leave a stale or contradictory outcome.
+
+A claim holds a **renewable lease** (`lease_expires_at`, 10 minutes). The
+daemon renews every in-flight action via `POST /actions/:id/lease` once a
+minute, so the stale-taken sweep can only reclaim work from a dead daemon (or
+an execution that finished without a durable ack) — never from a live,
+still-running plan/intervention. The daemon additionally refuses to run an
+action already in flight or already terminal, and the 30 s action poller is
+single-flight. This closes the LAMA-345 duplicate lifecycle, where a
+Projects-scale intervention outlived the fixed 10-minute window, was flipped
+back to `pending`, and was re-claimed and re-executed concurrently.
 
 **Mount lifecycle (LAMA-130/LAMA-113):**
 

@@ -14,6 +14,7 @@ import {
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
+  planHasContentChanges,
   validateBisyncMaxDeletePercent,
   validateMountCacheMode,
   type FolderHealthFacts,
@@ -566,5 +567,29 @@ describe("allowlisted tuning validators", () => {
     expect(validateMountCacheMode(null)).toBe(true);
     expect(validateMountCacheMode("writes")).toBe(true);
     expect(validateMountCacheMode("turbo")).toBe(false);
+  });
+});
+
+// LAMA-345 follow-up (release-blocking): the reviewed plan is the execution
+// contract, so "did the dry run report any content change?" is a first-class
+// shared predicate — the server refuses an approval at the boundary and the
+// daemon re-checks at dispatch with the SAME function.
+describe("planHasContentChanges", () => {
+  const empty = { wouldCopy: [], wouldDelete: [], wouldMkdir: [], files: 0, bytes: 0 };
+
+  test("false only when every signal is empty", () => {
+    expect(planHasContentChanges({ changes: empty })).toBe(false);
+  });
+
+  test("a single copy, delete or mkdir is a change", () => {
+    expect(planHasContentChanges({ changes: { ...empty, wouldCopy: ["a"] } })).toBe(true);
+    expect(planHasContentChanges({ changes: { ...empty, wouldDelete: ["a"] } })).toBe(true);
+    expect(planHasContentChanges({ changes: { ...empty, wouldMkdir: ["d"] } })).toBe(true);
+  });
+
+  test("a reported total or byte count alone is still a change", () => {
+    // rclone's stats can report work the bounded sample list did not carry.
+    expect(planHasContentChanges({ changes: { ...empty, files: 349 } })).toBe(true);
+    expect(planHasContentChanges({ changes: { ...empty, bytes: 803_465_460 } })).toBe(true);
   });
 });

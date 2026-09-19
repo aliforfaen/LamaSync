@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FolderAssignment, QueuedAction } from "@lamasync/core";
 import {
+  actionClaimDecision,
   isDryRunRequested,
   selectActionTargets,
   selectAssignmentsForSyncAction,
@@ -508,5 +509,35 @@ describe("summarizeReportForAction — cancelled (LAMA-345)", () => {
       status: "failed",
       result: "sync failed (exit 3)",
     });
+  });
+});
+
+// LAMA-345 follow-up (release-blocking): the single-flight guard. A reclaimed
+// in-flight action must never be executed twice concurrently — the cachy
+// incident began with exactly that duplicate lifecycle.
+describe("actionClaimDecision", () => {
+  const none = new Set<string>();
+
+  test("a fresh pending claim runs", () => {
+    expect(actionClaimDecision({ id: "a1", status: "pending" }, none)).toEqual({
+      run: true,
+      reason: null,
+    });
+    expect(actionClaimDecision({ id: "a1", status: "taken" }, none).run).toBe(true);
+  });
+
+  test("an id already in flight is a no-op", () => {
+    const decision = actionClaimDecision(
+      { id: "a1", status: "taken" },
+      new Set(["a1"]),
+    );
+    expect(decision.run).toBe(false);
+    expect(decision.reason).toBe("already in flight");
+  });
+
+  test("a terminal row is never re-executed", () => {
+    expect(actionClaimDecision({ id: "a1", status: "done" }, none).run).toBe(false);
+    expect(actionClaimDecision({ id: "a1", status: "failed" }, none).run).toBe(false);
+    expect(actionClaimDecision({ id: "a1", status: "done" }, none).reason).toBe("already done");
   });
 });

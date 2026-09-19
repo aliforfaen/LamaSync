@@ -464,7 +464,12 @@ CREATE TABLE IF NOT EXISTS queued_actions (
     created_at    INTEGER NOT NULL,
     taken_at      INTEGER,
     completed_at  INTEGER,
-    result        TEXT
+    result        TEXT,
+    -- LAMA-345 follow-up: a claimed action holds a renewable lease. The
+    -- daemon renews it while the action is still executing, so the stale-
+    -- taken reaper can never reclaim (and therefore never re-execute) work
+    -- that a live daemon is still running.
+    lease_expires_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_queued_actions_host_status
@@ -995,6 +1000,11 @@ export const MIGRATIONS: string[] = [
   "CREATE TABLE IF NOT EXISTS folder_sync_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, intervention TEXT NOT NULL, authority TEXT NOT NULL, max_delete_percent INTEGER, summary TEXT NOT NULL, changes TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
   "ALTER TABLE folder_sync_plans ADD COLUMN max_delete_percent INTEGER",
   "CREATE INDEX IF NOT EXISTS idx_folder_sync_plans_assignment ON folder_sync_plans(assignment_id, created_at)",
+  // LAMA-345 follow-up: a claimed queued action carries a renewable lease so
+  // the stale-taken reaper never reclaims an action a live daemon is still
+  // executing. Nullable: pre-existing rows fall back to taken_at + the lease
+  // window in the reaper.
+  "ALTER TABLE queued_actions ADD COLUMN lease_expires_at INTEGER",
 ];
 
 /**

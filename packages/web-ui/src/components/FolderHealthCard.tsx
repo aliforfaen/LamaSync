@@ -862,7 +862,8 @@ function PlanReview({
         {totals.sampled ? (
           <p className="muted">
             This device keeps the first {totals.sampleCap} entries per list, so the sample below is
-            the beginning of each list — the totals above are exact.
+            the beginning of each list. The counts above are the sampled entries, not the full
+            total; the reported data total is the honest size of the plan.
           </p>
         ) : null}
         <ul>

@@ -140,6 +140,12 @@ export function shouldAcknowledgeFilter(input: {
 
 interface TransferStats {
   files: number; bytes: number; errors: number; checks: number; transfers: number;
+  /**
+   * LAMA-345 follow-up: rclone's own deleted-file count. Optional because the
+   * pre-existing report shape did not carry it; a dry run reports the deletes
+   * it suppressed here, which is what makes a plan's change total exact.
+   */
+  deletes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -151,6 +157,7 @@ interface RcloneStatsLine {
   bytes?: unknown;
   checks?: unknown;
   errors?: unknown;
+  deletes?: unknown;
 }
 
 function isRcloneStatsLine(value: unknown): value is RcloneStatsLine {
@@ -196,11 +203,13 @@ export function accumulateRcloneJsonLog(
         stats?: {
           bytes?: unknown;
           checks?: unknown;
+          deletes?: unknown;
           errors?: unknown;
           transfers?: unknown;
         };
         msg?: unknown;
         object?: unknown;
+        skipped?: unknown;
       };
       const s = obj.stats;
       if (s) {
@@ -208,12 +217,39 @@ export function accumulateRcloneJsonLog(
         if (typeof s.errors === "number") acc.errors = s.errors;
         if (typeof s.checks === "number") acc.checks = s.checks;
         if (typeof s.transfers === "number") acc.transfers = s.transfers;
+        if (typeof s.deletes === "number") acc.deletes = s.deletes;
       }
       const msg = obj.msg;
       if (msg === "Copied (new)" || msg === "Copied (server-side copy)") acc.files += 1;
-      if (msg === "Would copy" && typeof obj.object === "string") acc.wouldCopy.push(obj.object);
-      if (msg === "Would delete" && typeof obj.object === "string") acc.wouldDelete.push(obj.object);
-      if (msg === "Would make directory" && typeof obj.object === "string") acc.wouldMkdir.push(obj.object);
+      // LAMA-345 follow-up (release-blocking): a dry run's change list must be
+      // read from rclone's MACHINE-READABLE `skipped` field, not from the
+      // human log sentence. rclone >= 1.62 routes every suppressed operation
+      // through `SkipDestructive`, which tags the JSON line with
+      // `"skipped": "<action>"` (copy / delete / make directory / move / …)
+      // and only varies the `msg` wording. The previous code matched invented
+      // `"Would copy"` sentences that modern rclone never emits, so every
+      // planned dry run reported "0 changes" while the real resync copied the
+      // whole tree — the cachy incident (plan 0 → 349 transfers).
+      const skipped = typeof obj.skipped === "string" ? obj.skipped : null;
+      if (skipped !== null) {
+        if (typeof obj.object === "string") {
+          // A move is a content change: the file leaves one side. Counting it
+          // as a copy keeps the plan from claiming "no changes" for a run that
+          // will still mutate both sides.
+          if (skipped === "copy" || skipped === "move") acc.wouldCopy.push(obj.object);
+          else if (skipped === "delete" || skipped === "move into backup dir") acc.wouldDelete.push(obj.object);
+          else if (skipped === "make directory") acc.wouldMkdir.push(obj.object);
+        }
+      } else {
+        // Defensive fallback for a writer that emitted only a sentence. No
+        // released rclone ever used this wording (v1.57 and v1.68 both emit
+        // `skipped`), so it is not expected to fire — it exists only so a
+        // future/third-party log shape degrades to a non-empty list rather
+        // than a silent "0 changes" plan.
+        if (msg === "Would copy" && typeof obj.object === "string") acc.wouldCopy.push(obj.object);
+        if (msg === "Would delete" && typeof obj.object === "string") acc.wouldDelete.push(obj.object);
+        if (msg === "Would make directory" && typeof obj.object === "string") acc.wouldMkdir.push(obj.object);
+      }
     } catch {}
   }
   return acc;

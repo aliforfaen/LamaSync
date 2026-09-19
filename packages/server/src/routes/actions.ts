@@ -9,6 +9,7 @@ import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import {
+  ACTION_LEASE_MS,
   type QueuedAction,
   type QueuedActionStatus,
   type QueuedActionType,
@@ -17,6 +18,7 @@ import {
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
+  planHasContentChanges,
 } from "@lamasync/core";
 import { getFolderPlan } from "../folder-health.ts";
 import { broadcast } from "../ws.ts";
@@ -44,10 +46,17 @@ const PENDING_TAKE_LIMIT = 10;
 const ACTION_HISTORY_LIMIT = 50;
 const ACTION_HISTORY_MAX_LIMIT = 200;
 // LAMA-232: an action claimed by a daemon that died before acking is stuck
-// in 'taken' forever. Sweeps flip taken rows older than this back to
-// 'pending' so the next poll re-claims them. Long syncs legitimately take
-// minutes, so 10 min is a safe distance from any in-flight execution.
-const STALE_TAKEN_MS = 10 * 60_000;
+// in 'taken' forever. Sweeps flip taken rows whose lease has expired back to
+// 'pending' so the next poll re-claims them.
+//
+// LAMA-345 follow-up (release-blocking): the lease is now RENEWABLE and is
+// what fixes the duplicate lifecycle. A long plan/intervention can outlive
+// any fixed window; the old sweep flipped a still-running action back to
+// 'pending' after 10 min and the same daemon's next poll re-claimed and
+// re-executed it while the first run was still going. A daemon that is still
+// executing renews the lease every minute, so only a genuinely dead daemon
+// (or an execution that finished without a durable ack) ever expires.
+const STALE_TAKEN_MS = ACTION_LEASE_MS;
 
 let activeDb: Database = defaultDb;
 export function __setDb(next: Database): void {
@@ -106,18 +115,24 @@ function isCompletionStatus(value: unknown): value is "done" | "failed" {
 }
 
 /**
- * LAMA-232: flip 'taken' actions older than STALE_TAKEN_MS back to
- * 'pending' (clearing taken_at) so a daemon that died mid-execution
- * doesn't orphan them forever. Called on every daemon poll; the next poll
- * re-claims and re-executes the survivors.
+ * LAMA-232 / LAMA-345: flip 'taken' actions whose LEASE has expired back to
+ * 'pending' (clearing taken_at and the lease) so a daemon that died
+ * mid-execution doesn't orphan them forever. Called on every daemon poll; the
+ * next poll re-claims and re-executes the survivors.
+ *
+ * A live daemon renews the lease while an action is still running (see
+ * `POST /actions/:id/lease`), so an in-flight plan/intervention is never
+ * reclaimed. Pre-LAMA-345 rows have no lease and fall back to
+ * `taken_at + STALE_TAKEN_MS`.
  */
 export function reapStaleTakenActions(database: Database): number {
-  const cutoff = Date.now() - STALE_TAKEN_MS;
+  const now = Date.now();
   const result = database.run(
     `UPDATE queued_actions
-       SET status = 'pending', taken_at = NULL
-       WHERE status = 'taken' AND taken_at IS NOT NULL AND taken_at < ?`,
-    [cutoff],
+       SET status = 'pending', taken_at = NULL, lease_expires_at = NULL
+       WHERE status = 'taken'
+         AND COALESCE(lease_expires_at, COALESCE(taken_at, 0) + ?) < ?`,
+    [STALE_TAKEN_MS, now],
   );
   return Number(result.changes ?? 0);
 }
@@ -197,6 +212,18 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
           if (!semantics.ok) {
             set.status = 400;
             return { error: semantics.message ?? "this plan does not match the requested operation" };
+          }
+          // LAMA-345 follow-up (release-blocking): a plan whose own dry run
+          // reported no copies, deletes or directory creation must never be
+          // approved into a content-mutating run. The cachy incident executed
+          // 349 transfers from a "0 change" plan; the daemon enforces the same
+          // rule at dispatch, this is the earliest boundary the operator sees.
+          if (!planHasContentChanges(plan)) {
+            set.status = 400;
+            return {
+              error:
+                "the reviewed plan reported no copies, deletes or directory changes — nothing would be transferred. Plan again once the folder state changes.",
+            };
           }
         }
       }
@@ -309,9 +336,9 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         const now = Date.now();
         activeDb.run(
           `UPDATE queued_actions
-             SET status = 'taken', taken_at = ?
+             SET status = 'taken', taken_at = ?, lease_expires_at = ?
              WHERE id IN (${placeholders}) AND status = 'pending'`,
-          [now, ...takenIds],
+          [now, now + STALE_TAKEN_MS, ...takenIds],
         );
         return takenIds;
       })();
@@ -382,6 +409,59 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
     },
   )
   .post(
+    "/actions/:id/lease",
+    ({params, set, request}) => {
+      const existing = activeDb
+        .query<{ id: string; host_id: string; status: string }, [string]>(
+          "SELECT id, host_id, status FROM queued_actions WHERE id = ?",
+        )
+        .get(params.id);
+      if (!existing) {
+        set.status = 404;
+        return { error: "Action not found" };
+      }
+      // LAMA-234: only the action's owning host may hold or renew it.
+      if (!deviceMayAccessHost(principalOf(request), existing.host_id)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      // LAMA-345 follow-up: a lease renewal is only valid while the action is
+      // still taken. A 409 tells the daemon its lease was already lost (the
+      // reaper reclaimed it, or it completed) so it can stop treating the
+      // action as in flight instead of acking a row it no longer owns.
+      if (existing.status !== "taken") {
+        set.status = 409;
+        return { error: `Action is no longer taken (status=${existing.status})` };
+      }
+      const now = Date.now();
+      activeDb.run(
+        `UPDATE queued_actions SET lease_expires_at = ? WHERE id = ? AND status = 'taken'`,
+        [now + STALE_TAKEN_MS, params.id],
+      );
+      const row = activeDb
+        .query<ActionRow, [string]>(`${ACTION_SELECT} WHERE id = ?`)
+        .get(params.id);
+      if (!row) {
+        set.status = 500;
+        return { error: "Failed to load action after lease renewal" };
+      }
+      return rowToAction(row);
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      detail: {
+        summary: "Renew the lease on a claimed action (daemon, while running)",
+        tags: ["Actions"],
+        responses: {
+          200: { description: "Lease renewed" },
+          404: { description: "Action not found" },
+          403: { description: "Forbidden" },
+          409: { description: "Action is no longer taken" },
+        },
+      },
+    },
+  )
+  .post(
     "/actions/:id/complete",
     ({params, body, set, request}) => {
       const { status, result } = body as {
@@ -393,8 +473,8 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: `Invalid completion status: ${String(status)}` };
       }
       const existing = activeDb
-        .query<{ id: string; host_id: string; type: string }, [string]>(
-          "SELECT id, host_id, type FROM queued_actions WHERE id = ?",
+        .query<{ id: string; host_id: string; type: string; status: string }, [string]>(
+          "SELECT id, host_id, type, status FROM queued_actions WHERE id = ?",
         )
         .get(params.id);
       if (!existing) {
@@ -406,10 +486,24 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 403;
         return { error: "Forbidden" };
       }
+      // LAMA-345 follow-up: completion is idempotent. A retried or duplicated
+      // ack must not rewrite a terminal outcome or append a second
+      // operation_log row — the duplicate lifecycle left exactly those
+      // contradictory audit rows behind.
+      if (existing.status === "done" || existing.status === "failed") {
+        const settled = activeDb
+          .query<ActionRow, [string]>(`${ACTION_SELECT} WHERE id = ?`)
+          .get(params.id);
+        if (!settled) {
+          set.status = 500;
+          return { error: "Failed to load action after completion" };
+        }
+        return rowToAction(settled);
+      }
       const completedAt = Date.now();
       activeDb.run(
         `UPDATE queued_actions
-           SET status = ?, completed_at = ?, result = ?
+           SET status = ?, completed_at = ?, result = ?, lease_expires_at = NULL
            WHERE id = ?`,
         [status, completedAt, result ?? null, params.id],
       );

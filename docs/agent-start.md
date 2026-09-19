@@ -28,6 +28,16 @@ two-file listing pair replaces the old `bisync.state` sentinel, filter changes
 are acknowledged only by a resync that actually established a baseline, and
 execution is bound to the reviewed plan's semantics (intervention, winning side
 and `--max-delete` percentage) rather than to the request that follows it.
+Live v0.3.12 fleet validation then found a **release-blocking plan/execution
+safety regression**, fixed in this worktree too: the dry-run accumulator never
+matched modern rclone's `"skipped"` field, so a plan could report 0 changes and
+then execute hundreds of transfers (cachy: plan 0 → 349 transfers / 803 MB).
+Plans are now truthful, a "0 change" plan can never be approved into a
+content-mutating run (refused at the enqueue boundary and again at dispatch),
+and a claimed action holds a renewable lease (`POST /api/v1/actions/:id/lease`)
+so a long plan/intervention cannot be reclaimed and re-executed while it is
+still running. The LAMA-345 comments carry the evidence and the deployment
+gate; do not retry the cachy intervention from a pre-fix build.
 
 LAMA-316's app-backup data contract, LAMA-324 storage destinations, LAMA-325
 retention, and the LAMA-302 real-worktree soak are complete. LAMA-327 live

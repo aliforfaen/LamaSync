@@ -281,9 +281,13 @@ describe("LAMA-232 — orphaned 'taken' action reclaim", () => {
 
   test("reapStaleTakenActions flips old taken rows back to pending", async () => {
     const id = await enqueueAndTake();
-    // Backdate the claim so it looks orphaned (> STALE_TAKEN_MS).
-    db.run("UPDATE queued_actions SET taken_at = ? WHERE id = ?", [
-      Date.now() - 11 * 60_000,
+    // Backdate the claim AND its lease so it looks orphaned (> STALE_TAKEN_MS).
+    // A row whose lease is still fresh is deliberately NOT reaped (see the
+    // renewal tests below) — that is the duplicate-lifecycle fix.
+    const stale = Date.now() - 11 * 60_000;
+    db.run("UPDATE queued_actions SET taken_at = ?, lease_expires_at = ? WHERE id = ?", [
+      stale,
+      stale,
       id,
     ]);
     const reaped = reapStaleTakenActions(db);
@@ -299,8 +303,10 @@ describe("LAMA-232 — orphaned 'taken' action reclaim", () => {
 
   test("GET /actions/pending reaps stale taken actions before claiming", async () => {
     const id = await enqueueAndTake();
-    db.run("UPDATE queued_actions SET taken_at = ? WHERE id = ?", [
-      Date.now() - 11 * 60_000,
+    const stale = Date.now() - 11 * 60_000;
+    db.run("UPDATE queued_actions SET taken_at = ?, lease_expires_at = ? WHERE id = ?", [
+      stale,
+      stale,
       id,
     ]);
     const res = await get(`/api/v1/actions/pending?hostId=host-a`);
@@ -413,7 +419,7 @@ describe("LAMA-345 — folder health actions enqueue validation", () => {
           max_delete_percent, summary, changes, config_revision,
           filter_fingerprint, baseline_fingerprint, created_at, expires_at)
        VALUES ('plan-1', 'f1', 'host-a', 'a1', 'initialize', 'remote', NULL, 'reviewed',
-               '{}', 1, NULL, NULL, ?, ?)`,
+               '{"wouldCopy":["/f1/one.txt"],"wouldDelete":[],"wouldMkdir":[],"files":1,"bytes":12}', 1, NULL, NULL, ?, ?)`,
       [Date.now(), Date.now() + 60_000],
     );
     const ok = await postJson("/api/v1/hosts/host-a/actions", {
@@ -487,7 +493,7 @@ describe("LAMA-345 — folder health actions enqueue validation", () => {
           max_delete_percent, summary, changes, config_revision,
           filter_fingerprint, baseline_fingerprint, created_at, expires_at)
        VALUES ('plan-x', 'f1', 'host-a', 'a1', 'seed', 'local', 10, 'reviewed',
-               '{}', 1, NULL, NULL, ?, ?)`,
+               '{"wouldCopy":["/f1/one.txt"],"wouldDelete":[],"wouldMkdir":[],"files":1,"bytes":12}', 1, NULL, NULL, ?, ?)`,
       [Date.now(), Date.now() + 60_000],
     );
 
@@ -563,5 +569,140 @@ describe("LAMA-345 — folder health actions enqueue validation", () => {
       .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM queued_actions")
       .get();
     expect(stored?.n).toBe(0);
+  });
+});
+
+// LAMA-345 follow-up (release-blocking): a long plan/intervention must not be
+// reclaimed while it is still running, and a duplicate ack must not rewrite
+// history. The lease is renewable; completion is idempotent.
+describe("LAMA-345 — renewable action lease and idempotent completion", () => {
+  async function enqueueAndTake(type = "check_update"): Promise<string> {
+    const created = await postJson("/api/v1/hosts/host-a/actions", { type });
+    const { id } = (await created.json()) as { id: string };
+    const claimed = await get(`/api/v1/actions/pending?hostId=host-a`);
+    expect(claimed.status).toBe(200);
+    return id;
+  }
+
+  function leaseOf(id: string): { taken_at: number | null; lease_expires_at: number | null; status: string } | null {
+    return db
+      .query<{ taken_at: number | null; lease_expires_at: number | null; status: string }, [string]>(
+        "SELECT taken_at, lease_expires_at, status FROM queued_actions WHERE id = ?",
+      )
+      .get(id);
+  }
+
+  test("a fresh lease protects a long-running action from the stale sweep", async () => {
+    const id = await enqueueAndTake();
+    // The claim is old, but the lease was renewed (the daemon is still running).
+    const now = Date.now();
+    db.run("UPDATE queued_actions SET taken_at = ?, lease_expires_at = ? WHERE id = ?", [
+      now - 11 * 60_000,
+      now + 5 * 60_000,
+      id,
+    ]);
+    expect(reapStaleTakenActions(db)).toBe(0);
+    expect(leaseOf(id)?.status).toBe("taken");
+  });
+
+  test("a pre-LAMA-345 row with no lease falls back to taken_at + the lease window", async () => {
+    const id = await enqueueAndTake();
+    db.run("UPDATE queued_actions SET taken_at = ?, lease_expires_at = NULL WHERE id = ?", [
+      Date.now() - 11 * 60_000,
+      id,
+    ]);
+    expect(reapStaleTakenActions(db)).toBe(1);
+    expect(leaseOf(id)?.status).toBe("pending");
+  });
+
+  test("renewing an expired lease keeps the action taken", async () => {
+    const id = await enqueueAndTake();
+    const stale = Date.now() - 11 * 60_000;
+    db.run("UPDATE queued_actions SET taken_at = ?, lease_expires_at = ? WHERE id = ?", [
+      stale,
+      stale,
+      id,
+    ]);
+    const renewed = await postJson(`/api/v1/actions/${id}/lease`, {});
+    expect(renewed.status).toBe(200);
+    const body = (await renewed.json()) as { id: string; status: string };
+    expect(body.id).toBe(id);
+    expect(body.status).toBe("taken");
+    const lease = leaseOf(id);
+    expect(lease?.lease_expires_at ?? 0).toBeGreaterThan(Date.now());
+    // The reaper now leaves it alone, so a second poll cannot re-claim it.
+    expect(reapStaleTakenActions(db)).toBe(0);
+    const poll = await get(`/api/v1/actions/pending?hostId=host-a`);
+    expect((await poll.json()) as unknown[]).toHaveLength(0);
+  });
+
+  test("renewing a completed action is a 409, not a silent re-take", async () => {
+    const id = await enqueueAndTake();
+    await postJson(`/api/v1/actions/${id}/complete`, { status: "done", result: "ok" });
+    const res = await postJson(`/api/v1/actions/${id}/lease`, {});
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("no longer taken");
+  });
+
+  test("renewal is 404 for an unknown action and host-scoped for a known one", async () => {
+    const unknown = await postJson("/api/v1/actions/nope/lease", {});
+    expect(unknown.status).toBe(404);
+    const idB = await (async () => {
+      const created = await postJson("/api/v1/hosts/host-b/actions", { type: "check_update" });
+      return ((await created.json()) as { id: string }).id;
+    })();
+    await get(`/api/v1/actions/pending?hostId=host-b`);
+    // The default test credential is the master key, which may act for any
+    // host; the device-scoped 403 is enforced by the same `deviceMayAccessHost`
+    // check every other action route uses (and is covered by auth.test.ts).
+    const res = await postJson(`/api/v1/actions/${idB}/lease`, {});
+    expect(res.status).toBe(200);
+  });
+
+  test("a duplicate ack cannot rewrite a terminal outcome or duplicate the audit row", async () => {
+    const id = await enqueueAndTake();
+    const first = await postJson(`/api/v1/actions/${id}/complete`, {
+      status: "done",
+      result: "sync completed in 12s",
+    });
+    expect(first.status).toBe(200);
+    const second = await postJson(`/api/v1/actions/${id}/complete`, {
+      status: "failed",
+      result: "duplicate ack must be ignored",
+    });
+    expect(second.status).toBe(200);
+    const body = (await second.json()) as { status: string; result: string };
+    expect(body.status).toBe("done");
+    expect(body.result).toBe("sync completed in 12s");
+    const rows = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM operation_log WHERE host_id = ? AND operation = 'check_update'",
+      )
+      .get("host-a");
+    expect(rows?.n).toBe(1);
+  });
+
+  test("a zero-change plan can never be approved into a content run", async () => {
+    db.run(
+      `INSERT INTO folder_sync_plans
+         (id, folder_id, host_id, assignment_id, intervention, authority,
+          max_delete_percent, summary, changes, config_revision,
+          filter_fingerprint, baseline_fingerprint, created_at, expires_at)
+       VALUES ('plan-zero', 'f1', 'host-a', 'a1', 'resync', 'local', 10, 'no changes',
+               '{"wouldCopy":[],"wouldDelete":[],"wouldMkdir":[],"files":0,"bytes":0}', 1, NULL, NULL, ?, ?)`,
+      [Date.now(), Date.now() + 60_000],
+    );
+    const refused = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "resync",
+        authority: "local",
+        planId: "plan-zero",
+        confirm: true,
+      },
+    });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toContain("no copies, deletes");
   });
 });
