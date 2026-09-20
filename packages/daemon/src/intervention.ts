@@ -27,6 +27,7 @@ import {
   checkFolderPlanValidity,
   checkPlanSemantics,
   FOLDER_PLAN_TTL_MS,
+  planHasContentChanges,
   type FolderPlanExecution,
   type FolderPlanInvalidReason,
   type PlanSemanticRequest,
@@ -122,6 +123,80 @@ export function parseDryRunChanges(details: string | null | undefined): FolderSy
   };
 }
 
+/**
+ * LAMA-345 follow-up: the execution-time proof that a reviewed zero-content
+ * plan may run as a BASELINE-ONLY RECOVERY.
+ *
+ * A plan whose dry run reported no copies, deletes or directory creation is a
+ * legitimate operation when the listing pair is missing or unsafe but both
+ * sides already agree: the intervention then only rebuilds the baseline and
+ * mutates no content. It may only run, however, if a FRESH dry run — using the
+ * plan's own reviewed control — still proves there is nothing to move. Any
+ * copy/delete/mkdir the fresh dry run reveals means the folder moved since the
+ * review, so the plan is refused and the operator must plan a content run.
+ *
+ * The invariant is "no unreviewed content mutation": a zero-content plan never
+ * authorizes a transfer, and a plan with content is still executed exactly as
+ * reviewed (authority + `--max-delete` untouched).
+ */
+export type ZeroContentRecheck =
+  | { ok: true; changes: FolderSyncPlan["changes"] }
+  | {
+      ok: false;
+      reason: "no-report" | "failed" | "unreadable" | "changed";
+      message: string;
+      changes: FolderSyncPlan["changes"] | null;
+    };
+
+export function recheckZeroContentExecution(
+  report: OperationReport | null,
+): ZeroContentRecheck {
+  if (!report) {
+    return { ok: false, reason: "no-report", message: "the fresh dry run did not run", changes: null };
+  }
+  if (report.status !== "success") {
+    return {
+      ok: false,
+      reason: "failed",
+      message: `the fresh dry run did not complete (${report.status}): ${report.summary ?? "no summary"}`,
+      changes: null,
+    };
+  }
+  const details = report.details;
+  if (typeof details !== "string" || details.trim().length === 0) {
+    return {
+      ok: false,
+      reason: "unreadable",
+      message: "the fresh dry run reported no change detail",
+      changes: null,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(details);
+  } catch {
+    parsed = null;
+  }
+  if (!isRecord(parsed)) {
+    return {
+      ok: false,
+      reason: "unreadable",
+      message: "the fresh dry run's change detail could not be read",
+      changes: null,
+    };
+  }
+  const changes = parseDryRunChanges(details);
+  if (planHasContentChanges({ changes })) {
+    return {
+      ok: false,
+      reason: "changed",
+      message: `${changes.files} file(s) would transfer since the review`,
+      changes,
+    };
+  }
+  return { ok: true, changes };
+}
+
 /** Human-readable, bounded plan headline. Pure so it is unit-tested. */
 export function buildPlanSummary(
   intervention: FolderSyncPlan["intervention"],
@@ -145,7 +220,10 @@ export function buildPlanSummary(
   if (changes.wouldCopy.length > 0) parts.push(`${changes.wouldCopy.length} to copy`);
   if (changes.wouldDelete.length > 0) parts.push(`${changes.wouldDelete.length} to delete`);
   if (changes.wouldMkdir.length > 0) parts.push(`${changes.wouldMkdir.length} director(ies) to create`);
-  const changeText = parts.length > 0 ? parts.join(", ") : "no file changes detected";
+  const changeText =
+    parts.length > 0
+      ? parts.join(", ")
+      : "no file changes detected (baseline rebuild only)";
   const filterText = filterChanged ? " The ignore/filter set changed, so listings must be rebuilt." : "";
   return `${verb} — ${side}. Dry run: ${changeText}.${filterText}`;
 }

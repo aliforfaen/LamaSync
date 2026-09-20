@@ -32,9 +32,13 @@ Live v0.3.12 fleet validation then found a **release-blocking plan/execution
 safety regression**, fixed in this worktree too: the dry-run accumulator never
 matched modern rclone's `"skipped"` field, so a plan could report 0 changes and
 then execute hundreds of transfers (cachy: plan 0 → 349 transfers / 803 MB).
-Plans are now truthful, a "0 change" plan can never be approved into a
-content-mutating run (refused at the enqueue boundary and again at dispatch),
-and a claimed action holds a renewable lease (`POST /api/v1/actions/:id/lease`)
+Plans are now truthful, and the invariant is **no unreviewed content
+mutation** rather than "never rebuild a baseline": a zero-content review is a
+legitimate baseline-only recovery, but the daemon re-runs a fresh dry run with
+the plan's own reviewed control before executing and refuses the run if
+anything would transfer (the enqueue boundary no longer rejects it, since only
+the daemon can run rclone). A claimed action holds a renewable lease
+(`POST /api/v1/actions/:id/lease`)
 so a long plan/intervention cannot be reclaimed and re-executed while it is
 still running. The LAMA-345 comments carry the evidence and the deployment
 gate; do not retry the cachy intervention from a pre-fix build.

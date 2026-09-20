@@ -682,7 +682,7 @@ describe("LAMA-345 — renewable action lease and idempotent completion", () => 
     expect(rows?.n).toBe(1);
   });
 
-  test("a zero-change plan can never be approved into a content run", async () => {
+  test("a zero-change plan is accepted for daemon-side baseline-only revalidation", async () => {
     db.run(
       `INSERT INTO folder_sync_plans
          (id, folder_id, host_id, assignment_id, intervention, authority,
@@ -692,7 +692,11 @@ describe("LAMA-345 — renewable action lease and idempotent completion", () => 
                '{"wouldCopy":[],"wouldDelete":[],"wouldMkdir":[],"files":0,"bytes":0}', 1, NULL, NULL, ?, ?)`,
       [Date.now(), Date.now() + 60_000],
     );
-    const refused = await postJson("/api/v1/hosts/host-a/actions", {
+    // LAMA-345 follow-up: refusing every zero-change plan also blocked the
+    // legitimate "rebuild the baseline when both sides already agree"
+    // recovery. The server only enforces plan semantics; the daemon re-runs a
+    // fresh dry run before executing and refuses if anything would transfer.
+    const accepted = await postJson("/api/v1/hosts/host-a/actions", {
       type: "folder_intervention",
       payload: {
         folderId: "f1",
@@ -702,7 +706,21 @@ describe("LAMA-345 — renewable action lease and idempotent completion", () => 
         confirm: true,
       },
     });
-    expect(refused.status).toBe(400);
-    expect(((await refused.json()) as { error: string }).error).toContain("no copies, deletes");
+    expect(accepted.status).toBe(201);
+    expect(((await accepted.json()) as { status: string }).status).toBe("pending");
+
+    // The plan is still bound to WHAT was reviewed: a zero-change plan cannot
+    // authorize a different authority.
+    const mismatched = await postJson("/api/v1/hosts/host-a/actions", {
+      type: "folder_intervention",
+      payload: {
+        folderId: "f1",
+        intervention: "resync",
+        authority: "remote",
+        planId: "plan-zero",
+        confirm: true,
+      },
+    });
+    expect(mismatched.status).toBe(400);
   });
 });

@@ -9,6 +9,7 @@ import {
   buildPlanSummary,
   buildSyncPlan,
   parseDryRunChanges,
+  recheckZeroContentExecution,
   runControlFor,
   runControlFromExecution,
   verifyPlanAgainstLive,
@@ -82,6 +83,62 @@ describe("buildPlanSummary", () => {
     expect(summary).toContain("2 to copy");
     expect(summary).toContain("1 to delete");
     expect(summary).toContain("ignore/filter set changed");
+  });
+
+  test("a zero-change plan is labelled as a baseline rebuild, not a content run", () => {
+    const summary = buildPlanSummary("resync", "local", empty, false);
+    expect(summary).toContain("no file changes detected (baseline rebuild only)");
+  });
+});
+
+describe("recheckZeroContentExecution (LAMA-345 baseline-only recovery)", () => {
+  const empty = JSON.stringify({ wouldCopy: [], wouldDelete: [], wouldMkdir: [], rclone: { transfers: 0, deletes: 0, bytes: 0 } });
+  const report = (over: Partial<OperationReport>): OperationReport => ({
+    hostId: "dev-vm",
+    operation: "sync",
+    status: "success",
+    summary: "dry run",
+    details: empty,
+    ...over,
+  });
+
+  test("a fresh dry run that still proves zero mutations approves the baseline rebuild", () => {
+    const verdict = recheckZeroContentExecution(report({}));
+    expect(verdict.ok).toBe(true);
+    if (verdict.ok) expect(verdict.changes.files).toBe(0);
+  });
+
+  test("a fresh dry run that reveals transfers refuses the run as changed", () => {
+    const changed = JSON.stringify({
+      wouldCopy: ["/a", "/b"],
+      wouldDelete: [],
+      wouldMkdir: [],
+      rclone: { transfers: 2, deletes: 0, bytes: 44 },
+    });
+    const verdict = recheckZeroContentExecution(report({ details: changed }));
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("changed");
+      expect(verdict.message).toContain("2 file(s)");
+    }
+  });
+
+  test("a revealed delete or mkdir also refuses the run", () => {
+    const del = JSON.stringify({ wouldCopy: [], wouldDelete: ["/gone"], wouldMkdir: [], rclone: { transfers: 0, deletes: 1, bytes: 0 } });
+    const mkdir = JSON.stringify({ wouldCopy: [], wouldDelete: [], wouldMkdir: ["/new"], rclone: { transfers: 0, deletes: 0, bytes: 0 } });
+    expect(recheckZeroContentExecution(report({ details: del })).ok).toBe(false);
+    expect(recheckZeroContentExecution(report({ details: mkdir })).ok).toBe(false);
+  });
+
+  test("a missing, failed or unreadable fresh dry run refuses — never assumed clean", () => {
+    expect(recheckZeroContentExecution(null).ok).toBe(false);
+    expect(recheckZeroContentExecution(report({ status: "failed" })).ok).toBe(false);
+    expect(recheckZeroContentExecution(report({ details: null })).ok).toBe(false);
+    expect(recheckZeroContentExecution(report({ details: "{not json" })).ok).toBe(false);
+    const failed = recheckZeroContentExecution(report({ status: "failed" }));
+    if (!failed.ok) expect(failed.reason).toBe("failed");
+    const unreadable = recheckZeroContentExecution(report({ details: null }));
+    if (!unreadable.ok) expect(unreadable.reason).toBe("unreadable");
   });
 });
 

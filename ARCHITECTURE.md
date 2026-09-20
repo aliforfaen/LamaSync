@@ -515,6 +515,18 @@ single-flight. This closes the LAMA-345 duplicate lifecycle, where a
 Projects-scale intervention outlived the fixed 10-minute window, was flipped
 back to `pending`, and was re-claimed and re-executed concurrently.
 
+**Reviewed folder plans (LAMA-345):** a `folder_intervention` runs only from a
+stored plan the operator reviewed, and it executes the plan's own semantics
+(intervention, winning side, `--max-delete` percentage) rather than the request
+that follows it. The invariant is **no unreviewed content mutation**: a plan
+whose dry run reported no copies, deletes or directory creation is a
+*baseline-only recovery* — the listing pair is missing or unsafe while both
+sides already agree — and the daemon re-runs a fresh dry run with that plan's
+own control before executing. If the fresh run reveals any copy, delete or
+mkdir the folder moved since the review, so the run is refused and the operator
+must plan a content run. A dry run that does not complete fails planning and
+can never be flattened into a "0 change" plan.
+
 **Mount lifecycle (LAMA-130/LAMA-113):**
 
 - Daemon owns the rclone process and tracks its PID in

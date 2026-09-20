@@ -18,7 +18,6 @@ import {
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
-  planHasContentChanges,
 } from "@lamasync/core";
 import { getFolderPlan } from "../folder-health.ts";
 import { broadcast } from "../ws.ts";
@@ -213,18 +212,15 @@ export const actionsRoutes = new Elysia({ prefix: "/api/v1" })
             set.status = 400;
             return { error: semantics.message ?? "this plan does not match the requested operation" };
           }
-          // LAMA-345 follow-up (release-blocking): a plan whose own dry run
-          // reported no copies, deletes or directory creation must never be
-          // approved into a content-mutating run. The cachy incident executed
-          // 349 transfers from a "0 change" plan; the daemon enforces the same
-          // rule at dispatch, this is the earliest boundary the operator sees.
-          if (!planHasContentChanges(plan)) {
-            set.status = 400;
-            return {
-              error:
-                "the reviewed plan reported no copies, deletes or directory changes — nothing would be transferred. Plan again once the folder state changes.",
-            };
-          }
+          // LAMA-345 follow-up: a zero-content plan is NOT refused here. It
+          // is a legitimate BASELINE-ONLY RECOVERY (rebuild a missing/unsafe
+          // listing pair when both sides already agree) and the daemon
+          // re-validates it at execution time with a fresh dry run before it
+          // is allowed to touch anything. The server cannot run rclone, so it
+          // cannot prove "zero mutations"; it only enforces plan semantics.
+          // The invariant is "no unreviewed content mutation" — a zero-content
+          // plan never authorizes a transfer, and any mutation the daemon's
+          // fresh dry run reveals refuses the run.
         }
       }
       const host = activeDb

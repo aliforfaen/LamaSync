@@ -52,6 +52,7 @@ import type { BisyncRunControl } from "./executor.ts";
 import { diagnoseFolder, measureLocalTree, probeFolderHealth } from "./folder-health.ts";
 import {
   buildSyncPlan,
+  recheckZeroContentExecution,
   runControlFor,
   runControlFromExecution,
   verifyPlanAgainstLive,
@@ -1469,26 +1470,46 @@ async function main(): Promise<void> {
               await ack("failed", `plan refused — ${verdict.message}`);
               return;
             }
-            // LAMA-345 follow-up (release-blocking): the reviewed plan is the
-            // contract. A plan whose own dry run reported no content changes
-            // must never be executed as a content-mutating run — the cachy
-            // incident executed 349 transfers / 803 MB from a "0 change" plan.
-            // The reviewed authority and deletion threshold are untouched;
-            // the operation is simply refused instead of run blind.
-            if (!planHasContentChanges(plan)) {
-              console.warn(
-                `[intervention] folder=${instruction.folderId} refused plan=${plan.id}: plan reported no content changes`,
-              );
-              await ack(
-                "failed",
-                "plan refused — the reviewed plan reported no copies, deletes or directory changes, so a content run is refused. Plan again once the folder state changes.",
-              );
-              return;
-            }
             control = runControlFromExecution(verdict.execution);
-            console.log(
-              `[intervention] folder=${instruction.folderId} approved plan=${plan.id} intervention=${control.mode} authority=${control.authority ?? "(none)"} maxDeletePercent=${control.maxDeletePercent ?? "default"}`,
-            );
+            // LAMA-345 follow-up (release-blocking): the reviewed plan is the
+            // contract, and the invariant is "no unreviewed content
+            // mutation" — not "never rebuild a baseline". A plan whose own
+            // dry run reported no copies, deletes or directory creation is a
+            // legitimate BASELINE-ONLY RECOVERY (the listing pair is missing
+            // or unsafe but both sides already agree), so it may run, but
+            // ONLY after a fresh dry run with the plan's own reviewed control
+            // still proves there is nothing to move. The cachy incident
+            // executed 349 transfers from a plan that reported "0 changes";
+            // that state change is now caught here. The reviewed authority and
+            // deletion threshold are untouched, and a plan with content is
+            // still executed exactly as reviewed.
+            if (!planHasContentChanges(plan)) {
+              const recheck = await runOnce(target.assignment, {
+                dryRun: true,
+                bisync: control,
+                triggerOrigin: "manual",
+              });
+              const proof = recheckZeroContentExecution(recheck);
+              if (!proof.ok) {
+                console.warn(
+                  `[intervention] folder=${instruction.folderId} refused plan=${plan.id} baseline-only recovery: ${proof.message}`,
+                );
+                await ack(
+                  "failed",
+                  proof.reason === "changed"
+                    ? `plan refused — the folder changed since the review (${proof.changes?.files ?? 0} file(s) would transfer); plan again for a content run.`
+                    : `plan refused — baseline-only recovery could not be re-validated: ${proof.message}`,
+                );
+                return;
+              }
+              console.log(
+                `[intervention] folder=${instruction.folderId} approved plan=${plan.id} baseline-only recovery (fresh dry run: 0 changes) authority=${control.authority ?? "(none)"} maxDeletePercent=${control.maxDeletePercent ?? "default"}`,
+              );
+            } else {
+              console.log(
+                `[intervention] folder=${instruction.folderId} approved plan=${plan.id} intervention=${control.mode} authority=${control.authority ?? "(none)"} maxDeletePercent=${control.maxDeletePercent ?? "default"}`,
+              );
+            }
           } else {
             // `resume` is the only mutating intervention without a plan: it
             // continues a stopped run and discards no listings.

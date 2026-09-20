@@ -24,11 +24,17 @@ distributable binary build.
   The accumulator now reads `skipped` (with the sentence as a legacy
   fallback), rclone's dry-run `transfers`/`deletes`/`bytes` give the true
   plan totals, and a dry run that does not complete fails planning instead of
-  becoming a "0 change" plan. *Zero-change execution guard:* a reviewed plan
-  whose dry run reported no copies, deletes or mkdirs can no longer be
-  approved into a content-mutating run — refused at the enqueue boundary (400)
-  and again at daemon dispatch. Plan semantics, authority and the reviewed
-  `--max-delete` percentage are untouched. *Duplicate action lifecycle:* a
+  becoming a "0 change" plan. *Zero-content execution invariant:* the rule
+  is **no unreviewed content mutation**, not "never rebuild a baseline". A
+  reviewed plan whose dry run reported no copies, deletes or mkdirs is a
+  legitimate **baseline-only recovery** (the listing pair is missing or unsafe
+  but both sides already agree); it may run only after the daemon re-runs a
+  fresh dry run with the plan's own reviewed control and that run still proves
+  nothing would transfer. Any copy/delete/mkdir the fresh dry run reveals
+  means the folder moved since the review, so the run is refused and the
+  operator must plan a content run. Plan semantics, authority and the reviewed
+  `--max-delete` percentage are untouched, and the plan summary now labels a
+  zero-content review "baseline rebuild only". *Duplicate action lifecycle:* a
   claimed action now holds a **renewable 10-minute lease**
   (`POST /api/v1/actions/:id/lease`); the daemon renews every in-flight action
   every minute, so a Projects-scale plan/intervention can no longer outlive a

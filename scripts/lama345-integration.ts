@@ -651,9 +651,11 @@ check(
   `${argvShaped.status}: ${str(record(argvShaped.body)["error"])}`,
 );
 
-// LAMA-345 follow-up: a "0 change" plan can never be approved into a content
-// run (the release-blocking cachy incident), and a claimed action holds a
-// renewable lease so a long plan/intervention is never reclaimed mid-run.
+// LAMA-345 follow-up: a "0 change" plan is a legitimate BASELINE-ONLY
+// RECOVERY and is accepted for daemon-side revalidation (the daemon re-runs a
+// fresh dry run and refuses if anything would transfer). A claimed action
+// holds a renewable lease so a long plan/intervention is never reclaimed
+// mid-run, and a duplicate ack cannot rewrite the outcome.
 const zeroPlanRes = await api("POST", "/folder-plans", {
   id: crypto.randomUUID(),
   hostId: "srv-main",
@@ -662,7 +664,7 @@ const zeroPlanRes = await api("POST", "/folder-plans", {
   intervention: "resync",
   authority: "local",
   maxDeletePercent: 10,
-  summary: "Reseed the baseline — this device wins conflicting files. Dry run: no file changes detected.",
+  summary: "Reseed the baseline — this device wins conflicting files. Dry run: no file changes detected (baseline rebuild only).",
   changes: { wouldCopy: [], wouldDelete: [], wouldMkdir: [], files: 0, bytes: 0 },
   configRevision: 1,
   filterFingerprint: "fp-1",
@@ -676,9 +678,18 @@ const zeroApproval = await api("POST", "/hosts/srv-main/actions", {
   payload: { folderId: planFolder, intervention: "resync", authority: "local", planId: zeroPlanId, confirm: true },
 });
 check(
-  "a 0-change plan can never be approved into a content run",
-  zeroApproval.status === 400 && str(record(zeroApproval.body)["error"]).includes("no copies, deletes"),
+  "a 0-change plan is accepted as a baseline-only recovery (daemon revalidates)",
+  zeroApproval.status === 201 && str(record(zeroApproval.body)["status"]) === "pending",
   `${zeroApproval.status}: ${str(record(zeroApproval.body)["error"])}`,
+);
+const zeroMismatch = await api("POST", "/hosts/srv-main/actions", {
+  type: "folder_intervention",
+  payload: { folderId: planFolder, intervention: "resync", authority: "remote", planId: zeroPlanId, confirm: true },
+});
+check(
+  "a 0-change plan still cannot authorize a different reviewed operation",
+  zeroMismatch.status === 400,
+  `${zeroMismatch.status}: ${str(record(zeroMismatch.body)["error"])}`,
 );
 
 const leaseActionRes = await api("POST", "/hosts/srv-main/actions", { type: "check_update" });
