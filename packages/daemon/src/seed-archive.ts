@@ -828,14 +828,32 @@ export async function createSeedArchive(input: {
     };
   }
   const before = buildStatsFingerprint(input.sourceRoot, input.filter);
-  mkdirSync(dirname(input.outputPath), { recursive: true });
   // The manifest IS the archive's member list. tar is given nothing else, so
   // the archive cannot contain content the manifest never measured. The list is
   // NUL-separated and read with `--verbatim-files-from --null`, so a name that
   // begins with `-` is a NAME and can never be parsed as an option, and no name
   // can be truncated or split (NUL is the one byte a path cannot contain).
+  //
+  // Writing that list is a filesystem operation like any other, so it is inside
+  // the guard: an unwritable output directory (or a full one) must come back as
+  // a failed result, never as a thrown EACCES/ENOSPC escaping this function.
   const membersFilePath = `${input.outputPath}.members`;
-  writeFileSync(membersFilePath, encodeSeedMemberList(input.manifest.entries.map((e) => e.path)));
+  try {
+    mkdirSync(dirname(input.outputPath), { recursive: true });
+    writeFileSync(membersFilePath, encodeSeedMemberList(input.manifest.entries.map((e) => e.path)));
+  } catch (err) {
+    return {
+      ok: false,
+      archivePath: input.outputPath,
+      bytes: 0,
+      sha256: null,
+      memberCount: 0,
+      churned: false,
+      error: `the archive could not be prepared at ${input.outputPath}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
   let memberCount = 0;
   let result: SeedCommandResult;
   try {
