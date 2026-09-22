@@ -394,7 +394,7 @@ The contract is `@lamasync/core/seed-relay` (dependency-free, no credentials),
 implemented by `packages/daemon/src/seed-relay-local.ts` and driven by
 `packages/daemon/src/seed-transport.ts`.
 
-#### Key validation and prefix containment
+#### Key validation and prefix containment — lexical AND actual
 
 Every key is validated with `validateSeedRelayObjectKey` **before any store
 call** — including the keys being *deleted*, because "delete the key the job
@@ -412,6 +412,45 @@ reports" must never be a way to delete something else:
 List prefixes have their own validator (`validateSeedRelayPrefix`): a prefix may
 be a namespace but must still be inside `lamasync/seed/`, so a sweep cannot walk
 out of it.
+
+**A lexically valid key is not containment.** `resolve()` never touches the
+filesystem, so `root/lamasync/seed/<jobId>` can itself BE a symlink to an
+outside directory while the key looks perfect — and before this correction
+`put` created, `head` stat'd, `get` read and `delete` **removed** a file outside
+the relay root through exactly that link (reproduced, then fixed).
+
+`checkSeedRelayObjectContainment` therefore adds an **actual-filesystem** check
+that every store call runs first: each EXISTING path component below the root is
+`lstat`-ed and must be a real directory (or, for the final component, a real
+regular file). A symlink anywhere in the chain is refused and never followed.
+The digest sidecar is checked the same way, because it is written, read and
+unlinked like the object; the relay's working directory is checked too, since a
+symlinked staging area would move the write outside as well.
+
+`list` never follows a link either: a symlink is not an object, so it is not
+returned as a key and is **not descended into**. Anything it refused to follow
+is reported in `skippedSymlinks` rather than dropped silently, so a sweep can
+surface a planted link as a finding instead of walking past it — and
+`seedRelayOrphanKeys` never treats one as an orphan.
+
+#### Race limits, stated rather than hidden
+
+The containment check is not atomic with the operation it guards: an attacker
+who can write to the relay root could swap a verified directory for a symlink in
+the window between the two. Closing that completely needs directory-fd APIs
+(`openat`/`O_NOFOLLOW`/`openat2(RESOLVE_NO_SYMLINKS)`) that neither Node nor Bun
+exposes, so the exposure is bounded by ownership and by each operation's shape:
+
+* the relay root is a daemon-owned directory — never a user's synced tree and
+  never inside one;
+* one writer per job (the job lease), and object keys are per-job;
+* `put` publishes with an atomic rename, which REPLACES a symlink at the final
+  component instead of writing through it;
+* `delete` unlinks the final component itself, so a symlink there is removed
+  rather than followed.
+
+What the check removes is the class that matters: a planted symlink silently
+redirecting a seed's read, write or delete outside the relay root.
 
 #### Immutable archive metadata
 
@@ -741,7 +780,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2496 pass / 0 fail, 170 files
+bun test                                # 2509 pass / 0 fail, 170 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -809,14 +848,19 @@ Focused suites:
   comparison (a missing digest is never a pass), cleanup/retention decisions,
   orphan detection that only names seed-namespace keys, bounded failure
   sentences, and fail-closed archive-facts normalization.
-- `packages/daemon/src/seed-relay-local.test.ts` — **34 tests**: the store and
+- `packages/daemon/src/seed-relay-local.test.ts` — **47 tests**: the store and
   the transport driven against each other — put/head/get/delete, immutability
   (a byte-identical re-put is idempotent, different content is refused), a
   digest or size mismatch on either hop (with the partial file removed), an
   aborted upload and download, a store that misreports or throws, keys that
-  cannot escape the namespace or the root (including a symlink), cleanup that
-  resumes after a partial failure and then no-ops, and the phase guard reusing
-  the job state machine.
+  cannot escape the namespace or the root, cleanup that resumes after a partial
+  failure and then no-ops, and the phase guard reusing the job state machine.
+  Nine of them are the symlink-containment regression against a **real outside
+  directory**: `put`, `head`, `get`, `delete` and `cleanup` each prove nothing
+  outside is created, read, modified or removed; `list` proves it never recurses
+  through the link and reports it in `skippedSymlinks`; and symlinked
+  intermediate, final, digest-sidecar and working-directory components are each
+  refused. Reverting the check makes exactly those nine fail.
 - `packages/daemon/src/seed-transport-bounded.test.ts` — **4 tests**: the
   bounded-foundation invariant, asserted from the module graph — no production
   module imports the transport, nothing reaches a configured S3 or rclone,

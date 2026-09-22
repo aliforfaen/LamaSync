@@ -78,7 +78,12 @@ distributable binary build.
   against hostile option-shaped file names with the host's real GNU tar.
   *Transport foundation (Stage 1b, contract only):* `@lamasync/core/seed-relay`
   defines the dedicated per-job namespace (`lamasync/seed/<jobId>/`), key
-  validation with prefix containment, the immutable archive metadata (format,
+  validation with prefix containment — **lexical and actual**: every existing
+  path component below the relay root is `lstat`-ed and must be a real
+  directory, so a symlinked parent cannot redirect a read, write or delete
+  outside (reproduced, then fixed and regression-tested against a real outside
+  directory; race limits and the reason a full fix needs dirfd APIs are
+  documented) — the immutable archive metadata (format,
   byte count, SHA-256, manifest fingerprint, member count) and the
   cleanup/retention state. `packages/daemon/src/seed-transport.ts` uploads with
   a digest computed locally, re-verifies the store's read-back, and **re-hashes

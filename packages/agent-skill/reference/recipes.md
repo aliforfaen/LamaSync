@@ -366,9 +366,10 @@ rclone transfers no empty directories.
 
 The transport **contract** now exists (`@lamasync/core/seed-relay`): a
 dedicated per-job namespace (`lamasync/seed/<jobId>/`), key validation with
-prefix containment, immutable archive metadata (format, byte count, SHA-256,
-manifest fingerprint, member count), verified upload and download, and an
-idempotent cleanup/retention state. A seed archive is transport, not data:
+prefix containment — lexical AND actual, so a symlinked path component cannot
+redirect a seed outside the relay root — immutable archive metadata (format,
+byte count, SHA-256, manifest fingerprint, member count), verified upload and
+download, and an idempotent cleanup/retention state. A seed archive is transport, not data:
 everything in that namespace is deletable at any time and no credential is ever
 part of the contract.
 
