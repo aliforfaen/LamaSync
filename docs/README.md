@@ -28,10 +28,12 @@ do not treat old handoffs as current requirements.
 and soak evidence. `handoff-315-path-classification.md` remains here because the
 path-classification implementation it proposes has not started.
 [Initial large-folder seeding](handoff-346-initial-folder-seeding.md) is the
-live design record for LAMA-346: its first vertical slice (contract, plan,
-space calculation, job state machine, progress-aware deadline, archive
-primitives) is implemented while the archive transport and live acceptance
-remain open, so it stays here rather than in the archive. The dashboard
+live design record for LAMA-346: its first vertical slice (contract, explicit
+source authority, plan, space calculation, staging proof, job state machine,
+progress-aware deadline, archive primitives) is implemented while two declared
+Stage 1 prerequisites — filter-aware archive construction and the archive
+transport — and the live acceptance remain open, so it stays here rather than
+in the archive. The dashboard
 design reference and image artifacts remain here because the web UI assets
 link to them directly.
 

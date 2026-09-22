@@ -6,22 +6,37 @@ Read this after `AGENTS.md` when entering a coding worktree.
 
 LAMA-346's first vertical slice (initial large-folder seeding and
 progress-aware sync timeouts) is implemented in this worktree and awaits
-review. Two things are load-bearing and easy to break. The **progress-aware
-deadline** lives in `shouldExtendSeedDeadline` (`@lamasync/core/folder-seed`)
-and is wired into `packages/daemon/src/executor.ts` only for initial seed
-stages — a first run with no usable baseline, an explicit `initialize`/`seed`
-intervention, or `seedStage: true` — so ordinary runs must keep their exact
-fixed wall-clock timeout. **Execution is deliberately unavailable**: the
-archive transport and remote orchestration are not implemented, so
-`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false`, `POST /seed-jobs` returns
-`503 { executionAvailable: false, reason }`, and the Folders page shows a
-disabled control. Do not flip that constant without a two-host fixture
-acceptance that includes a zero-content-change bisync baseline validation. The
-archive primitives (create/validate/extract/verify/atomic-publish) are
+review, after an independent-review correction pass. Several things are
+load-bearing and easy to break.
+
+The **progress-aware deadline** lives in `shouldExtendSeedDeadline`
+(`@lamasync/core/folder-seed`), and *which runs get it* is the single pure
+`syncRunIsProgressAware({ seedStage?, bisyncMode?, baselineReady })` in
+`packages/daemon/src/executor.ts`: a sync against an **existing, ready
+baseline must keep its exact fixed wall-clock timeout**, while a first run
+with no usable baseline (the dev-vm shape), an explicit `initialize`/`seed`
+intervention, or `seedStage: true` is supervised progress-aware. Do not widen
+that scope.
+
+**Execution is deliberately unavailable**: two Stage 1 prerequisites are
+open — filter-aware archive construction
+(`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `false`) and the archive transport
+(`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false`) — so `POST /seed-jobs`
+returns `503 { executionAvailable: false, reason }` and the Folders page shows
+a disabled control. Do not flip either constant without a two-host fixture
+acceptance that includes a zero-content-change bisync baseline validation.
+
+The archive primitives (create/validate/extract/verify/atomic-publish) are
 implemented and fixture-tested end-to-end with the host's real GNU tar, and
 mtimes must survive the archive or the following bisync will re-copy the whole
-tree. Design, space math, failure/recovery table, threat rules and the
-rollout plan are in
+tree. The **manifest is the authority for what may be archived**: it is built
+from the folder's effective filter universe, a member a seed cannot represent
+blocks the run before tar starts, and the produced archive's member set must
+equal the manifest's. The **source device is named by the operator**
+(`sourceHostId`), never inferred from a size, and the staging verdict must be a
+true sibling with a same-filesystem proof reported by the target device —
+unknown fails closed. Design, space math, failure/recovery table, threat rules
+and the rollout plan are in
 [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
 
 LAMA-345's follow-up (Dashboard fleet-health summary with the evidence-based

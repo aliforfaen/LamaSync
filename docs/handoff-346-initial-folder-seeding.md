@@ -1,10 +1,19 @@
 # LAMA-346 — initial large-folder seeding and progress-aware sync timeouts
 
-Status: **first vertical slice implemented and locally validated.** Execution of
-the archive transport is deliberately **unavailable** — the plan, the space
-calculation, the staging rules, the persistent job state machine and the
-progress-aware deadline are implemented and tested, and the API/UI say exactly
-that. Ordinary sync is unchanged.
+Status: **first vertical slice implemented and locally validated, after an
+independent review correction pass.** Execution is deliberately
+**unavailable** — the plan, space calculation, staging rules, persistent job
+state machine, archive primitives and progress-aware deadline are implemented
+and tested, and the API/UI say exactly that.
+
+The timeout change is stated precisely, because "ordinary sync is unchanged"
+was too broad:
+
+- a sync against an **existing, ready baseline keeps its exact fixed
+  wall-clock timeout** — steady-state sync is untouched;
+- a **first run with no usable baseline** (the dev-vm shape), an explicit
+  `initialize`/`seed` intervention, or a caller-flagged seed stage is
+  supervised by the progress-aware stall budget plus the 6-hour ceiling.
 
 Branch: `aliforfaen/lama346-initial-folder-seed` (worktree
 `lama346-initial-folder-seed`). No deploy, no live host touched, rclone never
@@ -24,6 +33,13 @@ fixed **600-second wall-clock timeout with exit 143** *before any completed
 transfer or check was recorded*. Each top-level retry cycle lasted about
 **43.5 minutes**. The subsequent recovery transferred **850 items / 16.9 MiB**,
 and a later resync reported **zero changes**.
+
+Read-only inspection of `/home/messhias/lamasync/projects` also found **28
+symlinks**, chiefly nested `node_modules` under `worktrees/`. That fact is
+load-bearing rather than incidental: a seed cannot represent a symlink, so a
+seed that walked the *raw* tree could never publish a complete one. It is only
+seedable through the folder's **effective filter universe** — the same set of
+paths the following bisync baseline syncs (see §2.4).
 
 The conclusion is not "rclone is slow". It is that a first full transfer is
 not a sync, and that **a timeout that measures elapsed time instead of
@@ -45,27 +61,109 @@ do the heavy lifting.
 - The recommendation is derived from a measurement the daemon already reports
   on its slow cadence — preparing a plan is cheap and cannot itself time out.
 
-### 2.2 Staging, never inside the target
+### 2.2 The source authority is explicit, never inferred
+
+`POST /folders/:id/seed-plans` requires **both**:
+
+| Field | Meaning |
+|---|---|
+| `hostId` | the **target** device the seed is staged on |
+| `sourceHostId` | the device that **holds the data** — named by the operator |
+| `confirm: true` | the operator approved preparing a plan |
+
+`sourceHostId` is validated and persisted as its own column
+(`folder_seed_plans.source_authority_host_id`, plus a `source_authority` JSON
+verdict). It must be:
+
+1. **assigned to this folder** — otherwise 404 "that device is not assigned to
+   this folder, so it cannot be the source of this seed";
+2. **not the target** — otherwise 400/409 "the source device must be a
+   different device from the target — a device cannot seed itself";
+3. **holding a fresh, usable measurement** — within
+   `SEED_SOURCE_MEASUREMENT_MAX_AGE_MS` (26 h: one deep-measurement cadence
+   plus slack) and non-empty. Otherwise the plan is created but explicitly
+   **not runnable**, naming the device, the age, and what to do next.
+
+The planner never picks "the largest other assignment". Choosing an authority
+from a number would silently seed the wrong tree, and a seed of the wrong tree
+is worse than no seed. The plan's `sourceAuthority` block records the choice,
+`selectedBy: "operator"`, and the evidence that it was usable; the panel shows
+the sentence verbatim.
+
+### 2.3 Staging: a true sibling, on a proven filesystem
 
 ```
-target parent (same filesystem)
+target parent (same filesystem, and the SAME directory for both paths)
 ├── <target dir>                        ← final destination
 └── .lamasync-seed-staging-<base>-<id>  ← archive unpacked + verified here
 ```
 
-- Staging is a **sibling** of the final target, on the **same filesystem**.
-  `validateStagingLocation` refuses staging inside the target (it would be
-  managed content *and* make publication a copy) and refuses a different
-  filesystem (publication would be a copy, reintroducing the timeout).
-- Publication is **one atomic rename**. A non-empty target is refused rather
-  than merged: merging a partial tree with a seed would force the following
-  bisync to guess.
-- The archive lives in a **dedicated, temporary object namespace**
-  (`lamasync/seed/<jobId>/payload.tar.zst`), never the existing Shared
-  managed-folder namespace. A seed archive is transport, not data, and must
-  never be mistaken for a synced file.
+`validateStagingLocation` refuses, in order:
 
-### 2.3 Archive format
+1. **inside the target** — it would be managed content *and* make publication
+   a copy instead of a rename;
+2. **a different direct parent** — staging must sit in exactly the directory
+   that holds the target (`/data/elsewhere` is not a sibling of
+   `/data/projects`, and `/data/elsewhere/x` is not either);
+3. **not a derived staging directory** — the name must start with
+   `SEED_STAGING_DIR_PREFIX`. Publication renames the staging directory *over*
+   the target, so an unrelated pre-existing directory must never qualify;
+4. **a different filesystem** — publication would be a copy, reintroducing the
+   timeout this feature exists to remove;
+5. **an UNKNOWN filesystem verdict** — fail closed. The server cannot stat the
+   target's filesystem, so the fact comes from the **target device's own
+   report**: `facts.seedStaging` proves that the staging sibling's parent *is*
+   the target's parent and that the directory was readable. `null` (never
+   reported, malformed, or unreadable) is not runnable, and the server
+   normalizer only accepts a literal `true` — a truthy value is unproven.
+
+Publication is **one atomic rename**. A non-empty target is refused rather
+than merged: merging a partial tree with a seed would force the following
+bisync to guess.
+
+The archive lives in a **dedicated, temporary object namespace**
+(`lamasync/seed/<jobId>/payload.tar.zst`), never the existing Shared
+managed-folder namespace. A seed archive is transport, not data, and must
+never be mistaken for a synced file.
+
+### 2.4 The effective filter universe (a Stage 1 prerequisite)
+
+A seed archives **exactly the universe the following bisync baseline syncs**:
+`lamasyncignore` patterns, `ignoreGitMetadata`, and `respectGitignore`. It
+never archives the raw tree while sync filters a different one. Two concrete
+reasons:
+
+- a target published from a *different* universe cannot validate to zero
+  content changes, which is the seed's entire contract;
+- the raw tree contains members a seed cannot represent — the 28 nested
+  `node_modules` symlinks found in the real Projects tree. Excluding
+  `node_modules` removes them from the universe **before they are walked**, so
+  the same folder becomes seedable.
+
+The universe is an explicit, fingerprinted input:
+
+```ts
+interface SeedSourceFilterUniverse {
+  fingerprint: string;        // must equal the source assignment's fingerprint
+  patterns: readonly string[];
+  includes(relativePath, isDirectory): boolean;   // false prunes the subtree
+}
+```
+
+`buildSeedManifest(root, { filter })` **requires** it — there is no default —
+and `seedPreflight` requires it too. The manifest records the fingerprint,
+pattern count, and a bounded sample of what was excluded, so a manifest can be
+checked against the plan's own `filterUniverse` block.
+
+`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is **`false`**: no adapter from the
+daemon's effective filter patterns to that walk predicate is wired yet.
+Consequently **no arbitrary folder — including the real Projects tree — can be
+seeded today**, and the plan says so instead of implying otherwise. Stage 1
+must wire it (see §6). The plan also refuses when the target's *established*
+baseline used a different filter set than the source's (`filterUniverse.match`
+is false), because that seed would be re-synced afterwards.
+
+### 2.5 Archive format
 
 - `tar.zstd` when `zstd` is on PATH; `tar.gz` is the documented compatibility
   fallback (GNU tar + gzip are already hard dependencies of the app-capture
@@ -77,12 +175,14 @@ target parent (same filesystem)
 - Extraction uses `--no-same-owner --no-same-permissions --no-overwrite-dir`,
   so no ownership or setuid bit from an untrusted archive is ever applied.
 
-### 2.4 The pipeline (local half implemented and fixture-tested)
+### 2.6 The pipeline and the manifest↔archive contract
 
 ```
-source tree
-  → manifest (path, kind, size, mtime, SHA-256) + stats fingerprint
+effective filter universe of the source tree
+  → manifest (path, kind, size, mtime, SHA-256) + stats fingerprint + filter identity
+  → [refuse if any included member is not representable]   ← BEFORE tar
   → tar + zstd|gzip (verbose output = measurable progress)
+  → [refuse unless the archive's member set EQUALS the manifest's]   ← AFTER tar
   → member validation (safe relative path AND regular file/directory)
   → [transport: NOT IMPLEMENTED]
   → extract into sibling staging dir
@@ -91,11 +191,26 @@ source tree
   → fresh zero-content-change bisync baseline validation
 ```
 
+The earlier draft of this design had a real defect, caught in review: the
+manifest called symlinks "excluded / not archived" while `tar` archived the
+whole tree, so create-then-validate could never succeed. The correction is
+that the manifest is the **authority** for what may be archived, and two
+independent guards enforce it:
+
+1. **before tar** — `seedManifestBlockingReason` refuses when the universe
+   contains a member the seed cannot represent. The runner is never invoked
+   and no archive file is produced (asserted by test);
+2. **after tar** — the produced archive's member set must equal the manifest's
+   (normalizing tar's `./` prefix and directory trailing slashes, ignoring the
+   archive root). A mismatch in either direction deletes the archive and fails
+   with "content the manifest does not describe" / "content the manifest
+   requires but the archive lacks".
+
 Everything up to and including the atomic rename is implemented in
 `packages/daemon/src/seed-archive.ts` and driven end-to-end against a fixture
 with the host's real GNU tar, for both `tar.zstd` and `tar.gz`.
 
-### 2.5 Progress-aware timeout (the actual dev-vm fix)
+### 2.7 Progress-aware timeout (the actual dev-vm fix)
 
 `shouldExtendSeedDeadline` (core, pure) is the single decision:
 
@@ -107,14 +222,21 @@ with the host's real GNU tar, for both `tar.zstd` and `tar.gz`.
 - **fail** at the absolute ceiling `SEED_STAGE_HARD_CAP_MS` = 6 h, so a stage
   that reports progress forever still ends.
 
-The daemon applies it to exactly the stages that are initial seed stages: a
-first run with **no usable baseline** (the dev-vm shape), an explicit
-`initialize`/`seed` intervention, or a caller-flagged `seedStage`. Every other
-run keeps its exact fixed wall-clock timeout — no normal safety limit is
-weakened. Only a parsed rclone **phase or stats** line counts as measurable
-progress, so unrelated chatter cannot keep a dead stage alive.
+`syncRunIsProgressAware` (daemon, pure, unit-tested) is the single expression
+of **which runs** get it:
 
-### 2.6 Persistent job state machine
+| Run | Deadline |
+|---|---|
+| sync with a ready baseline | **fixed wall-clock timeout, unchanged** |
+| planned resync on a ready baseline | fixed wall-clock timeout, unchanged |
+| first run with **no usable baseline** (dev-vm shape) | progress-aware stall budget + hard cap |
+| explicit `initialize` / `seed` intervention | progress-aware stall budget + hard cap |
+| caller-flagged `seedStage` | progress-aware stall budget + hard cap |
+
+Only a parsed rclone **phase or stats** line counts as measurable progress, so
+unrelated chatter cannot keep a dead stage alive.
+
+### 2.8 Persistent job state machine
 
 Phases, strictly forward one step at a time (or to a terminal phase):
 
@@ -135,6 +257,15 @@ preflight → measuring_source → archiving_source → uploading_archive
   a 409.
 - Progress and errors are broadcast on the `seed_job` WebSocket event and read
   back through `GET /seed-jobs/:id` / `GET /folders/:id/seed-jobs`.
+
+### 2.9 Prerequisites are listed, not collapsed into one boolean
+
+`seedPlanPrerequisites(plan)` returns every gate in order —
+`source_authority`, `filter_universe`, `staging_same_filesystem`,
+`target_tooling`, `target_space`, `transport` — each with its own message.
+The UI lists the unmet ones ("Before this seed can run: …"), so an operator
+sees *all* blockers instead of the first one. Two of them
+(`filter_universe`, `transport`) are the open Stage 1 prerequisites.
 
 ## 3. Space calculation
 
@@ -168,19 +299,25 @@ ok                   = targetFreeBytes is known AND targetFreeBytes ≥ required
 | Case | Behaviour |
 |---|---|
 | Source tree changes while archiving | stats fingerprint taken before and after; a difference **fails the archive** (`churned`). Nothing is uploaded or extracted. |
+| The universe includes a symlink / device / FIFO / socket | `seedManifestBlockingReason` **blocks the seed before tar runs** and names the offender plus "exclude them with the folder's ignore rules". Never archived, never silently dropped. |
+| The archive does not represent exactly the manifest | the archive is deleted and the run fails, naming the undescribed/ missing content. |
 | Archive member is absolute, `..`, drive/UNC, backslash, NUL/control, or over-long | `validateArchiveMembers` rejects the whole archive and reports a bounded offender sample. Fail closed — never skip a member silently. |
 | Archive member is a symlink, hardlink, device, FIFO or socket | `validateSeedArchive` rejects it (`tar -tvf` type char must be `-` or `d`). |
 | Archive is unreadable / wrong format | listing failure is a hard failure, never a trusted empty list. |
-| Source contains symlinks or special files | recorded as `excluded` in the manifest and reported as a preflight error; the mandatory baseline validation is where a genuinely incomplete tree surfaces. |
 | Extracted tree differs (missing, size, checksum, unexpected extra) | `verifyExtractedTree` fails before publication. |
 | Target already has files | publication refused; nothing merged or overwritten. |
 | Target free space short or unknown | plan is not runnable with the exact shortfall. |
-| Staging inside the target / different filesystem | refused by `validateStagingLocation`, and again by `publishStagedTree`. |
+| Staging inside the target / not the same direct parent / not a derived staging name / different filesystem / unproven filesystem | refused by `validateStagingLocation`, and again by `publishStagedTree`. |
+| `sourceHostId` is the target | 400 (request grammar) and 409 (plan builder, for direct callers). |
+| `sourceHostId` is not assigned to the folder | 404, naming the reason. |
+| Source measurement missing, stale (>26 h) or empty | plan created, **not runnable**, message names the device and the age. |
+| Source and target established filter sets differ | plan not runnable; both fingerprints are recorded. |
+| Filter-aware archive construction not wired | plan not runnable; `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is false. |
 | Seed stage stalls | killed after the stall budget with `seed-stage stalled: …`; the job is failed with that reason. |
 | Seed stage keeps progressing for six hours | killed at the hard cap with `seed-stage hard_cap: …`. |
 | Daemon stops reporting | lease expires → reaper fails the job ("the device stopped reporting progress and its lease expired"). |
 | Operator cancels | `POST /seed-jobs/:id/cancel` writes a terminal `cancelled`; the device observes it and stops. A job already terminal is returned unchanged. |
-| Plan goes stale | dies on expiry (30 min), config-revision bump, filter change, baseline change, missing tooling, insufficient space, or a staging policy violation. |
+| Plan goes stale | dies on expiry (30 min), config-revision bump, filter change, baseline change, unusable source authority, unwired filter-aware archiving, a filter mismatch, missing tooling, insufficient space, or a staging policy violation. |
 | Post-seed baseline validation reports content changes | the seed is treated as **failed** — the whole point of the seed is that the following bisync has nothing to do. |
 | Resume | the phase machine allows a same-phase retry, and the persisted job/lease model is designed for resumption. The transport implementation must re-verify the archive checksum before resuming extraction. |
 
@@ -192,43 +329,67 @@ ok                   = targetFreeBytes is known AND targetFreeBytes ≥ required
 2. **An archive is untrusted input.** Members are validated by name *and*
    type before extraction; extraction runs with no ownership/setuid restore and
    no overwrite of the staging directory's own permissions.
-3. **No silent authority choice.** The seed never decides which side wins a
-   content conflict; that remains the reviewed `authority` of the LAMA-345
-   intervention, and the seed only ever publishes into an **empty** target.
-4. **Fail closed everywhere.** Unknown free space, a missing measurement, a
-   changed source, an unsafe member, a non-empty target, an unreadable
-   archive, a mismatched tree — all refuse rather than proceed.
-5. **Staging is never managed content.** It is a sibling directory, created
-   with a `SEED_STAGING_DIR_PREFIX` name, and removed by the atomic rename.
+3. **No silent authority choice — of either kind.** The *source device* is
+   named by the operator and never inferred from a size; and the seed never
+   decides which side wins a content conflict, which remains the reviewed
+   `authority` of the LAMA-345 intervention. The seed only ever publishes into
+   an **empty** target.
+4. **Fail closed everywhere.** Unknown free space, a missing/stale
+   measurement, an unrepresentable member, an archive that does not match the
+   manifest, a changed source, an unsafe member, a non-empty target, an
+   unreadable archive, an unproven filesystem, a mismatched tree — all refuse
+   rather than proceed.
+5. **Staging is never managed content.** It is a sibling directory with the
+   `SEED_STAGING_DIR_PREFIX` name, in the target's own parent, and it is
+   consumed by the atomic rename.
 6. **The seed namespace is separate.** Archives go to `lamasync/seed/<jobId>/…`,
    never the Shared managed-folder namespace, so transport data cannot be
    mistaken for synced data or picked up by bisync.
-7. **No weakening of normal limits.** Ordinary sync keeps its fixed
-   wall-clock timeout, its `--max-delete` threshold, and its plan review. The
-   progress-aware deadline applies only to explicitly identified seed stages.
-8. **Nothing runs yet.** Execution is gated by a single explicit capability
-   constant; the API refuses with a reason and the UI disables the control.
+7. **One universe, one tree.** The archive is built from the folder's
+   effective filter universe, so what is published is exactly what sync will
+   compare. Archiving raw source while sync filters a different set is
+   structurally impossible here.
+8. **Normal limits are not weakened.** A sync with a ready baseline keeps its
+   fixed wall-clock timeout, its `--max-delete` threshold, and its plan review.
+   The progress-aware deadline applies only to the explicitly identified
+   first-run/initialize/seed cases.
+9. **Nothing runs yet.** Execution is gated by explicit capability constants
+   (`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` **and**
+   `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED`); the API refuses with a reason and
+   the UI disables the control.
 
 ## 6. Rollout plan
 
 **Stage 0 — this slice (done, awaiting review).**
-Contract, schema + migration, server API, plan/preflight surface, job
-state machine + lease + progress, archive primitives with fixture tests,
-progress-aware deadline wired into the daemon, UI panel + help text, docs and
-skill reference. `POST /seed-jobs` returns 503; the UI's Run control is
-disabled with the server's reason.
+Contract, schema + migration, server API, plan/preflight surface, explicit
+source authority, job state machine + lease + progress, archive primitives
+with fixture tests, progress-aware deadline wired into the daemon, UI panel +
+help text, docs and skill reference. `POST /seed-jobs` returns 503; the UI's
+Run control is disabled with the server's reason.
 
-**Stage 1 — transport, still no execution.**
-Implement the S3 relay (upload to `lamasync/seed/<jobId>/…`, download on the
-target) behind the existing `SeedJob` state machine, with an integration test
-against a local object-store fixture. Keep `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
-false until the *whole* pipeline (including the post-seed baseline validation)
-is proven end-to-end.
+**Stage 1 — the two open prerequisites.**
+
+1. **Filter-aware archive construction.** Adapt the daemon's existing
+   effective filter machinery (`cheapEffectiveFilter` /
+   `liveFilterFingerprint` / `materialiseGitignoreFilter`) into a
+   `SeedSourceFilterUniverse`: an rclone-pattern-equivalent
+   `includes(relativePath, isDirectory)` predicate plus the fingerprint the
+   source assignment already reports. Fixture-test it against a tree
+   containing nested `node_modules` symlinks (the real Projects shape) and
+   assert the manifest has no unsupported members and the fingerprint equals
+   the assignment's. Only then may `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED`
+   become true.
+2. **The transport.** Implement the S3 relay (upload to
+   `lamasync/seed/<jobId>/…`, download on the target) behind the existing
+   `SeedJob` state machine, with an integration test against a local
+   object-store fixture. Keep `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` false until
+   the *whole* pipeline (including the post-seed baseline validation) is
+   proven end-to-end.
 
 **Stage 2 — end-to-end fixture acceptance.**
 A two-host fixture run through the real daemon: source archive → transport →
 target staging → verify → atomic rename → bisync baseline validation reporting
-zero content changes. Only then flip the capability constant.
+zero content changes. Only then flip the capability constants.
 
 **Stage 3 — live acceptance on the real pair.**
 Re-run the dev-vm shape with a copy of a large tree (never the live
@@ -245,48 +406,63 @@ control. The seed remains opt-in per folder.
 | Area | State |
 |---|---|
 | Shared contract, thresholds, space math, staging policy, archive member safety | **implemented + tested** |
+| Explicit source authority (request grammar, assignment check, freshness, persistence) | **implemented + tested** |
 | `folder_seed_plans` / `folder_seed_jobs` schema + migration | **implemented** |
 | Seed plan preflight API (read-only) | **implemented + tested** |
+| Prerequisite list (6 gates, each with its own message) | **implemented + tested** |
 | Seed job state machine, lease, progress, cancel, complete | **implemented + tested** |
-| Archive create / validate / extract / verify / atomic publish | **implemented + fixture-tested end-to-end** |
-| Progress-aware seed-stage deadline in the executor | **implemented + tested with real processes** |
-| Web UI plan panel, phases, help text, disabled execution | **implemented + tested** |
-| Upload/download of the archive to temporary seed space | **NOT implemented** |
+| Archive create / validate / extract / verify / atomic publish, with the manifest↔archive equality guard | **implemented + fixture-tested end-to-end** |
+| Progress-aware seed-stage deadline in the executor, scoped by `syncRunIsProgressAware` | **implemented + tested with real processes** |
+| Web UI plan panel, source-device picker, prerequisites, phases, help text, disabled execution | **implemented + tested** |
+| **Filter-aware archive construction from the effective filter universe** | **NOT implemented (Stage 1 prerequisite)** |
+| Upload/download of the archive to temporary seed space | **NOT implemented (Stage 1 prerequisite)** |
 | Remote orchestration (which host runs which phase) | **NOT implemented** |
 | Post-seed zero-change bisync validation as an automated gate | **designed, not implemented** |
 
-Because the transport and remote orchestration are not implemented,
-`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false`, `POST /seed-jobs` returns
-`503 { executionAvailable: false, reason }`, and the UI shows a disabled
-control. No live archive transfer is claimed anywhere.
+Because the filter-aware archive and the transport are not implemented,
+`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` and
+`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` are both `false`, `POST /seed-jobs`
+returns `503 { executionAvailable: false, reason }`, and the UI shows a
+disabled control. **No arbitrary folder — including the real Projects tree —
+can be seeded today**, and no live archive transfer is claimed anywhere.
 
 ## 8. Changed files
 
 Core
-- `packages/core/src/folder-seed.ts` (new) — contract, space math, staging
-  policy, archive safety, phase machine, deadline decision, wire grammar.
+- `packages/core/src/folder-seed.ts` (new) — contract, source authority,
+  filter universe, space math, staging policy, archive safety, prerequisites,
+  phase machine, deadline decision, wire grammar.
 - `packages/core/src/folder-seed.test.ts` (new).
-- `packages/core/src/folder-health.ts` — `facts.archive` tooling block.
+- `packages/core/src/folder-health.ts` — `facts.archive` tooling block and
+  `facts.seedStaging` staging proof.
 - `packages/core/src/types.ts` — `seed_plan` / `seed_job` WS events.
-- `packages/core/src/db/schema.ts` — `folder_seed_plans`, `folder_seed_jobs`
-  in `SERVER_SCHEMA` and `MIGRATIONS`.
+- `packages/core/src/db/schema.ts` — `folder_seed_plans` (incl.
+  `source_authority_host_id`, `source_authority`, `filter_universe`),
+  `folder_seed_jobs` in `SERVER_SCHEMA` and `MIGRATIONS`.
 - `packages/core/src/index.ts`, `packages/core/package.json` — export the new
   module (`@lamasync/core/folder-seed`).
 
 Daemon
-- `packages/daemon/src/seed-archive.ts` (new) — tooling detection, manifest,
-  create/list/validate/extract, verify, atomic publish, preflight.
+- `packages/daemon/src/seed-archive.ts` (new) — tooling detection,
+  filter-aware manifest, create/list/validate/extract, manifest↔archive
+  equality, verify, atomic publish, preflight.
 - `packages/daemon/src/seed-archive.test.ts` (new).
-- `packages/daemon/src/seed-deadline.test.ts` (new).
-- `packages/daemon/src/executor.ts` — `ProcessWatchdog` / `superviseProcess` /
-  `seedStageWatchdog`, wired to first-run and initialize/seed runs.
-- `packages/daemon/src/folder-health.ts` — report archive tooling.
+- `packages/daemon/src/seed-deadline.test.ts` (new) — plus
+  `syncRunIsProgressAware` scope tests.
+- `packages/daemon/src/executor.ts` — `ProcessWatchdog` /
+  `superviseProcess` / `seedStageWatchdog` / `syncRunIsProgressAware`.
+- `packages/daemon/src/folder-health.ts` — report archive tooling and
+  `seedStagingProofFor`.
 
 Server
-- `packages/server/src/seed-jobs.ts` (new) — persistence + plan preflight.
+- `packages/server/src/seed-jobs.ts` (new) — persistence + plan preflight with
+  the explicit source authority.
 - `packages/server/src/routes/folder-seed.ts` (new) — the REST surface.
 - `packages/server/src/routes/folder-seed.test.ts` (new).
-- `packages/server/src/routes/folder-health.ts` — normalize `facts.archive`.
+- `packages/server/src/seed-staging-facts.test.ts` (new) — fail-closed
+  normalization of the device's staging proof.
+- `packages/server/src/routes/folder-health.ts` — normalize `facts.archive`
+  and `facts.seedStaging`.
 - `packages/server/src/routes/folders.ts` — delete seed artifacts with an
   assignment.
 - `packages/server/src/auth.ts` — device allowlist for its own seed routes.
@@ -296,58 +472,85 @@ Server
 Web UI
 - `packages/web-ui/src/folder-seed.ts` (new), `folder-seed.test.ts` (new).
 - `packages/web-ui/src/components/FolderSeedPlanCard.tsx` (new),
-  `FolderSeedPlanCard.test.tsx` (new).
-- `packages/web-ui/src/pages/Folders.tsx` — mount the panel.
-- `packages/web-ui/src/api.ts` — seed plan/job client methods.
+  `FolderSeedPlanCard.test.tsx` (new) — includes the explicit source-device
+  picker and the unmet-prerequisite list.
+- `packages/web-ui/src/pages/Folders.tsx` — mount the panel with sibling
+  records.
+- `packages/web-ui/src/api.ts` — seed plan/job client methods
+  (`createSeedPlan` now sends `sourceHostId`).
 - `packages/web-ui/src/index.css` — panel styles.
 
 Docs / skill
 - `packages/agent-skill/reference/api.md` — every new route + the contract.
+- `packages/agent-skill/reference/recipes.md` — the seed-plan recipe.
 - `docs/handoff-346-initial-folder-seeding.md` (this file).
-- `docs/status.md`, `docs/agent-start.md`.
+- `docs/status.md`, `docs/agent-start.md`, `docs/features.md`, `docs/README.md`.
 
 ## 9. Validation
 
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # see the worktree report
+bun test                                # 2385 pass / 0 fail, 164 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
-Focused suites added:
+Focused suites:
 
-- `packages/core/src/folder-seed.test.ts` — 34 tests: recommendation is never
-  automatic, space fails closed, staging policy, phase machine, deadline
-  continue/stall/hard-cap, wire grammar, plan validity, execution capability.
-- `packages/daemon/src/seed-archive.test.ts` — 20 tests: real GNU tar for both
-  `tar.zstd` and `tar.gz` — create → validate → extract → verify byte-for-byte
-  → atomic rename, mtime preservation, traversal/symlink/churn/corruption
-  refusals, non-empty target refusal, preflight.
-- `packages/daemon/src/seed-deadline.test.ts` — 8 tests against real child
+- `packages/core/src/folder-seed.test.ts` — **42 tests**: recommendation is
+  never automatic, the source authority is required in the request grammar,
+  space fails closed, the sibling + proven-filesystem staging policy, the phase
+  machine, deadline continue/stall/hard-cap, plan validity (incl. unusable
+  authority, unwired filter-aware archiving, filter mismatch, unknown
+  filesystem), the prerequisite list, and the execution capability.
+- `packages/daemon/src/seed-archive.test.ts` — **29 tests**: real GNU tar for
+  both `tar.zstd` and `tar.gz` — create → validate → extract → verify
+  byte-for-byte → atomic rename, mtime preservation, traversal/symlink/churn/
+  corruption refusals, non-empty target refusal, preflight, and the two
+  corrections: **create refuses a symlink in the universe before tar runs**
+  (runner spy asserts tar was never invoked and no archive exists) and
+  **create refuses an archive whose members do not equal the manifest**
+  (and deletes it); plus the filter-prunes-`node_modules` case and the
+  `/data/elsewhere` rejection.
+- `packages/daemon/src/seed-deadline.test.ts` — **11 tests** against real child
   processes: fixed timeout still kills an ordinary run, a progressing stage
   survives past the nominal timeout, a stall is killed, progress resets the
-  budget, the hard cap bounds a chatty stage.
-- `packages/server/src/routes/folder-seed.test.ts` — 13 tests: admin-only plan
-  creation, mandatory `confirm`, plan built from reported facts, not-runnable
-  when unmeasured, gzip fallback, list/read validity, explicit 503 execution
-  refusal with no job row, legal/illegal phase transitions, host scoping,
-  idempotent completion, admin-only cancel, stale-lease reaping.
+  budget, the hard cap bounds a chatty stage, and the scope rule (ready
+  baseline ⇒ fixed; first run ⇒ progress-aware).
+- `packages/daemon/src/folder-health.test.ts` — **23 tests**, incl. the
+  target's own staging proof (proved / unreadable ⇒ unknown / relative path ⇒
+  no proof) and the heartbeat carrying both new fact blocks.
+- `packages/server/src/routes/folder-seed.test.ts` — **17 tests**: admin-only
+  plan creation, mandatory `confirm`, mandatory `sourceHostId`, self-seed and
+  unassigned-source refusals, stale measurement not usable, plan built from
+  reported facts, unproven filesystem not runnable, filter mismatch refused,
+  gzip fallback, list/read validity, explicit 503 execution refusal with no
+  job row, legal/illegal phase transitions, host scoping, idempotent
+  completion, admin-only cancel, stale-lease reaping.
+- `packages/server/src/seed-staging-facts.test.ts` — **4 tests**: the device's
+  staging proof normalizes fail-closed (absent/malformed ⇒ null; a
+  truthy-but-not-`true` verdict ⇒ unproven; unparsable numbers dropped).
 - `packages/web-ui/src/folder-seed.test.ts` +
-  `components/FolderSeedPlanCard.test.tsx` — 22 tests: recommendation wording,
-  space/archive/staging wording, no invented tooling claims, disabled execution,
-  plain-language phases, progress with only known totals.
+  `components/FolderSeedPlanCard.test.tsx` — **35 tests**: recommendation
+  wording, source-authority wording, source-device candidates (the target is
+  never offered; unmeasured/stale/empty are refused with reasons), unmet
+  prerequisites, space/archive/staging wording, no invented tooling claims,
+  disabled execution, plain-language phases, progress with only known totals,
+  and the precise timeout-scope copy.
 
 ## 10. Remaining live validation (owner / later stage)
 
-1. Implement and fixture-test the archive transport (stage 1) before any live
-   run.
-2. Two-host end-to-end fixture acceptance with a zero-change baseline
+1. **Stage 1a:** wire filter-aware archive construction from the daemon's
+   effective filter universe, and fixture-test it against a tree with nested
+   `node_modules` symlinks (the real Projects shape).
+2. **Stage 1b:** implement and fixture-test the archive transport before any
+   live run.
+3. Two-host end-to-end fixture acceptance with a zero-change baseline
    validation (stage 2).
-3. A live dev-vm-shape run on a **copy** of a large tree, confirming no
+4. A live dev-vm-shape run on a **copy** of a large tree, confirming no
    timeout kill while progressing and a correct resume after a deliberate
    stall (stage 3).
-4. Confirm the target's archive tooling is reported before the Run control is
-   enabled for that device.
-5. Decide the retention/cleanup policy for `lamasync/seed/…` objects after a
+5. Confirm the target's archive tooling *and* staging proof are reported before
+   the Run control is enabled for that device.
+6. Decide the retention/cleanup policy for `lamasync/seed/…` objects after a
    successful or abandoned job.

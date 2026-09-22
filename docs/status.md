@@ -28,14 +28,18 @@ distributable binary build.
   a first run with **no usable baseline** (the dev-vm shape), an explicit
   `initialize`/`seed` intervention, or an explicit `seedStage` flag — so every
   ordinary run keeps its exact fixed timeout and no safety limit is weakened.
-  *Seed path (opt-in, never automatic):* a measured folder at or above 3,000
-  entries gets a **recommendation**, never a trigger; a plan exists only after
-  an admin `POST /folders/:id/seed-plans { hostId, confirm: true }`, which is
-  read-only and built from the target's already-reported free space and
-  archive tooling plus the largest reported source measurement. The plan
-  reserves `archive + extracted tree` × 1.25 + 64 MiB, refuses staging inside
-  the target or on another filesystem, and prefers `tar + zstd` with a
-  documented `tar + gzip` fallback.
+  *Seed path (opt-in, never automatic, source never inferred):* a measured
+  folder at or above 3,000 entries gets a **recommendation**, never a trigger;
+  a plan exists only after an admin
+  `POST /folders/:id/seed-plans { hostId, sourceHostId, confirm: true }`, which
+  is read-only. `sourceHostId` is mandatory and persisted: the device that
+  holds the data must be assigned to the folder, must not be the target, and
+  must hold a measurement fresher than 26 h — the planner never picks "the
+  largest other assignment". The plan reserves `archive + extracted tree` ×
+  1.25 + 64 MiB, requires staging to be a **true sibling** (the target's own
+  parent directory, a `SEED_STAGING_DIR_PREFIX` name, outside the target, on a
+  filesystem the target device itself proved — an unknown verdict fails
+  closed), and prefers `tar + zstd` with a documented `tar + gzip` fallback.
   *Archive pipeline (implemented and fixture-tested end-to-end with the host's
   real GNU tar):* manifest with SHA-256 and a stats fingerprint → archive →
   member validation (safe relative path **and** regular file/directory, so
@@ -43,7 +47,15 @@ distributable binary build.
   directory with no ownership/setuid restore → byte-for-byte verification →
   **one atomic rename** (a non-empty target is refused, never merged). mtimes
   survive, which is what makes the mandatory zero-content-change bisync
-  baseline validation possible.
+  baseline validation possible. The **manifest is the authority for what may
+  be archived**: a member the folder's effective filter universe includes but
+  a seed cannot represent (a symlink — the real Projects tree has 28, chiefly
+  nested `node_modules`) blocks the run *before tar starts*, and the produced
+  archive's member set must **equal** the manifest's or it is deleted and the
+  run fails. The archive is built from the folder's **effective filter
+  universe**, never the raw tree; filter-aware construction is a declared
+  Stage 1 prerequisite (`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `false`),
+  so no arbitrary folder can be seeded today.
   *Persistent job state machine:* ten ordered phases plus terminal states,
   stored in `folder_seed_jobs` with bounded progress, a renewable 10-minute
   lease (an expired lease means the owner is gone, never merely slow),
@@ -53,8 +65,12 @@ distributable binary build.
   orchestration are **not implemented**, so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
   is `false`, `POST /seed-jobs` returns `503 { executionAvailable: false,
   reason }`, and the Folders page renders a **disabled** control with that
-  reason and a plain-language glossary — never a fake button. Ordinary sync is
-  unaffected. Design, space math, failure/recovery table, threat rules and the
+  reason and a plain-language glossary — never a fake button. The timeout
+  scope is stated precisely rather than as "ordinary sync is unaffected": a
+  sync against an **existing, ready baseline keeps its exact fixed wall-clock
+  timeout** (including a planned resync on that baseline), while a **first run
+  with no usable baseline** — the dev-vm case — is supervised progress-aware.
+  Design, space math, failure/recovery table, threat rules and the
   rollout plan are in
   [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
 
@@ -593,18 +609,25 @@ distributable binary build.
 
 ## Active follow-ups
 
-1. **LAMA-346 — the archive transport, remote orchestration and live
+1. **LAMA-346 — the two Stage 1 prerequisites, remote orchestration and live
    acceptance.** The first vertical slice is implemented and locally
-   validated; execution is deliberately unavailable. Remaining work, in
-   order: (a) implement the S3 relay into `lamasync/seed/<jobId>/…` behind the
-   existing job state machine with a local object-store fixture; (b) a
-   two-host end-to-end fixture acceptance including a zero-content-change
-   bisync baseline validation; (c) a live dev-vm-shape run on a **copy** of a
-   large tree confirming no timeout kill while progressing and a correct
-   resume after a deliberate stall; (d) confirm the target's archive tooling is
-   reported before the Run control is enabled for that device; (e) decide the
+   validated (including an independent-review correction pass); execution is
+   deliberately unavailable. Remaining work, in order: (a) wire
+   **filter-aware archive construction** from the daemon's existing effective
+   filter machinery (`cheapEffectiveFilter` / `liveFilterFingerprint` /
+   `materialiseGitignoreFilter`) into a `SeedSourceFilterUniverse`, and
+   fixture-test it against a tree with nested `node_modules` symlinks so the
+   real Projects tree becomes seedable; (b) implement the S3 relay into
+   `lamasync/seed/<jobId>/…` behind the existing job state machine with a
+   local object-store fixture; (c) a two-host end-to-end fixture acceptance
+   including a zero-content-change bisync baseline validation; (d) a live
+   dev-vm-shape run on a **copy** of a large tree confirming no timeout kill
+   while progressing and a correct resume after a deliberate stall; (e)
+   confirm the target's archive tooling **and** staging proof are reported
+   before the Run control is enabled for that device; (f) decide the
    retention/cleanup policy for seed objects after a successful or abandoned
-   job. Only then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`. See
+   job. Only then flip `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` and
+   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`. See
    [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
 
 2. **LAMA-337 — release, and the one device-path question it leaves open.**

@@ -308,12 +308,20 @@ curl "${AUTH[@]}" -X POST "$BASE/backups/legacy-root/prune" \
 A first full sync of a very large folder is not a normal sync: on 2026-09-17 a
 91,660-entry / 14.86 GB tree was killed by the fixed 600-second wall-clock
 timeout (exit 143) before a single transfer completed. LamaSync now
-**recommends** a one-time seed transfer above 3,000 entries, and gives
-initial seed stages a progress-aware deadline (long work continues while it
-keeps making measurable progress; it is stopped when it genuinely stalls).
+**recommends** a one-time seed transfer above 3,000 entries, and supervises
+initial seed stages with a progress-aware deadline.
 
-A seed plan is **always operator-approved** — nothing is created
-automatically, and ordinary sync still works for the same folder.
+The timeout change is narrow, and it is worth stating exactly:
+
+- a sync against an **existing, ready baseline keeps its exact fixed
+  wall-clock timeout** — steady-state sync is unchanged;
+- a **first run with no usable baseline** (the dev-vm case), an explicit
+  `initialize`/`seed` intervention, or a flagged seed stage keeps running while
+  it makes measurable progress and is stopped when it genuinely stalls (or at
+  the 6-hour ceiling).
+
+A seed plan is **always operator-approved** and always names its source: the
+source device is never inferred from a size.
 
 ```bash
 # 1. Make sure the DEVICE THAT HOLDS THE DATA has reported a measurement.
@@ -321,24 +329,39 @@ automatically, and ordinary sync still works for the same folder.
 curl "${AUTH[@]}" -X POST "$BASE/hosts/$SOURCE_HOST/actions" \
   -d '{"type":"diagnose_folder","payload":{"folderId":"<folderId>"}}'
 
-# 2. Prepare the plan for the DEVICE BEING SEEDED (read-only; confirm is mandatory).
+# 2. Prepare the plan for the DEVICE BEING SEEDED. `confirm` AND `sourceHostId`
+#    are both mandatory — name the device that holds the data yourself.
 curl "${AUTH[@]}" -X POST "$BASE/folders/<folderId>/seed-plans" \
-  -d '{"hostId":"<target-hostId>","confirm":true}'
+  -d '{"hostId":"<target-hostId>","sourceHostId":"<source-hostId>","confirm":true}'
 
 # 3. Read it back with its validity verdict.
 curl "${AUTH[@]}" "$BASE/folders/<folderId>/seed-plans?limit=5"
 ```
 
-The plan reports the source size, the target's free space, the reservation
-(`archive + extracted tree` × 1.25 + 64 MiB), the archive format (`tar + zstd`
-when the device has zstd, else the documented `tar + gzip` fallback), and the
-staging rule (a sibling of the target, never inside it).
+The plan reports the named source device and its measurement freshness, the
+target's free space, the reservation (`archive + extracted tree` × 1.25 +
+64 MiB), the archive format (`tar + zstd` when the device has zstd, else the
+documented `tar + gzip` fallback), the effective filter universe the archive
+would be built from, and the staging rule (a sibling in the target's own
+parent directory, on a filesystem the target itself proved).
+
+Errors worth knowing:
+
+| Response | Meaning |
+|---|---|
+| 422 | `confirm` is not literally `true`, or `sourceHostId` is missing |
+| 400 | `sourceHostId` is the same device as `hostId` — a device cannot seed itself |
+| 404 | the named source device is not assigned to this folder |
+| 201 + `validity.valid: false` | the plan exists but is not runnable; `validity.message` names the first blocker and the plan's prerequisite list names them all |
 
 **Execution is not available yet.** `POST /seed-jobs` returns
-`503 { executionAvailable: false, reason }` because the archive transport is
-not implemented or validated, and the Web UI shows a disabled control with
-that reason. Do not expect a seed to run; the value today is the honest
-preflight plus the progress-aware timeout for initial seed stages.
+`503 { executionAvailable: false, reason }` because two Stage 1 prerequisites
+are still open: the archive is not yet built from the folder's **effective
+filter universe** (so a tree containing nested `node_modules` symlinks, like
+the real Projects tree, cannot be seeded), and the archive transport is not
+implemented or validated. The Web UI shows a disabled control with that
+reason. Do not expect a seed to run; the value today is the honest preflight
+plus the progress-aware timeout for first runs.
 
 ## See also
 
