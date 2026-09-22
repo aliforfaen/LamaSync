@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import {
   archiveCreateArgs,
   archiveExtractArgs,
@@ -35,6 +35,8 @@ import {
   buildSeedManifest,
   buildStatsFingerprint,
   createSeedArchive,
+  encodeSeedMemberList,
+  seedSourcePathUnsafeReason,
   defaultSeedCommandRunner,
   detectArchiveTooling,
   extractSeedArchive,
@@ -91,7 +93,7 @@ function fixture(): string {
  * not match the manifest, which is exactly what the equality guard defends
  * against — so both directions of that guard stay testable.
  */
-function rewriteMembersFileRunner(transform: (lines: string[]) => string[]): SeedCommandRunner {
+function rewriteMembersFileRunner(transform: (names: string[]) => string[]): SeedCommandRunner {
   return async (args, opts) => {
     const index = args.indexOf("--files-from");
     const membersFile = args[index + 1];
@@ -100,9 +102,11 @@ function rewriteMembersFileRunner(transform: (lines: string[]) => string[]): See
       // must pass through untouched.
       return defaultSeedCommandRunner(args, opts);
     }
-    const lines = readFileSync(membersFile, "utf8").split("\n").filter((line) => line.length > 0);
-    const next = transform(lines);
-    writeFileSync(membersFile, next.length > 0 ? `${next.join("\n")}\n` : "");
+    const names = readFileSync(membersFile, "utf8")
+      .split("\0")
+      .filter((name) => name.length > 0);
+    const next = transform(names);
+    writeFileSync(membersFile, encodeSeedMemberList(next));
     return defaultSeedCommandRunner(args, opts);
   };
 }
@@ -169,6 +173,7 @@ describe("manifest", () => {
     expect(blocking).not.toBeNull();
     expect(blocking).toContain("link (symlink)");
     expect(blocking).toContain("a seed never publishes a partial tree");
+    expect(blocking).toContain("cannot be represented");
   });
 
   test("the effective filter universe prunes a subtree, so its symlinks never enter the manifest", async () => {
@@ -237,6 +242,39 @@ describe("archive argument construction", () => {
     });
     expect(gz).toContain("--gzip");
     expect(gz).toContain("--no-recursion");
+  });
+
+  test("the list is read as NAMES: --verbatim-files-from and --null come first", () => {
+    for (const format of ["tar.zstd", "tar.gz"] as const) {
+      const args = archiveCreateArgs({
+        format,
+        sourceRoot: "/src",
+        outputPath: "/o.tar",
+        membersFilePath: "/o.members",
+      });
+      // A list line that begins with `-` is a legal file NAME. Without these
+      // two flags GNU tar parses such a line as an OPTION (measured: a file
+      // named `--directory=sub` really did change tar's working directory).
+      const verbatim = args.indexOf("--verbatim-files-from");
+      const nul = args.indexOf("--null");
+      const filesFrom = args.indexOf("--files-from");
+      expect(verbatim).toBeGreaterThan(-1);
+      expect(nul).toBeGreaterThan(-1);
+      // They only affect SUBSEQUENT `-T` options, so the order is load-bearing.
+      expect(verbatim).toBeLessThan(filesFrom);
+      expect(nul).toBeLessThan(filesFrom);
+    }
+  });
+
+  test("the member list is NUL-separated, so no legal name can be split or read as an option", () => {
+    const encoded = encodeSeedMemberList(["normal.txt", "--directory=sub", "-Csub", "--checkpoint=1"]);
+    expect(encoded.toString("utf8")).toBe(
+      "normal.txt\0--directory=sub\0-Csub\0--checkpoint=1\0",
+    );
+    // Every name is terminated, so a name can never run into the next one and a
+    // name beginning with `-` is never at a line start tar could parse.
+    expect(encoded.toString("utf8").endsWith("\0")).toBe(true);
+    expect(encodeSeedMemberList([]).length).toBe(0);
   });
 
   test("extraction never restores ownership or setuid bits", () => {
@@ -348,6 +386,302 @@ for (const format of formats) {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Hostile file names
+//
+// A list line that begins with `-` is a legal POSIX file NAME. GNU tar parses
+// such a line as an OPTION unless it is told the list holds names, and the
+// options it honours from a list include `--directory` — so before this
+// correction a file named `--directory=sub` silently changed tar's working
+// directory mid-archive, and the class of honoured options is version- and
+// build-dependent (the review flagged `--checkpoint-action`).
+//
+// Two independent defences are tested here: the list is read as NAMES
+// (`--verbatim-files-from --null`, NUL-separated), and a name tar would ESCAPE
+// in its listing (control characters, backslash) is refused before tar runs.
+// ---------------------------------------------------------------------------
+
+describe("hostile file names are names, never options", () => {
+  /** Legal root-level names that look like tar options, plus benign names. */
+  const HOSTILE_NAMES = [
+    "--checkpoint=1",
+    "--checkpoint-action=exec=touch PWNED",
+    "--directory=sub",
+    "-Csub",
+    "--null",
+    "--verbatim-files-from",
+    "--file=EVIL.tar",
+  ];
+
+  function hostileFixture(): string {
+    const source = join(root, "source");
+    mkdirSync(join(source, "sub"), { recursive: true });
+    writeFileSync(join(source, "normal.txt"), "normal\n");
+    writeFileSync(join(source, "sub", "inner.txt"), "inner\n");
+    for (const name of HOSTILE_NAMES) writeFileSync(join(source, name), `hostile: ${name}\n`);
+    return source;
+  }
+
+  test("no option executes, and every hostile name is archived literally", async () => {
+    const source = hostileFixture();
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
+    // Leading-dash names are supported, not refused: they are legal file names
+    // and the list encoding makes them unambiguous.
+    expect(manifest.unsupported).toEqual([]);
+    for (const name of HOSTILE_NAMES) {
+      expect(manifest.entries.some((entry) => entry.path === name)).toBe(true);
+    }
+
+    const archivePath = join(root, "hostile.tar.gz");
+    // tar's own working directory is the one a `--directory`/`-C` injection
+    // would redirect into, so watch it as well as the source and output dirs.
+    const cwd = join(root, "cwd");
+    mkdirSync(cwd);
+    const created = await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      filter: allFilesFilter(),
+      runner: async (args, opts) => {
+        const previous = process.cwd();
+        process.chdir(cwd);
+        try {
+          return await defaultSeedCommandRunner(args, opts);
+        } finally {
+          process.chdir(previous);
+        }
+      },
+    });
+    expect(created.error).toBeNull();
+    expect(created.ok).toBe(true);
+
+    // No injected action ran: nothing was created anywhere it could land.
+    for (const dir of [cwd, source, dirname(archivePath)]) {
+      expect(existsSync(join(dir, "PWNED"))).toBe(false);
+      expect(existsSync(join(dir, "EVIL.tar"))).toBe(false);
+    }
+
+    // The archive's member set is exactly the manifest's, so the hostile names
+    // were archived as files rather than consumed as options.
+    const validation = await validateSeedArchive({ format: "tar.gz", archivePath });
+    expect(validation.ok).toBe(true);
+    expect(validation.members.count).toBe(manifest.entries.length);
+
+    // And the whole round trip preserves them: extract, verify byte-for-byte,
+    // publish. A leading-dash name must survive as a regular file.
+    const stagingDir = join(root, ".lamasync-seed-staging-target-job1");
+    const extracted = await extractSeedArchive({ format: "tar.gz", archivePath, stagingDir });
+    expect(extracted.ok).toBe(true);
+    const verified = await verifyExtractedTree({ root: stagingDir, manifest });
+    expect(verified.mismatches).toEqual([]);
+    expect(verified.ok).toBe(true);
+    expect(readFileSync(join(stagingDir, "--directory=sub"), "utf8")).toBe(
+      "hostile: --directory=sub\n",
+    );
+    expect(readFileSync(join(stagingDir, "-Csub"), "utf8")).toBe("hostile: -Csub\n");
+    const targetPath = join(root, "target");
+    const published = publishStagedTree({ stagingDir, targetPath });
+    expect(published.ok).toBe(true);
+    expect(readFileSync(join(targetPath, "--checkpoint=1"), "utf8")).toBe(
+      "hostile: --checkpoint=1\n",
+    );
+  });
+
+  test("characterization: the newline list this code must NEVER use parses them as options", async () => {
+    // This is a test of GNU tar's behaviour, not of our code. It documents why
+    // `--verbatim-files-from --null` are load-bearing, and it is the one place
+    // the unsafe invocation is exercised at all.
+    const source = hostileFixture();
+    const listPath = join(root, "newline.members");
+    writeFileSync(listPath, `normal.txt\n${HOSTILE_NAMES.join("\n")}\n`);
+    const archivePath = join(root, "vulnerable.tar");
+    const cwd = join(root, "cwd");
+    mkdirSync(cwd);
+    const previous = process.cwd();
+    process.chdir(cwd);
+    let result: Awaited<ReturnType<SeedCommandRunner>>;
+    try {
+      result = await defaultSeedCommandRunner([
+        "tar",
+        "--create",
+        "--file",
+        archivePath,
+        "--verbose",
+        "--directory",
+        source,
+        "--no-recursion",
+        "--files-from",
+        listPath,
+      ]);
+    } finally {
+      process.chdir(previous);
+    }
+
+    // Under GNU tar <= 1.35 the dash lines are parsed as OPTIONS: `normal.txt`
+    // is archived, then the first dash line is rejected as an "unrecognized
+    // option" and tar exits non-zero, while `--directory=sub` (tested below in
+    // isolation) is genuinely honoured. The invariant that matters for the fix
+    // is that the dash lines are NOT all archived as literal members.
+    expect(existsSync(archivePath)).toBe(true);
+    const listed = await defaultSeedCommandRunner([
+      "tar",
+      "--list",
+      "--file",
+      archivePath,
+      "--numeric-owner",
+    ]);
+    const members = listed.stdout
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0);
+    const allLiteral = result.exitCode === 0 && HOSTILE_NAMES.every((n) => members.includes(n));
+    if (allLiteral) {
+      // Not a bug in our code — this would mean tar is now safe by default.
+      // The flags stay as belt and braces, so this test just needs updating.
+      throw new Error(
+        "GNU tar now reads -T lists verbatim by default: update this characterization test " +
+          "(the --verbatim-files-from/--null flags remain, as belt and braces)",
+      );
+    }
+    expect(result.exitCode).not.toBe(0);
+    for (const name of HOSTILE_NAMES) {
+      expect(members).not.toContain(name);
+    }
+    // Nothing executed here either — the option that was honoured was a
+    // directory change, not an action.
+    expect(existsSync(join(cwd, "PWNED"))).toBe(false);
+  });
+
+  test("characterization: `--directory=sub` as a file name really is honoured without the flags", async () => {
+    // The sharpest proof that a list line is parsed as an option: a legal file
+    // named `--directory=sub` redirects tar, and a later entry then resolves
+    // relative to `sub` (or fails). With `--verbatim-files-from --null` the
+    // same name is archived as a file — proven by the round-trip test above.
+    const source = hostileFixture();
+    const listPath = join(root, "dir.members");
+    // `sub/inner.txt` is only reachable if tar chdir'd into `sub`.
+    writeFileSync(listPath, "normal.txt\n--directory=sub\nsub/inner.txt\n");
+    const archivePath = join(root, "dir.tar");
+    const result = await defaultSeedCommandRunner([
+      "tar",
+      "--create",
+      "--file",
+      archivePath,
+      "--verbose",
+      "--directory",
+      source,
+      "--no-recursion",
+      "--files-from",
+      listPath,
+    ]);
+    const safe = await defaultSeedCommandRunner([
+      "tar",
+      "--list",
+      "--file",
+      archivePath,
+      "--numeric-owner",
+    ]);
+    const safeMembers = safe.stdout.split(/\r?\n/).filter((line) => line.length > 0);
+    // Without the flags: `--directory=sub` is consumed as an option, so
+    // `sub/inner.txt` is looked up INSIDE `sub` (where it does not exist) and
+    // tar fails. It is never archived under its real name.
+    expect(result.exitCode).not.toBe(0);
+    expect(safeMembers).not.toContain("sub/inner.txt");
+    expect(safeMembers).not.toContain("--directory=sub");
+  });
+});
+
+describe("names tar escapes in its listing are refused BEFORE tar", () => {
+  const UNSAFE_NAMES: Array<{ name: string; reason: string }> = [
+    { name: "new\nline.txt", reason: "name contains a control character" },
+    { name: "tab\there.txt", reason: "name contains a control character" },
+    { name: "bell\x07.txt", reason: "name contains a control character" },
+    { name: "delete\x7f.txt", reason: "name contains a control character" },
+    { name: "back\\slash.txt", reason: "name contains a backslash" },
+  ];
+
+  test("the predicate names the reason for each class", () => {
+    expect(seedSourcePathUnsafeReason("normal.txt")).toBeNull();
+    // Legal and representable: spaces, quotes, a trailing space, a leading dash.
+    expect(seedSourcePathUnsafeReason("a b.txt")).toBeNull();
+    expect(seedSourcePathUnsafeReason("'quote'.txt")).toBeNull();
+    expect(seedSourcePathUnsafeReason("trailing ")).toBeNull();
+    expect(seedSourcePathUnsafeReason("--directory=sub")).toBeNull();
+    for (const { name, reason } of UNSAFE_NAMES) {
+      expect(seedSourcePathUnsafeReason(name)).toBe(reason);
+    }
+  });
+
+  test("the manifest records them as unsupported and create refuses before tar runs", async () => {
+    const source = fixture();
+    for (const { name } of UNSAFE_NAMES) writeFileSync(join(source, name), "unsafe\n");
+    // A directory whose NAME is unsafe is refused as a whole: its subtree is
+    // unrepresentable by construction, so it is not even walked.
+    mkdirSync(join(source, "bad\x01dir"), { recursive: true });
+    writeFileSync(join(source, "bad\x01dir", "inside.txt"), "inside\n");
+
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
+    for (const { name, reason } of UNSAFE_NAMES) {
+      expect(manifest.unsupported).toContainEqual({ path: name, reason });
+    }
+    expect(manifest.unsupported).toContainEqual({
+      path: "bad\x01dir",
+      reason: "name contains a control character",
+    });
+    expect(manifest.entries.some((entry) => entry.path.startsWith("bad\x01dir"))).toBe(false);
+
+    const blocking = seedManifestBlockingReason(manifest);
+    expect(blocking).toContain("cannot be represented");
+    expect(blocking).toContain("control character or a backslash");
+    expect(blocking).toContain("tar escapes those in its listing");
+
+    const archivePath = join(root, "unsafe.tar.gz");
+    let runnerCalled = false;
+    const created = await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      filter: allFilesFilter(),
+      runner: async (args, opts) => {
+        runnerCalled = true;
+        return defaultSeedCommandRunner(args, opts);
+      },
+    });
+    expect(created.ok).toBe(false);
+    expect(created.error).toContain("control character or a backslash");
+    // The whole point: tar never ran, so no escaped name could ever reach the
+    // archive or its listing.
+    expect(runnerCalled).toBe(false);
+    expect(existsSync(archivePath)).toBe(false);
+  });
+
+  test("an archive that does contain an escaped name is refused by validation", async () => {
+    // Defence in depth for a hand-crafted archive: tar escapes control
+    // characters and backslashes in its listing, so the name read back differs
+    // from the real one. The listing must fail closed rather than be trusted.
+    const tooling = await detectArchiveTooling();
+    if (!tooling.tar) return;
+    const source = join(root, "escaped");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "tab\there.txt"), "tab\n");
+    const archivePath = join(root, "escaped.tar.gz");
+    await defaultSeedCommandRunner([
+      "tar",
+      "--create",
+      "--file",
+      archivePath,
+      "--gzip",
+      "--directory",
+      source,
+      "tab\there.txt",
+    ]);
+    const validation = await validateSeedArchive({ format: "tar.gz", archivePath });
+    expect(validation.ok).toBe(false);
+    expect(validation.offenders.join(" ")).toContain("tab");
+  });
+});
 
 describe("fail-closed safety paths", () => {
   test("create REFUSES a symlink in the universe before tar ever runs", async () => {

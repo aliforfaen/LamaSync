@@ -304,6 +304,15 @@ const WINDOWS_DRIVE_RE = /^[A-Za-z]:/;
  * character, or an over-long name) must abort the whole seed rather than be
  * skipped silently. A skipped member would leave a tree that only *looks*
  * complete.
+ *
+ * A leading dash is deliberately ALLOWED. `--foo` is a legal POSIX file name
+ * and it is data everywhere this name is used — the archive listing, the
+ * manifest, the wire format. The one place a leading dash is dangerous is the
+ * member LIST handed to tar's `--files-from`, where GNU tar would parse a line
+ * beginning with `-` as an OPTION; that list is therefore NUL-separated and
+ * read with `--verbatim-files-from --null` (daemon `archiveCreateArgs`), and a
+ * source name tar would ESCAPE in its listing is refused before tar runs
+ * (daemon `seedSourcePathUnsafeReason`).
  */
 export function isSafeArchiveMember(member: string): boolean {
   if (typeof member !== "string") return false;

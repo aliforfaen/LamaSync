@@ -192,6 +192,45 @@ export interface SeedUnsupportedMember {
   reason: string;
 }
 
+/**
+ * Encode the manifest's member paths for tar's `--files-from`.
+ *
+ * NUL-separated, each name NUL-terminated: this is the only encoding that can
+ * represent every legal name, and (with `--null`) it makes tar read each entry
+ * as a literal file name. Newline-delimited lists are the shape that let a
+ * legal file name beginning with `-` be parsed as a tar option.
+ */
+export function encodeSeedMemberList(paths: readonly string[]): Buffer {
+  const parts: Buffer[] = [];
+  for (const path of paths) parts.push(Buffer.from(`${path}\0`, "utf8"));
+  return Buffer.concat(parts);
+}
+
+/**
+ * Why a SOURCE path cannot be represented in the archive and its listing, or
+ * `null` when it can.
+ *
+ * GNU tar ESCAPES control characters and backslashes in its `--verbose`
+ * listing (`\n` becomes `\\n`, `\x01` becomes `\\001`, `\` becomes `\\`), so the
+ * archive holds the real name while the listing reports a different one. The
+ * manifest↔archive equality guard could then never match, and the operator
+ * would see a mismatch rather than a reason. The seed therefore refuses these
+ * names BEFORE tar runs, with a message that says what to do about them.
+ *
+ * Everything else a legal POSIX name can contain is fine: spaces, quotes,
+ * trailing spaces, and a leading dash. A leading dash is safe because tar is
+ * given the member list with `--verbatim-files-from --null`, so a list line is
+ * a NAME and never an option (see `archiveCreateArgs`).
+ */
+export function seedSourcePathUnsafeReason(relativePath: string): string | null {
+  for (let i = 0; i < relativePath.length; i += 1) {
+    const code = relativePath.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return "name contains a control character";
+  }
+  if (relativePath.includes("\\")) return "name contains a backslash";
+  return null;
+}
+
 export interface SeedManifest {
   entries: SeedManifestEntry[];
   fileCount: number;
@@ -309,6 +348,15 @@ export async function buildSeedManifest(
         skip(rel);
         continue;
       }
+      // A name tar escapes in its listing cannot be verified after archiving,
+      // so it is refused HERE — before tar — rather than surfacing later as an
+      // inexplicable member mismatch. An unsafe directory is not descended
+      // into: its whole subtree is unrepresentable by construction.
+      const unsafe = seedSourcePathUnsafeReason(rel);
+      if (unsafe !== null) {
+        unsupported.push({ path: rel, reason: unsafe });
+        continue;
+      }
       if (dirent.isSymbolicLink()) {
         unsupported.push({ path: rel, reason: "symlink" });
         continue;
@@ -413,10 +461,12 @@ export function seedManifestBlockingReason(manifest: SeedManifest): string | nul
     ? first.path.slice(first.path.lastIndexOf("/") + 1)
     : first.path;
   return (
-    `${manifest.unsupported.length} entr(y/ies) in this folder's effective filter universe are symlinks or special ` +
-    `files, which a seed cannot represent (for example ${sample}). Exclude them with the folder's ignore rules ` +
-    `(lamasyncignore) — a trailing-slash rule like \`- dir/\` only matches directories, so use \`- ${leaf}\` or a ` +
-    `glob such as \`- **/${leaf}\` — or remove them, then prepare the plan again — a seed never publishes a partial tree.`
+    `${manifest.unsupported.length} entr(y/ies) in this folder's effective filter universe cannot be represented in ` +
+    `a seed archive (for example ${sample}). A symlink or special file cannot be archived safely; a name containing a ` +
+    `control character or a backslash cannot be verified after archiving, because tar escapes those in its listing. ` +
+    `Rename them or exclude them with the folder's ignore rules (lamasyncignore) — a trailing-slash rule like ` +
+    `\`- dir/\` only matches directories, so use \`- ${leaf}\` or a glob such as \`- **/${leaf}\` — then prepare the ` +
+    `plan again — a seed never publishes a partial tree.`
   );
 }
 
@@ -489,12 +539,27 @@ export function buildStatsFingerprint(root: string, filter?: SeedSourceFilterUni
  *
  * `--no-recursion` is what makes the list authoritative — without it tar would
  * descend into every listed directory and re-archive the excluded content.
+ *
+ * THE LIST IS NAMES, NEVER OPTIONS. A list line starting with `-` is a legal
+ * source file name (`--directory=sub`, `-Csub`, `--checkpoint=1`, …), and GNU
+ * tar parses such a line as an OPTION unless told otherwise — measured on
+ * tar 1.35, where a file named `--directory=sub` really did change tar's
+ * working directory mid-archive. Both flags below are therefore load-bearing
+ * and must come BEFORE `--files-from`, because they only affect SUBSEQUENT
+ * list options:
+ *
+ *   * `--verbatim-files-from` — read every list line as a file name;
+ *   * `--null` — read the list NUL-separated, which is also the only encoding
+ *     that can represent every possible name (NUL cannot appear in a path).
+ *
+ * A control character or a backslash in a name is refused earlier, by
+ * `seedSourcePathUnsafeReason`, because tar escapes those in its listing.
  */
 export function archiveCreateArgs(input: {
   format: SeedArchiveFormat;
   sourceRoot: string;
   outputPath: string;
-  /** Path to a file listing the manifest's member paths, one per line. */
+  /** Path to a NUL-separated list of the manifest's member paths. */
   membersFilePath: string;
 }): string[] {
   const compression = input.format === "tar.zstd" ? ["--zstd"] : ["--gzip"];
@@ -510,6 +575,9 @@ export function archiveCreateArgs(input: {
     "--directory",
     input.sourceRoot,
     "--no-recursion",
+    // Names, not options — and NUL-separated, so every legal name round-trips.
+    "--verbatim-files-from",
+    "--null",
     "--files-from",
     input.membersFilePath,
   ];
@@ -718,8 +786,10 @@ export interface CreateArchiveResult {
  *      dropping the symlink silently would leave a tree the following bisync
  *      would then have to "repair");
  *   2. tar is handed the manifest's member paths (`--no-recursion
- *      --files-from`), so the archive cannot contain content the manifest never
- *      measured — the filtered-out part of the tree is simply never named;
+ *      --verbatim-files-from --null --files-from`), so the archive cannot
+ *      contain content the manifest never measured — the filtered-out part of
+ *      the tree is simply never named — and a legal name beginning with `-`
+ *      is a NAME, never an option;
  *   3. after tar runs, the archive's member set must EQUAL the manifest's
  *      member set, so unrepresented source content can never reach the target;
  *   4. the source tree's stats fingerprint is taken before and after tar runs —
@@ -760,13 +830,12 @@ export async function createSeedArchive(input: {
   const before = buildStatsFingerprint(input.sourceRoot, input.filter);
   mkdirSync(dirname(input.outputPath), { recursive: true });
   // The manifest IS the archive's member list. tar is given nothing else, so
-  // the archive cannot contain content the manifest never measured.
+  // the archive cannot contain content the manifest never measured. The list is
+  // NUL-separated and read with `--verbatim-files-from --null`, so a name that
+  // begins with `-` is a NAME and can never be parsed as an option, and no name
+  // can be truncated or split (NUL is the one byte a path cannot contain).
   const membersFilePath = `${input.outputPath}.members`;
-  writeFileSync(
-    membersFilePath,
-    input.manifest.entries.map((entry) => entry.path).join("\n") +
-      (input.manifest.entries.length > 0 ? "\n" : ""),
-  );
+  writeFileSync(membersFilePath, encodeSeedMemberList(input.manifest.entries.map((e) => e.path)));
   let memberCount = 0;
   let result: SeedCommandResult;
   try {

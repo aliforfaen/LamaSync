@@ -356,8 +356,9 @@ Errors worth knowing:
 
 The archive **is** now built from the folder's **effective filter universe**
 (Stage 1a): the same `--filter-from` rules rclone receives for the sync, and
-tar is given only the manifest's members, so ignored content cannot enter the
-archive. A member the universe *includes* but a seed cannot represent (a
+tar is given only the manifest's members — as NUL-separated NAMES, so ignored
+content cannot enter the archive and a file name beginning with `-` is never
+read as a tar option. A member the universe *includes* but a seed cannot represent (a
 symlink or special file — rclone's local backend skips those too) still fails
 closed rather than being dropped silently, and the remedy is the folder's own
 ignore rules. Directories that end up holding nothing are not archived, because

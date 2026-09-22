@@ -333,7 +333,7 @@ describe("the universe of a Projects-shaped tree", () => {
     expect(built.blocking).toEqual([]);
     expect(built.manifest?.unsupported.length).toBeGreaterThan(0);
     const reason = seedManifestBlockingReason(built.manifest!)!;
-    expect(reason).toContain("cannot represent");
+    expect(reason).toContain("cannot be represented");
     // The remedy names a pattern form that can actually match a symlink: a
     // trailing-slash rule only matches directories.
     expect(reason).toContain("only matches directories");

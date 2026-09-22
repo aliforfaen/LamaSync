@@ -228,8 +228,11 @@ re-synced afterwards, and execution remains unavailable (§7).
 ```
 effective filter universe of the source tree
   → manifest (path, kind, size, mtime, SHA-256) + stats fingerprint + filter identity
-  → [refuse if any included member is not representable]   ← BEFORE tar
-  → tar + zstd|gzip (verbose output = measurable progress)
+  → [refuse if any included member is not representable, or its name is one tar
+     escapes in a listing]                                    ← BEFORE tar
+  → tar + zstd|gzip over a NUL-separated member-name list
+    (--no-recursion --verbatim-files-from --null --files-from;
+     verbose output = measurable progress)
   → [refuse unless the archive's member set EQUALS the manifest's]   ← AFTER tar
   → member validation (safe relative path AND regular file/directory)
   → [transport: NOT IMPLEMENTED]
@@ -249,11 +252,13 @@ independent guards enforce it:
    contains a member the seed cannot represent. The runner is never invoked
    and no archive file is produced (asserted by test);
 2. **tar's input is the manifest** — Stage 1a: tar is invoked as
-   `tar --create --directory <root> --no-recursion --files-from <member list>`,
-   where the member list is exactly `manifest.entries`. The old
-   `--directory root .` form archived the whole raw tree, so a *filtered*
-   folder could never produce a matching archive at all. `--no-recursion` is
-   what makes the list authoritative;
+   `tar --create --directory <root> --no-recursion --verbatim-files-from
+   --null --files-from <member list>`, where the member list is exactly
+   `manifest.entries`, NUL-separated. The old `--directory root .` form
+   archived the whole raw tree, so a *filtered* folder could never produce a
+   matching archive at all. `--no-recursion` is what makes the list
+   authoritative, and the two list-reading flags are what make a list line a
+   NAME rather than an option (see §2.6.1);
 3. **after tar** — the produced archive's member set must equal the manifest's
    (normalizing tar's `./` prefix and directory trailing slashes, ignoring the
    archive root). A mismatch in either direction deletes the archive and fails
@@ -264,6 +269,40 @@ independent guards enforce it:
 Source churn is measured **within the same universe** (`buildStatsFingerprint`
 takes the filter), so a change to excluded content can neither fail the run nor
 mask a change to included content.
+
+#### 2.6.1 The member list is names, never options
+
+A file name may legally begin with `-`. GNU tar parses a `--files-from` line
+beginning with `-` as an **option** unless it is told otherwise, and the set of
+options it honours from a list is version- and build-dependent. Measured on GNU
+tar 1.35, a file named `--directory=sub` really did change tar's working
+directory mid-archive, which would silently archive the wrong tree; the review
+flagged the `--checkpoint-action` class, which other builds may honour.
+
+Two independent defences, both tested against the real tar on the host:
+
+1. **The list is read as names.** `--verbatim-files-from` and `--null` are
+   passed **before** `--files-from` (they only affect *subsequent* list
+   options — order is load-bearing, and verified: putting
+   `--verbatim-files-from` after `--files-from` does not help), and the list is
+   **NUL-separated**. NUL is the one byte a path cannot contain, so this is the
+   only encoding that can represent every legal name, and no name can be
+   truncated or split.
+2. **A name tar would escape in its listing is refused before tar.**
+   `seedSourcePathUnsafeReason` rejects a control character (`0x00`–`0x1F`,
+   `0x7F`) or a backslash, because tar writes `\n`, `\001` and `\\` in its
+   `--verbose` listing: the archive would hold the real name while the listing
+   reports an escaped one, so the manifest↔archive equality guard could never
+   match. The refusal names the member and says what to do. A directory whose
+   *own* name is unsafe is refused as a whole and not even walked.
+
+Everything else a legal POSIX name can contain is **supported**: spaces,
+quotes, a trailing space, and a leading dash. The round trip is tested
+end-to-end for `--checkpoint=1`, `--checkpoint-action=exec=touch PWNED`,
+`--directory=sub`, `-Csub`, `--null`, `--verbatim-files-from` and
+`--file=EVIL.tar` as *file names*: the archive's member set equals the
+manifest's, nothing is executed anywhere, and extract → verify → publish
+preserves them byte for byte.
 
 #### Why a filter-included symlink is refused rather than skipped
 
@@ -521,8 +560,10 @@ Daemon
 - `packages/daemon/src/seed-archive.ts` (new) — tooling detection,
   filter-aware manifest, create/list/validate/extract, manifest↔archive
   equality, verify, atomic publish, preflight. Stage 1a: tar is fed the
-  manifest's member list (`--no-recursion --files-from`), empty directories are
-  pruned, and churn is measured inside the universe.
+  manifest's member list as NUL-separated names (`--no-recursion
+  --verbatim-files-from --null --files-from`), a name tar escapes in its
+  listing is refused before tar runs, empty directories are pruned, and churn is
+  measured inside the universe.
 - `packages/daemon/src/seed-archive.test.ts` (new).
 - `packages/daemon/src/seed-filter-universe.ts` (new, Stage 1a) — the rclone
   `--filter-from` rule compiler, the universe builder, and the
@@ -573,7 +614,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2426 pass / 0 fail, 166 files
+bun test                                # 2434 pass / 0 fail, 166 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -595,7 +636,7 @@ Focused suites:
   single entry point's four fail-closed paths, and **a fidelity cross-check
   against the host's real `rclone lsf --filter-from` over 22 rule sets**
   (skipped when rclone is not on PATH).
-- `packages/daemon/src/seed-archive.test.ts` — **33 tests**: real GNU tar for
+- `packages/daemon/src/seed-archive.test.ts` — **41 tests**: real GNU tar for
   both `tar.zstd` and `tar.gz` — create → validate → extract → verify
   byte-for-byte → atomic rename, mtime preservation, traversal/symlink/churn/
   corruption refusals, non-empty target refusal, preflight, and the fail-closed
@@ -606,7 +647,15 @@ Focused suites:
   refuses an archive missing a manifest member** and **one carrying content the
   manifest does not describe** (both by rewriting the member list under real
   tar, and both delete the archive), **churn OUTSIDE the universe does not fail
-  the archive**, plus the `/data/elsewhere` rejection.
+  the archive**, plus the `/data/elsewhere` rejection. Hostile names get their
+  own suites: the argv contract (both flags present **before** `--files-from`),
+  the NUL encoding, an end-to-end run over seven option-shaped file names
+  proving **no option executes** and every name is archived literally
+  (extract → verify → publish round trip included), two characterization tests
+  pinning what the unsafe newline invocation does to tar, and the
+  before-tar refusal of control-character/backslash names (runner spy asserts
+  tar was never invoked). Removing either flag or the NUL encoding makes four
+  of these fail — verified by reverting the fix locally.
 - `packages/daemon/src/seed-deadline.test.ts` — **11 tests** against real child
   processes: fixed timeout still kills an ordinary run, a progressing stage
   survives past the nominal timeout, a stall is killed, progress resets the

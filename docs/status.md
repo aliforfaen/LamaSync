@@ -66,11 +66,16 @@ distributable binary build.
   on), compiled with rclone's own semantics and pinned by a cross-check test
   against the host's real rclone. `buildSeedSourceManifest(assignment, type)`
   is the single assignment → universe → manifest entry point, tar is given the
-  manifest's member list (`--no-recursion --files-from`) so excluded content
-  can never enter the archive, churn is measured inside the same universe, and
-  a member the universe includes but a seed cannot represent still fails closed
-  before tar runs. Fixture-tested against the real Projects shape (nested
-  `node_modules` symlinks + ignored content).
+  manifest's member list (`--no-recursion --verbatim-files-from --null
+  --files-from`, NUL-separated) so excluded content can never enter the archive
+  **and a legal file name beginning with `-` is a name rather than a tar
+  option** (measured: without the flags a file named `--directory=sub` changed
+  tar's working directory), churn is measured inside the same universe, and a
+  member the universe includes but a seed cannot represent — a symlink, a
+  special file, or a name tar escapes in its listing (control character,
+  backslash) — still fails closed before tar runs. Fixture-tested against the
+  real Projects shape (nested `node_modules` symlinks + ignored content) and
+  against hostile option-shaped file names with the host's real GNU tar.
   *Explicitly unavailable execution:* the archive transport (temporary
   `lamasync/seed/<jobId>/…` object space → target staging) and remote
   orchestration are **not implemented**, so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
