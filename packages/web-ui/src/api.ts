@@ -52,6 +52,10 @@ import type {
   // LAMA-345: managed-folder health + reviewed plans.
   FolderHealthResponse,
   FolderPlanWithValidity,
+  // LAMA-346: initial large-folder seeding.
+  SeedJob,
+  SeedPlan,
+  SeedPlanValidity,
   MobileClientType,
   MobileEnrollmentCreateRequest,
   MobileEnrollmentCreateResponse,
@@ -1188,6 +1192,25 @@ export const api = {
     apiGet<FolderPlanWithValidity[]>(
       `/folders/${encodeURIComponent(folderId)}/plans?limit=${limit}`,
     ),
+  // LAMA-346: seed plans (operator-approved, read-only preflight) and seed
+  // jobs. `createSeedJob` is expected to fail with 503 while the archive
+  // transport is unimplemented — the caller surfaces the server's own reason.
+  seedPlans: (folderId: string, limit = 5) =>
+    apiGet<Array<{ plan: SeedPlan; validity: SeedPlanValidity }>>(
+      `/folders/${encodeURIComponent(folderId)}/seed-plans?limit=${limit}`,
+    ),
+  createSeedPlan: (folderId: string, body: { hostId: string; confirm: true }) =>
+    apiPost<{ plan: SeedPlan; validity: SeedPlanValidity }>(
+      `/folders/${encodeURIComponent(folderId)}/seed-plans`,
+      body,
+    ),
+  seedJobs: (folderId: string, limit = 5) =>
+    apiGet<SeedJob[]>(`/folders/${encodeURIComponent(folderId)}/seed-jobs?limit=${limit}`),
+  seedJob: (jobId: string) => apiGet<SeedJob>(`/seed-jobs/${encodeURIComponent(jobId)}`),
+  createSeedJob: (body: { planId: string; confirm: true }) =>
+    apiPost<SeedJob>("/seed-jobs", body),
+  cancelSeedJob: (jobId: string) =>
+    apiPost<SeedJob>(`/seed-jobs/${encodeURIComponent(jobId)}/cancel`),
   listShares: () => apiGet<Share[]>("/shares"),
   listResticSnapshots: () => apiGet<ResticSnapshot[]>("/restic/snapshots"),
   pruneOperations: (olderThanMs: number) =>
