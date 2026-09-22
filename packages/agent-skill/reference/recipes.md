@@ -303,6 +303,43 @@ curl "${AUTH[@]}" -X POST "$BASE/backups/legacy-root/prune" \
 - Restic and sftp folders are skipped; only S3 / local / nfs `backup`
   folders are scanned.
 
+## Recipe 11 — Prepare a seed plan for a very large first sync (LAMA-346)
+
+A first full sync of a very large folder is not a normal sync: on 2026-09-17 a
+91,660-entry / 14.86 GB tree was killed by the fixed 600-second wall-clock
+timeout (exit 143) before a single transfer completed. LamaSync now
+**recommends** a one-time seed transfer above 3,000 entries, and gives
+initial seed stages a progress-aware deadline (long work continues while it
+keeps making measurable progress; it is stopped when it genuinely stalls).
+
+A seed plan is **always operator-approved** — nothing is created
+automatically, and ordinary sync still works for the same folder.
+
+```bash
+# 1. Make sure the DEVICE THAT HOLDS THE DATA has reported a measurement.
+#    On that device (or from the Folders page) queue a read-only check:
+curl "${AUTH[@]}" -X POST "$BASE/hosts/$SOURCE_HOST/actions" \
+  -d '{"type":"diagnose_folder","payload":{"folderId":"<folderId>"}}'
+
+# 2. Prepare the plan for the DEVICE BEING SEEDED (read-only; confirm is mandatory).
+curl "${AUTH[@]}" -X POST "$BASE/folders/<folderId>/seed-plans" \
+  -d '{"hostId":"<target-hostId>","confirm":true}'
+
+# 3. Read it back with its validity verdict.
+curl "${AUTH[@]}" "$BASE/folders/<folderId>/seed-plans?limit=5"
+```
+
+The plan reports the source size, the target's free space, the reservation
+(`archive + extracted tree` × 1.25 + 64 MiB), the archive format (`tar + zstd`
+when the device has zstd, else the documented `tar + gzip` fallback), and the
+staging rule (a sibling of the target, never inside it).
+
+**Execution is not available yet.** `POST /seed-jobs` returns
+`503 { executionAvailable: false, reason }` because the archive transport is
+not implemented or validated, and the Web UI shows a disabled control with
+that reason. Do not expect a seed to run; the value today is the honest
+preflight plus the progress-aware timeout for initial seed stages.
+
 ## See also
 
 - `reference/troubleshooting.md` — what to do when something fails.

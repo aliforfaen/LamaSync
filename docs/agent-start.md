@@ -4,6 +4,26 @@ Read this after `AGENTS.md` when entering a coding worktree.
 
 ## Current work
 
+LAMA-346's first vertical slice (initial large-folder seeding and
+progress-aware sync timeouts) is implemented in this worktree and awaits
+review. Two things are load-bearing and easy to break. The **progress-aware
+deadline** lives in `shouldExtendSeedDeadline` (`@lamasync/core/folder-seed`)
+and is wired into `packages/daemon/src/executor.ts` only for initial seed
+stages — a first run with no usable baseline, an explicit `initialize`/`seed`
+intervention, or `seedStage: true` — so ordinary runs must keep their exact
+fixed wall-clock timeout. **Execution is deliberately unavailable**: the
+archive transport and remote orchestration are not implemented, so
+`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false`, `POST /seed-jobs` returns
+`503 { executionAvailable: false, reason }`, and the Folders page shows a
+disabled control. Do not flip that constant without a two-host fixture
+acceptance that includes a zero-content-change bisync baseline validation. The
+archive primitives (create/validate/extract/verify/atomic-publish) are
+implemented and fixture-tested end-to-end with the host's real GNU tar, and
+mtimes must survive the archive or the following bisync will re-copy the whole
+tree. Design, space math, failure/recovery table, threat rules and the
+rollout plan are in
+[`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
+
 LAMA-345's follow-up (Dashboard fleet-health summary with the evidence-based
 update verdict, one derived health read path, the far-future-cron scheduler fix,
 and the in-page scroll + Folders deep-link corrections) is implemented in this

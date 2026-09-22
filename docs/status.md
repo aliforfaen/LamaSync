@@ -13,6 +13,51 @@ distributable binary build.
 
 ## Recently shipped
 
+- **LAMA-346 — initial large-folder seeding and progress-aware sync
+  timeouts (first vertical slice).** A first full transfer is not a sync. On
+  2026-09-17 `dev-vm`'s initial bisync against `master`'s 91,660-entry /
+  14.86 GB Projects tree repeatedly hit the fixed 600-second wall-clock
+  timeout with exit 143 *before any completed transfer or check*, in ~43.5
+  minute retry cycles; the recovery that worked moved 850 items / 16.9 MiB and
+  a later resync was zero-change.
+  *Timeout fix:* `shouldExtendSeedDeadline` (shared, pure) replaces elapsed
+  time with progress. A stage continues while measurable rclone phase/stats
+  progress arrives, and fails on a stall (the old 600 s timeout, reinterpreted
+  as a *stall* budget; an assignment's own `timeoutSec` replaces it) or at a
+  6-hour absolute ceiling. The daemon applies it only to initial seed stages —
+  a first run with **no usable baseline** (the dev-vm shape), an explicit
+  `initialize`/`seed` intervention, or an explicit `seedStage` flag — so every
+  ordinary run keeps its exact fixed timeout and no safety limit is weakened.
+  *Seed path (opt-in, never automatic):* a measured folder at or above 3,000
+  entries gets a **recommendation**, never a trigger; a plan exists only after
+  an admin `POST /folders/:id/seed-plans { hostId, confirm: true }`, which is
+  read-only and built from the target's already-reported free space and
+  archive tooling plus the largest reported source measurement. The plan
+  reserves `archive + extracted tree` × 1.25 + 64 MiB, refuses staging inside
+  the target or on another filesystem, and prefers `tar + zstd` with a
+  documented `tar + gzip` fallback.
+  *Archive pipeline (implemented and fixture-tested end-to-end with the host's
+  real GNU tar):* manifest with SHA-256 and a stats fingerprint → archive →
+  member validation (safe relative path **and** regular file/directory, so
+  traversal/symlink/device members abort) → extract into a sibling staging
+  directory with no ownership/setuid restore → byte-for-byte verification →
+  **one atomic rename** (a non-empty target is refused, never merged). mtimes
+  survive, which is what makes the mandatory zero-content-change bisync
+  baseline validation possible.
+  *Persistent job state machine:* ten ordered phases plus terminal states,
+  stored in `folder_seed_jobs` with bounded progress, a renewable 10-minute
+  lease (an expired lease means the owner is gone, never merely slow),
+  idempotent completion, admin-only cancel, and `seed_job` WebSocket updates.
+  *Explicitly unavailable execution:* the archive transport (temporary
+  `lamasync/seed/<jobId>/…` object space → target staging) and remote
+  orchestration are **not implemented**, so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
+  is `false`, `POST /seed-jobs` returns `503 { executionAvailable: false,
+  reason }`, and the Folders page renders a **disabled** control with that
+  reason and a plain-language glossary — never a fake button. Ordinary sync is
+  unaffected. Design, space math, failure/recovery table, threat rules and the
+  rollout plan are in
+  [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
+
 - **LAMA-345 release-blocking plan/execution safety regression (live v0.3.12
   fleet validation).** Two defects, fixed at the layer that owned each.
   *Phantom "0 change" plans:* the executor's dry-run accumulator matched
@@ -548,7 +593,21 @@ distributable binary build.
 
 ## Active follow-ups
 
-1. **LAMA-337 — release, and the one device-path question it leaves open.**
+1. **LAMA-346 — the archive transport, remote orchestration and live
+   acceptance.** The first vertical slice is implemented and locally
+   validated; execution is deliberately unavailable. Remaining work, in
+   order: (a) implement the S3 relay into `lamasync/seed/<jobId>/…` behind the
+   existing job state machine with a local object-store fixture; (b) a
+   two-host end-to-end fixture acceptance including a zero-content-change
+   bisync baseline validation; (c) a live dev-vm-shape run on a **copy** of a
+   large tree confirming no timeout kill while progressing and a correct
+   resume after a deliberate stall; (d) confirm the target's archive tooling is
+   reported before the Run control is enabled for that device; (e) decide the
+   retention/cleanup policy for seed objects after a successful or abandoned
+   job. Only then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`. See
+   [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
+
+2. **LAMA-337 — release, and the one device-path question it leaves open.**
    The reconnect flow is merged with the
    repo gates green; the release and the production deploy are the operator's,
    not the worktree's. One deliberate non-change needs an owner call: the
@@ -559,14 +618,14 @@ distributable binary build.
    Kotlin UI change, deliberately left out of this server/web pass — see
    *Known limitations*.
 
-2. **LAMA-336 — release and live confirmation.** The code for every finding is
+3. **LAMA-336 — release and live confirmation.** The code for every finding is
    merged; the release, the `dev-vm` update and the
    check that the next Hermes capture produces a verified snapshot in the
    server archive are the operator's, not the worktree's. Nothing in the
    change set is deployed yet, so the original five failing attempts are still
    the live behaviour until it ships.
 
-3. **LAMA-296 stage 2 — real-device soak.** Automatic camera protection is
+4. **LAMA-296 stage 2 — real-device soak.** Automatic camera protection is
    emulator-verified (see
    [`report-296-stage-2-auto-protection.md`](report-296-stage-2-auto-protection.md));
    the remaining evidence is a one-day real-phone run (Doze/battery,
@@ -574,7 +633,7 @@ distributable binary build.
    paths, a real partial-access selection, and a server restart mid-
    transfer).
 
-4. **LAMA-315 — path classification and recommendation UX.** The design
+5. **LAMA-315 — path classification and recommendation UX.** The design
    handoff is [`handoff-315-path-classification.md`](
    handoff-315-path-classification.md) (taxonomy, data model, staged
    delivery). Stage 1 — annotation provenance, the deterministic classifier,
@@ -586,11 +645,11 @@ distributable binary build.
    plan, optional denormalization) remain. Known contract gap: `excludes` is a
    raw `string[]` with no class or rationale, so review surfaces list exclude
    patterns verbatim and associate no classification with them.
-5. **Application setup/restore executor.** Build the target-side wizard:
+6. **Application setup/restore executor.** Build the target-side wizard:
    preflight, dry-run/change plan, populated-target decisions, revalidation
    before writes, rollback artifact, and execution journal. Direct app restore
    remains intentionally unavailable until this exists.
-6. **LAMA-311 — daemon home-path sandbox.** The unit contract, the queued-action
+7. **LAMA-311 — daemon home-path sandbox.** The unit contract, the queued-action
   config refresh, and the unit reconciliation shipped; only production-client
   rollout remains. `lamasyncd --update` and the remote `update_daemon` action now
   migrate an already-installed unit (removing the obsolete
@@ -604,18 +663,18 @@ distributable binary build.
   restart/update authority, because a unit migration requires
   `systemctl --user restart lamasyncd.service`. See `docs/agent-start.md` for the
   rollout command set.
-7. **Dispatcher race (filed separately from LAMA-311).** The refresh-once fix
+8. **Dispatcher race (filed separately from LAMA-311).** The refresh-once fix
   covers "the named folder is missing from a cache that the server has already
   superseded". The broader race — a claimed action is executed against a config
   revision that changes mid-flight, a host-wide trigger resolves against an
   empty stale cache, and `STALE_TAKEN_MS` (10 min) can flip a long-running
 trigger back to `pending` and re-claim it while it is still running — is its own
 issue with its own fix (revision-pinned selection or a bounded re-check).
-8. **LAMA-321 follow-up — trash retention.** Optional per-folder
+9. **LAMA-321 follow-up — trash retention.** Optional per-folder
    `trashRetentionDays` with `.trashinfo` DeletionDate-based cleanup; deferred
    from the first pass to keep deletion risk narrow. See the LAMA-321 issue
    handoff for the retention correctness rules.
-9. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
+10. **LAMA-329 phase 8 — the evidence sweep, and the items it exists to
    close.** Phases 3–7 shipped; see **Recently shipped**. What remains is
    verification that needs a human or a device, not more code:
    - **TalkBack** over the shell and the mobile nav: focus order, the
@@ -643,7 +702,7 @@ issue with its own fix (revision-pinned selection or a bounded re-check).
      browser belong to this sweep. The review's fixes are covered by tests: the
      raw-fetch transport signals, the shared sign-out ordering, and
      service-worker activation pruning only `lamasync-shell-*`.
-10. **LAMA-332 — Android WebView fleet administration is forbidden after a
+11. **LAMA-332 — Android WebView fleet administration is forbidden after a
    fresh re-pair.** On the physical device, the embedded management UI returns
    `Forbidden` for fleet data while the native shell reports `Connected`. The
    operator signed out, removed the registration from LamaSync, and paired
@@ -666,7 +725,7 @@ issue with its own fix (revision-pinned selection or a bounded re-check).
    physical dashboard no longer reports Forbidden; separately improve the
    native cookie-presence indicator so it does not claim verified fleet
    authority.
-11. **size_history retention.** LAMA-328 bounds and downsamples history reads,
+12. **size_history retention.** LAMA-328 bounds and downsamples history reads,
     but successful measurements still append indefinitely. Add pruning to the
     existing daily maintenance pass once an operator-approved retention
     horizon is chosen.
