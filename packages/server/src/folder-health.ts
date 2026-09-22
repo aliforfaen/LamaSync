@@ -184,6 +184,16 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
   const lastRun = isRecord(value["lastRun"]) ? value["lastRun"] : null;
   const measurement = isRecord(value["measurement"]) ? value["measurement"] : null;
   const filterSource = filter["source"];
+  // LAMA-346: archive tooling is reported by the heartbeat. A missing or
+  // malformed block is `null` ("not verified"), never an invented `true`.
+  const archiveRaw = isRecord(value["archive"]) ? value["archive"] : null;
+  const archive: FolderHealthFacts["archive"] = archiveRaw
+    ? {
+        tar: archiveRaw["tar"] === true,
+        zstd: archiveRaw["zstd"] === true,
+        gzip: archiveRaw["gzip"] === true,
+      }
+    : null;
   return {
     folderType: clampString(value["folderType"], 32) ?? effectiveType,
     effectiveType,
@@ -191,6 +201,7 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
     paused: value["paused"] === true,
     runInProgress: value["runInProgress"] === true,
     rcloneAvailable: value["rcloneAvailable"] !== false,
+    archive,
     localDir: localDir as FolderHealthFacts["localDir"],
     freeSpaceBytes: clampInt(value["freeSpaceBytes"], 0, Number.MAX_SAFE_INTEGER),
     freeSpaceThresholdBytes: clampInt(

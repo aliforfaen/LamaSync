@@ -26,6 +26,10 @@ import {
   deleteFolderPlansForAssignment,
 } from "../folder-health.ts";
 import {
+  deleteSeedJobsForAssignment,
+  deleteSeedPlansForAssignment,
+} from "../seed-jobs.ts";
+import {
   bumpConfigRevision,
   bumpConfigRevisionForFolder,
 } from "../config-revision.ts";
@@ -776,6 +780,9 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       for (const assignmentId of assignmentIds) {
         deleteFolderHealthForAssignment(db, assignmentId);
         deleteFolderPlansForAssignment(db, assignmentId);
+        // LAMA-346: seed plans and jobs are equally orphan-prone.
+        deleteSeedPlansForAssignment(db, assignmentId);
+        deleteSeedJobsForAssignment(db, assignmentId);
       }
       db.run("DELETE FROM folder_assignments WHERE folder_id = ?", [params.id]);
       // LAMA-328 review: the durable size-invalidation watermark has no FK to
@@ -1069,6 +1076,8 @@ export const foldersRoutes = new Elysia({ prefix: "/api/v1" })
       // plan for the host that no longer has it.
       deleteFolderHealthForAssignment(db, assignment.id);
       deleteFolderPlansForAssignment(db, assignment.id);
+      deleteSeedPlansForAssignment(db, assignment.id);
+      deleteSeedJobsForAssignment(db, assignment.id);
       db.run("DELETE FROM folder_assignments WHERE folder_id = ? AND host_id = ?", [
         params.id,
         params.hostId,
