@@ -333,8 +333,16 @@ export interface SeedRelayStore {
   }): Promise<SeedRelayResult<{ bytes: number; sha256: string }>>;
   /** Delete an object. Deleting something already absent is a SUCCESS. */
   delete(key: string): Promise<SeedRelayResult<{ deleted: boolean; alreadyAbsent: boolean }>>;
-  /** List keys under a prefix (bounded by the caller). */
-  list(prefix: string): Promise<SeedRelayResult<{ keys: string[] }>>;
+  /**
+   * List object keys under a prefix (bounded by the caller).
+   *
+   * A store must NEVER follow a symbolic link while listing: a link is not an
+   * object, so it is not returned as a key, and it is not descended into.
+   * Anything it refused to follow is reported in `skippedSymlinks` instead of
+   * being dropped silently, so a sweep can surface a planted link as a finding
+   * rather than quietly walking past it.
+   */
+  list(prefix: string): Promise<SeedRelayResult<{ keys: string[]; skippedSymlinks: string[] }>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +402,12 @@ function isTerminalSeedStatus(status: string): boolean {
  * candidates, an invalid key is reported rather than deleted, and the caller
  * decides what to do with the result. Nothing outside the namespace can be
  * reached through this function.
+ *
+ * A listing's `skippedSymlinks` is NOT passed here: a symbolic link is not an
+ * object, so it is neither an orphan nor deletable. The caller should surface it
+ * as a finding — a link inside the seed namespace is either an accident or an
+ * attempt to redirect the relay, and in both cases the answer is a human, not a
+ * deletion.
  */
 export function seedRelayOrphanKeys(input: {
   listedKeys: readonly string[];

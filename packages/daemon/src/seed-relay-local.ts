@@ -12,10 +12,15 @@
 // Contract points this implementation exists to prove, because the transport
 // depends on them:
 //
-//   * KEY CONTAINMENT. Every key is validated with the shared
-//     `validateSeedRelayObjectKey` before it touches the filesystem, and the
-//     resolved path must still be inside the root. A key that escapes the seed
-//     namespace — or the root — is refused, never normalised into place.
+//   * KEY CONTAINMENT, LEXICAL AND ACTUAL. Every key is validated with the
+//     shared `validateSeedRelayObjectKey` before it touches the filesystem, the
+//     resolved path must still be inside the root, AND every existing path
+//     component below the root is checked with `lstat` and must be a real
+//     directory (or the real final file). A symlink anywhere in the chain —
+//     including a parent directory that points outside — is refused before any
+//     read, write, stat or unlink, and is never followed. A lexical `resolve()`
+//     alone is not containment: `root/lamasync/seed/job-1` can BE a symlink to
+//     an outside directory while the key looks perfectly valid.
 //   * IMMUTABILITY. `put` refuses to replace an object whose content differs.
 //     Re-putting byte-identical content is an idempotent success, which is what
 //     makes a retried upload safe.
@@ -37,6 +42,7 @@ import {
   createReadStream,
   createWriteStream,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -81,6 +87,100 @@ export const SEED_RELAY_DIGEST_SUFFIX = ".sha256";
 /** Working directory inside the root where partial uploads live. */
 export const SEED_RELAY_TMP_DIR = ".lamasync-seed-relay-tmp";
 
+export interface SeedRelayContainmentVerdict {
+  ok: boolean;
+  error: string | null;
+  /** The offending component, relative to the root, when there is one. */
+  offender: string | null;
+}
+
+const CONTAINMENT_FAIL = (error: string, offender: string | null): SeedRelayContainmentVerdict => ({
+  ok: false,
+  error,
+  offender,
+});
+
+/**
+ * Walk the EXISTING path components of `relativePath` below `rootDir` and
+ * refuse anything that is not a real directory (or, for the final component, a
+ * real regular file).
+ *
+ * `lstat` is used deliberately: it reports the link itself rather than its
+ * target, so a symlinked component is detected instead of followed. Components
+ * that do not exist yet are fine — the remainder of the chain will be created
+ * under an already-verified real directory — and the walk stops there.
+ *
+ * RACE LIMITS, stated rather than hidden: this check is not atomic with the
+ * operation it guards. An attacker who can write to the relay root could swap a
+ * verified directory for a symlink in the window between the two. Closing that
+ * completely needs directory-fd APIs (`openat`/`O_NOFOLLOW`/
+ * `openat2(RESOLVE_NO_SYMLINKS)`) that neither Node nor Bun exposes, so the
+ * exposure is bounded by ownership and by the operation's own shape instead:
+ *
+ *   * the relay root is a daemon-owned directory — never a user's synced tree
+ *     and never inside one;
+ *   * one writer per job (the job lease) and object keys are per-job;
+ *   * `put` publishes with an atomic rename, which REPLACES a symlink at the
+ *     final component instead of writing through it;
+ *   * `delete` unlinks the final component itself, so a symlink there is
+ *     removed rather than followed.
+ *
+ * What this removes is the class that matters: a planted symlink silently
+ * redirecting a seed's read, write or delete outside the relay root.
+ */
+export function checkSeedRelayFilesystemContainment(
+  rootDir: string,
+  relativePath: string,
+): SeedRelayContainmentVerdict {
+  const segments = relativePath.split("/");
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
+    return CONTAINMENT_FAIL("the path has an empty or traversal segment", null);
+  }
+  const root = resolve(rootDir);
+  let current = root;
+  for (let i = 0; i < segments.length; i += 1) {
+    current = join(current, segments[i]!);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      // Nothing exists from here down, and everything above has been verified.
+      return { ok: true, error: null, offender: null };
+    }
+    const where = segments.slice(0, i + 1).join("/");
+    if (stat.isSymbolicLink()) {
+      return CONTAINMENT_FAIL(
+        `${where} is a symbolic link; the seed relay never follows a link out of its own root`,
+        where,
+      );
+    }
+    const isLast = i === segments.length - 1;
+    if (!isLast && !stat.isDirectory()) {
+      return CONTAINMENT_FAIL(`${where} is not a directory`, where);
+    }
+    if (isLast && !stat.isFile() && !stat.isDirectory()) {
+      return CONTAINMENT_FAIL(`${where} is not a regular file or directory`, where);
+    }
+  }
+  return { ok: true, error: null, offender: null };
+}
+
+/**
+ * The namespace rule plus the filesystem rule: the check every store call makes
+ * before it touches anything.
+ */
+export function checkSeedRelayObjectContainment(
+  rootDir: string,
+  key: string,
+): SeedRelayContainmentVerdict {
+  const lexical = resolveSeedRelayObjectPath(rootDir, key);
+  if (!lexical.ok) return CONTAINMENT_FAIL(lexical.error, null);
+  return checkSeedRelayFilesystemContainment(rootDir, key);
+}
+
 export interface LocalSeedRelayStoreOptions {
   /** Directory that holds the object namespace. Created if missing. */
   rootDir: string;
@@ -92,6 +192,10 @@ export interface LocalSeedRelayStoreOptions {
  * Resolve a validated key to an absolute path inside `rootDir`, or explain why
  * it cannot be. Belt and braces behind `validateSeedRelayObjectKey`: even a
  * valid key is refused if the resolved path is not under the root.
+ *
+ * This is the LEXICAL half only — `resolve()` never touches the filesystem, so
+ * it cannot see a symlinked parent. Every operation must also pass
+ * `checkSeedRelayFilesystemContainment`.
  */
 export function resolveSeedRelayObjectPath(
   rootDir: string,
@@ -163,6 +267,18 @@ export function createLocalSeedRelayStore(options: LocalSeedRelayStoreOptions): 
   const tmpDir = join(rootDir, SEED_RELAY_TMP_DIR);
 
   const digestPathFor = (objectPath: string): string => `${objectPath}${SEED_RELAY_DIGEST_SUFFIX}`;
+  const digestKeyFor = (key: string): string => `${key}${SEED_RELAY_DIGEST_SUFFIX}`;
+
+  /**
+   * The containment gate every operation goes through first: the lexical key
+   * rule AND the actual-filesystem check, for the object and for its digest
+   * sidecar (which is written, read and unlinked just like the object).
+   */
+  const containment = (key: string): SeedRelayContainmentVerdict => {
+    const object = checkSeedRelayObjectContainment(rootDir, key);
+    if (!object.ok) return object;
+    return checkSeedRelayObjectContainment(rootDir, digestKeyFor(key));
+  };
 
   const readDigest = (objectPath: string): string | null => {
     try {
@@ -210,6 +326,14 @@ export function createLocalSeedRelayStore(options: LocalSeedRelayStoreOptions): 
       if (!target.ok) return seedRelayFailure(target.error);
       if (!Number.isSafeInteger(input.expected.bytes) || input.expected.bytes <= 0) {
         return seedRelayFailure("the expected archive byte count is not a positive integer");
+      }
+      const contained = containment(input.key);
+      if (!contained.ok) return seedRelayFailure(contained.error ?? "the object path is not contained");
+      // The staging area is inside the root too, so it gets the same check: a
+      // symlinked working directory would move the write outside as well.
+      const tmpContained = checkSeedRelayFilesystemContainment(rootDir, SEED_RELAY_TMP_DIR);
+      if (!tmpContained.ok) {
+        return seedRelayFailure(tmpContained.error ?? "the relay working directory is not contained");
       }
 
       // Immutability: an object that is already there is only re-put when it is
@@ -271,12 +395,16 @@ export function createLocalSeedRelayStore(options: LocalSeedRelayStoreOptions): 
     async head(key) {
       const target = resolveSeedRelayObjectPath(rootDir, key);
       if (!target.ok) return seedRelayFailure(target.error);
+      const contained = containment(key);
+      if (!contained.ok) return seedRelayFailure(contained.error ?? "the object path is not contained");
       return headAt(key, target.path);
     },
 
     async get(input) {
       const target = resolveSeedRelayObjectPath(rootDir, input.key);
       if (!target.ok) return seedRelayFailure(target.error);
+      const contained = containment(input.key);
+      if (!contained.ok) return seedRelayFailure(contained.error ?? "the object path is not contained");
       if (input.signal?.aborted) return seedRelayFailure("the download was cancelled");
       if (!existsSync(target.path)) {
         return seedRelayFailure(`no object stored at ${input.key}`, true);
@@ -314,6 +442,8 @@ export function createLocalSeedRelayStore(options: LocalSeedRelayStoreOptions): 
     async delete(key) {
       const target = resolveSeedRelayObjectPath(rootDir, key);
       if (!target.ok) return seedRelayFailure(target.error);
+      const contained = containment(key);
+      if (!contained.ok) return seedRelayFailure(contained.error ?? "the object path is not contained");
       return deleteAt(key, target.path);
     },
 
@@ -322,6 +452,7 @@ export function createLocalSeedRelayStore(options: LocalSeedRelayStoreOptions): 
       if (!verdict.ok) return seedRelayFailure(verdict.error ?? "the list prefix is not usable");
       const root = resolve(rootDir);
       const keys: string[] = [];
+      const skippedSymlinks: string[] = [];
       const walk = (dir: string): void => {
         let entries;
         try {
@@ -331,11 +462,20 @@ export function createLocalSeedRelayStore(options: LocalSeedRelayStoreOptions): 
         }
         for (const entry of entries) {
           const full = join(dir, entry.name);
+          const relative = full.slice(root.length + 1).split(sep).join("/");
+          // A symbolic link is not an object: it is never returned as a key and
+          // it is NEVER descended into, so a link to an outside directory can
+          // neither be listed as an object nor have its contents walked. It is
+          // reported instead, because a link inside the seed namespace is a
+          // finding, not something to walk quietly past.
+          if (entry.isSymbolicLink()) {
+            if (relative.startsWith(prefix)) skippedSymlinks.push(relative);
+            continue;
+          }
           if (entry.isDirectory()) {
             walk(full);
             continue;
           }
-          const relative = full.slice(root.length + 1).split(sep).join("/");
           if (!relative.startsWith(prefix)) continue;
           // The digest sidecar is an implementation detail, never an object.
           if (relative.endsWith(SEED_RELAY_DIGEST_SUFFIX)) continue;
@@ -344,7 +484,8 @@ export function createLocalSeedRelayStore(options: LocalSeedRelayStoreOptions): 
       };
       walk(root);
       keys.sort();
-      return seedRelaySuccess({ keys });
+      skippedSymlinks.sort();
+      return seedRelaySuccess({ keys, skippedSymlinks });
     },
   };
 }

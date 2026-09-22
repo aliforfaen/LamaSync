@@ -13,6 +13,7 @@
 // a partial cleanup, and a re-run of a finished cleanup.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "crypto";
 import {
   existsSync,
   mkdirSync,
@@ -36,6 +37,8 @@ import {
 import {
   SEED_RELAY_DIGEST_SUFFIX,
   SEED_RELAY_TMP_DIR,
+  checkSeedRelayFilesystemContainment,
+  checkSeedRelayObjectContainment,
   createLocalSeedRelayStore,
   resolveSeedRelayObjectPath,
   seedRelayBytesSource,
@@ -65,6 +68,8 @@ beforeEach(() => {
   targetDir = join(root, "target");
   mkdirSync(sourceDir, { recursive: true });
   mkdirSync(targetDir, { recursive: true });
+  // The relay root itself exists; its CONTENTS are what each test plants.
+  mkdirSync(storeRoot, { recursive: true });
 });
 
 afterEach(() => {
@@ -665,27 +670,6 @@ describe("no credentials, and the local store is not a live backend", () => {
     }
   });
 
-  test("a symlink cannot be used to reach outside the store root", async () => {
-    const outside = join(root, "outside-secret.txt");
-    writeFileSync(outside, "secret\n");
-    mkdirSync(join(storeRoot, "lamasync", "seed"), { recursive: true });
-    symlinkSync(outside, join(storeRoot, "lamasync", "seed", "link"));
-    // A symlink is not an object: it is not a regular file, so it is refused
-    // rather than followed.
-    const s = store();
-    const head = await s.head("lamasync/seed/link/placeholder.tar.gz");
-    expect(head.ok).toBe(false);
-    // And reading through it never happens: `get` on a path whose parent is the
-    // symlink fails rather than returning the secret.
-    const dest = join(targetDir, "leak.tar.gz");
-    const got = await s.get({
-      key: "lamasync/seed/link/placeholder.tar.gz",
-      destPath: dest,
-      expected: { bytes: 7, sha256: DIGEST },
-    });
-    expect(got.ok).toBe(false);
-    expect(existsSync(dest)).toBe(false);
-  });
 });
 
 describe("the transport reuses the job state machine instead of inventing state", () => {
@@ -727,5 +711,208 @@ describe("the transport reuses the job state machine instead of inventing state"
     for (const step of ["upload", "download", "verify"] as const) {
       expect(SEED_JOB_PHASES).toContain(seedTransportPhaseAllowed("preflight", step).phase);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Symlink containment: the real bypass
+//
+// A lexically perfect key is not containment. `resolve()` never touches the
+// filesystem, so `root/lamasync/seed/job-1` can BE a symlink to an outside
+// directory while the key looks valid — and before this correction `put`
+// created, `head` stat'd, `get` read and `delete` REMOVED a file outside the
+// relay root through exactly that link. The check is now `lstat`-based on every
+// existing component below the root, and it never follows a link.
+// ---------------------------------------------------------------------------
+
+describe("a symlinked parent directory cannot redirect the relay", () => {
+  /** root/lamasync/seed/<job> → an outside DIRECTORY that already holds a file. */
+  function plantOutsideDirectorySymlink(): { outside: string; victim: string } {
+    const outside = join(root, "outside");
+    mkdirSync(outside, { recursive: true });
+    const victim = join(outside, "payload.tar.gz");
+    writeFileSync(victim, "OUTSIDE CONTENT\n");
+    mkdirSync(join(storeRoot, "lamasync", "seed"), { recursive: true });
+    symlinkSync(outside, join(storeRoot, "lamasync", "seed", JOB));
+    return { outside, victim };
+  }
+
+  test("the key is lexically valid, which is why the filesystem check exists", () => {
+    plantOutsideDirectorySymlink();
+    // The lexical rule passes: the resolved path IS under the root.
+    expect(resolveSeedRelayObjectPath(storeRoot, seedRelayArchiveKey(JOB, "tar.gz")).ok).toBe(true);
+    // The filesystem rule refuses, and names the offending component.
+    const verdict = checkSeedRelayObjectContainment(storeRoot, seedRelayArchiveKey(JOB, "tar.gz"));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.offender).toBe(`lamasync/seed/${JOB}`);
+    expect(verdict.error).toContain("symbolic link");
+  });
+
+  test("put refuses and creates nothing outside", async () => {
+    const { outside, victim } = plantOutsideDirectorySymlink();
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const result = await store().put({
+      key: seedRelayArchiveKey(JOB, "tar.gz"),
+      source: { kind: "bytes", data: bytes },
+      expected: { bytes: 4, sha256 },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("symbolic link");
+    // The outside file is untouched and nothing new appeared next to it.
+    expect(readFileSync(victim, "utf8")).toBe("OUTSIDE CONTENT\n");
+    expect(readdirSync(outside).sort()).toEqual(["payload.tar.gz"]);
+  });
+
+  test("head refuses and reads nothing outside", async () => {
+    const { victim } = plantOutsideDirectorySymlink();
+    const head = await store().head(seedRelayArchiveKey(JOB, "tar.gz"));
+    expect(head.ok).toBe(false);
+    if (!head.ok) expect(head.error).toContain("symbolic link");
+    // Not reported as an object, and the outside file is untouched.
+    expect(readFileSync(victim, "utf8")).toBe("OUTSIDE CONTENT\n");
+  });
+
+  test("get refuses and leaks nothing to the target", async () => {
+    const { victim } = plantOutsideDirectorySymlink();
+    const dest = join(targetDir, "leak.tar.gz");
+    const got = await store().get({
+      key: seedRelayArchiveKey(JOB, "tar.gz"),
+      destPath: dest,
+      expected: { bytes: 16, sha256: "f".repeat(64) },
+    });
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.error).toContain("symbolic link");
+    expect(existsSync(dest)).toBe(false);
+    expect(readFileSync(victim, "utf8")).toBe("OUTSIDE CONTENT\n");
+  });
+
+  test("delete refuses and removes nothing outside", async () => {
+    const { outside, victim } = plantOutsideDirectorySymlink();
+    const result = await store().delete(seedRelayArchiveKey(JOB, "tar.gz"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("symbolic link");
+    // The outside file survives, and the planted link is still a link.
+    expect(existsSync(victim)).toBe(true);
+    expect(readFileSync(victim, "utf8")).toBe("OUTSIDE CONTENT\n");
+    expect(readdirSync(outside).sort()).toEqual(["payload.tar.gz"]);
+  });
+
+  test("list never recurses through it, and reports it instead of dropping it", async () => {
+    const { outside } = plantOutsideDirectorySymlink();
+    // An outside directory with a plausible-looking object inside: if the walk
+    // followed the link, this key would be listed as an object.
+    mkdirSync(join(outside, "nested"), { recursive: true });
+    writeFileSync(join(outside, "nested", "payload.tar.gz"), "OUTSIDE\n");
+    const listed = await store().list("lamasync/seed/");
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.keys).toEqual([]);
+    expect(listed.value.skippedSymlinks).toEqual([`lamasync/seed/${JOB}`]);
+    // A sweep must treat a reported link as a finding, never as an orphan.
+    const { orphans, invalid } = seedRelayOrphanKeys({ listedKeys: listed.value.keys, knownJobIds: [] });
+    expect(orphans).toEqual([]);
+    expect(invalid).toEqual([]);
+  });
+
+  test("cleanup reports a failure instead of deleting through the link", async () => {
+    const { victim } = plantOutsideDirectorySymlink();
+    const key = seedRelayArchiveKey(JOB, "tar.gz");
+    const result = await cleanupSeedRelayObjects({
+      store: store(),
+      keys: [key],
+      cleanup: initialSeedRelayCleanup(),
+      now: 3_000,
+    });
+    expect(result.complete).toBe(false);
+    expect(result.cleanup.state).toBe("failed");
+    expect(result.cleanup.message).toContain("symbolic link");
+    expect(result.cleanup.deletedKeys).toEqual([]);
+    expect(existsSync(victim)).toBe(true);
+  });
+});
+
+describe("other symlink shapes below the relay root", () => {
+  test("a symlinked INTERMEDIATE component is refused", () => {
+    const outside = join(root, "outside");
+    mkdirSync(outside, { recursive: true });
+    // root/lamasync → outside
+    symlinkSync(outside, join(storeRoot, "lamasync"));
+    const verdict = checkSeedRelayObjectContainment(storeRoot, seedRelayArchiveKey(JOB, "tar.gz"));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.offender).toBe("lamasync");
+  });
+
+  test("a symlinked FINAL component is refused rather than followed", async () => {
+    const outside = join(root, "outside-secret.txt");
+    writeFileSync(outside, "OUTSIDE SECRET\n");
+    const key = seedRelayArchiveKey(JOB, "tar.gz");
+    mkdirSync(join(storeRoot, "lamasync", "seed", JOB), { recursive: true });
+    symlinkSync(outside, join(storeRoot, key));
+    const s = store();
+    const head = await s.head(key);
+    expect(head.ok).toBe(false);
+    if (!head.ok) expect(head.error).toContain("symbolic link");
+    const dest = join(targetDir, "final.tar.gz");
+    const got = await s.get({ key, destPath: dest, expected: { bytes: 16, sha256: "f".repeat(64) } });
+    expect(got.ok).toBe(false);
+    expect(existsSync(dest)).toBe(false);
+    const del = await s.delete(key);
+    expect(del.ok).toBe(false);
+    // The outside file is neither read nor removed.
+    expect(readFileSync(outside, "utf8")).toBe("OUTSIDE SECRET\n");
+  });
+
+  test("a symlinked DIGEST SIDECAR is refused too", async () => {
+    // The sidecar is written, read and unlinked like the object, so it gets the
+    // same check: a link there would redirect the digest, not the payload.
+    const outside = join(root, "outside-digest");
+    writeFileSync(outside, "OUTSIDE\n");
+    const key = seedRelayArchiveKey(JOB, "tar.gz");
+    const archive = await fixtureArchive();
+    const s = store();
+    expect((await s.put({ key, source: { kind: "file", path: archive.path }, expected: archive })).ok).toBe(true);
+    // Replace the sidecar with a symlink and re-check every operation.
+    const sidecar = join(storeRoot, `${key}${SEED_RELAY_DIGEST_SUFFIX}`);
+    rmSync(sidecar, { force: true });
+    symlinkSync(outside, sidecar);
+    expect((await s.head(key)).ok).toBe(false);
+    expect((await s.delete(key)).ok).toBe(false);
+    expect(readFileSync(outside, "utf8")).toBe("OUTSIDE\n");
+  });
+
+  test("a symlinked relay WORKING directory is refused before any write", async () => {
+    const outside = join(root, "outside-tmp");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(storeRoot, { recursive: true });
+    symlinkSync(outside, join(storeRoot, SEED_RELAY_TMP_DIR));
+    const archive = await fixtureArchive();
+    const result = await store().put({
+      key: seedRelayArchiveKey(JOB, "tar.gz"),
+      source: { kind: "file", path: archive.path },
+      expected: archive,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("symbolic link");
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  test("a non-directory INTERMEDIATE component is refused", () => {
+    mkdirSync(storeRoot, { recursive: true });
+    writeFileSync(join(storeRoot, "lamasync"), "a file, not a directory\n");
+    const verdict = checkSeedRelayObjectContainment(storeRoot, seedRelayArchiveKey(JOB, "tar.gz"));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.error).toContain("is not a directory");
+  });
+
+  test("a missing chain is fine: nothing exists to follow yet", () => {
+    // The common case — a fresh root — must not be refused.
+    expect(checkSeedRelayObjectContainment(storeRoot, seedRelayArchiveKey(JOB, "tar.gz")).ok).toBe(true);
+  });
+
+  test("the containment check itself refuses traversal in its input", () => {
+    expect(checkSeedRelayFilesystemContainment(storeRoot, "../escape").ok).toBe(false);
+    expect(checkSeedRelayFilesystemContainment(storeRoot, "a/../b").ok).toBe(false);
+    expect(checkSeedRelayFilesystemContainment(storeRoot, "a//b").ok).toBe(false);
   });
 });
