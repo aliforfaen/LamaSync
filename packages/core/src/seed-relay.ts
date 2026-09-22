@@ -219,7 +219,9 @@ export function seedArchiveMetadataProblem(metadata: SeedArchiveMetadata): strin
     return "the archive byte count is not a positive integer";
   }
   if (!SEED_SHA256_RE.test(metadata.sha256)) return "the archive SHA-256 is not a 64-character hex digest";
-  if (metadata.manifestFingerprint.length === 0) return "the manifest fingerprint is empty";
+  if (!SEED_SHA256_RE.test(metadata.manifestFingerprint)) {
+    return "the manifest fingerprint is not a 64-character hex digest";
+  }
   if (!Number.isSafeInteger(metadata.memberCount) || metadata.memberCount <= 0) {
     return "the archive member count is not a positive integer";
   }

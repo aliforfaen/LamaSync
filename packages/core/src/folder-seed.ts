@@ -1194,10 +1194,7 @@ export function normalizeSeedJobArchiveFacts(
     sha256: hexDigestOrNull(record["sha256"]),
     objectKey: typeof record["objectKey"] === "string" ? record["objectKey"] : null,
     memberCount: positiveIntOrNull(record["memberCount"]),
-    manifestFingerprint:
-      typeof record["manifestFingerprint"] === "string" && record["manifestFingerprint"].length > 0
-        ? record["manifestFingerprint"]
-        : null,
+    manifestFingerprint: hexDigestOrNull(record["manifestFingerprint"]),
     uploadedAt: positiveIntOrNull(record["uploadedAt"]),
     verifiedAt: positiveIntOrNull(record["verifiedAt"]),
     cleanup: {

@@ -142,6 +142,9 @@ describe("archive metadata is immutable and explicitly checked", () => {
     expect(seedArchiveMetadataProblem(metadata({ manifestFingerprint: "" }))).toContain(
       "manifest fingerprint",
     );
+    expect(seedArchiveMetadataProblem(metadata({ manifestFingerprint: "not-a-digest" }))).toContain(
+      "manifest fingerprint",
+    );
     expect(seedArchiveMetadataProblem(metadata({ memberCount: 0 }))).toContain("member count");
     expect(seedArchiveMetadataProblem(metadata({ objectKey: "lamasync/seed/other/x" }))).toContain(
       "belongs to job",
@@ -313,7 +316,7 @@ describe("archive facts are the transport state, and normalize fail-closed", () 
       sha256: "not-a-digest",
       objectKey: 42,
       memberCount: "many",
-      manifestFingerprint: "",
+      manifestFingerprint: "not-a-digest",
       uploadedAt: 0,
       verifiedAt: "soon",
       cleanup: { state: "exploded", attempts: -1, deletedKeys: ["a", 7], message: 5 },
