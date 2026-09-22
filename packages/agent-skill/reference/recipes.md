@@ -380,6 +380,12 @@ files changed. It runs in a temp sandbox with two daemon-shaped identities and
 a test-only object store, and it never touches a configured backend, credential
 or real folder.
 
+The job **lifecycle** is proven test-only
+(`packages/server/src/seed-coordinator.ts` + its tests): phases one at a time,
+lease renewal, archive-facts persistence, cancellation, a lost lease, and
+idempotent cleanup — all on the existing job state machine, with no new table
+and no production wiring.
+
 **Execution is still not available.** `POST /seed-jobs` returns
 `503 { executionAvailable: false, reason }` because the one remaining Stage 1
 prerequisite is open: no real store is wired to a running job, so nothing

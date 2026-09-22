@@ -107,6 +107,21 @@ distributable binary build.
   about what it downloaded, a stalled stage, a non-empty target, and a
   filter-included symlink. rclone-gated with an explicit, named skip and a
   documented list of the host proofs still required (handoff §2.11).
+  *Test-only job orchestration (Stage 2b):* `packages/server/src/seed-coordinator.ts`
+  drives a seed job through the **existing** state machine — phases one at a
+  time via `canTransitionSeedPhase`, lease renewal on every phase entry and
+  progress report, archive facts persisted with `updateSeedJobArchive` before
+  the target may run, terminal outcomes through the idempotent `finishSeedJob`,
+  and idempotent cleanup recorded on the job. Injected source/target sides and an
+  injected local object store keep it test-only: no configured backend,
+  credential, rclone config or live host, no new table or column, and a
+  bounded-foundation test reads the module graph to assert no production module
+  imports it. The lifecycle proof covers completion, source and target failures,
+  operator cancellation, a lost lease, cleanup idempotency, an illegal phase
+  transition a side cannot ignore, and lease renewal. It also surfaced a real
+  gap: **the source manifest does not travel to the target** — the target
+  verifies the archive and the extracted tree against it, so making the manifest
+  available to the target is still owed.
   *Explicitly unavailable execution:* no real store is wired to a running job
   and remote orchestration is **not implemented**, so
   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while

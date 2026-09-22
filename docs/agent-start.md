@@ -51,6 +51,15 @@ host proofs still required (real network hop, real ENOSPC, the daemon
 orchestration, a live copy run). Never make it touch a configured backend, a
 credential, a real folder or dev-vm.
 
+**Stage 2b is implemented, and it is TEST-ONLY.**
+`packages/server/src/seed-coordinator.ts` drives one seed job through the
+existing state machine (phases one at a time, lease renewal, archive-facts
+persistence, idempotent cleanup) with injected source/target sides and an
+injected local object store. No production module may import it —
+`seed-coordinator-bounded.test.ts` asserts that from the module graph, and
+`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` must stay `false` while it is test-only.
+Never give it a configured backend, a credential or a live folder.
+
 **Execution is deliberately unavailable**: no store is wired to a running job,
 so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
 `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`), `POST /seed-jobs` returns

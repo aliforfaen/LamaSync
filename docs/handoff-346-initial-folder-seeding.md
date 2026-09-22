@@ -607,6 +607,78 @@ visible in the output rather than implied.
 5. **Concurrency and retention under load:** two jobs at once, a job abandoned
    mid-transfer, and the abandoned-object sweep running against a real store.
 
+### 2.12 Stage 2b — test-only job orchestration (the lifecycle proof)
+
+`packages/server/src/seed-coordinator.ts` drives ONE seed job through the
+**existing** job state machine. It invents no parallel state: the phases, the
+progress records, the renewable lease, the terminal outcomes and the archive
+facts are the ones `seed-jobs.ts` and `folder-seed.ts` already define, and the
+`folder_seed_jobs` schema is untouched (a test asserts the exact column set).
+
+It exists to close the orchestration gap Stage 2a left open. Stage 2a proved the
+daemon-side primitives compose; this proves the **lifecycle** around them is
+legal and safe.
+
+#### What it drives
+
+| Step | Contract it uses | What it guarantees |
+|---|---|---|
+| claim | report `preflight` progress as this owner | the lease is set and the job flips to `running` exactly as the device route does |
+| source | injected side: measure → archive → upload | each phase is entered through `canTransitionSeedPhase`; the returned archive facts are persisted with `updateSeedJobArchive` **before** the target may run |
+| target | injected side: download → verify → extract → verify → publish → baseline | the target verifies against the recorded digest, and the published tree is checked against the source manifest |
+| terminal | `finishSeedJob` (idempotent) | `completed` **only** with a passing baseline verdict; otherwise `failed` with a bounded reason |
+| cleanup | the injected idempotent cleanup step | the relay object is removed and the cleanup state recorded on the job, in every terminal case |
+
+#### The safety properties, each with a test
+
+* **One phase at a time.** A side that asks for an illegal transition is
+  refused, and the refusal is *latched*: a buggy side that ignores it and
+  reports success still cannot walk the job to `completed`.
+* **The lease is renewed while work runs.** Every phase entry and progress
+  report renews it, so a long phase is never reclaimed from a live owner; it is
+  released when the job ends. A monotonic fake clock makes the renewal
+  observable in the test.
+* **Progress is bounded and never invents a total.** Byte and entry counts are
+  non-negative integers; a total is present only when the phase knew one.
+* **A cancellation is the operator's.** When the cancel route lands mid-run the
+  job stays `cancelled` with the operator's own summary, and the coordinator
+  does not overwrite it.
+* **A lost lease stops the work.** A job another owner already ended is left
+  alone: the coordinator only reports `completed`/`failed`/`cancelled` for
+  outcomes IT produced, and reports `lease_lost` otherwise. No terminal state is
+  written by an owner that no longer holds the job.
+* **Cleanup is idempotent and never masks the outcome.** A store that fails once
+  is recorded as a retryable `failed` cleanup state while the job still
+  completes; a retry finishes it.
+* **A source or target failure publishes nothing.** No archive facts, an empty
+  target tree, and the object cleaned up.
+* **A seed is not "done" without the zero-change verdict.** A target that
+  reports success without a passing baseline fails the job — the publish may
+  have happened, and the job still fails.
+
+#### Test-only, asserted from the module graph
+
+`seed-coordinator-bounded.test.ts` reads the source to assert that **no
+production module imports the coordinator**, that its code carries no
+credential, endpoint, bucket or rclone surface (comments stripped, so prose
+cannot satisfy or break the check), that execution is still unavailable, and
+that it invents no phase. `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false` and
+`POST /seed-jobs` still returns 503.
+
+#### What Stage 2b does NOT do, and what is still owed
+
+1. **No resume.** A failed job is not restarted from its persisted phase; the
+   phase is recorded so a later slice can.
+2. **No scheduling, no WebSocket broadcast, no route.** The server routes remain
+   the only production surface, and they are unchanged.
+3. **The manifest does not travel.** In the proof the two sides share the
+   manifest inside one test process, because today nothing sends it to the
+   target. A production target verifies the *archive* (member set + digest) and
+   the extracted tree against that; making the source manifest available to the
+   target is a real design gap this slice surfaces rather than hides.
+4. **No real store, no second machine, no live folder.** The relay store is
+   injected and local; the host proofs in §2.11 still apply.
+
 ## 3. Space calculation
 
 The peak staging footprint is `archive + extracted tree`, because the archive
@@ -743,10 +815,15 @@ that reports zero files changed, then bidirectional edits and ignored-content
 checks, with the failure cases in §2.11. It is gated on rclone and explicitly
 skipped without it.
 
-**Stage 2b — the same proof through the real daemon (open).**
-The harness drives the primitives directly. Stage 2b must run the same chain
-through the job state machine, lease and phase reports with a real temporary
-object space, and only then may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip.
+**Stage 2b — test-only job orchestration (done).**
+`packages/server/src/seed-coordinator.ts` drives a job through the existing
+state machine with injected sides and an injected local store, and
+`seed-coordinator.test.ts` proves the lifecycle: completion, source and target
+failures, cancellation, lease expiry, cleanup idempotency, illegal-transition
+refusal and lease renewal. See §2.12.
+
+**Stage 2c — the same chain through a real daemon and a real temporary object
+space (open).** Only then may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip.
 
 **Stage 3 — live acceptance on the real pair.**
 Re-run the dev-vm shape with a copy of a large tree (never the live
@@ -776,6 +853,7 @@ control. The seed remains opt-in per folder.
 | Local object store (the integration fixture, and a legitimate local store) | **implemented + tested** |
 | Upload / download orchestration with hash verification at both hops, and failure cleanup | **implemented + tested against the fixture** |
 | Disposable two-host end-to-end proof harness (archive → relay → publish → real bisync zero-change acceptance, plus the failure cases) | **implemented + tested** (rclone-gated) |
+| Test-only job orchestration across the existing state machine: phases, lease renewal, archive-facts persistence, failure/cancel/lease-loss handling, idempotent cleanup | **implemented + tested** |
 | **Wiring a real store and the job/daemon orchestration that calls it** | **NOT implemented (Stage 1b — the one open prerequisite)** |
 | Remote orchestration (which host runs which phase) | **NOT implemented** |
 | Post-seed zero-change bisync validation as an automated gate | **designed, not implemented** |
@@ -834,6 +912,13 @@ Daemon
   the capability flag is `false`.
 - `packages/daemon/src/seed-e2e.test.ts` (new, Stage 2a) — the disposable
   two-host proof harness, rclone-gated.
+- `packages/server/src/seed-coordinator.ts` (new, Stage 2b) — the test-only job
+  coordinator: it drives the existing state machine with injected sides and an
+  injected cleanup step, and adds no state of its own.
+- `packages/server/src/seed-coordinator.test.ts` (new, Stage 2b) — the lifecycle
+  proof (16 tests).
+- `packages/server/src/seed-coordinator-bounded.test.ts` (new, Stage 2b) — reads
+  the module graph to assert the coordinator stays test-only.
 - `packages/daemon/src/seed-archive.ts` — `createSeedArchive` now returns a
   failed result (instead of throwing) when the member list cannot be written,
   which the Stage 2a space failure case found.
@@ -884,7 +969,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2534 pass / 0 fail, 171 files
+bun test                                # 2554 pass / 0 fail, 173 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -977,6 +1062,16 @@ Focused suites:
   acceptance with bidirectional edits, ignored content, an anti-vacuity pair of
   roots and a modtime sensitivity test; and the failure cases in §2.11. The
   gate test names the skip explicitly.
+- `packages/server/src/seed-coordinator.test.ts` — **16 tests**: the Stage 2b
+  lifecycle proof — a completed run through every phase with its archive facts,
+  bounded progress and cleanup; a source failure (unrepresentable universe) and
+  a throwing source; a target failure (tampered object) and a missing baseline
+  verdict; operator cancellation, a lost lease and the existing reaper; cleanup
+  idempotency and a retryable cleanup failure; an illegal phase transition that
+  a side cannot ignore; lease renewal observed on a fake clock; and the schema
+  check proving no column was added.
+- `packages/server/src/seed-coordinator-bounded.test.ts` — **4 tests**: the
+  test-only invariant, read from the module graph.
 - `packages/server/src/seed-transport-state.test.ts` — **5 tests**: the
   transport state lives on the existing job row (round trip, cleanup recordable
   after the job ended, fail-closed read of a malformed row, and a schema check
@@ -996,10 +1091,10 @@ Focused suites:
    `cleanupSeedRelayObjects`, then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` —
    the one open prerequisite. The contract, the local store and the
    verification logic are already implemented and tested.
-2. **Stage 2b:** the same proof through the real daemon (job state machine,
-   lease, phase reports) with a real temporary object space between two
-   machines, plus the host proofs listed in §2.11 (real ENOSPC, the network hop,
-   concurrency, retention under load).
+2. **Stage 2c:** the same chain through a real daemon with a real temporary
+   object space between two machines, plus the host proofs listed in §2.11
+   (real ENOSPC, the network hop, concurrency, retention under load) and the
+   manifest-handoff gap §2.12 records.
 3. A live dev-vm-shape run on a **copy** of a large tree, confirming no
    timeout kill while progressing and a correct resume after a deliberate
    stall (stage 3).
