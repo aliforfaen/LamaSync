@@ -91,7 +91,7 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     freeSpaceBytes: 100_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
     watcher: { enabled: false, running: false, quietSec: 30 },
-    filter: { fingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false },
+    filter: { fingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 2 },
     baseline: {
       present: false,
       ready: false,
@@ -269,7 +269,13 @@ describe("seed plan creation", () => {
           insideTarget: boolean;
           sameFilesystem: boolean | null;
         };
-        filterUniverse: { fingerprint: string | null; match: boolean; archiveImplemented: boolean; message: string };
+        filterUniverse: {
+          fingerprint: string | null;
+          match: boolean;
+          archiveImplemented: boolean;
+          patternCount: number;
+          message: string;
+        };
         execution: { available: boolean; reason: string };
       };
       validity: { valid: boolean; reason: string | null; message: string };
@@ -291,20 +297,27 @@ describe("seed plan creation", () => {
     expect(body.plan.stagingPolicy.derivedSibling).toBe(true);
     expect(body.plan.stagingPolicy.insideTarget).toBe(false);
     expect(body.plan.stagingPolicy.sameFilesystem).toBe(true);
-    // The filter universe comes from the source device and is not wired yet.
+    // The filter universe comes from the source device, is IMPLEMENTED
+    // (Stage 1a) and matches the target's established baseline.
     expect(body.plan.filterUniverse.fingerprint).toBe("fp-1");
     expect(body.plan.filterUniverse.match).toBe(true);
-    expect(body.plan.filterUniverse.archiveImplemented).toBe(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED);
+    // The countable rule lines the source device reported (a floor: the
+    // Git-ignore snapshot is only built during a run).
+    expect(body.plan.filterUniverse.patternCount).toBe(2);
+    expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(true);
+    expect(body.plan.filterUniverse.archiveImplemented).toBe(true);
     // Execution is explicitly unavailable.
     expect(body.plan.execution.available).toBe(SEED_ARCHIVE_TRANSPORT_IMPLEMENTED);
     expect(body.plan.execution.available).toBe(false);
     expect(body.plan.execution.reason).toContain("not available yet");
-    expect(body.plan.execution.reason).toContain("filter universe");
-    // The plan is NOT runnable while the Stage 1 prerequisites are open, and
-    // the reason names them rather than pretending.
+    expect(body.plan.execution.reason).toContain("effective-filter-universe construction");
+    expect(body.plan.execution.reason).toContain("one Stage 1 prerequisite is still open");
+    // The plan is NOT runnable while the one remaining Stage 1 prerequisite
+    // (the transport) is open, and the reason says so rather than pretending.
     expect(body.validity.valid).toBe(false);
     expect(body.validity.reason).toBe("not_runnable");
-    expect(body.validity.message).toContain("filter universe");
+    expect(body.validity.message).toContain("not available yet");
+    expect(body.validity.message).toContain("temporary seed space");
   });
 
   test("an UNPROVEN same-filesystem verdict makes the plan not runnable", async () => {
@@ -321,17 +334,26 @@ describe("seed plan creation", () => {
           sameFilesystem: boolean | null;
           message: string;
         };
+        filterUniverse: {
+          fingerprint: string | null;
+          match: boolean;
+          archiveImplemented: boolean;
+          patternCount: number;
+          message: string;
+        };
       };
       validity: { valid: boolean; reason: string | null; message: string };
     };
     expect(body.plan.stagingPolicy.adjacentToTarget).toBe(true);
     expect(body.plan.stagingPolicy.derivedSibling).toBe(true);
     expect(body.plan.stagingPolicy.sameFilesystem).toBeNull();
-    // The staging policy's own message names the missing proof. (`validity`
-    // reports the FIRST unmet prerequisite, which is the filter universe.)
+    // The staging policy's own message names the missing proof, and `validity`
+    // reports the FIRST unmet prerequisite — now the staging proof, because
+    // filter-aware archiving (Stage 1a) is implemented.
     expect(body.plan.stagingPolicy.message).toContain("has not confirmed");
     expect(body.validity.valid).toBe(false);
     expect(body.validity.reason).toBe("not_runnable");
+    expect(body.validity.message).toContain("has not confirmed");
   });
 
   test("a target whose baseline used a different filter set is refused", async () => {
@@ -340,7 +362,7 @@ describe("seed plan creation", () => {
     });
     insertHealth("a2", "f1", "host-b", {
       freeSpaceBytes: 200_000_000_000,
-      filter: { fingerprint: "fp-other", source: "lamasyncignore", changedSinceBaseline: false },
+      filter: { fingerprint: "fp-other", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 0 },
     });
     const body = (await (await createPlan(adminToken, "host-b")).json()) as {
       plan: { filterUniverse: { fingerprint: string | null; targetFingerprint: string | null; match: boolean } };
@@ -440,7 +462,7 @@ describe("seed job creation is explicitly unavailable", () => {
     };
     expect(body.executionAvailable).toBe(false);
     expect(body.error).toContain("not available yet");
-    expect(body.error).toContain("filter universe");
+    expect(body.error).toContain("temporary seed space");
     expect(body.planId).toBe(created.plan.id);
     // No job row was created.
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM folder_seed_jobs").get()?.n).toBe(0);

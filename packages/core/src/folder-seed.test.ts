@@ -513,8 +513,16 @@ describe("plan validity", () => {
   }
   const live = { now: 1_000, configRevision: 3, filterFingerprint: "abc", baselineFingerprint: "base" };
 
-  test("valid when nothing moved", () => {
-    expect(checkSeedPlanValidity(basePlan(), live).valid).toBe(true);
+  test("a fully-consistent plan is still not runnable while execution is unavailable", () => {
+    // Stage 1a is implemented, so every FACT on this plan is fine...
+    expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(true);
+    const validity = checkSeedPlanValidity(basePlan(), live);
+    // ...but the transport is not, and a plan that cannot run is never
+    // reported as runnable.
+    expect(validity.valid).toBe(false);
+    expect(validity.reason).toBe("not_runnable");
+    expect(validity.message).toContain("temporary seed space");
+    expect(validity.message).not.toBe("Seed plan is current and runnable.");
   });
 
   test("dies on expiry, config, filter and baseline changes", () => {
@@ -537,7 +545,8 @@ describe("plan validity", () => {
     expect(validity.message).toContain("40 hours old");
   });
 
-  test("dies while filter-aware archiving is unwired, and on a filter mismatch", () => {
+  test("dies when a plan still reports unwired filter-aware archiving, and on a filter mismatch", () => {
+    // A plan built while Stage 1a was unwired keeps failing closed.
     const unwired = basePlan();
     unwired.filterUniverse = { ...unwired.filterUniverse, archiveImplemented: false, message: "Stage 1." };
     expect(checkSeedPlanValidity(unwired, live).reason).toBe("not_runnable");
@@ -599,7 +608,7 @@ describe("plan validity", () => {
 });
 
 describe("seed prerequisites are listed, not collapsed into a boolean", () => {
-  test("names the two open Stage 1 prerequisites on a real plan", () => {
+  test("names every prerequisite, including the one open Stage 1 gate", () => {
     const execution = seedPlanExecution();
     const prerequisites = seedPlanPrerequisites({
       sourceAuthority: {
@@ -621,7 +630,7 @@ describe("seed prerequisites are listed, not collapsed into a boolean", () => {
         match: true,
         patternCount: 0,
         archiveImplemented: SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
-        message: "filter-aware archiving is Stage 1",
+        message: "the archive is built from the source device's effective filter universe",
       },
       stagingPolicy: {
         adjacentToTarget: true,
@@ -648,7 +657,9 @@ describe("seed prerequisites are listed, not collapsed into a boolean", () => {
       "target_space",
       "transport",
     ]);
-    expect(prerequisites.find((p) => p.id === "filter_universe")!.ok).toBe(false);
+    // Filter-aware archiving is implemented (Stage 1a), so the only open gate
+    // on this fully-specified plan is the transport.
+    expect(prerequisites.find((p) => p.id === "filter_universe")!.ok).toBe(true);
     expect(prerequisites.find((p) => p.id === "transport")!.ok).toBe(false);
     expect(prerequisites.find((p) => p.id === "staging_same_filesystem")!.ok).toBe(true);
     expect(execution.available).toBe(false);
@@ -656,14 +667,16 @@ describe("seed prerequisites are listed, not collapsed into a boolean", () => {
 });
 
 describe("execution capability is explicit, not a fake button", () => {
-  test("execution is unavailable until the transport AND filter-aware archiving are validated", () => {
+  test("execution stays unavailable while the transport is unimplemented", () => {
     const execution = seedPlanExecution();
     expect(SEED_ARCHIVE_TRANSPORT_IMPLEMENTED).toBe(false);
-    expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(false);
+    // Stage 1a is done, and doing it must NOT have enabled execution.
+    expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(true);
     expect(execution.available).toBe(false);
     expect(execution.reason).toContain("not available yet");
-    expect(execution.reason).toContain("filter universe");
+    expect(execution.reason).toContain("one Stage 1 prerequisite is still open");
     expect(execution.reason).toContain("temporary seed space");
+    expect(execution.reason).toContain("no live archive transfer is claimed");
     // The timeout change is stated precisely: an existing baseline is NOT
     // silently re-scoped.
     expect(execution.reason).toContain("existing baseline keeps its exact fixed timeout");

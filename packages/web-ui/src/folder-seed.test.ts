@@ -36,7 +36,7 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     freeSpaceBytes: 10_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
     watcher: null,
-    filter: { fingerprint: null, source: "none", changedSinceBaseline: false },
+    filter: { fingerprint: null, source: "none", changedSinceBaseline: false, patternCount: 0 },
     baseline: {
       present: false,
       ready: false,
@@ -212,6 +212,10 @@ describe("plan wording", () => {
   test("the help text is explicit that nothing is enabled yet, and states the timeout change precisely", () => {
     const help = seedUnavailableHelp();
     expect(help).toContain("not switched on yet");
+    // Stage 1a is implemented, so the help names what is ACTUALLY missing
+    // rather than implying the whole feature is unwired.
+    expect(help).toContain("archive transfer itself");
+    expect(help).toContain("effective ignore rules");
     // The correction: a first sync with no baseline IS supervised differently.
     expect(help).toContain("existing baseline is untouched and keeps its fixed timeout");
     expect(help).toContain("FIRST sync with no baseline");

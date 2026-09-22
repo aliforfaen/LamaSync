@@ -706,7 +706,10 @@ export function buildSeedPlan(
     fingerprint: sourceFilterFingerprint,
     targetFingerprint: targetFilterFingerprint,
     match: filterMatch,
-    patternCount: 0,
+    // The source device's countable rule lines (a floor: the Git-ignore
+    // snapshot is only built during a run). Reported rather than left at zero
+    // so the plan describes the universe it will actually use.
+    patternCount: sourceRecord?.facts.filter.patternCount ?? 0,
     archiveImplemented: SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
     message: !SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED
       ? SEED_FILTER_UNIVERSE_REQUIRED_REASON

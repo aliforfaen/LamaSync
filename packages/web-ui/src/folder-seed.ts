@@ -298,9 +298,10 @@ export function seedProgressPercent(job: Pick<SeedJob, "progress">): number | nu
 /** The single sentence shown when a seed plan exists but cannot run yet. */
 export function seedUnavailableHelp(): string {
   return (
-    "Seeding is not switched on yet. Preparing a plan is safe and read-only: it names the source device, checks " +
-    "that the archive would be built from the folder's effective ignore rules, checks the target's free space and " +
-    "archive tools, and shows exactly what would be reserved. " +
+    "Seeding is not switched on yet, because the archive transfer itself — uploading it to temporary seed space " +
+    "and unpacking it on the target — is not implemented. Preparing a plan is safe and read-only: it names the " +
+    "source device, checks that the archive would be built from the folder's effective ignore rules, checks the " +
+    "target's free space and archive tools, and shows exactly what would be reserved. " +
     "Sync with an existing baseline is untouched and keeps its fixed timeout; a FIRST sync with no baseline yet is " +
     "supervised by the progress-aware stall budget, so a large first transfer is no longer killed at 10 minutes " +
     "while it is still moving data."
@@ -332,7 +333,7 @@ export const SEED_GLOSSARY: readonly SeedGlossaryEntry[] = [
   {
     term: "Effective filter universe",
     plain:
-      "The paths this folder's ignore rules actually sync: its lamasyncignore patterns, the ignore-git-metadata option, and respect-gitignore. A seed must archive exactly that set — not the raw folder — or the following sync would not agree with what was published.",
+      "The paths this folder's ignore rules actually sync: its lamasyncignore patterns, the ignore-git-metadata option, and respect-gitignore. A seed archives exactly that set — not the raw folder — or the following sync would not agree with what was published. Anything the rules exclude is never even measured, and the archive is handed only that set.",
   },
   {
     term: "Source device",

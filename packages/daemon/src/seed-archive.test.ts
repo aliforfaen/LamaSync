@@ -85,6 +85,28 @@ function fixture(): string {
   return source;
 }
 
+/**
+ * A runner that rewrites the `--files-from` member list before delegating to
+ * the real tar. It is the only remaining way to produce an archive that does
+ * not match the manifest, which is exactly what the equality guard defends
+ * against — so both directions of that guard stay testable.
+ */
+function rewriteMembersFileRunner(transform: (lines: string[]) => string[]): SeedCommandRunner {
+  return async (args, opts) => {
+    const index = args.indexOf("--files-from");
+    const membersFile = args[index + 1];
+    if (index < 0 || membersFile === undefined) {
+      // Only the create call carries a member list; listing/extracting calls
+      // must pass through untouched.
+      return defaultSeedCommandRunner(args, opts);
+    }
+    const lines = readFileSync(membersFile, "utf8").split("\n").filter((line) => line.length > 0);
+    const next = transform(lines);
+    writeFileSync(membersFile, next.length > 0 ? `${next.join("\n")}\n` : "");
+    return defaultSeedCommandRunner(args, opts);
+  };
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "lama346-"));
 });
@@ -188,15 +210,33 @@ describe("manifest", () => {
 });
 
 describe("archive argument construction", () => {
-  test("prefers the explicit compressor flag and keeps mtimes", () => {
-    const zstd = archiveCreateArgs({ format: "tar.zstd", sourceRoot: "/src", outputPath: "/o.tar.zst" });
+  test("archives exactly the manifest's member list, never the raw tree", () => {
+    const zstd = archiveCreateArgs({
+      format: "tar.zstd",
+      sourceRoot: "/src",
+      outputPath: "/o.tar.zst",
+      membersFilePath: "/o.members",
+    });
     expect(zstd).toContain("--zstd");
     expect(zstd).toContain("--verbose");
+    // The member list is the archive's contract, and `--no-recursion` is what
+    // makes it authoritative: without it tar would descend into every listed
+    // directory and re-archive the content the filter universe excludes.
+    expect(zstd).toContain("--files-from");
+    expect(zstd).toContain("/o.members");
+    expect(zstd).toContain("--no-recursion");
+    expect(zstd).not.toContain(".");
     // Reproducibility flags that would destroy bisync's size+modtime
     // comparison must never be present.
     expect(zstd).not.toContain("--mtime=@0");
-    const gz = archiveCreateArgs({ format: "tar.gz", sourceRoot: "/src", outputPath: "/o.tar.gz" });
+    const gz = archiveCreateArgs({
+      format: "tar.gz",
+      sourceRoot: "/src",
+      outputPath: "/o.tar.gz",
+      membersFilePath: "/o.members",
+    });
     expect(gz).toContain("--gzip");
+    expect(gz).toContain("--no-recursion");
   });
 
   test("extraction never restores ownership or setuid bits", () => {
@@ -235,6 +275,7 @@ for (const format of formats) {
         sourceRoot: source,
         outputPath: archivePath,
         manifest,
+        filter: allFilesFilter(),
         onProgress: (n) => {
           archiveProgress = n;
         },
@@ -288,7 +329,13 @@ for (const format of formats) {
       const source = fixture();
       const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
       const archivePath = join(root, "p.tar.gz");
-      await createSeedArchive({ format: "tar.gz", sourceRoot: source, outputPath: archivePath, manifest });
+      await createSeedArchive({
+        format: "tar.gz",
+        sourceRoot: source,
+        outputPath: archivePath,
+        manifest,
+        filter: allFilesFilter(),
+      });
       const targetPath = join(root, "target");
       const stagingDir = join(root, ".lamasync-seed-staging-target-job1");
       await extractSeedArchive({ format: "tar.gz", archivePath, stagingDir });
@@ -318,6 +365,7 @@ describe("fail-closed safety paths", () => {
       sourceRoot: source,
       outputPath: archivePath,
       manifest,
+      filter: allFilesFilter(),
       runner: spyRunner,
     });
     expect(created.ok).toBe(false);
@@ -327,26 +375,125 @@ describe("fail-closed safety paths", () => {
     expect(existsSync(archivePath)).toBe(false);
   });
 
-  test("create REFUSES an archive whose members do not equal the manifest", async () => {
+  test("the archive never contains content the effective filter universe excludes", async () => {
     const source = fixture();
-    // A manifest built from a NARROWER universe than the tree tar will archive:
-    // tar sees `sub/**`, the manifest does not describe it.
-    const narrowed = await buildSeedManifest(source, {
-      filter: excludePrefixFilter("sub", "universe-without-sub"),
-    });
-    expect(narrowed.unsupported).toEqual([]);
-    const archivePath = join(root, "mismatch.tar.gz");
+    // The real-world shape: a subtree the folder's ignore rules exclude (where
+    // a Projects tree keeps its nested node_modules and their symlinks).
+    mkdirSync(join(source, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(source, "node_modules", "pkg", "index.js"), "module.exports = 1;\n");
+    symlinkSync("../../a.txt", join(source, "node_modules", "pkg", "link.txt"));
+
+    const filter = excludePrefixFilter("node_modules", "universe-excluding-node-modules");
+    const manifest = await buildSeedManifest(source, { filter });
+    // The excluded subtree is never walked, so its symlink never appears.
+    expect(manifest.unsupported).toEqual([]);
+    expect(manifest.entries.some((e) => e.path.startsWith("node_modules"))).toBe(false);
+    expect(manifest.filter.skippedSample).toContain("node_modules");
+
+    const archivePath = join(root, "filtered.tar.gz");
     const created = await createSeedArchive({
       format: "tar.gz",
       sourceRoot: source,
       outputPath: archivePath,
-      manifest: narrowed,
+      manifest,
+      filter,
+    });
+    expect(created.ok).toBe(true);
+    expect(created.error).toBeNull();
+
+    // The archive's member set is EXACTLY the manifest's — tar was given the
+    // manifest's paths and nothing else, so the excluded subtree cannot leak in.
+    const validation = await validateSeedArchive({ format: "tar.gz", archivePath });
+    expect(validation.ok).toBe(true);
+    expect(validation.members.count).toBe(manifest.entries.length);
+    expect(validation.members.sample.some((m) => m.startsWith("node_modules"))).toBe(false);
+
+    // And the published tree contains no trace of it either.
+    const stagingDir = join(root, ".lamasync-seed-staging-target-job1");
+    await extractSeedArchive({ format: "tar.gz", archivePath, stagingDir });
+    expect(existsSync(join(stagingDir, "node_modules"))).toBe(false);
+    const verified = await verifyExtractedTree({ root: stagingDir, manifest });
+    expect(verified.ok).toBe(true);
+  });
+
+  test("the member-list file is removed whether tar succeeds or fails", async () => {
+    const source = fixture();
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
+    const archivePath = join(root, "cleanup.tar.gz");
+    await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      filter: allFilesFilter(),
+      runner: async () => ({ exitCode: 1, stdout: "", stderr: "simulated failure" }),
+    });
+    expect(existsSync(`${archivePath}.members`)).toBe(false);
+  });
+
+  test("create REFUSES an archive missing a manifest member", async () => {
+    const source = fixture();
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
+    const archivePath = join(root, "missing.tar.gz");
+    // Drop one path from the member list tar is given: the archive then lacks
+    // content the manifest promised, which must fail closed.
+    const created = await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      filter: allFilesFilter(),
+      runner: rewriteMembersFileRunner((lines) => lines.filter((line) => line !== "a.txt")),
+    });
+    expect(created.ok).toBe(false);
+    expect(created.error).toContain("does not match the source manifest");
+    expect(created.error).toContain("content the manifest requires but the archive lacks");
+    // The inconsistent archive is not left behind to be uploaded.
+    expect(existsSync(archivePath)).toBe(false);
+  });
+
+  test("create REFUSES an archive with content the manifest does not describe", async () => {
+    const source = fixture();
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
+    // A file that appears AFTER the manifest was measured: the manifest does
+    // not describe it, so an archive carrying it must fail closed.
+    writeFileSync(join(source, "late.txt"), "appeared after the manifest\n");
+    const archivePath = join(root, "extra.tar.gz");
+    const created = await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      filter: allFilesFilter(),
+      runner: rewriteMembersFileRunner((lines) => [...lines, "late.txt"]),
     });
     expect(created.ok).toBe(false);
     expect(created.error).toContain("does not match the source manifest");
     expect(created.error).toContain("content the manifest does not describe");
-    // The inconsistent archive is not left behind to be uploaded.
     expect(existsSync(archivePath)).toBe(false);
+  });
+
+  test("churn OUTSIDE the universe does not fail the archive", async () => {
+    const source = fixture();
+    mkdirSync(join(source, "node_modules"), { recursive: true });
+    writeFileSync(join(source, "node_modules", "junk.js"), "junk\n");
+    const filter = excludePrefixFilter("node_modules", "universe-excluding-node-modules");
+    const manifest = await buildSeedManifest(source, { filter });
+    const archivePath = join(root, "outside-churn.tar.gz");
+    const created = await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      filter,
+      runner: async (args, opts) => {
+        // Excluded content changing mid-archive is not a seed problem.
+        writeFileSync(join(source, "node_modules", "junk.js"), "junk changed\n");
+        return defaultSeedCommandRunner(args, opts);
+      },
+    });
+    expect(created.churned).toBe(false);
+    expect(created.ok).toBe(true);
   });
 
   test("a traversal member aborts validation", async () => {
@@ -410,6 +557,7 @@ describe("fail-closed safety paths", () => {
       sourceRoot: source,
       outputPath: archivePath,
       manifest,
+      filter: allFilesFilter(),
       runner: churningRunner,
     });
     expect(created.churned).toBe(true);
@@ -421,7 +569,13 @@ describe("fail-closed safety paths", () => {
     const source = fixture();
     const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
     const archivePath = join(root, "p.tar.gz");
-    await createSeedArchive({ format: "tar.gz", sourceRoot: source, outputPath: archivePath, manifest });
+    await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      filter: allFilesFilter(),
+    });
     const stagingDir = join(root, ".lamasync-seed-staging-target-job1");
     await extractSeedArchive({ format: "tar.gz", archivePath, stagingDir });
     // Corrupt one file and add an unexpected one.

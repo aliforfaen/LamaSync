@@ -130,6 +130,37 @@ describe("cheapEffectiveFilter", () => {
     expect(info.patterns[0]).toBe("- .git/**");
     rmSync(dir, { recursive: true, force: true });
   });
+
+  test("the heartbeat reports the countable rule lines, as a floor", () => {
+    const local = tempDir();
+    const state = tempDir();
+    writeFileSync(join(local, ".lamasyncignore"), "- *.tmp\n- cache/\n");
+    const { report } = probeFolderHealth({
+      assignment: assignment({
+        localPath: local,
+        ignorePath: ".lamasyncignore",
+        ignoreGitMetadata: true,
+      }),
+      effectiveType: "sync",
+      enabled: true,
+      paused: false,
+      runInProgress: false,
+      activePhase: null,
+      rcloneAvailable: true,
+      pendingConflicts: 0,
+      watcher: { enabled: false, running: false, quietSec: 30 },
+      lastRun: null,
+      measurement: null,
+      readCounts: false,
+      stateDir: state,
+    });
+    // `- .git/**` + the two configured patterns. The Git-ignore snapshot is
+    // added at run time, so this is a floor and must not be read as the whole
+    // universe.
+    expect(report.facts.filter.patternCount).toBe(3);
+    rmSync(local, { recursive: true, force: true });
+    rmSync(state, { recursive: true, force: true });
+  });
 });
 
 describe("liveFilterFingerprint", () => {

@@ -247,7 +247,7 @@ export function FolderSeedPlanCard({
               </button>
               {!verdict.runnable ? (
                 <span className="muted folder-seed-disabled-reason">
-                  Unavailable: {entry.plan.execution.available ? "the plan is not runnable" : "seed transport not implemented"}
+                  Unavailable: {entry.plan.execution.available ? "the plan is not runnable" : "seed transport not implemented (Stage 1b)"}
                 </span>
               ) : null}
             </div>

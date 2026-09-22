@@ -239,6 +239,7 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
           ? (filterSource as FolderHealthFacts["filter"]["source"])
           : "none",
       changedSinceBaseline: filter["changedSinceBaseline"] === true,
+      patternCount: clampInt(filter["patternCount"], 0, 100_000) ?? 0,
     },
     baseline: {
       present: baseline["present"] === true,

@@ -22,10 +22,12 @@
 //
 // A seed archives exactly the EFFECTIVE FILTER UNIVERSE the following bisync
 // baseline syncs — never the raw source tree. That universe is an explicit,
-// fingerprinted input to the archive primitives, and filter-aware archive
-// construction is a declared Stage 1 prerequisite (`SEED_FILTER_AWARE_ARCHIVE_
-// IMPLEMENTED` is false today), so no arbitrary folder is presented as
-// seedable while the pieces are missing.
+// fingerprinted input to the archive primitives, and it is now IMPLEMENTED
+// (`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED`): the daemon compiles the same
+// `--filter-from` rule lines the executor writes and hands tar only the
+// manifest's members. What is still missing is the transport
+// (`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is false), so execution stays
+// unavailable and no folder is presented as seedable.
 //
 // It must stay free of node built-ins so the web UI can import it unchanged.
 
@@ -214,19 +216,25 @@ export interface SeedSourceFilterUniverse {
 }
 
 /**
- * Stage 1 prerequisite: building an archive from the effective filter
- * universe. Until this is wired, the archive primitives accept only an
- * already-filtered, representable source and refuse anything else, and no
- * folder is presented as seedable.
+ * Stage 1a — IMPLEMENTED. The daemon builds both the manifest and the archive
+ * from the folder's effective filter universe: `.lamasyncignore`,
+ * `ignoreGitMetadata` and `respectGitignore`, compiled with rclone's own
+ * `--filter-from` semantics from the exact rule lines the executor hands to
+ * rclone (`buildSeedFilterUniverse`), and tar is given only the manifest's
+ * member paths (`--no-recursion --files-from`).
  */
-export const SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED = false;
+export const SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED = true;
 
+/**
+ * Why the universe is required at all. Kept as a named, exported string so the
+ * API contract, the plan and the UI all quote the same sentence.
+ */
 export const SEED_FILTER_UNIVERSE_REQUIRED_REASON =
   "A seed archive must be built from exactly the effective filter universe the following sync baseline uses " +
   "(lamasyncignore, ignore-git-metadata, respect-gitignore). Archiving the raw source tree while sync filters a " +
   "different tree would produce a seed that cannot validate to zero content changes, and would include members a " +
-  "seed cannot represent — the fleet's own Projects tree contains nested node_modules symlinks. Filter-aware " +
-  "archive construction is a Stage 1 prerequisite and is not wired yet, so no arbitrary folder can be seeded today.";
+  "seed cannot represent. Filter-aware archive construction is implemented: the daemon compiles the same " +
+  "--filter-from rule lines the executor writes, and tar is handed only the manifest's members.";
 
 export interface SeedFilterUniverseFacts {
   /**
@@ -941,10 +949,11 @@ export interface SeedPlanExecution {
  * One thing a plan needs before it may run, and whether it is satisfied.
  *
  * Exported as data so the API and the UI can list what is missing instead of
- * reducing every blocker to a single boolean. Two of these are Stage 1
- * prerequisites that are deliberately unsatisfied today
- * (`filter_universe`, `transport`), which is what keeps an arbitrary folder —
- * for example the fleet's own Projects tree — from being presented as seedable.
+ * reducing every blocker to a single boolean. `transport` is the Stage 1
+ * prerequisite that is deliberately unsatisfied today, and `filter_universe`
+ * still fails whenever the target's established baseline was built with a
+ * different filter set — which together keep an arbitrary folder from being
+ * presented as runnable.
  */
 export type SeedPrerequisiteId =
   | "source_authority"
@@ -1009,8 +1018,9 @@ export interface SeedPlan {
   space: SeedSpacePlan;
   /**
    * The effective filter universe the archive must be built from. Recorded on
-   * the plan so a manifest can be checked against it, and so the plan is
-   * honestly not runnable while filter-aware archiving is unwired.
+   * the plan so the manifest's own fingerprint can be checked against it, and
+   * so a target whose established baseline used a different filter set is
+   * refused rather than re-synced afterwards.
    */
   filterUniverse: SeedFilterUniverseFacts;
   archive: {
@@ -1104,10 +1114,11 @@ export function isSeedLeaseExpired(job: Pick<SeedJob, "leaseExpiresAt">, now: nu
 export const SEED_ARCHIVE_TRANSPORT_IMPLEMENTED = false;
 
 export const SEED_EXECUTION_UNAVAILABLE_REASON =
-  "Seed execution is not available yet. The plan, space calculation, staging rules, archive primitives and " +
-  "progress model are ready and reviewed, but two Stage 1 prerequisites are still open: the archive must be " +
-  "built from the folder's effective filter universe, and the archive must be uploaded to temporary seed space " +
-  "and staged on the target. Neither has been validated end-to-end, so no folder can be seeded today.";
+  "Seed execution is not available yet. The plan, space calculation, staging rules, archive primitives, " +
+  "effective-filter-universe construction and progress model are ready and reviewed, but one Stage 1 " +
+  "prerequisite is still open: the archive must be uploaded to temporary seed space and staged on the target. " +
+  "That transport has not been implemented or validated end-to-end, so no folder can be seeded today — and no " +
+  "live archive transfer is claimed.";
 
 /**
  * The timeout change, stated precisely. It is NOT "ordinary sync is
@@ -1202,7 +1213,8 @@ export function checkSeedPlanValidity(
     return { valid: false, reason: "not_runnable", message: plan.sourceAuthority.message };
   }
   // The archive must come from the effective filter universe, not the raw
-  // tree. Not wired yet (Stage 1), so this plan is never runnable today.
+  // tree. Stage 1a implements this; a plan built before it — or one whose
+  // facts were recorded while it was unwired — still fails closed here.
   if (!plan.filterUniverse.archiveImplemented) {
     return { valid: false, reason: "not_runnable", message: plan.filterUniverse.message };
   }
@@ -1231,6 +1243,15 @@ export function checkSeedPlanValidity(
     plan.stagingPolicy.sameFilesystem !== true
   ) {
     return { valid: false, reason: "not_runnable", message: plan.stagingPolicy.message };
+  }
+  // Finally, execution itself. A plan whose facts are all consistent is still
+  // not "runnable" while the operation is unavailable, and saying otherwise
+  // would let a caller show a plan as ready for something that cannot run. The
+  // plan's own blockers are reported first, because those are the ones the
+  // operator can act on; this one is fleet-wide.
+  const execution = seedPlanExecution();
+  if (!execution.available) {
+    return { valid: false, reason: "not_runnable", message: execution.reason };
   }
   return { valid: true, reason: null, message: "Seed plan is current and runnable." };
 }

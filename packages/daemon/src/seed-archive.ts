@@ -37,6 +37,7 @@ import {
   statSync,
   statfsSync,
   unlinkSync,
+  writeFileSync,
 } from "fs";
 import { dirname, join, relative, sep } from "path";
 import {
@@ -170,13 +171,21 @@ export interface SeedManifestEntry {
  * The seed's contract is "the published tree is identical to the source
  * universe, so the following bisync validates to zero content changes". A
  * symlink, device, FIFO or socket cannot be archived safely (a symlink in an
- * archive is an extraction hazard) and cannot be silently dropped either —
- * dropping it would make the baseline validation fail. Such a member
- * therefore BLOCKS the seed, and `createSeedArchive` refuses before tar runs.
+ * archive is an extraction hazard) and must not be dropped silently either — a
+ * member that disappears between the manifest and the archive is exactly the
+ * class of divergence this feature exists to prevent. Such a member therefore
+ * BLOCKS the seed, and `createSeedArchive` refuses before tar runs.
  *
- * In practice this is what the effective filter universe is for: excluding
- * `node_modules` (where a Projects tree's symlinks live) removes them from the
- * universe entirely, so they never appear here.
+ * Note what this means in practice, because it is a deliberate choice: rclone's
+ * local backend does NOT transfer symlinks or special files either (without
+ * `--links`/`-L`, which this fleet never passes, it logs "Can't follow symlink
+ * without -L/--copy-links"/"Can't transfer non file/directory" and skips them).
+ * A filter-included symlink is therefore something sync ignores but the seed
+ * cannot prove it ignores identically, so the seed refuses and names the member
+ * instead of publishing a tree it cannot vouch for. Excluding the subtree with
+ * the folder's own ignore rules removes it from the universe entirely and is
+ * the documented remedy — which is why a Projects tree full of nested
+ * `node_modules` symlinks becomes seedable once its excludes are configured.
  */
 export interface SeedUnsupportedMember {
   path: string;
@@ -194,6 +203,14 @@ export interface SeedManifest {
   statsFingerprint: string;
   /** Members of the universe that a seed cannot represent. Must be empty. */
   unsupported: SeedUnsupportedMember[];
+  /**
+   * Directories the filter universe includes but that contain no included file.
+   * They are NOT members of the manifest, because rclone does not transfer
+   * empty directories by default (the fleet never passes
+   * `--create-empty-src-dirs`), so archiving them would publish directories the
+   * following bisync would not have created. Recorded so the plan can say so.
+   */
+  emptyDirsPruned: string[];
   /**
    * The effective filter universe this manifest was built from. The archive is
    * only valid for the SAME universe, which is why the fingerprint travels
@@ -247,8 +264,10 @@ export const SEED_MANIFEST_SKIPPED_SAMPLE_CAP = 20;
  * excluded directory is pruned whole (so an excluded `node_modules` costs
  * nothing and its nested symlinks are never even seen). Members the universe
  * DOES include but a seed cannot represent are recorded in `unsupported`, and
- * `createSeedArchive` refuses while that list is non-empty. Reaching the entry
- * cap fails the whole manifest.
+ * `createSeedArchive` refuses while that list is non-empty. Directories the
+ * universe includes but that hold no included file are dropped (rclone does
+ * not transfer empty directories by default) and recorded in `emptyDirsPruned`.
+ * Reaching the entry cap fails the whole manifest.
  */
 export async function buildSeedManifest(
   root: string,
@@ -318,12 +337,32 @@ export async function buildSeedManifest(
   entries.sort((a, b) => a.path.localeCompare(b.path));
   unsupported.sort((a, b) => a.path.localeCompare(b.path));
 
+  // rclone transfers no empty directories by default, so a directory the
+  // universe includes but that holds no included file is not part of the
+  // universe the sync will actually reproduce. Drop it, and record it.
+  const dirsWithContent = new Set<string>();
+  for (const entry of entries) {
+    if (entry.kind !== "file") continue;
+    let parent = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : "";
+    while (parent.length > 0) {
+      dirsWithContent.add(parent);
+      parent = parent.includes("/") ? parent.slice(0, parent.lastIndexOf("/")) : "";
+    }
+  }
+  const emptyDirsPruned: string[] = [];
+  const kept = entries.filter((entry) => {
+    if (entry.kind !== "dir") return true;
+    if (dirsWithContent.has(entry.path)) return true;
+    emptyDirsPruned.push(entry.path);
+    return false;
+  });
+
   const contentHash = createHash("sha256");
   const statsHash = createHash("sha256");
   let totalBytes = 0;
   let fileCount = 0;
   let dirCount = 0;
-  for (const entry of entries) {
+  for (const entry of kept) {
     contentHash.update(`${entry.path}\0${entry.kind}\0${entry.size}\0${entry.sha256 ?? "-"}\n`);
     statsHash.update(`${entry.path}\0${entry.kind}\0${entry.size}\0${entry.mtimeMs}\n`);
     if (entry.kind === "file") {
@@ -334,13 +373,14 @@ export async function buildSeedManifest(
     }
   }
   return {
-    entries,
+    entries: kept,
     fileCount,
     dirCount,
     totalBytes,
     fingerprint: contentHash.digest("hex"),
     statsFingerprint: statsHash.digest("hex"),
     unsupported,
+    emptyDirsPruned,
     filter: {
       fingerprint: filter.fingerprint,
       patternCount: filter.patterns.length,
@@ -364,15 +404,32 @@ export function seedManifestBlockingReason(manifest: SeedManifest): string | nul
     .slice(0, 5)
     .map((member) => `${member.path} (${member.reason})`)
     .join(", ");
+  // The remedy is the folder's own ignore rules, and the pattern form matters:
+  // a trailing-slash rule (`- dir/`) only matches directories, so it cannot
+  // exclude a symlink — the operator needs a non-trailing-slash rule or a
+  // glob.
+  const first = manifest.unsupported[0]!;
+  const leaf = first.path.includes("/")
+    ? first.path.slice(first.path.lastIndexOf("/") + 1)
+    : first.path;
   return (
     `${manifest.unsupported.length} entr(y/ies) in this folder's effective filter universe are symlinks or special ` +
     `files, which a seed cannot represent (for example ${sample}). Exclude them with the folder's ignore rules ` +
-    "(lamasyncignore) or remove them, then prepare the plan again — a seed never publishes a partial tree."
+    `(lamasyncignore) — a trailing-slash rule like \`- dir/\` only matches directories, so use \`- ${leaf}\` or a ` +
+    `glob such as \`- **/${leaf}\` — or remove them, then prepare the plan again — a seed never publishes a partial tree.`
   );
 }
 
 /** Cheap churn re-check: path + size + mtime only, no content hashing. */
-export function buildStatsFingerprint(root: string): string {
+/**
+ * Cheap churn re-check: path + size + mtime only, no content hashing.
+ *
+ * When a filter universe is supplied, only members of that universe count — a
+ * change to content the seed never archives must not fail the archive, and a
+ * change inside an excluded subtree must not be able to hide behind it either.
+ * Without a universe the whole raw tree is measured (the pre-Stage-1a shape).
+ */
+export function buildStatsFingerprint(root: string, filter?: SeedSourceFilterUniverse): string {
   const hash = createHash("sha256");
   const stack: string[] = [root];
   const rows: string[] = [];
@@ -387,6 +444,7 @@ export function buildStatsFingerprint(root: string): string {
     for (const dirent of dirents) {
       const full = join(dir, dirent.name);
       const rel = toPosix(relative(root, full));
+      if (filter && !filter.includes(rel, dirent.isDirectory())) continue;
       if (dirent.isSymbolicLink()) {
         rows.push(`${rel}\0link`);
         continue;
@@ -418,19 +476,26 @@ export function buildStatsFingerprint(root: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * `tar --create --directory <root> .` archives the WHOLE source root.
+ * `tar --create --directory <root> --no-recursion --files-from <list>` archives
+ * EXACTLY the manifest's member set.
  *
- * That is only sound because the manifest is built from the effective filter
- * universe and `createSeedArchive` (a) refuses when the universe contains
- * members a seed cannot represent and (b) verifies afterwards that the
- * archive's member set equals the manifest's. The raw tree may therefore only
- * be archived when the manifest already represents all of it — the filter
- * excludes are applied by the caller, not by tar.
+ * Stage 1a: the archive used to be built with `--directory root .`, which
+ * archives the whole raw tree — including everything the folder's effective
+ * filter universe excludes. That could never be right for a filtered folder:
+ * the produced archive would contain content the manifest does not describe,
+ * the member-set equality guard would refuse it, and the seed could not run at
+ * all. The member list is now the archive's contract, exactly as the manifest
+ * is: tar may only add the paths the manifest already measured and hashed.
+ *
+ * `--no-recursion` is what makes the list authoritative — without it tar would
+ * descend into every listed directory and re-archive the excluded content.
  */
 export function archiveCreateArgs(input: {
   format: SeedArchiveFormat;
   sourceRoot: string;
   outputPath: string;
+  /** Path to a file listing the manifest's member paths, one per line. */
+  membersFilePath: string;
 }): string[] {
   const compression = input.format === "tar.zstd" ? ["--zstd"] : ["--gzip"];
   return [
@@ -444,7 +509,9 @@ export function archiveCreateArgs(input: {
     "--verbose",
     "--directory",
     input.sourceRoot,
-    ".",
+    "--no-recursion",
+    "--files-from",
+    input.membersFilePath,
   ];
 }
 
@@ -650,11 +717,14 @@ export interface CreateArchiveResult {
  *      (an archive containing a symlink would be rejected at validation, and
  *      dropping the symlink silently would leave a tree the following bisync
  *      would then have to "repair");
- *   2. after tar runs, the archive's member set must EQUAL the manifest's
+ *   2. tar is handed the manifest's member paths (`--no-recursion
+ *      --files-from`), so the archive cannot contain content the manifest never
+ *      measured — the filtered-out part of the tree is simply never named;
+ *   3. after tar runs, the archive's member set must EQUAL the manifest's
  *      member set, so unrepresented source content can never reach the target;
- *   3. the source tree's stats fingerprint is taken before and after tar runs —
- *      a difference means the tree moved mid-archive and the whole operation
- *      fails closed.
+ *   4. the source tree's stats fingerprint is taken before and after tar runs —
+ *      within the effective filter universe — and a difference means the tree
+ *      moved mid-archive and the whole operation fails closed.
  */
 export async function createSeedArchive(input: {
   format: SeedArchiveFormat;
@@ -662,6 +732,12 @@ export async function createSeedArchive(input: {
   outputPath: string;
   /** The manifest of the effective filter universe. Required. */
   manifest: SeedManifest;
+  /**
+   * The same effective filter universe the manifest was built from. Required:
+   * churn is only meaningful within the universe the seed actually archives, so
+   * a change to excluded content must not be able to fail (or mask) the run.
+   */
+  filter: SeedSourceFilterUniverse;
   runner?: SeedCommandRunner;
   onProgress?: (membersDone: number) => void;
   signal?: AbortSignal;
@@ -681,28 +757,46 @@ export async function createSeedArchive(input: {
       error: blocking,
     };
   }
-  const before = buildStatsFingerprint(input.sourceRoot);
+  const before = buildStatsFingerprint(input.sourceRoot, input.filter);
   mkdirSync(dirname(input.outputPath), { recursive: true });
-  let memberCount = 0;
-  const result = await runner(
-    archiveCreateArgs({
-      format: input.format,
-      sourceRoot: input.sourceRoot,
-      outputPath: input.outputPath,
-    }),
-    {
-      ...(input.signal ? { signal: input.signal } : {}),
-      onLine: (line, stream) => {
-        // GNU tar writes `--verbose` member names to stderr; some builds use
-        // stdout. Count either, but never count its "Removing leading" notes.
-        if (line.length === 0) return;
-        if (line.startsWith("tar:")) return;
-        void stream;
-        memberCount += 1;
-        input.onProgress?.(memberCount);
-      },
-    },
+  // The manifest IS the archive's member list. tar is given nothing else, so
+  // the archive cannot contain content the manifest never measured.
+  const membersFilePath = `${input.outputPath}.members`;
+  writeFileSync(
+    membersFilePath,
+    input.manifest.entries.map((entry) => entry.path).join("\n") +
+      (input.manifest.entries.length > 0 ? "\n" : ""),
   );
+  let memberCount = 0;
+  let result: SeedCommandResult;
+  try {
+    result = await runner(
+      archiveCreateArgs({
+        format: input.format,
+        sourceRoot: input.sourceRoot,
+        outputPath: input.outputPath,
+        membersFilePath,
+      }),
+      {
+        ...(input.signal ? { signal: input.signal } : {}),
+        onLine: (line, stream) => {
+          // GNU tar writes `--verbose` member names to stderr; some builds use
+          // stdout. Count either, but never count its "Removing leading" notes.
+          if (line.length === 0) return;
+          if (line.startsWith("tar:")) return;
+          void stream;
+          memberCount += 1;
+          input.onProgress?.(memberCount);
+        },
+      },
+    );
+  } finally {
+    try {
+      unlinkSync(membersFilePath);
+    } catch {
+      /* best-effort */
+    }
+  }
   if (result.exitCode !== 0) {
     return {
       ok: false,
@@ -714,7 +808,7 @@ export async function createSeedArchive(input: {
       error: `tar exited ${result.exitCode}: ${result.stderr.slice(-300)}`,
     };
   }
-  const after = buildStatsFingerprint(input.sourceRoot);
+  const after = buildStatsFingerprint(input.sourceRoot, input.filter);
   const churned = before !== after;
   const bytes = existsSync(input.outputPath) ? statSync(input.outputPath).size : 0;
   const sha256 = existsSync(input.outputPath) ? await sha256File(input.outputPath) : null;

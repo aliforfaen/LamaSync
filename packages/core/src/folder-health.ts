@@ -164,6 +164,14 @@ export interface FolderHealthFilterFacts {
   source: "none" | "lamasyncignore" | "gitignore" | "combined";
   /** True when the fingerprint differs from the acknowledged baseline. */
   changedSinceBaseline: boolean;
+  /**
+   * Rule lines the device can count WITHOUT walking the tree: the
+   * `.lamasyncignore` patterns plus the generated `- .git/**`. The Git-ignore
+   * snapshot component is only computed during a real run (it walks the
+   * worktree), so this is a floor, not the whole universe — LAMA-346 uses it
+   * to describe a seed plan's filter universe without a second round-trip.
+   */
+  patternCount: number;
 }
 
 /**

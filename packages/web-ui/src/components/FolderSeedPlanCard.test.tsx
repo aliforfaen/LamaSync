@@ -28,7 +28,7 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     freeSpaceBytes: 10_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
     watcher: null,
-    filter: { fingerprint: null, source: "none", changedSinceBaseline: false },
+    filter: { fingerprint: null, source: "none", changedSinceBaseline: false, patternCount: 0 },
     baseline: {
       present: false,
       ready: false,

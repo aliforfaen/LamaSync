@@ -329,6 +329,9 @@ export function probeFolderHealth(opts: FolderHealthProbeOptions): FolderHealthP
       fingerprint: acknowledged,
       source: filterInfo.source,
       changedSinceBaseline: pending !== null,
+      // Countable without a tree walk; the Git-ignore snapshot is added at run
+      // time, so this is a floor and is labelled as one.
+      patternCount: filterInfo.patterns.length,
     },
     baseline: {
       present: baseline.present,
