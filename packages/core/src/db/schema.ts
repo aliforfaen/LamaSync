@@ -439,6 +439,80 @@ CREATE TABLE IF NOT EXISTS folder_sync_plans (
 CREATE INDEX IF NOT EXISTS idx_folder_sync_plans_assignment
     ON folder_sync_plans(assignment_id, created_at);
 
+-- LAMA-346: operator-approved seed plans for a first large-folder transfer.
+-- A plan is a reviewed intent with a short TTL, exactly like a sync plan, and
+-- is NEVER created automatically: the recommended flag records that the
+-- file-count threshold was crossed, while the row only exists because an
+-- admin asked for it. The space/staging columns are the deterministic
+-- preflight result.
+CREATE TABLE IF NOT EXISTS folder_seed_plans (
+    id                          TEXT PRIMARY KEY,
+    folder_id                   TEXT NOT NULL,
+    host_id                     TEXT NOT NULL,
+    assignment_id               TEXT NOT NULL,
+    recommended                 INTEGER NOT NULL,
+    threshold_files             INTEGER NOT NULL,
+    recommendation              TEXT NOT NULL,
+    source_file_count           INTEGER NOT NULL,
+    source_bytes                INTEGER NOT NULL,
+    source_measured_at          INTEGER NOT NULL,
+    source_host_id              TEXT,
+    source_manifest_fingerprint TEXT,
+    target_free_bytes           INTEGER,
+    target_free_measured_at     INTEGER,
+    target_host_id              TEXT,
+    staging_root                TEXT,
+    staging_same_filesystem     INTEGER,
+    space                       TEXT NOT NULL,
+    archive_format              TEXT NOT NULL,
+    archive_tooling             TEXT NOT NULL,
+    archive_tooling_ready       INTEGER NOT NULL,
+    archive_estimate_bytes      INTEGER NOT NULL,
+    archive_choice_reason       TEXT NOT NULL,
+    archive_fallback            INTEGER NOT NULL,
+    staging_policy              TEXT NOT NULL,
+    config_revision             INTEGER NOT NULL,
+    filter_fingerprint          TEXT,
+    baseline_fingerprint        TEXT,
+    execution_available         INTEGER NOT NULL,
+    execution_reason            TEXT NOT NULL,
+    created_at                  INTEGER NOT NULL,
+    expires_at                  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_folder_seed_plans_folder
+    ON folder_seed_plans(folder_id, created_at);
+
+-- LAMA-346: the resumable seed job. Phase/progress/source/archive/staging are
+-- JSON blobs already bounded by the shared contract; the scalar columns exist
+-- so the stale-lease sweep and the UI list never have to parse them. A job is
+-- created only from a valid plan, and the lease is renewable so a long seed
+-- cannot be reclaimed and re-executed while it is still running.
+CREATE TABLE IF NOT EXISTS folder_seed_jobs (
+    id               TEXT PRIMARY KEY,
+    plan_id          TEXT NOT NULL,
+    folder_id        TEXT NOT NULL,
+    host_id          TEXT NOT NULL,
+    assignment_id    TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    phase            TEXT NOT NULL,
+    progress         TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    archive          TEXT NOT NULL,
+    staging          TEXT NOT NULL,
+    lease_owner      TEXT,
+    lease_expires_at INTEGER,
+    error            TEXT,
+    summary          TEXT,
+    created_at       INTEGER NOT NULL,
+    started_at       INTEGER,
+    updated_at       INTEGER NOT NULL,
+    finished_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_folder
+    ON folder_seed_jobs(folder_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_status_lease
+    ON folder_seed_jobs(status, lease_expires_at);
+
 -- LAMA-294: locks are keyed by the canonical destination/repository key so
 -- two assignments that write the same physical destination (or share a Restic
 -- repo) serialize, while distinct prefixes under one backend run concurrently.
@@ -1005,6 +1079,15 @@ export const MIGRATIONS: string[] = [
   // executing. Nullable: pre-existing rows fall back to taken_at + the lease
   // window in the reaper.
   "ALTER TABLE queued_actions ADD COLUMN lease_expires_at INTEGER",
+  // LAMA-346: operator-approved seed plans + resumable seed jobs. Schema
+  // lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF NOT EXISTS
+  // entries are the idempotent safety net for existing databases ("already
+  // exists" is swallowed by initDb's try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS folder_seed_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, recommended INTEGER NOT NULL, threshold_files INTEGER NOT NULL, recommendation TEXT NOT NULL, source_file_count INTEGER NOT NULL, source_bytes INTEGER NOT NULL, source_measured_at INTEGER NOT NULL, source_host_id TEXT, source_manifest_fingerprint TEXT, target_free_bytes INTEGER, target_free_measured_at INTEGER, target_host_id TEXT, staging_root TEXT, staging_same_filesystem INTEGER, space TEXT NOT NULL, archive_format TEXT NOT NULL, archive_tooling TEXT NOT NULL, archive_tooling_ready INTEGER NOT NULL, archive_estimate_bytes INTEGER NOT NULL, archive_choice_reason TEXT NOT NULL, archive_fallback INTEGER NOT NULL, staging_policy TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, execution_available INTEGER NOT NULL, execution_reason TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_seed_plans_folder ON folder_seed_plans(folder_id, created_at)",
+  "CREATE TABLE IF NOT EXISTS folder_seed_jobs (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, progress TEXT NOT NULL, source TEXT NOT NULL, archive TEXT NOT NULL, staging TEXT NOT NULL, lease_owner TEXT, lease_expires_at INTEGER, error TEXT, summary TEXT, created_at INTEGER NOT NULL, started_at INTEGER, updated_at INTEGER NOT NULL, finished_at INTEGER)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_folder ON folder_seed_jobs(folder_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_status_lease ON folder_seed_jobs(status, lease_expires_at)",
 ];
 
 /**

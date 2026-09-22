@@ -15,6 +15,10 @@
 // staleness rules, and the allowlisted intervention payload grammar. It must
 // stay free of node built-ins so the web UI can import it unchanged.
 
+// LAMA-346: the archive tooling reported with a health fact is defined by the
+// seed contract, so both modules share one shape.
+import type { SeedArchiveTooling } from "./folder-seed.ts";
+
 // ---------------------------------------------------------------------------
 // Health states
 // ---------------------------------------------------------------------------
@@ -203,6 +207,13 @@ export interface FolderHealthFacts {
   paused: boolean;
   runInProgress: boolean;
   rcloneAvailable: boolean;
+  /**
+   * LAMA-346: archive tooling present on this device, detected cheaply and
+   * reported with the ordinary heartbeat so a seed plan can be built for it
+   * without a second round-trip. `null` when the device has not reported it
+   * (older daemons), which the plan treats as "not verified".
+   */
+  archive?: SeedArchiveTooling | null;
   localDir: FolderHealthLocalDirState;
   freeSpaceBytes: number | null;
   freeSpaceThresholdBytes: number | null;

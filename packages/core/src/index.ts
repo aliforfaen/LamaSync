@@ -8,6 +8,11 @@ export * from "./folder-health.ts";
 // verdict, shared by the /health route, the Dashboard and the notification
 // sweeps so they cannot disagree.
 export * from "./fleet-health.ts";
+// LAMA-346: initial large-folder seeding contract — operator-approved seed
+// plans (never automatic), the staging/space calculation, the resumable job
+// state machine and the progress-aware seed-stage deadline. Dependency-free
+// so the web UI can import it without pulling node built-ins into the bundle.
+export * from "./folder-seed.ts";
 export * from "./retention.ts";
 export { SERVER_SCHEMA, MIGRATIONS, LEGACY_S3_DROP_MIGRATIONS } from "./db/schema.ts";
 export { initDb } from "./db/client.ts";

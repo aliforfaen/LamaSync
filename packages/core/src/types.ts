@@ -3,6 +3,7 @@
 // LAMA-345: managed-folder health contract. `folder-health.ts` is
 // dependency-free and never imports this file, so this is a one-way edge.
 import type { FolderHealthRecord, FolderSyncPlan } from "./folder-health.ts";
+import type { SeedJob, SeedPlan } from "./folder-seed.ts";
 import type { FleetHealthSummary, UpdateStatus } from "./fleet-health.ts";
 
 export type { FolderHealthRecord, FolderSyncPlan, FleetHealthSummary, UpdateStatus };
@@ -945,7 +946,13 @@ export type WSEvent =
   // carries a newly-reported sync plan. Both are advisory UI updates — the
   // REST reads stay authoritative.
   | { kind: "folder_health"; record: FolderHealthRecord }
-  | { kind: "folder_plan"; plan: FolderSyncPlan };
+  | { kind: "folder_plan"; plan: FolderSyncPlan }
+  // LAMA-346: initial large-folder seeding. `seed_plan` carries a newly
+  // created operator-approved seed plan; `seed_job` carries a phase/progress
+  // update for a running seed job (or its terminal outcome). Both are
+  // advisory UI updates — the REST reads stay authoritative.
+  | { kind: "seed_plan"; plan: SeedPlan }
+  | { kind: "seed_job"; job: SeedJob };
 
 export interface PruneResult {
   deleted: number;
