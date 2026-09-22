@@ -354,14 +354,22 @@ Errors worth knowing:
 | 404 | the named source device is not assigned to this folder |
 | 201 + `validity.valid: false` | the plan exists but is not runnable; `validity.message` names the first blocker and the plan's prerequisite list names them all |
 
-**Execution is not available yet.** `POST /seed-jobs` returns
-`503 { executionAvailable: false, reason }` because two Stage 1 prerequisites
-are still open: the archive is not yet built from the folder's **effective
-filter universe** (so a tree containing nested `node_modules` symlinks, like
-the real Projects tree, cannot be seeded), and the archive transport is not
-implemented or validated. The Web UI shows a disabled control with that
-reason. Do not expect a seed to run; the value today is the honest preflight
-plus the progress-aware timeout for first runs.
+The archive **is** now built from the folder's **effective filter universe**
+(Stage 1a): the same `--filter-from` rules rclone receives for the sync, and
+tar is given only the manifest's members, so ignored content cannot enter the
+archive. A member the universe *includes* but a seed cannot represent (a
+symlink or special file — rclone's local backend skips those too) still fails
+closed rather than being dropped silently, and the remedy is the folder's own
+ignore rules. Directories that end up holding nothing are not archived, because
+rclone transfers no empty directories.
+
+**Execution is still not available.** `POST /seed-jobs` returns
+`503 { executionAvailable: false, reason }` because the one remaining Stage 1
+prerequisite is open: the archive transport (upload to temporary seed space →
+target staging) is not implemented or validated. The Web UI shows a disabled
+control with that reason, and a plan whose facts are all consistent is still
+reported as **not runnable**. Do not expect a seed to run; the value today is
+the honest preflight plus the progress-aware timeout for first runs.
 
 ## See also
 

@@ -18,13 +18,22 @@ with no usable baseline (the dev-vm shape), an explicit `initialize`/`seed`
 intervention, or `seedStage: true` is supervised progress-aware. Do not widen
 that scope.
 
-**Execution is deliberately unavailable**: two Stage 1 prerequisites are
-open — filter-aware archive construction
-(`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `false`) and the archive transport
-(`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false`) — so `POST /seed-jobs`
+**Stage 1a (filter-aware archive construction) is implemented**:
+`packages/daemon/src/seed-filter-universe.ts` compiles the exact
+`--filter-from` rule lines the executor writes into a `SeedSourceFilterUniverse`
+with rclone's own semantics (pinned by a cross-check test against the host's
+real rclone), and `buildSeedSourceManifest(assignment, type)` is the single
+assignment → universe → manifest entry point. tar is given the manifest's
+member list, churn is measured inside the universe, and a filter-included
+symlink or special file still fails closed before tar runs.
+
+**Execution is deliberately unavailable**: the archive transport is the one
+open Stage 1 prerequisite (`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false`;
+`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is now `true`), so `POST /seed-jobs`
 returns `503 { executionAvailable: false, reason }` and the Folders page shows
-a disabled control. Do not flip either constant without a two-host fixture
-acceptance that includes a zero-content-change bisync baseline validation.
+a disabled control. Do not flip the transport constant without a two-host
+fixture acceptance that includes a zero-content-change bisync baseline
+validation.
 
 The archive primitives (create/validate/extract/verify/atomic-publish) are
 implemented and fixture-tested end-to-end with the host's real GNU tar, and

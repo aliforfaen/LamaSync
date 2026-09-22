@@ -53,19 +53,31 @@ distributable binary build.
   nested `node_modules`) blocks the run *before tar starts*, and the produced
   archive's member set must **equal** the manifest's or it is deleted and the
   run fails. The archive is built from the folder's **effective filter
-  universe**, never the raw tree; filter-aware construction is a declared
-  Stage 1 prerequisite (`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `false`),
-  so no arbitrary folder can be seeded today.
+  universe**, never the raw tree, and tar is given only the manifest's member
+  paths — so excluded content cannot enter the archive at all.
   *Persistent job state machine:* ten ordered phases plus terminal states,
   stored in `folder_seed_jobs` with bounded progress, a renewable 10-minute
   lease (an expired lease means the owner is gone, never merely slow),
   idempotent completion, admin-only cancel, and `seed_job` WebSocket updates.
+  *Filter-aware archive construction (Stage 1a, implemented):* the archive is
+  built from the folder's **effective filter universe** — the exact
+  `--filter-from` rule lines the executor writes (`lamasyncignore`,
+  `ignoreGitMetadata`, and a Git-ignore snapshot when `respectGitignore` is
+  on), compiled with rclone's own semantics and pinned by a cross-check test
+  against the host's real rclone. `buildSeedSourceManifest(assignment, type)`
+  is the single assignment → universe → manifest entry point, tar is given the
+  manifest's member list (`--no-recursion --files-from`) so excluded content
+  can never enter the archive, churn is measured inside the same universe, and
+  a member the universe includes but a seed cannot represent still fails closed
+  before tar runs. Fixture-tested against the real Projects shape (nested
+  `node_modules` symlinks + ignored content).
   *Explicitly unavailable execution:* the archive transport (temporary
   `lamasync/seed/<jobId>/…` object space → target staging) and remote
   orchestration are **not implemented**, so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
-  is `false`, `POST /seed-jobs` returns `503 { executionAvailable: false,
-  reason }`, and the Folders page renders a **disabled** control with that
-  reason and a plain-language glossary — never a fake button. The timeout
+  is `false` (while `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is now `true`),
+  `POST /seed-jobs` returns `503 { executionAvailable: false, reason }`, and
+  the Folders page renders a **disabled** control with that reason and a
+  plain-language glossary — never a fake button. The timeout
   scope is stated precisely rather than as "ordinary sync is unaffected": a
   sync against an **existing, ready baseline keeps its exact fixed wall-clock
   timeout** (including a planned resync on that baseline), while a **first run
@@ -609,25 +621,19 @@ distributable binary build.
 
 ## Active follow-ups
 
-1. **LAMA-346 — the two Stage 1 prerequisites, remote orchestration and live
-   acceptance.** The first vertical slice is implemented and locally
-   validated (including an independent-review correction pass); execution is
-   deliberately unavailable. Remaining work, in order: (a) wire
-   **filter-aware archive construction** from the daemon's existing effective
-   filter machinery (`cheapEffectiveFilter` / `liveFilterFingerprint` /
-   `materialiseGitignoreFilter`) into a `SeedSourceFilterUniverse`, and
-   fixture-test it against a tree with nested `node_modules` symlinks so the
-   real Projects tree becomes seedable; (b) implement the S3 relay into
+1. **LAMA-346 — the transport, remote orchestration and live acceptance.**
+   The first vertical slice and Stage 1a (filter-aware archive construction)
+   are implemented and locally validated; execution is deliberately
+   unavailable. Remaining work, in order: (a) implement the S3 relay into
    `lamasync/seed/<jobId>/…` behind the existing job state machine with a
-   local object-store fixture; (c) a two-host end-to-end fixture acceptance
-   including a zero-content-change bisync baseline validation; (d) a live
+   local object-store fixture; (b) a two-host end-to-end fixture acceptance
+   including a zero-content-change bisync baseline validation; (c) a live
    dev-vm-shape run on a **copy** of a large tree confirming no timeout kill
-   while progressing and a correct resume after a deliberate stall; (e)
+   while progressing and a correct resume after a deliberate stall; (d)
    confirm the target's archive tooling **and** staging proof are reported
-   before the Run control is enabled for that device; (f) decide the
+   before the Run control is enabled for that device; (e) decide the
    retention/cleanup policy for seed objects after a successful or abandoned
-   job. Only then flip `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` and
-   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`. See
+   job. Only then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`. See
    [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
 
 2. **LAMA-337 — release, and the one device-path question it leaves open.**

@@ -126,7 +126,7 @@ The archive lives in a **dedicated, temporary object namespace**
 managed-folder namespace. A seed archive is transport, not data, and must
 never be mistaken for a synced file.
 
-### 2.4 The effective filter universe (a Stage 1 prerequisite)
+### 2.4 The effective filter universe — Stage 1a, IMPLEMENTED
 
 A seed archives **exactly the universe the following bisync baseline syncs**:
 `lamasyncignore` patterns, `ignoreGitMetadata`, and `respectGitignore`. It
@@ -155,13 +155,61 @@ and `seedPreflight` requires it too. The manifest records the fingerprint,
 pattern count, and a bounded sample of what was excluded, so a manifest can be
 checked against the plan's own `filterUniverse` block.
 
-`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is **`false`**: no adapter from the
-daemon's effective filter patterns to that walk predicate is wired yet.
-Consequently **no arbitrary folder — including the real Projects tree — can be
-seeded today**, and the plan says so instead of implying otherwise. Stage 1
-must wire it (see §6). The plan also refuses when the target's *established*
-baseline used a different filter set than the source's (`filterUniverse.match`
-is false), because that seed would be re-synced afterwards.
+#### How the universe is derived (no second notion of "ignored")
+
+The universe is not a re-implementation of the ignore rules. It is compiled
+from **the same `--filter-from` rule lines the executor writes for the run**:
+`loadFilterPatterns(resolveFilterPath(...))` →
+`effectiveSyncFilterPatterns(patterns, folderType, ignoreGitMetadata)` (which
+prepends `- .git/**`), and, when `respectGitignore` is on,
+`buildRcloneFilterSnapshot(root).rules` **prepended** to those patterns — the
+exact order `materialiseGitignoreFilter` writes into the file rclone reads.
+Order matters, because rclone's **first** matching rule wins.
+
+`packages/daemon/src/seed-filter-universe.ts` compiles those lines with
+rclone's own semantics and exposes the result as the predicate. The fingerprint
+comes from `effectiveFilterFingerprint(gitignoreRules, patterns)` — the *same*
+function the executor uses — so a seed's universe is directly comparable with
+the assignment's acknowledged baseline fingerprint.
+
+`buildSeedSourceManifest(assignment, folderType)` is the single entry point:
+assignment → universe → manifest, failing closed on an unusable rule set, an
+unbuildable Git-ignore snapshot, an unrepresentable member, or an unreadable
+source. Stage 1b's job will call it; nothing calls it from a running job yet,
+because the transport is still missing.
+
+#### rclone semantics that are easy to get wrong
+
+Verified against rclone v1.68.2 and pinned by a cross-check test that runs the
+host's real `rclone lsf --filter-from` over a table of rule sets (skipped when
+rclone is absent):
+
+| Behaviour | Consequence for a seed |
+|---|---|
+| **First matching rule wins**; an unmatched path is included | Rule order must match the executor's file exactly — an appended `+` cannot re-include an earlier `-` |
+| A rule needs a sign **and exactly one space**; `-a.txt` is malformed | rclone aborts the run on one, so the universe is unusable and the seed fails closed |
+| **Only a trailing-slash rule matches a directory** | `- node_modules` excludes a *file* of that name and leaves the **directory** in the universe; `- node_modules/` prunes the subtree |
+| A pattern containing `/` (or starting with `/`) is root-relative; otherwise it matches the basename at any depth | `sub/a.txt` is root-relative, `a.txt` matches `sub/a.txt` too |
+| `{{...}}` is compiled as `^(?:.*/)?<regex>$` | Prefix-anchored, allowed at any depth, must consume the whole path: `{{sub/inner}}` does **not** exclude `sub/inner/g.bin` |
+| `**` crosses `/`; `*` and `?` do not; matching is case-sensitive | `**/*.log` excludes `sub/b.log` but not root `b.log` |
+| rclone's local backend **skips symlinks and special files** without `--links`/`-L` (which this fleet never passes) | Recorded as a deliberate, conservative refusal — see §2.6 |
+
+#### Directories that the universe includes but that hold nothing
+
+rclone transfers no empty directories by default (the fleet never passes
+`--create-empty-src-dirs`), so a directory the universe includes but that
+contains no included file is **not** a manifest member. It is recorded in
+`manifest.emptyDirsPruned` instead. This is what removes the empty `.git/`
+directory that `- .git/**` leaves behind: the rule is not a trailing-slash rule,
+so it excludes everything *inside* `.git` rather than the directory itself.
+
+#### Status
+
+`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is **`true`** (Stage 1a). The one
+remaining Stage 1 prerequisite is the **transport**. A plan is still refused
+when the target's *established* baseline used a different filter set than the
+source's (`filterUniverse.match` is false), because that seed would be
+re-synced afterwards, and execution remains unavailable (§7).
 
 ### 2.5 Archive format
 
@@ -194,17 +242,41 @@ effective filter universe of the source tree
 The earlier draft of this design had a real defect, caught in review: the
 manifest called symlinks "excluded / not archived" while `tar` archived the
 whole tree, so create-then-validate could never succeed. The correction is
-that the manifest is the **authority** for what may be archived, and two
+that the manifest is the **authority** for what may be archived, and three
 independent guards enforce it:
 
 1. **before tar** — `seedManifestBlockingReason` refuses when the universe
    contains a member the seed cannot represent. The runner is never invoked
    and no archive file is produced (asserted by test);
-2. **after tar** — the produced archive's member set must equal the manifest's
+2. **tar's input is the manifest** — Stage 1a: tar is invoked as
+   `tar --create --directory <root> --no-recursion --files-from <member list>`,
+   where the member list is exactly `manifest.entries`. The old
+   `--directory root .` form archived the whole raw tree, so a *filtered*
+   folder could never produce a matching archive at all. `--no-recursion` is
+   what makes the list authoritative;
+3. **after tar** — the produced archive's member set must equal the manifest's
    (normalizing tar's `./` prefix and directory trailing slashes, ignoring the
    archive root). A mismatch in either direction deletes the archive and fails
    with "content the manifest does not describe" / "content the manifest
-   requires but the archive lacks".
+   requires but the archive lacks". Both directions are tested by rewriting the
+   member list under a real tar.
+
+Source churn is measured **within the same universe** (`buildStatsFingerprint`
+takes the filter), so a change to excluded content can neither fail the run nor
+mask a change to included content.
+
+#### Why a filter-included symlink is refused rather than skipped
+
+rclone's local backend does not transfer symlinks or special files without
+`--links`/`-L`, and this fleet passes neither — it logs "Can't follow symlink
+without -L/--copy-links" and skips them. So sync would *ignore* such a member.
+The seed still refuses (fail closed) rather than dropping it, deliberately:
+the seed's value is a **provable** identity between the published tree and the
+source universe, and a member that silently disappears between the manifest and
+the archive is exactly the divergence this feature exists to prevent. The
+refusal names the member and its reason, and the remedy is the folder's own
+ignore rules — which is why the Projects shape becomes seedable once its
+excludes are configured (fixture-tested with nested `node_modules` symlinks).
 
 Everything up to and including the atomic rename is implemented in
 `packages/daemon/src/seed-archive.ts` and driven end-to-end against a fixture
@@ -264,8 +336,9 @@ preflight → measuring_source → archiving_source → uploading_archive
 `source_authority`, `filter_universe`, `staging_same_filesystem`,
 `target_tooling`, `target_space`, `transport` — each with its own message.
 The UI lists the unmet ones ("Before this seed can run: …"), so an operator
-sees *all* blockers instead of the first one. Two of them
-(`filter_universe`, `transport`) are the open Stage 1 prerequisites.
+sees *all* blockers instead of the first one. `transport` is the one open
+Stage 1 prerequisite; `filter_universe` still fails whenever the target's
+established baseline used a different filter set.
 
 ## 3. Space calculation
 
@@ -360,26 +433,28 @@ ok                   = targetFreeBytes is known AND targetFreeBytes ≥ required
 
 ## 6. Rollout plan
 
-**Stage 0 — this slice (done, awaiting review).**
+**Stage 0 — done, reviewed, corrected.**
 Contract, schema + migration, server API, plan/preflight surface, explicit
 source authority, job state machine + lease + progress, archive primitives
 with fixture tests, progress-aware deadline wired into the daemon, UI panel +
 help text, docs and skill reference. `POST /seed-jobs` returns 503; the UI's
 Run control is disabled with the server's reason.
 
-**Stage 1 — the two open prerequisites.**
+**Stage 1a — filter-aware archive construction (done).**
+`packages/daemon/src/seed-filter-universe.ts` compiles the exact
+`--filter-from` rule lines the executor writes into a `SeedSourceFilterUniverse`
+with rclone's own semantics, and `buildSeedSourceManifest(assignment, type)` is
+the single assignment → universe → manifest entry point. `buildSeedManifest`,
+`createSeedArchive` and `seedPreflight` all require that universe; tar is given
+the manifest's member list and nothing else; churn is measured inside the same
+universe. Fixture-tested against the real Projects shape (nested `node_modules`
+symlinks + ignored content) and cross-checked against the host's real rclone.
+`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`; **execution is still
+unavailable**, because the transport is not.
 
-1. **Filter-aware archive construction.** Adapt the daemon's existing
-   effective filter machinery (`cheapEffectiveFilter` /
-   `liveFilterFingerprint` / `materialiseGitignoreFilter`) into a
-   `SeedSourceFilterUniverse`: an rclone-pattern-equivalent
-   `includes(relativePath, isDirectory)` predicate plus the fingerprint the
-   source assignment already reports. Fixture-test it against a tree
-   containing nested `node_modules` symlinks (the real Projects shape) and
-   assert the manifest has no unsupported members and the fingerprint equals
-   the assignment's. Only then may `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED`
-   become true.
-2. **The transport.** Implement the S3 relay (upload to
+**Stage 1b — the transport (the one open prerequisite).**
+
+Implement the S3 relay (upload to
    `lamasync/seed/<jobId>/…`, download on the target) behind the existing
    `SeedJob` state machine, with an integration test against a local
    object-store fixture. Keep `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` false until
@@ -389,7 +464,7 @@ Run control is disabled with the server's reason.
 **Stage 2 — end-to-end fixture acceptance.**
 A two-host fixture run through the real daemon: source archive → transport →
 target staging → verify → atomic rename → bisync baseline validation reporting
-zero content changes. Only then flip the capability constants.
+zero content changes. Only then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`.
 
 **Stage 3 — live acceptance on the real pair.**
 Re-run the dev-vm shape with a copy of a large tree (never the live
@@ -412,19 +487,19 @@ control. The seed remains opt-in per folder.
 | Prerequisite list (6 gates, each with its own message) | **implemented + tested** |
 | Seed job state machine, lease, progress, cancel, complete | **implemented + tested** |
 | Archive create / validate / extract / verify / atomic publish, with the manifest↔archive equality guard | **implemented + fixture-tested end-to-end** |
+| Filter-aware archive construction: rclone-equivalent rule compiler, universe builder, assignment → manifest entry point, tar fed the manifest's member list, churn measured inside the universe | **implemented + fixture-tested, cross-checked against the host's real rclone** |
 | Progress-aware seed-stage deadline in the executor, scoped by `syncRunIsProgressAware` | **implemented + tested with real processes** |
 | Web UI plan panel, source-device picker, prerequisites, phases, help text, disabled execution | **implemented + tested** |
-| **Filter-aware archive construction from the effective filter universe** | **NOT implemented (Stage 1 prerequisite)** |
-| Upload/download of the archive to temporary seed space | **NOT implemented (Stage 1 prerequisite)** |
+| Upload/download of the archive to temporary seed space | **NOT implemented (Stage 1b — the one open prerequisite)** |
 | Remote orchestration (which host runs which phase) | **NOT implemented** |
 | Post-seed zero-change bisync validation as an automated gate | **designed, not implemented** |
 
-Because the filter-aware archive and the transport are not implemented,
-`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` and
-`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` are both `false`, `POST /seed-jobs`
-returns `503 { executionAvailable: false, reason }`, and the UI shows a
-disabled control. **No arbitrary folder — including the real Projects tree —
-can be seeded today**, and no live archive transfer is claimed anywhere.
+Because the transport is not implemented, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
+is `false` (while `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is now `true`),
+`POST /seed-jobs` returns `503 { executionAvailable: false, reason }`, and the
+UI shows a disabled control. **No folder can be seeded today**, and no live
+archive transfer is claimed anywhere: Stage 1a made the *local* half of a seed
+correct and provable, it did not make a seed runnable.
 
 ## 8. Changed files
 
@@ -433,8 +508,8 @@ Core
   filter universe, space math, staging policy, archive safety, prerequisites,
   phase machine, deadline decision, wire grammar.
 - `packages/core/src/folder-seed.test.ts` (new).
-- `packages/core/src/folder-health.ts` — `facts.archive` tooling block and
-  `facts.seedStaging` staging proof.
+- `packages/core/src/folder-health.ts` — `facts.archive` tooling block,
+  `facts.seedStaging` staging proof, and `facts.filter.patternCount`.
 - `packages/core/src/types.ts` — `seed_plan` / `seed_job` WS events.
 - `packages/core/src/db/schema.ts` — `folder_seed_plans` (incl.
   `source_authority_host_id`, `source_authority`, `filter_universe`),
@@ -445,14 +520,21 @@ Core
 Daemon
 - `packages/daemon/src/seed-archive.ts` (new) — tooling detection,
   filter-aware manifest, create/list/validate/extract, manifest↔archive
-  equality, verify, atomic publish, preflight.
+  equality, verify, atomic publish, preflight. Stage 1a: tar is fed the
+  manifest's member list (`--no-recursion --files-from`), empty directories are
+  pruned, and churn is measured inside the universe.
 - `packages/daemon/src/seed-archive.test.ts` (new).
+- `packages/daemon/src/seed-filter-universe.ts` (new, Stage 1a) — the rclone
+  `--filter-from` rule compiler, the universe builder, and the
+  assignment → manifest entry point.
+- `packages/daemon/src/seed-filter-universe.test.ts` (new, Stage 1a) — incl.
+  the fidelity cross-check against the host's real rclone.
 - `packages/daemon/src/seed-deadline.test.ts` (new) — plus
   `syncRunIsProgressAware` scope tests.
 - `packages/daemon/src/executor.ts` — `ProcessWatchdog` /
   `superviseProcess` / `seedStageWatchdog` / `syncRunIsProgressAware`.
-- `packages/daemon/src/folder-health.ts` — report archive tooling and
-  `seedStagingProofFor`.
+- `packages/daemon/src/folder-health.ts` — report archive tooling,
+  `seedStagingProofFor`, and the countable `filter.patternCount`.
 
 Server
 - `packages/server/src/seed-jobs.ts` (new) — persistence + plan preflight with
@@ -461,8 +543,8 @@ Server
 - `packages/server/src/routes/folder-seed.test.ts` (new).
 - `packages/server/src/seed-staging-facts.test.ts` (new) — fail-closed
   normalization of the device's staging proof.
-- `packages/server/src/routes/folder-health.ts` — normalize `facts.archive`
-  and `facts.seedStaging`.
+- `packages/server/src/routes/folder-health.ts` — normalize `facts.archive`,
+  `facts.seedStaging` and `facts.filter.patternCount`.
 - `packages/server/src/routes/folders.ts` — delete seed artifacts with an
   assignment.
 - `packages/server/src/auth.ts` — device allowlist for its own seed routes.
@@ -491,7 +573,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2385 pass / 0 fail, 164 files
+bun test                                # 2426 pass / 0 fail, 166 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -503,23 +585,37 @@ Focused suites:
   machine, deadline continue/stall/hard-cap, plan validity (incl. unusable
   authority, unwired filter-aware archiving, filter mismatch, unknown
   filesystem), the prerequisite list, and the execution capability.
-- `packages/daemon/src/seed-archive.test.ts` — **29 tests**: real GNU tar for
+- `packages/daemon/src/seed-filter-universe.test.ts` — **25 tests**: the rule
+  parser (comments, the mandatory single space, a trailing `;` staying in the
+  pattern, a malformed regex refused), the glob translation, the semantics
+  table in §2.4, the exact rule lines an assignment produces
+  (`ignoreGitMetadata` and `respectGitignore` ordering), the Projects-shaped
+  fixture (pruned subtree ⇒ no symlink in the manifest; a filter-**included**
+  symlink ⇒ fail closed; the archive's member set equals the manifest's), the
+  single entry point's four fail-closed paths, and **a fidelity cross-check
+  against the host's real `rclone lsf --filter-from` over 22 rule sets**
+  (skipped when rclone is not on PATH).
+- `packages/daemon/src/seed-archive.test.ts` — **33 tests**: real GNU tar for
   both `tar.zstd` and `tar.gz` — create → validate → extract → verify
   byte-for-byte → atomic rename, mtime preservation, traversal/symlink/churn/
-  corruption refusals, non-empty target refusal, preflight, and the two
-  corrections: **create refuses a symlink in the universe before tar runs**
-  (runner spy asserts tar was never invoked and no archive exists) and
-  **create refuses an archive whose members do not equal the manifest**
-  (and deletes it); plus the filter-prunes-`node_modules` case and the
-  `/data/elsewhere` rejection.
+  corruption refusals, non-empty target refusal, preflight, and the fail-closed
+  set: **create refuses a symlink in the universe before tar runs** (runner spy
+  asserts tar was never invoked and no archive exists), **the archive never
+  contains content the universe excludes** (`node_modules` with a symlink
+  inside it), **the member list is removed on success and failure**, **create
+  refuses an archive missing a manifest member** and **one carrying content the
+  manifest does not describe** (both by rewriting the member list under real
+  tar, and both delete the archive), **churn OUTSIDE the universe does not fail
+  the archive**, plus the `/data/elsewhere` rejection.
 - `packages/daemon/src/seed-deadline.test.ts` — **11 tests** against real child
   processes: fixed timeout still kills an ordinary run, a progressing stage
   survives past the nominal timeout, a stall is killed, progress resets the
   budget, the hard cap bounds a chatty stage, and the scope rule (ready
   baseline ⇒ fixed; first run ⇒ progress-aware).
-- `packages/daemon/src/folder-health.test.ts` — **23 tests**, incl. the
+- `packages/daemon/src/folder-health.test.ts` — **24 tests**, incl. the
   target's own staging proof (proved / unreadable ⇒ unknown / relative path ⇒
-  no proof) and the heartbeat carrying both new fact blocks.
+  no proof), the heartbeat carrying both new fact blocks, and the countable
+  `filter.patternCount` floor.
 - `packages/server/src/routes/folder-seed.test.ts` — **17 tests**: admin-only
   plan creation, mandatory `confirm`, mandatory `sourceHostId`, self-seed and
   unassigned-source refusals, stale measurement not usable, plan built from
@@ -540,17 +636,17 @@ Focused suites:
 
 ## 10. Remaining live validation (owner / later stage)
 
-1. **Stage 1a:** wire filter-aware archive construction from the daemon's
-   effective filter universe, and fixture-test it against a tree with nested
-   `node_modules` symlinks (the real Projects shape).
-2. **Stage 1b:** implement and fixture-test the archive transport before any
-   live run.
-3. Two-host end-to-end fixture acceptance with a zero-change baseline
+1. **Stage 1b:** implement and fixture-test the archive transport before any
+   live run — the one open prerequisite.
+2. Two-host end-to-end fixture acceptance with a zero-change baseline
    validation (stage 2).
-4. A live dev-vm-shape run on a **copy** of a large tree, confirming no
+3. A live dev-vm-shape run on a **copy** of a large tree, confirming no
    timeout kill while progressing and a correct resume after a deliberate
    stall (stage 3).
-5. Confirm the target's archive tooling *and* staging proof are reported before
+4. Confirm the target's archive tooling *and* staging proof are reported before
    the Run control is enabled for that device.
-6. Decide the retention/cleanup policy for `lamasync/seed/…` objects after a
+5. Decide the retention/cleanup policy for `lamasync/seed/…` objects after a
    successful or abandoned job.
+
+Stage 1a is done: the local half of a seed is correct and provable, and the
+plan's remaining gate is the transport alone.
