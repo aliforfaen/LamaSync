@@ -20,6 +20,7 @@ import {
   SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
   type FolderHealthFacts,
   type SeedJob,
+  emptySeedJobArchiveFacts,
 } from "@lamasync/core";
 
 process.env.LAMASYNC_API_KEY = process.env.LAMASYNC_API_KEY ?? "folder-seed-master-key-123";
@@ -163,7 +164,7 @@ function seedJobFixture(overrides: Partial<SeedJob> = {}): SeedJob {
       updatedAt: now,
     },
     source: { fileCount: 91_660, totalBytes: 14_864_173_809, measuredAt: now, measuredOnHostId: "host-a", manifestFingerprint: null },
-    archive: { format: "tar.zstd", bytes: null, sha256: null, objectKey: null, memberCount: null },
+    archive: emptySeedJobArchiveFacts("tar.zstd"),
     staging: { path: "/home/b/.lamasync-seed-staging-Projects-job-1", targetPath: "/home/b/Projects", requiredFreeBytes: 1, freeBytesAtPlan: 100_000_000_000 },
     leaseOwner: null,
     leaseExpiresAt: null,

@@ -35,6 +35,7 @@ import {
   type SeedArchiveTooling,
   type SeedFilterUniverseFacts,
   type SeedJob,
+  normalizeSeedJobArchiveFacts,
   type SeedJobArchiveFacts,
   type SeedJobPhase,
   type SeedJobPhaseOrTerminal,
@@ -408,9 +409,10 @@ function rowToSeedJob(row: SeedJobRow): SeedJob {
     source: isRecord(source)
       ? (source as unknown as SeedSourceFacts)
       : { fileCount: 0, totalBytes: 0, measuredAt: 0, measuredOnHostId: null, manifestFingerprint: null },
-    archive: isRecord(archive)
-      ? (archive as unknown as SeedJobArchiveFacts)
-      : { format: "tar.gz", bytes: null, sha256: null, objectKey: null, memberCount: null },
+    // Fail closed: a missing or malformed field becomes null/not_started, so
+    // the transport refuses to download rather than trusting a shape it cannot
+    // verify against.
+    archive: normalizeSeedJobArchiveFacts(archive),
     staging: isRecord(staging)
       ? (staging as unknown as SeedJobStagingFacts)
       : { path: "", targetPath: "", requiredFreeBytes: 0, freeBytesAtPlan: null },
@@ -548,6 +550,30 @@ export function renewSeedJobLease(
         SET lease_owner = ?, lease_expires_at = ?, updated_at = ?
       WHERE id = ? AND status = 'running'`,
     [owner, expiresAt, now, jobId],
+  );
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Record the archive/transport facts of a job.
+ *
+ * Deliberately NOT guarded on status: the archive metadata is written while the
+ * job is running (the upload phase) and the cleanup state is written AFTER the
+ * job reaches a terminal phase, which is exactly when its objects become
+ * deletable. The job's OUTCOME stays owned by `finishSeedJob`; this function
+ * only ever touches the `archive` block.
+ */
+export function updateSeedJobArchive(
+  database: Database,
+  jobId: string,
+  archive: SeedJobArchiveFacts,
+  now: number = Date.now(),
+): SeedJob | null {
+  database.run(
+    `UPDATE folder_seed_jobs
+        SET archive = ?, updated_at = ?
+      WHERE id = ?`,
+    [JSON.stringify(archive), now, jobId],
   );
   return getSeedJob(database, jobId);
 }

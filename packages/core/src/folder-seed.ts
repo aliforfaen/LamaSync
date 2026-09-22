@@ -110,9 +110,18 @@ export const SEED_PATH_MAX_LENGTH = 4096;
 /** Staging directory name created beside (never inside) the final target. */
 export const SEED_STAGING_DIR_PREFIX = ".lamasync-seed-staging-";
 
-/** Dedicated, temporary object namespace for seed archives. Deliberately
- *  NOT the managed-folder namespace: a seed archive is transport, not data,
- *  and must never be mistaken for a synced file. */
+/**
+ * Dedicated, temporary object namespace for seed archives. Deliberately NOT
+ * the managed-folder namespace: a seed archive is transport, not data, and must
+ * never be mistaken for a synced file. Everything in here is deletable at any
+ * time without touching a user's data.
+ *
+ * Stage 1b implements the relay CONTRACT over this namespace
+ * (`@lamasync/core/seed-relay`: key validation with prefix containment, the
+ * immutable archive metadata, the store interface, and the cleanup/retention
+ * state). No configured S3 backend, rclone remote or live host is wired, and
+ * `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false`.
+ */
 export const SEED_OBJECT_KEY_PREFIX = "lamasync/seed";
 
 // ---------------------------------------------------------------------------
@@ -1069,12 +1078,151 @@ export interface SeedPlanValidity {
   message: string;
 }
 
+/**
+ * The recorded cleanup state of one job's seed objects.
+ *
+ * It lives WITH the job (in the job row's archive facts) rather than in a
+ * parallel table, because it is a property of that job's transport. `attempts`
+ * makes a retry observable, and `deletedKeys` is a set of keys CONFIRMED
+ * absent, so a second pass over the same job is a no-op instead of a second
+ * deletion attempt.
+ *
+ * The retention POLICY (when a deletion is due, and how long an abandoned
+ * object is kept) lives in `@lamasync/core/seed-relay`, next to the store
+ * contract it belongs to.
+ */
+export type SeedRelayCleanupState = "not_started" | "cleaned" | "failed";
+
+export interface SeedRelayCleanup {
+  state: SeedRelayCleanupState;
+  attempts: number;
+  lastAttemptAt: number | null;
+  /** Keys confirmed absent. Never contains a key outside the job's namespace. */
+  deletedKeys: string[];
+  /** Bounded reason when the state is `failed`. Never a credential. */
+  message: string | null;
+}
+
+export function initialSeedRelayCleanup(): SeedRelayCleanup {
+  return { state: "not_started", attempts: 0, lastAttemptAt: null, deletedKeys: [], message: null };
+}
+
+/** True when nothing is left to delete for this job. */
+export function isSeedRelayCleanupComplete(cleanup: SeedRelayCleanup): boolean {
+  return cleanup.state === "cleaned";
+}
+
+/** A lowercase hex SHA-256 digest, the only digest shape the wire accepts. */
+export const SEED_SHA256_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The archive/transport facts of one seed job.
+ *
+ * This IS the transport state — deliberately not a parallel table. It holds
+ * the immutable archive metadata the source produced (format, byte count,
+ * SHA-256, manifest fingerprint, member count), the object key in the
+ * dedicated seed namespace, and the cleanup/retention state of that object.
+ * The whole block lives in the existing `folder_seed_jobs.archive` JSON column,
+ * so the transport adds no schema and no second source of truth.
+ *
+ * Immutability is a contract, not a comment: `bytes`, `sha256`,
+ * `manifestFingerprint` and `memberCount` are written ONCE by the source from
+ * the archive it just wrote, and every later step compares against them.
+ */
 export interface SeedJobArchiveFacts {
   format: SeedArchiveFormat;
   bytes: number | null;
   sha256: string | null;
   objectKey: string | null;
   memberCount: number | null;
+  /** Content fingerprint of the manifest the archive was built from. */
+  manifestFingerprint: string | null;
+  /** When the source finished uploading the object. */
+  uploadedAt: number | null;
+  /** When the target last verified the downloaded bytes against this record. */
+  verifiedAt: number | null;
+  /** Cleanup/retention state of the object. Idempotent by construction. */
+  cleanup: SeedRelayCleanup;
+}
+
+/**
+ * The archive facts of a job that has not reached the transport yet. Every
+ * field the transport owns is explicitly empty rather than invented, and the
+ * cleanup state starts as `not_started`.
+ */
+export function emptySeedJobArchiveFacts(format: SeedArchiveFormat): SeedJobArchiveFacts {
+  return {
+    format,
+    bytes: null,
+    sha256: null,
+    objectKey: null,
+    memberCount: null,
+    manifestFingerprint: null,
+    uploadedAt: null,
+    verifiedAt: null,
+    cleanup: initialSeedRelayCleanup(),
+  };
+}
+
+/**
+ * Normalize archive facts read from storage (or from an older daemon).
+ *
+ * Fail closed: a missing or malformed field becomes `null`/`not_started` — the
+ * transport then refuses to download, because it has no digest to verify
+ * against — instead of being cast into a shape the caller would trust.
+ */
+export function normalizeSeedJobArchiveFacts(
+  value: unknown,
+  fallbackFormat: SeedArchiveFormat = "tar.gz",
+): SeedJobArchiveFacts {
+  if (typeof value !== "object" || value === null) return emptySeedJobArchiveFacts(fallbackFormat);
+  const record = value as Record<string, unknown>;
+  const format =
+    record["format"] === "tar.zstd" || record["format"] === "tar.gz"
+      ? (record["format"] as SeedArchiveFormat)
+      : fallbackFormat;
+  const cleanup = record["cleanup"];
+  const cleanupRecord =
+    typeof cleanup === "object" && cleanup !== null ? (cleanup as Record<string, unknown>) : {};
+  const state = cleanupRecord["state"];
+  const deletedKeys = Array.isArray(cleanupRecord["deletedKeys"])
+    ? cleanupRecord["deletedKeys"].filter((key): key is string => typeof key === "string").slice(0, 64)
+    : [];
+  return {
+    format,
+    bytes: positiveIntOrNull(record["bytes"]),
+    sha256: hexDigestOrNull(record["sha256"]),
+    objectKey: typeof record["objectKey"] === "string" ? record["objectKey"] : null,
+    memberCount: positiveIntOrNull(record["memberCount"]),
+    manifestFingerprint:
+      typeof record["manifestFingerprint"] === "string" && record["manifestFingerprint"].length > 0
+        ? record["manifestFingerprint"]
+        : null,
+    uploadedAt: positiveIntOrNull(record["uploadedAt"]),
+    verifiedAt: positiveIntOrNull(record["verifiedAt"]),
+    cleanup: {
+      state:
+        state === "cleaned" || state === "failed" || state === "not_started"
+          ? (state as SeedRelayCleanup["state"])
+          : "not_started",
+      attempts: positiveIntOrZero(cleanupRecord["attempts"]),
+      lastAttemptAt: positiveIntOrNull(cleanupRecord["lastAttemptAt"]),
+      deletedKeys,
+      message: typeof cleanupRecord["message"] === "string" ? cleanupRecord["message"].slice(0, 240) : null,
+    },
+  };
+}
+
+function positiveIntOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function positiveIntOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function hexDigestOrNull(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
 }
 
 export interface SeedJobStagingFacts {

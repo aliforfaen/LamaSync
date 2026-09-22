@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { FolderHealthFacts, FolderHealthRecord } from "@lamasync/core/folder-health";
+import { emptySeedJobArchiveFacts } from "@lamasync/core/folder-seed";
 import type { SeedJob, SeedPlan } from "@lamasync/core/folder-seed";
 import {
   SEED_GLOSSARY,
@@ -408,7 +409,7 @@ describe("SeedJob typing stays honest", () => {
     const job: Pick<SeedJob, "status" | "leaseOwner" | "archive"> = {
       status: "planned",
       leaseOwner: null,
-      archive: { format: "tar.gz", bytes: null, sha256: null, objectKey: null, memberCount: null },
+      archive: emptySeedJobArchiveFacts("tar.gz"),
     };
     expect(job.leaseOwner).toBeNull();
     expect(job.archive.bytes).toBeNull();

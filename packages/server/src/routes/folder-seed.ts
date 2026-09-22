@@ -13,6 +13,7 @@ import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import {
   canTransitionSeedPhase,
+  emptySeedJobArchiveFacts,
   isTerminalSeedPhase,
   parseSeedJobCreatePayload,
   parseSeedPlanRequestPayload,
@@ -230,13 +231,7 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         phase: "preflight",
         progress: initialSeedJobProgress("preflight", now),
         source: plan.source,
-        archive: {
-          format: plan.archive.format,
-          bytes: null,
-          sha256: null,
-          objectKey: null,
-          memberCount: null,
-        },
+        archive: emptySeedJobArchiveFacts(plan.archive.format),
         staging: {
           path: "",
           targetPath: "",

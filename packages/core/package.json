@@ -13,6 +13,7 @@
     "./version-compare": "./src/version-compare.ts",
     "./folder-health": "./src/folder-health.ts",
     "./folder-seed": "./src/folder-seed.ts",
+    "./seed-relay": "./src/seed-relay.ts",
     "./fleet-health": "./src/fleet-health.ts"
   },
   "scripts": {

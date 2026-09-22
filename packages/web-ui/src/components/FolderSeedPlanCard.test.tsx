@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { FolderHealthFacts, FolderHealthRecord } from "@lamasync/core/folder-health";
+import { emptySeedJobArchiveFacts } from "@lamasync/core/folder-seed";
 import type { SeedJob, SeedPlan, SeedPlanValidity } from "@lamasync/core/folder-seed";
 import {
   FolderSeedPlanCard,
@@ -281,7 +282,14 @@ describe("SeedJobProgress", () => {
         updatedAt: 1,
       },
       source: { fileCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1, measuredOnHostId: "master", manifestFingerprint: null },
-      archive: { format: "tar.zstd", bytes: 1, sha256: "a", objectKey: "k", memberCount: 91_660 },
+      archive: {
+        ...emptySeedJobArchiveFacts("tar.zstd"),
+        bytes: 1,
+        sha256: "a".repeat(64),
+        objectKey: "lamasync/seed/j1/payload.tar.zst",
+        memberCount: 91_660,
+        manifestFingerprint: "mf",
+      },
       staging: { path: "/home/b/.lamasync-seed-staging-Projects-j1", targetPath: "/home/b/Projects", requiredFreeBytes: 1, freeBytesAtPlan: 2 },
       leaseOwner: "dev-vm",
       leaseExpiresAt: 2,
@@ -320,7 +328,7 @@ describe("SeedJobProgress", () => {
         updatedAt: 1,
       },
       source: { fileCount: 0, totalBytes: 0, measuredAt: 0, measuredOnHostId: null, manifestFingerprint: null },
-      archive: { format: "tar.gz", bytes: null, sha256: null, objectKey: null, memberCount: null },
+      archive: emptySeedJobArchiveFacts("tar.gz"),
       staging: { path: "", targetPath: "", requiredFreeBytes: 0, freeBytesAtPlan: null },
       leaseOwner: null,
       leaseExpiresAt: null,
