@@ -25,6 +25,7 @@ import type {
   FolderHealthState,
   FolderHealthWatcherFacts,
   FolderType,
+  SeedArchiveTooling,
 } from "@lamasync/core";
 import { deriveFolderHealth } from "@lamasync/core";
 import { expandHomePath } from "./config.ts";
@@ -46,6 +47,27 @@ export const HEALTH_DISK_SPACE_DEFAULT = 1_000_000_000;
  *  scheduled probe forever. Reaching it still reports the partial total and
  *  is honest about being a floor. */
 export const DEEP_MEASURE_ENTRY_CAP = 500_000;
+
+/** LAMA-346: archive tooling present on this device. */
+let cachedArchiveTooling: SeedArchiveTooling | null = null;
+
+/**
+ * Detect `tar`/`zstd`/`gzip` on PATH once per process.
+ *
+ * These are plain PATH lookups (no spawn), and they are reported with the
+ * ordinary heartbeat so a seed plan can be built for this device without a
+ * second round-trip. `force` is for tests and for an explicit re-diagnose.
+ */
+export function archiveToolingCached(force = false): SeedArchiveTooling {
+  if (force || cachedArchiveTooling === null) {
+    cachedArchiveTooling = {
+      tar: Bun.which("tar") !== null,
+      zstd: Bun.which("zstd") !== null,
+      gzip: Bun.which("gzip") !== null,
+    };
+  }
+  return cachedArchiveTooling;
+}
 
 export interface FolderHealthProbeOptions {
   assignment: FolderAssignment;
@@ -258,6 +280,7 @@ export function probeFolderHealth(opts: FolderHealthProbeOptions): FolderHealthP
     paused: opts.paused,
     runInProgress: opts.runInProgress,
     rcloneAvailable: opts.rcloneAvailable,
+    archive: archiveToolingCached(),
     localDir,
     freeSpaceBytes: free,
     freeSpaceThresholdBytes: threshold,
