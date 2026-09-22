@@ -94,6 +94,19 @@ distributable binary build.
   endpoint or bucket parameter. Retention is decided — delete on the terminal
   phase, a 24 h window for abandoned objects, idempotent retries,
   namespace-confined sweeps, never delete on an unknown age.
+  *Disposable two-host proof (Stage 2a):* `packages/daemon/src/seed-e2e.test.ts`
+  drives the whole local chain inside one temp sandbox with two daemon-shaped
+  identities — source effective filter universe → manifest → real GNU tar
+  archive → local-object-store relay upload/download (re-hashed on disk) →
+  sibling staging → extract → manifest verification → one atomic rename into an
+  **empty** target — and then a **real `rclone bisync --resync` over the same
+  filter rules that reports zero files changed**, followed by bidirectional
+  edits, ignored-content checks, an anti-vacuity pair of roots and a modtime
+  sensitivity test. Failure cases: insufficient target space (plan gate),
+  unwritable archive destination, a tampered stored object, a store that lies
+  about what it downloaded, a stalled stage, a non-empty target, and a
+  filter-included symlink. rclone-gated with an explicit, named skip and a
+  documented list of the host proofs still required (handoff §2.11).
   *Explicitly unavailable execution:* no real store is wired to a running job
   and remote orchestration is **not implemented**, so
   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
@@ -646,9 +659,11 @@ distributable binary build.
 
 1. **LAMA-346 — the transport, remote orchestration and live acceptance.**
    The first vertical slice and Stage 1a (filter-aware archive construction)
-   are implemented and locally validated, and Stage 1b's relay contract, local
+   are implemented and locally validated; Stage 1b's relay contract, local
    store and verified upload/download/cleanup are implemented and tested against
-   each other; execution is deliberately unavailable. Remaining work, in order:
+   each other; and Stage 2a's disposable two-host harness proves the whole local
+   chain end to end against a real bisync. Execution is deliberately
+   unavailable. Remaining work, in order:
    (a) wire a real store and the job/daemon orchestration, then implement the
    S3 relay into
    `lamasync/seed/<jobId>/…` behind the existing job state machine with a

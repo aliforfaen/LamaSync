@@ -40,6 +40,17 @@ live host is touched. `seed-transport-bounded.test.ts` asserts from the module
 graph that no production module imports the transport yet — keep it that way
 while the flag is `false`.
 
+**Stage 2a is implemented**: `packages/daemon/src/seed-e2e.test.ts` is a
+disposable two-host harness (one temp sandbox, two daemon-shaped identities,
+test-only local object store) that drives source archive → relay → target
+extract/verify/atomic-publish → a **real `rclone bisync --resync` reporting zero
+files changed**, then bidirectional edits and ignored-content checks, with the
+failure cases. It is gated on rclone and force-skipped by
+`LAMASYNC_TEST_RCLONE=1`; the gate is a named test, and handoff §2.11 lists the
+host proofs still required (real network hop, real ENOSPC, the daemon
+orchestration, a live copy run). Never make it touch a configured backend, a
+credential, a real folder or dev-vm.
+
 **Execution is deliberately unavailable**: no store is wired to a running job,
 so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
 `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`), `POST /seed-jobs` returns
@@ -51,8 +62,11 @@ whoever owns the configuration.
 
 The archive primitives (create/validate/extract/verify/atomic-publish) are
 implemented and fixture-tested end-to-end with the host's real GNU tar, and
-mtimes must survive the archive or the following bisync will re-copy the whole
-tree. The **manifest is the authority for what may be archived**: it is built
+mtimes must survive the archive, or the following bisync reports every file as
+changed (`File changed: time`) instead of a clean zero-change baseline — and
+with a whole tree of changed mtimes its safety check aborts the run. The Stage
+2a harness asserts "no file is reported as changed", not merely "no bytes
+moved". The **manifest is the authority for what may be archived**: it is built
 from the folder's effective filter universe, a member a seed cannot represent
 blocks the run before tar starts, and the produced archive's member set must
 equal the manifest's. The **source device is named by the operator**

@@ -373,6 +373,13 @@ download, and an idempotent cleanup/retention state. A seed archive is transport
 everything in that namespace is deletable at any time and no credential is ever
 part of the contract.
 
+The local chain is proven end to end by a disposable harness
+(`packages/daemon/src/seed-e2e.test.ts`, rclone-gated): archive → relay →
+publish → a real `rclone bisync --resync` over the same filters reporting zero
+files changed. It runs in a temp sandbox with two daemon-shaped identities and
+a test-only object store, and it never touches a configured backend, credential
+or real folder.
+
 **Execution is still not available.** `POST /seed-jobs` returns
 `503 { executionAvailable: false, reason }` because the one remaining Stage 1
 prerequisite is open: no real store is wired to a running job, so nothing

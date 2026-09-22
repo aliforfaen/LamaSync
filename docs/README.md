@@ -33,8 +33,9 @@ source authority, plan, space calculation, staging proof, job state machine,
 progress-aware deadline, archive primitives), Stage 1a (filter-aware archive
 construction from the effective filter universe) and Stage 1b's relay contract
 (per-job namespace, key containment, immutable metadata, verified
-upload/download, cleanup/retention) are implemented while the wiring to a real
-store and the live acceptance remain open, so it stays here rather than in the
+upload/download, cleanup/retention) and Stage 2a's disposable two-host harness
+(archive → relay → publish → real bisync zero-change acceptance) are implemented
+while the wiring to a real store and the live acceptance remain open, so it stays here rather than in the
 archive. The dashboard
 design reference and image artifacts remain here because the web UI assets
 link to them directly.

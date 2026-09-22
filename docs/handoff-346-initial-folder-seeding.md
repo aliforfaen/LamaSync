@@ -217,9 +217,15 @@ re-synced afterwards, and execution remains unavailable (§7).
   fallback (GNU tar + gzip are already hard dependencies of the app-capture
   path, LAMA-336). `selectSeedArchiveFormat` returns the reason with the
   choice, and the plan stores it.
-- The archive preserves **mtimes**. This is load-bearing: rclone bisync
-  compares size + modtime, so an archive that reset mtimes would make the
-  mandatory zero-change baseline validation fail and re-copy the whole tree.
+- The archive preserves **mtimes**. This is load-bearing, and measured rather
+  than assumed (Stage 2a): bisync compares size + modtime, so an archive that
+  reset mtimes makes it report every file as `File changed: time` instead of a
+  clean "no changes" baseline. With a whole tree of changed mtimes bisync's own
+  safety check aborts the run ("Safety abort: all files were changed on
+  Path2"). Note what it does *not* necessarily do: re-transfer the bytes — it
+  re-checks content and can report "nothing to transfer" — which is exactly why
+  the acceptance assertion is "no file is reported as changed", not merely "no
+  bytes moved".
 - Extraction uses `--no-same-owner --no-same-permissions --no-overwrite-dir`,
   so no ownership or setuid bit from an untrusted archive is ever applied.
 
@@ -516,6 +522,91 @@ rather than propagated.
   `seed-transport-bounded.test.ts` reads the module graph to assert that no
   production module imports the transport yet.
 
+### 2.11 Stage 2a — the disposable two-host end-to-end proof harness
+
+`packages/daemon/src/seed-e2e.test.ts` is the automated acceptance proof that a
+seed produces a tree a real bisync accepts as a valid baseline. It is **not a
+deployment**: it runs entirely inside one `mkdtemp` sandbox, with two
+daemon-shaped identities (their own roots, their own ignore rules, their own
+bisync state dirs), a test-only local object store, and **no configured
+backend, credential, rclone config, dev-vm, production service or real folder**.
+
+The pipeline it drives, in order:
+
+| Step | What runs | What it proves |
+|---|---|---|
+| 1. source | `buildSeedFilterUniverse` → `buildSeedSourceManifest` → `createSeedArchive` (real GNU tar) | the archive is built from the folder's effective filter universe, and its member set equals the manifest's |
+| 2. relay | `uploadSeedArchive` → `downloadSeedArchive` through a local object store | the upload is hash-verified and read back; the download is **re-hashed on disk** before anything may extract |
+| 3. target | `extractSeedArchive` → `verifyExtractedTree` → `publishStagedTree` into an **empty** sibling target | the published tree is exactly the source universe, mtimes included, via one atomic rename |
+| 4. acceptance | real `rclone bisync --resync` over the SAME `--filter-from` rules | **zero files reported as changed** — the seed, not a sync, established the baseline — then normal edits flow both ways and ignored content never moves |
+
+The fixture is the real Projects shape: 180 source files across nested modules,
+a 64 KiB and a 32 KiB binary blob, an ignored `node_modules` **holding symlinks**
+(plus a nested `worktrees/feature-x/node_modules` symlink, as in the real tree),
+`.git` metadata, an ignored `*.log` and an ignored `tmp/` directory, and a pinned
+`mtime`.
+
+#### The acceptance assertion is "no file changed", not "no bytes moved"
+
+Measured, not assumed: bisync compares size + modtime, so a seed that reset
+mtimes makes it print `File changed: time` for every file and then re-check
+content — reporting "nothing to transfer" while still not being a clean
+baseline. With a whole tree of changed mtimes its own safety check aborts the
+run outright ("Safety abort: all files were changed on Path2"). The harness
+therefore asserts on the **change report**, and a paired sensitivity test proves
+that assertion is load-bearing: with content byte-identical and only one
+target-side mtime drifted, bisync *does* report `File changed: time`.
+
+#### Anti-vacuity
+
+A second, separate pair of roots proves the zero-transfer result is not an
+artefact of bisync ignoring everything: an ignored subtree that exists only on
+the source is invisible **with** the seed's filters and visible **without** them.
+That is precisely the difference a mismatched universe would produce after every
+seed, and it is why the seed and the sync must compile the same rule lines.
+
+#### Failure cases the harness drives
+
+| Case | Assertion |
+|---|---|
+| insufficient **target** space | the space plan is not `ok`, and the `target_space` prerequisite is unmet through the real gate — nothing is staged |
+| unknown free space | fails closed rather than assuming |
+| insufficient **source** space | an unwritable archive destination returns a **failed result** (not a thrown `EACCES`) and leaves no archive or member list behind |
+| hash mismatch, stored object tampered | the download is refused with the SHA-256 reason and the file is deleted |
+| hash mismatch, store **lies** about what it downloaded | caught by this module's own re-hash on disk — a store's report is never evidence |
+| stalled progress | the upload's own progress ticks keep a slow stage alive past the nominal timeout, while a stall fails with `stalled` and a chatty stage is bounded by `hard_cap` |
+| non-empty target | `publishStagedTree` refuses, the operator's file is untouched and the staging tree is **not** merged in |
+| filter-included symlink | blocks before tar, with no archive produced |
+| the plan gate | a fully-consistent plan is still **not runnable** while the transport is unwired |
+
+#### Gating, and the host proof that is still required
+
+The seed-pipeline half always runs. The bisync acceptance needs a real rclone, so
+it is gated on `Bun.which("rclone")` and force-skipped by `LAMASYNC_TEST_RCLONE=1`
+(the repo's existing hermetic-CI convention). A dedicated test named *"the
+bisync gate is explicit, not silent"* runs either way, so a skipped acceptance is
+visible in the output rather than implied.
+
+**What the harness does NOT prove, and what a host must still show:**
+
+1. **A real two-machine hop.** The relay here is a local object store. A host
+   proof must run the same pipeline with a real temporary object space between
+   two machines, including the network failure modes (partial upload, retry,
+   resume) that a local store cannot produce.
+2. **Real disk-full behaviour.** Insufficient space is proven at the plan gate
+   and by an unwritable destination. A true ENOSPC mid-archive needs a small
+   filesystem or a quota on the source, and a target squeezed below the
+   reservation needs a real target volume.
+3. **The real daemon orchestration.** Nothing here drives `POST /seed-jobs`, the
+   job lease, the phase reports or the WebSocket events end to end; that wiring
+   is exactly what Stage 1b still owes, and it must not be flipped on until it
+   exists.
+4. **A live dev-vm-shape run** on a **copy** of a large tree: no timeout kill
+   while progressing, one correct resume after a deliberate stall, and a
+   zero-change baseline afterwards (stage 3).
+5. **Concurrency and retention under load:** two jobs at once, a job abandoned
+   mid-transfer, and the abandoned-object sweep running against a real store.
+
 ## 3. Space calculation
 
 The peak staging footprint is `archive + extracted tree`, because the archive
@@ -645,10 +736,17 @@ the S3 relay (upload to
    the *whole* pipeline (including the post-seed baseline validation) is
    proven end-to-end.
 
-**Stage 2 — end-to-end fixture acceptance.**
-A two-host fixture run through the real daemon: source archive → transport →
-target staging → verify → atomic rename → bisync baseline validation reporting
-zero content changes. Only then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`.
+**Stage 2a — the disposable two-host proof (done).**
+`packages/daemon/src/seed-e2e.test.ts` drives source archive → local-store relay
+→ target staging → verify → atomic rename → a **real** `rclone bisync --resync`
+that reports zero files changed, then bidirectional edits and ignored-content
+checks, with the failure cases in §2.11. It is gated on rclone and explicitly
+skipped without it.
+
+**Stage 2b — the same proof through the real daemon (open).**
+The harness drives the primitives directly. Stage 2b must run the same chain
+through the job state machine, lease and phase reports with a real temporary
+object space, and only then may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip.
 
 **Stage 3 — live acceptance on the real pair.**
 Re-run the dev-vm shape with a copy of a large tree (never the live
@@ -677,6 +775,7 @@ control. The seed remains opt-in per folder.
 | Relay contract: namespace + key validation with prefix containment, immutable archive metadata, cleanup/retention state | **implemented + tested** |
 | Local object store (the integration fixture, and a legitimate local store) | **implemented + tested** |
 | Upload / download orchestration with hash verification at both hops, and failure cleanup | **implemented + tested against the fixture** |
+| Disposable two-host end-to-end proof harness (archive → relay → publish → real bisync zero-change acceptance, plus the failure cases) | **implemented + tested** (rclone-gated) |
 | **Wiring a real store and the job/daemon orchestration that calls it** | **NOT implemented (Stage 1b — the one open prerequisite)** |
 | Remote orchestration (which host runs which phase) | **NOT implemented** |
 | Post-seed zero-change bisync validation as an automated gate | **designed, not implemented** |
@@ -733,6 +832,11 @@ Daemon
 - `packages/daemon/src/seed-transport-bounded.test.ts` (new, Stage 1b) — reads
   the module graph to assert no production module imports the transport while
   the capability flag is `false`.
+- `packages/daemon/src/seed-e2e.test.ts` (new, Stage 2a) — the disposable
+  two-host proof harness, rclone-gated.
+- `packages/daemon/src/seed-archive.ts` — `createSeedArchive` now returns a
+  failed result (instead of throwing) when the member list cannot be written,
+  which the Stage 2a space failure case found.
 - `packages/server/src/seed-transport-state.test.ts` (new, Stage 1b) — the
   transport state lives on the existing job row; no new column.
 - `packages/daemon/src/seed-deadline.test.ts` (new) — plus
@@ -780,7 +884,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2509 pass / 0 fail, 170 files
+bun test                                # 2534 pass / 0 fail, 171 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -865,6 +969,14 @@ Focused suites:
   bounded-foundation invariant, asserted from the module graph — no production
   module imports the transport, nothing reaches a configured S3 or rclone,
   execution is still unavailable, and the seed namespace stays separate.
+- `packages/daemon/src/seed-e2e.test.ts` — **25 tests** (3 skipped without
+  rclone): the disposable two-host harness. Sandbox/identity/namespace shape;
+  the effective universe (including the trailing-slash rule vs pruning
+  distinction); the manifest; the archive's member set; the upload/download
+  metadata; the published tree and its mtimes; the real bisync zero-change
+  acceptance with bidirectional edits, ignored content, an anti-vacuity pair of
+  roots and a modtime sensitivity test; and the failure cases in §2.11. The
+  gate test names the skip explicitly.
 - `packages/server/src/seed-transport-state.test.ts` — **5 tests**: the
   transport state lives on the existing job row (round trip, cleanup recordable
   after the job ended, fail-closed read of a malformed row, and a schema check
@@ -884,8 +996,10 @@ Focused suites:
    `cleanupSeedRelayObjects`, then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` —
    the one open prerequisite. The contract, the local store and the
    verification logic are already implemented and tested.
-2. Two-host end-to-end fixture acceptance with a zero-change baseline
-   validation (stage 2).
+2. **Stage 2b:** the same proof through the real daemon (job state machine,
+   lease, phase reports) with a real temporary object space between two
+   machines, plus the host proofs listed in §2.11 (real ENOSPC, the network hop,
+   concurrency, retention under load).
 3. A live dev-vm-shape run on a **copy** of a large tree, confirming no
    timeout kill while progressing and a correct resume after a deliberate
    stall (stage 3).
