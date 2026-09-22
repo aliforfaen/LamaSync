@@ -27,13 +27,27 @@ assignment → universe → manifest entry point. tar is given the manifest's
 member list, churn is measured inside the universe, and a filter-included
 symlink or special file still fails closed before tar runs.
 
-**Execution is deliberately unavailable**: the archive transport is the one
-open Stage 1 prerequisite (`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false`;
-`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is now `true`), so `POST /seed-jobs`
-returns `503 { executionAvailable: false, reason }` and the Folders page shows
-a disabled control. Do not flip the transport constant without a two-host
-fixture acceptance that includes a zero-content-change bisync baseline
-validation.
+**Stage 1b's foundation is implemented, but nothing is wired to a running job.**
+`@lamasync/core/seed-relay` is the relay contract (dedicated
+`lamasync/seed/<jobId>/` namespace, key validation with prefix containment,
+immutable archive metadata, cleanup/retention state);
+`packages/daemon/src/seed-relay-local.ts` is a local object store that is also
+the integration fixture; `packages/daemon/src/seed-transport.ts` uploads with a
+locally computed digest, verifies the store's read-back, and **re-hashes the
+downloaded bytes on disk before anything may extract**. There is no credential,
+endpoint or bucket in that interface, and no configured S3, rclone remote or
+live host is touched. `seed-transport-bounded.test.ts` asserts from the module
+graph that no production module imports the transport yet — keep it that way
+while the flag is `false`.
+
+**Execution is deliberately unavailable**: no store is wired to a running job,
+so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
+`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`), `POST /seed-jobs` returns
+`503 { executionAvailable: false, reason }`, and the Folders page shows a
+disabled control. Do not flip the transport constant without a two-host fixture
+acceptance that includes a zero-content-change bisync baseline validation, and
+do not add a credential to the relay contract: the store is constructed by
+whoever owns the configuration.
 
 The archive primitives (create/validate/extract/verify/atomic-publish) are
 implemented and fixture-tested end-to-end with the host's real GNU tar, and

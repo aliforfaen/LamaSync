@@ -364,13 +364,22 @@ closed rather than being dropped silently, and the remedy is the folder's own
 ignore rules. Directories that end up holding nothing are not archived, because
 rclone transfers no empty directories.
 
+The transport **contract** now exists (`@lamasync/core/seed-relay`): a
+dedicated per-job namespace (`lamasync/seed/<jobId>/`), key validation with
+prefix containment, immutable archive metadata (format, byte count, SHA-256,
+manifest fingerprint, member count), verified upload and download, and an
+idempotent cleanup/retention state. A seed archive is transport, not data:
+everything in that namespace is deletable at any time and no credential is ever
+part of the contract.
+
 **Execution is still not available.** `POST /seed-jobs` returns
 `503 { executionAvailable: false, reason }` because the one remaining Stage 1
-prerequisite is open: the archive transport (upload to temporary seed space →
-target staging) is not implemented or validated. The Web UI shows a disabled
-control with that reason, and a plan whose facts are all consistent is still
-reported as **not runnable**. Do not expect a seed to run; the value today is
-the honest preflight plus the progress-aware timeout for first runs.
+prerequisite is open: no real store is wired to a running job, so nothing
+uploads or downloads an archive yet. The Web UI shows a disabled control with
+that reason, and a plan whose facts are all consistent is still reported as
+**not runnable**. Do not expect a seed to run, and do not point the relay at a
+configured S3 backend or an rclone remote: the value today is the honest
+preflight plus the progress-aware timeout for first runs.
 
 ## See also
 

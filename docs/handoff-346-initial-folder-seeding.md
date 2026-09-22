@@ -379,6 +379,104 @@ sees *all* blockers instead of the first one. `transport` is the one open
 Stage 1 prerequisite; `filter_universe` still fails whenever the target's
 established baseline used a different filter set.
 
+### 2.10 The temporary object-storage relay — Stage 1b foundation
+
+A seed archive is **transport, not data**. It lives in a dedicated, temporary
+namespace, it is deletable at any time, and deleting the namespace can never
+touch a user's files.
+
+```
+lamasync/seed/<jobId>/payload.tar.zst      ← one object, one job
+lamasync/seed/<jobId>/payload.tar.gz
+```
+
+The contract is `@lamasync/core/seed-relay` (dependency-free, no credentials),
+implemented by `packages/daemon/src/seed-relay-local.ts` and driven by
+`packages/daemon/src/seed-transport.ts`.
+
+#### Key validation and prefix containment
+
+Every key is validated with `validateSeedRelayObjectKey` **before any store
+call** — including the keys being *deleted*, because "delete the key the job
+reports" must never be a way to delete something else:
+
+| Rule | Why |
+|---|---|
+| no absolute path, Windows drive, backslash or control character | one shape, one namespace |
+| no empty segment, no `.`/`..` segment | traversal is refused, never normalised |
+| must be inside `lamasync/seed/` and exactly `lamasync/seed/<jobId>/<name>` | prefix containment |
+| the `<jobId>` segment must be a single safe segment | a job id cannot become a second path component |
+| the key must belong to the job being operated on | a job cannot read or delete another job's object |
+| the resolved path must still be inside the store root | belt and braces behind the key check |
+
+List prefixes have their own validator (`validateSeedRelayPrefix`): a prefix may
+be a namespace but must still be inside `lamasync/seed/`, so a sweep cannot walk
+out of it.
+
+#### Immutable archive metadata
+
+`SeedArchiveMetadata` is produced **once**, by the source, from the archive it
+just wrote, and every later step *compares* against it:
+
+```
+{ jobId, objectKey, format, bytes, sha256, manifestFingerprint, memberCount, createdAt }
+```
+
+It is carried on the job as `SeedJobArchiveFacts` — a field of the existing
+`folder_seed_jobs.archive` JSON column, **not** a parallel table — together with
+`uploadedAt`, `verifiedAt` and the cleanup state. A malformed or partial row
+normalizes fail-closed (`normalizeSeedJobArchiveFacts`): missing fields become
+`null`, and the transport then refuses to download rather than trusting a shape
+it cannot verify against.
+
+#### Upload, download, verification
+
+```
+source:  archive on disk → hash locally → put (store verifies while streaming)
+           → head read-back must match → metadata recorded
+target:  metadata from the job → get into a target path
+           → RE-HASH the bytes on disk → compare → only then may anything extract
+```
+
+Both hops verify against a digest this code computed from bytes it actually
+moved. A store's own report is never evidence: `get` re-hashes the downloaded
+file, and `head` is only used to confirm the store kept what was sent. A failure
+deletes what it created — a failed upload leaves no object, a failed download
+leaves no file — so nothing partial can be mistaken for an archive.
+
+#### Cleanup and retention (the policy decision)
+
+| Situation | Policy |
+|---|---|
+| job reached a terminal phase | its objects are deleted — a seed archive has no value once the tree is published |
+| a cleanup pass fails | recorded as `failed` with a bounded reason and an attempt count; the next pass retries and finishes it |
+| the object is already gone | **success**, which is what makes cleanup idempotent and re-runnable |
+| a job row is gone (or unknown) | objects are reaped after `SEED_RELAY_ABANDONED_RETENTION_MS` (24 h) measured from `storedAt` |
+| the object's age is unknown | left alone — never delete on a guess |
+| a key is outside the seed namespace | reported, never deleted |
+
+Cleanup never throws: it runs on the failure path too, where an exception would
+mask the original error, and a store that throws is recorded as a failed attempt
+rather than propagated.
+
+#### What is deliberately NOT here
+
+* **No configured S3 backend, no rclone remote, no live host.** The store
+  interface has no endpoint, bucket, key or secret parameter; the only
+  implementation is a local directory, which is also the integration-test
+  fixture. Nothing in this slice reads a backend configuration.
+* **No credentials in any API, log line or stored value.** `describeSeedRelayFailure`
+  names the store *type* (`local-fs`) and never its location; the archive facts
+  have a fixed field set, pinned by test.
+* **No phase invention.** The transport names the phase each step belongs to and
+  defers to the job state machine's own `canTransitionSeedPhase`
+  (`seedTransportPhaseAllowed`), so a step cannot skip a phase or run on a job
+  that already ended.
+* **No live seed.** `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false`,
+  `POST /seed-jobs` still returns 503, the UI control is still disabled, and
+  `seed-transport-bounded.test.ts` reads the module graph to assert that no
+  production module imports the transport yet.
+
 ## 3. Space calculation
 
 The peak staging footprint is `archive + extracted tree`, because the archive
@@ -491,9 +589,17 @@ symlinks + ignored content) and cross-checked against the host's real rclone.
 `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`; **execution is still
 unavailable**, because the transport is not.
 
-**Stage 1b — the transport (the one open prerequisite).**
+**Stage 1b — the transport (foundation done, wiring open).**
 
-Implement the S3 relay (upload to
+Done: the relay CONTRACT (`@lamasync/core/seed-relay`), the local object store
+that is also the integration fixture (`seed-relay-local.ts`), and the
+upload/download/cleanup orchestration with verification at both hops
+(`seed-transport.ts`), all tested end to end against each other. The
+retention/cleanup policy is decided (see §2.10).
+
+Still open, and the reason `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false`:
+wiring a real store and the job/daemon orchestration that calls it. Implement
+the S3 relay (upload to
    `lamasync/seed/<jobId>/…`, download on the target) behind the existing
    `SeedJob` state machine, with an integration test against a local
    object-store fixture. Keep `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` false until
@@ -529,16 +635,20 @@ control. The seed remains opt-in per folder.
 | Filter-aware archive construction: rclone-equivalent rule compiler, universe builder, assignment → manifest entry point, tar fed the manifest's member list, churn measured inside the universe | **implemented + fixture-tested, cross-checked against the host's real rclone** |
 | Progress-aware seed-stage deadline in the executor, scoped by `syncRunIsProgressAware` | **implemented + tested with real processes** |
 | Web UI plan panel, source-device picker, prerequisites, phases, help text, disabled execution | **implemented + tested** |
-| Upload/download of the archive to temporary seed space | **NOT implemented (Stage 1b — the one open prerequisite)** |
+| Relay contract: namespace + key validation with prefix containment, immutable archive metadata, cleanup/retention state | **implemented + tested** |
+| Local object store (the integration fixture, and a legitimate local store) | **implemented + tested** |
+| Upload / download orchestration with hash verification at both hops, and failure cleanup | **implemented + tested against the fixture** |
+| **Wiring a real store and the job/daemon orchestration that calls it** | **NOT implemented (Stage 1b — the one open prerequisite)** |
 | Remote orchestration (which host runs which phase) | **NOT implemented** |
 | Post-seed zero-change bisync validation as an automated gate | **designed, not implemented** |
 
-Because the transport is not implemented, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
-is `false` (while `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is now `true`),
+Because no store is wired to a running job, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
+is `false` (while `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`),
 `POST /seed-jobs` returns `503 { executionAvailable: false, reason }`, and the
 UI shows a disabled control. **No folder can be seeded today**, and no live
 archive transfer is claimed anywhere: Stage 1a made the *local* half of a seed
-correct and provable, it did not make a seed runnable.
+correct and provable, and Stage 1b's foundation made the transport contract
+testable, but neither made a seed runnable.
 
 ## 8. Changed files
 
@@ -547,6 +657,10 @@ Core
   filter universe, space math, staging policy, archive safety, prerequisites,
   phase machine, deadline decision, wire grammar.
 - `packages/core/src/folder-seed.test.ts` (new).
+- `packages/core/src/seed-relay.ts` (new, Stage 1b) — the relay contract:
+  namespace + key/prefix validation, immutable archive metadata, the store
+  interface, cleanup/retention state.
+- `packages/core/src/seed-relay.test.ts` (new, Stage 1b).
 - `packages/core/src/folder-health.ts` — `facts.archive` tooling block,
   `facts.seedStaging` staging proof, and `facts.filter.patternCount`.
 - `packages/core/src/types.ts` — `seed_plan` / `seed_job` WS events.
@@ -554,7 +668,7 @@ Core
   `source_authority_host_id`, `source_authority`, `filter_universe`),
   `folder_seed_jobs` in `SERVER_SCHEMA` and `MIGRATIONS`.
 - `packages/core/src/index.ts`, `packages/core/package.json` — export the new
-  module (`@lamasync/core/folder-seed`).
+  modules (`@lamasync/core/folder-seed`, `@lamasync/core/seed-relay`).
 
 Daemon
 - `packages/daemon/src/seed-archive.ts` (new) — tooling detection,
@@ -570,6 +684,18 @@ Daemon
   assignment → manifest entry point.
 - `packages/daemon/src/seed-filter-universe.test.ts` (new, Stage 1a) — incl.
   the fidelity cross-check against the host's real rclone.
+- `packages/daemon/src/seed-relay-local.ts` (new, Stage 1b) — the local object
+  store: key containment, immutable put, streaming verification, atomic
+  publication, idempotent delete. Also the integration fixture.
+- `packages/daemon/src/seed-relay-local.test.ts` (new, Stage 1b).
+- `packages/daemon/src/seed-transport.ts` (new, Stage 1b) — upload, download
+  with re-hash-before-extraction, cleanup, and the phase guard that reuses
+  `canTransitionSeedPhase`.
+- `packages/daemon/src/seed-transport-bounded.test.ts` (new, Stage 1b) — reads
+  the module graph to assert no production module imports the transport while
+  the capability flag is `false`.
+- `packages/server/src/seed-transport-state.test.ts` (new, Stage 1b) — the
+  transport state lives on the existing job row; no new column.
 - `packages/daemon/src/seed-deadline.test.ts` (new) — plus
   `syncRunIsProgressAware` scope tests.
 - `packages/daemon/src/executor.ts` — `ProcessWatchdog` /
@@ -579,7 +705,8 @@ Daemon
 
 Server
 - `packages/server/src/seed-jobs.ts` (new) — persistence + plan preflight with
-  the explicit source authority.
+  the explicit source authority, plus `updateSeedJobArchive` and fail-closed
+  archive-facts normalization.
 - `packages/server/src/routes/folder-seed.ts` (new) — the REST surface.
 - `packages/server/src/routes/folder-seed.test.ts` (new).
 - `packages/server/src/seed-staging-facts.test.ts` (new) — fail-closed
@@ -614,7 +741,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2434 pass / 0 fail, 166 files
+bun test                                # 2496 pass / 0 fail, 170 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -675,6 +802,29 @@ Focused suites:
 - `packages/server/src/seed-staging-facts.test.ts` — **4 tests**: the device's
   staging proof normalizes fail-closed (absent/malformed ⇒ null; a
   truthy-but-not-`true` verdict ⇒ unproven; unparsable numbers dropped).
+- `packages/core/src/seed-relay.test.ts` — **19 tests**: the namespace and key
+  shape, every refusal reason (absolute, drive, backslash, control character,
+  empty segment, traversal, wrong depth, outside the namespace, bad job id,
+  another job's key), list-prefix containment, metadata problems, observation
+  comparison (a missing digest is never a pass), cleanup/retention decisions,
+  orphan detection that only names seed-namespace keys, bounded failure
+  sentences, and fail-closed archive-facts normalization.
+- `packages/daemon/src/seed-relay-local.test.ts` — **34 tests**: the store and
+  the transport driven against each other — put/head/get/delete, immutability
+  (a byte-identical re-put is idempotent, different content is refused), a
+  digest or size mismatch on either hop (with the partial file removed), an
+  aborted upload and download, a store that misreports or throws, keys that
+  cannot escape the namespace or the root (including a symlink), cleanup that
+  resumes after a partial failure and then no-ops, and the phase guard reusing
+  the job state machine.
+- `packages/daemon/src/seed-transport-bounded.test.ts` — **4 tests**: the
+  bounded-foundation invariant, asserted from the module graph — no production
+  module imports the transport, nothing reaches a configured S3 or rclone,
+  execution is still unavailable, and the seed namespace stays separate.
+- `packages/server/src/seed-transport-state.test.ts` — **5 tests**: the
+  transport state lives on the existing job row (round trip, cleanup recordable
+  after the job ended, fail-closed read of a malformed row, and a schema check
+  proving no column was added).
 - `packages/web-ui/src/folder-seed.test.ts` +
   `components/FolderSeedPlanCard.test.tsx` — **35 tests**: recommendation
   wording, source-authority wording, source-device candidates (the target is
@@ -685,8 +835,11 @@ Focused suites:
 
 ## 10. Remaining live validation (owner / later stage)
 
-1. **Stage 1b:** implement and fixture-test the archive transport before any
-   live run — the one open prerequisite.
+1. **Stage 1b (wiring):** wire a real store and the job/daemon orchestration
+   that calls `uploadSeedArchive` / `downloadSeedArchive` /
+   `cleanupSeedRelayObjects`, then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` —
+   the one open prerequisite. The contract, the local store and the
+   verification logic are already implemented and tested.
 2. Two-host end-to-end fixture acceptance with a zero-change baseline
    validation (stage 2).
 3. A live dev-vm-shape run on a **copy** of a large tree, confirming no
@@ -694,8 +847,10 @@ Focused suites:
    stall (stage 3).
 4. Confirm the target's archive tooling *and* staging proof are reported before
    the Run control is enabled for that device.
-5. Decide the retention/cleanup policy for `lamasync/seed/…` objects after a
-   successful or abandoned job.
+5. ~~Decide the retention/cleanup policy~~ — decided in §2.10: delete on the
+   terminal phase, a 24 h window for abandoned objects, idempotent retries,
+   namespace-confined sweeps, never delete on an unknown age.
 
-Stage 1a is done: the local half of a seed is correct and provable, and the
-plan's remaining gate is the transport alone.
+Stage 1a is done and Stage 1b's foundation is done: the local half of a seed and
+the transport CONTRACT are correct and provable, and the plan's remaining gate is
+wiring a real store to a running job.

@@ -30,10 +30,12 @@ path-classification implementation it proposes has not started.
 [Initial large-folder seeding](handoff-346-initial-folder-seeding.md) is the
 live design record for LAMA-346: its first vertical slice (contract, explicit
 source authority, plan, space calculation, staging proof, job state machine,
-progress-aware deadline, archive primitives) and Stage 1a (filter-aware archive
-construction from the effective filter universe) are implemented while the
-archive transport and the live acceptance remain open, so it stays here rather
-than in the archive. The dashboard
+progress-aware deadline, archive primitives), Stage 1a (filter-aware archive
+construction from the effective filter universe) and Stage 1b's relay contract
+(per-job namespace, key containment, immutable metadata, verified
+upload/download, cleanup/retention) are implemented while the wiring to a real
+store and the live acceptance remain open, so it stays here rather than in the
+archive. The dashboard
 design reference and image artifacts remain here because the web UI assets
 link to them directly.
 

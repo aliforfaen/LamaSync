@@ -76,10 +76,23 @@ distributable binary build.
   backslash) — still fails closed before tar runs. Fixture-tested against the
   real Projects shape (nested `node_modules` symlinks + ignored content) and
   against hostile option-shaped file names with the host's real GNU tar.
-  *Explicitly unavailable execution:* the archive transport (temporary
-  `lamasync/seed/<jobId>/…` object space → target staging) and remote
-  orchestration are **not implemented**, so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
-  is `false` (while `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is now `true`),
+  *Transport foundation (Stage 1b, contract only):* `@lamasync/core/seed-relay`
+  defines the dedicated per-job namespace (`lamasync/seed/<jobId>/`), key
+  validation with prefix containment, the immutable archive metadata (format,
+  byte count, SHA-256, manifest fingerprint, member count) and the
+  cleanup/retention state. `packages/daemon/src/seed-transport.ts` uploads with
+  a digest computed locally, re-verifies the store's read-back, and **re-hashes
+  the downloaded bytes on disk before anything may extract**; failures delete
+  what they created. A local object store (`seed-relay-local.ts`) is both a
+  legitimate store and the integration fixture. No configured S3, no rclone
+  remote and no live host is touched: the store interface has no credential,
+  endpoint or bucket parameter. Retention is decided — delete on the terminal
+  phase, a 24 h window for abandoned objects, idempotent retries,
+  namespace-confined sweeps, never delete on an unknown age.
+  *Explicitly unavailable execution:* no real store is wired to a running job
+  and remote orchestration is **not implemented**, so
+  `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
+  `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is now `true`),
   `POST /seed-jobs` returns `503 { executionAvailable: false, reason }`, and
   the Folders page renders a **disabled** control with that reason and a
   plain-language glossary — never a fake button. The timeout
@@ -628,17 +641,21 @@ distributable binary build.
 
 1. **LAMA-346 — the transport, remote orchestration and live acceptance.**
    The first vertical slice and Stage 1a (filter-aware archive construction)
-   are implemented and locally validated; execution is deliberately
-   unavailable. Remaining work, in order: (a) implement the S3 relay into
+   are implemented and locally validated, and Stage 1b's relay contract, local
+   store and verified upload/download/cleanup are implemented and tested against
+   each other; execution is deliberately unavailable. Remaining work, in order:
+   (a) wire a real store and the job/daemon orchestration, then implement the
+   S3 relay into
    `lamasync/seed/<jobId>/…` behind the existing job state machine with a
    local object-store fixture; (b) a two-host end-to-end fixture acceptance
    including a zero-content-change bisync baseline validation; (c) a live
    dev-vm-shape run on a **copy** of a large tree confirming no timeout kill
    while progressing and a correct resume after a deliberate stall; (d)
    confirm the target's archive tooling **and** staging proof are reported
-   before the Run control is enabled for that device; (e) decide the
-   retention/cleanup policy for seed objects after a successful or abandoned
-   job. Only then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`. See
+   before the Run control is enabled for that device. The retention/cleanup
+   policy is decided (delete on the terminal phase, 24 h for abandoned objects,
+   idempotent, namespace-confined). Only then flip
+   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`. See
    [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
 
 2. **LAMA-337 — release, and the one device-path question it leaves open.**
