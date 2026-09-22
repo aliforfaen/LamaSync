@@ -6,6 +6,7 @@ import type { SeedJob, SeedPlan } from "@lamasync/core/folder-seed";
 import {
   SEED_GLOSSARY,
   seedArchiveSentence,
+  seedFilterUniverseSentence,
   seedJobTone,
   seedPhaseLabel,
   seedProgressPercent,
@@ -13,9 +14,13 @@ import {
   seedRecommendationSentence,
   seedRecommended,
   seedRunnableVerdict,
+  seedSourceAuthoritySentence,
+  seedSourceCandidates,
+  seedSourceSelectionError,
   seedSpaceSentence,
   seedSpaceTone,
   seedUnavailableHelp,
+  seedUnmetPrerequisites,
   shouldOfferSeed,
 } from "./folder-seed.ts";
 
@@ -73,6 +78,20 @@ function plan(overrides: Partial<SeedPlan> = {}): SeedPlan {
     folderId: "f1",
     assignmentId: "a2",
     recommendation: { recommended: true, thresholdFiles: 3000, reason: "recommended" },
+    sourceHostId: "master",
+    sourceAuthority: {
+      hostId: "master",
+      assignmentId: "a1",
+      selectedBy: "operator",
+      assigned: true,
+      isTarget: false,
+      measurementUsable: true,
+      measurementAgeMs: 60_000,
+      fileCount: 91_660,
+      totalBytes: 14_864_173_809,
+      measuredAt: 1,
+      message: "Source authority: master — measured 91,660 entries (14864173809 bytes) 1 minutes ago.",
+    },
     source: { fileCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1, measuredOnHostId: "master", manifestFingerprint: null },
     target: { freeBytes: 200_000_000_000, freeBytesMeasuredAt: 1, measuredOnHostId: "dev-vm", stagingRoot: "/home/b", stagingSameFilesystem: null },
     space: {
@@ -95,18 +114,27 @@ function plan(overrides: Partial<SeedPlan> = {}): SeedPlan {
       choiceReason: "zstd is installed",
       fallback: false,
     },
+    filterUniverse: {
+      fingerprint: "universe",
+      targetFingerprint: null,
+      match: true,
+      patternCount: 0,
+      archiveImplemented: false,
+      message: "Filter-aware archive construction is a Stage 1 prerequisite.",
+    },
     stagingPolicy: {
       adjacentToTarget: true,
+      derivedSibling: true,
       insideTarget: false,
-      sameFilesystem: null,
-      message: "The device derives the staging directory as a sibling of its local path.",
+      sameFilesystem: true,
+      message: "Staging is a sibling of the target on the same filesystem.",
     },
     configRevision: 4,
     filterFingerprint: "fp",
     baselineFingerprint: "base",
     createdAt: 1,
     expiresAt: 2,
-    execution: { available: false, reason: "Seed archive transport is not implemented yet." },
+    execution: { available: false, reason: "Seed execution is not available yet." },
     ...overrides,
   };
 }
@@ -174,16 +202,132 @@ describe("plan wording", () => {
   test("the execution verdict is the server's own reason, never invented", () => {
     const verdict = seedRunnableVerdict(plan(), { valid: true, message: "current" });
     expect(verdict.runnable).toBe(false);
-    expect(verdict.message).toContain("not implemented yet");
+    expect(verdict.message).toContain("not available yet");
 
     const ready = plan({ execution: { available: true, reason: "available" } });
     expect(seedRunnableVerdict(ready, { valid: true, message: "current" }).runnable).toBe(true);
     expect(seedRunnableVerdict(ready, { valid: false, message: "expired" }).message).toBe("expired");
   });
 
-  test("the help text is explicit that nothing is enabled yet", () => {
-    expect(seedUnavailableHelp()).toContain("not switched on yet");
-    expect(seedUnavailableHelp()).toContain("Ordinary sync is unaffected");
+  test("the help text is explicit that nothing is enabled yet, and states the timeout change precisely", () => {
+    const help = seedUnavailableHelp();
+    expect(help).toContain("not switched on yet");
+    // The correction: a first sync with no baseline IS supervised differently.
+    expect(help).toContain("existing baseline is untouched and keeps its fixed timeout");
+    expect(help).toContain("FIRST sync with no baseline");
+    expect(help).not.toContain("Ordinary sync is unaffected");
+  });
+
+  test("the source authority sentence is the plan's own, never a substitute device", () => {
+    expect(seedSourceAuthoritySentence(plan())).toContain("Source authority: master");
+    const unusable = plan({
+      sourceAuthority: {
+        ...plan().sourceAuthority,
+        measurementUsable: false,
+        message: "master is assigned to this folder but has not measured it yet.",
+      },
+    });
+    expect(seedSourceAuthoritySentence(unusable)).toContain("has not measured it yet");
+  });
+
+  test("the filter-universe sentence is surfaced verbatim", () => {
+    expect(seedFilterUniverseSentence(plan())).toContain("Stage 1 prerequisite");
+  });
+
+  test("unmet prerequisites are listed, and the open Stage 1 ones are visible", () => {
+    const unmet = seedUnmetPrerequisites(plan());
+    const ids = unmet.map((item) => item.id);
+    expect(ids).toContain("filter_universe");
+    expect(ids).toContain("transport");
+    // The staging proof is satisfied in this fixture.
+    expect(ids).not.toContain("staging_same_filesystem");
+  });
+
+  test("an unproven same-filesystem verdict is an unmet prerequisite", () => {
+    const unproven = plan({
+      stagingPolicy: {
+        adjacentToTarget: true,
+        derivedSibling: true,
+        insideTarget: false,
+        sameFilesystem: null,
+        message: "The target device has not confirmed that the staging directory and the target share a filesystem.",
+      },
+    });
+    expect(seedUnmetPrerequisites(unproven).map((item) => item.id)).toContain("staging_same_filesystem");
+  });
+});
+
+describe("choosing the source device explicitly", () => {
+  const now = 1_700_000_000_000;
+
+  function sourceRecords(): FolderHealthRecord[] {
+    return [
+      record({
+        hostId: "master",
+        facts: facts({ measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: now - 60_000 } }),
+      }),
+      record({
+        hostId: "dev-vm",
+        assignmentId: "a2",
+        facts: facts({ measurement: { pathCount: 850, totalBytes: 17_715_220, measuredAt: now - 60_000 } }),
+      }),
+      record({
+        hostId: "nas",
+        assignmentId: "a3",
+        facts: facts({ measurement: null }),
+      }),
+      record({
+        hostId: "laptop",
+        assignmentId: "a4",
+        facts: facts({
+          measurement: { pathCount: 5, totalBytes: 100, measuredAt: now - 40 * 60 * 60_000 },
+        }),
+      }),
+    ];
+  }
+
+  test("the target is never offered as its own source", () => {
+    const candidates = seedSourceCandidates(sourceRecords(), "dev-vm", now);
+    expect(candidates.map((c) => c.hostId)).not.toContain("dev-vm");
+    expect(candidates.map((c) => c.hostId)).toEqual(["master", "laptop", "nas"]);
+  });
+
+  test("candidates are labelled with their own numbers and freshness", () => {
+    const candidates = seedSourceCandidates(sourceRecords(), "dev-vm", now);
+    const master = candidates.find((c) => c.hostId === "master")!;
+    expect(master.label).toContain("91,660");
+    expect(master.label).toContain("13.84 GiB");
+    expect(master.fresh).toBe(true);
+    const laptop = candidates.find((c) => c.hostId === "laptop")!;
+    expect(laptop.fresh).toBe(false);
+    expect(laptop.label).toContain("stale");
+    const nas = candidates.find((c) => c.hostId === "nas")!;
+    expect(nas.measured).toBe(false);
+    expect(nas.label).toContain("not measured yet");
+  });
+
+  test("no selection is an explicit refusal, not a silent default", () => {
+    const candidates = seedSourceCandidates(sourceRecords(), "dev-vm", now);
+    expect(seedSourceSelectionError(candidates, null)).toContain("never picks the source for you");
+    expect(seedSourceSelectionError(candidates, "")).toContain("never picks the source for you");
+  });
+
+  test("an unassigned, unmeasured, stale or empty device is refused with a reason", () => {
+    const candidates = seedSourceCandidates(sourceRecords(), "dev-vm", now);
+    expect(seedSourceSelectionError(candidates, "elsewhere")).toContain("not assigned to this folder");
+    expect(seedSourceSelectionError(candidates, "nas")).toContain("has not measured this folder yet");
+    expect(seedSourceSelectionError(candidates, "laptop")).toContain("measurement is stale");
+    const empty = seedSourceCandidates(
+      [record({ hostId: "empty-host", facts: facts({ measurement: { pathCount: 0, totalBytes: 0, measuredAt: now } }) })],
+      "dev-vm",
+      now,
+    );
+    expect(seedSourceSelectionError(empty, "empty-host")).toContain("measures this folder as empty");
+  });
+
+  test("a usable, explicit choice passes", () => {
+    const candidates = seedSourceCandidates(sourceRecords(), "dev-vm", now);
+    expect(seedSourceSelectionError(candidates, "master")).toBeNull();
   });
 });
 
@@ -245,8 +389,13 @@ describe("phase and progress wording", () => {
     expect(terms).toContain("Seed transfer");
     expect(terms).toContain("Staging directory");
     expect(terms).toContain("Progress-aware timeout");
+    expect(terms).toContain("Effective filter universe");
+    expect(terms).toContain("Source device");
     const timeout = SEED_GLOSSARY.find((entry) => entry.term === "Progress-aware timeout")!;
     expect(timeout.plain).toContain("stalls");
+    // Precise: an existing baseline is NOT re-scoped.
+    expect(timeout.plain).toContain("saved baseline keeps its exact fixed timeout");
+    expect(timeout.plain).toContain("FIRST transfer with no baseline");
   });
 });
 

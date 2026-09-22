@@ -1199,7 +1199,7 @@ export const api = {
     apiGet<Array<{ plan: SeedPlan; validity: SeedPlanValidity }>>(
       `/folders/${encodeURIComponent(folderId)}/seed-plans?limit=${limit}`,
     ),
-  createSeedPlan: (folderId: string, body: { hostId: string; confirm: true }) =>
+  createSeedPlan: (folderId: string, body: { hostId: string; sourceHostId: string; confirm: true }) =>
     apiPost<{ plan: SeedPlan; validity: SeedPlanValidity }>(
       `/folders/${encodeURIComponent(folderId)}/seed-plans`,
       body,

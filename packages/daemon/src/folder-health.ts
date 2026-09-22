@@ -26,8 +26,9 @@ import type {
   FolderHealthWatcherFacts,
   FolderType,
   SeedArchiveTooling,
+  SeedStagingProof,
 } from "@lamasync/core";
-import { deriveFolderHealth } from "@lamasync/core";
+import { deriveFolderHealth, parentPathOf, seedStagingPath } from "@lamasync/core";
 import { expandHomePath } from "./config.ts";
 import {
   baselineFingerprint,
@@ -67,6 +68,41 @@ export function archiveToolingCached(force = false): SeedArchiveTooling {
     };
   }
   return cachedArchiveTooling;
+}
+
+/**
+ * LAMA-346: the target's own proof that a seed's staging sibling can be
+ * published with one atomic rename.
+ *
+ * The server cannot stat the target's filesystem, so it cannot prove this; the
+ * device can. `seedStagingPath` always derives a sibling, so the proof reduces
+ * to: the staging sibling's parent IS the target's parent, and that directory
+ * is readable (one `statSync`, no walk). When it is not readable the verdict is
+ * `null` — unknown, which the plan refuses rather than assumes.
+ */
+export function seedStagingProofFor(localPath: string, now: number = Date.now()): SeedStagingProof {
+  const targetPath = expandHomePath(localPath);
+  const targetParent = parentPathOf(targetPath);
+  const staging = seedStagingPath(targetPath, "probe");
+  const stagingParent = staging === null ? null : parentPathOf(staging);
+  let device: number | null = null;
+  if (targetParent !== null && stagingParent === targetParent) {
+    try {
+      device = statSync(targetParent).dev;
+    } catch {
+      device = null;
+    }
+  }
+  const sameFilesystem =
+    targetParent !== null && stagingParent === targetParent && device !== null ? true : null;
+  return {
+    targetPath: targetParent === null ? null : targetPath,
+    targetParent,
+    stagingParent,
+    sameFilesystem,
+    device,
+    checkedAt: now,
+  };
 }
 
 export interface FolderHealthProbeOptions {
@@ -281,6 +317,7 @@ export function probeFolderHealth(opts: FolderHealthProbeOptions): FolderHealthP
     runInProgress: opts.runInProgress,
     rcloneAvailable: opts.rcloneAvailable,
     archive: archiveToolingCached(),
+    seedStaging: seedStagingProofFor(assignment.localPath, now),
     localDir,
     freeSpaceBytes: free,
     freeSpaceThresholdBytes: threshold,

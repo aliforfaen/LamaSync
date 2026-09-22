@@ -456,6 +456,12 @@ CREATE TABLE IF NOT EXISTS folder_seed_plans (
     source_file_count           INTEGER NOT NULL,
     source_bytes                INTEGER NOT NULL,
     source_measured_at          INTEGER NOT NULL,
+    -- LAMA-346 correction: the SOURCE AUTHORITY is named explicitly by the
+    -- operator and persisted as its own column. It is never inferred from a
+    -- size, because a wrong source produces a seed of the wrong tree.
+    source_authority_host_id    TEXT,
+    source_authority            TEXT,
+    filter_universe             TEXT,
     source_host_id              TEXT,
     source_manifest_fingerprint TEXT,
     target_free_bytes           INTEGER,
@@ -1083,7 +1089,13 @@ export const MIGRATIONS: string[] = [
   // lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF NOT EXISTS
   // entries are the idempotent safety net for existing databases ("already
   // exists" is swallowed by initDb's try/catch wrapper).
-  "CREATE TABLE IF NOT EXISTS folder_seed_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, recommended INTEGER NOT NULL, threshold_files INTEGER NOT NULL, recommendation TEXT NOT NULL, source_file_count INTEGER NOT NULL, source_bytes INTEGER NOT NULL, source_measured_at INTEGER NOT NULL, source_host_id TEXT, source_manifest_fingerprint TEXT, target_free_bytes INTEGER, target_free_measured_at INTEGER, target_host_id TEXT, staging_root TEXT, staging_same_filesystem INTEGER, space TEXT NOT NULL, archive_format TEXT NOT NULL, archive_tooling TEXT NOT NULL, archive_tooling_ready INTEGER NOT NULL, archive_estimate_bytes INTEGER NOT NULL, archive_choice_reason TEXT NOT NULL, archive_fallback INTEGER NOT NULL, staging_policy TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, execution_available INTEGER NOT NULL, execution_reason TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS folder_seed_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, recommended INTEGER NOT NULL, threshold_files INTEGER NOT NULL, recommendation TEXT NOT NULL, source_file_count INTEGER NOT NULL, source_bytes INTEGER NOT NULL, source_measured_at INTEGER NOT NULL, source_authority_host_id TEXT, source_authority TEXT, filter_universe TEXT, source_host_id TEXT, source_manifest_fingerprint TEXT, target_free_bytes INTEGER, target_free_measured_at INTEGER, target_host_id TEXT, staging_root TEXT, staging_same_filesystem INTEGER, space TEXT NOT NULL, archive_format TEXT NOT NULL, archive_tooling TEXT NOT NULL, archive_tooling_ready INTEGER NOT NULL, archive_estimate_bytes INTEGER NOT NULL, archive_choice_reason TEXT NOT NULL, archive_fallback INTEGER NOT NULL, staging_policy TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, execution_available INTEGER NOT NULL, execution_reason TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+  // LAMA-346 correction: explicit source authority + the filter universe the
+  // archive must be built from. Added after the table shipped in the same
+  // unreleased branch; duplicate-column errors are ignored by the runner.
+  "ALTER TABLE folder_seed_plans ADD COLUMN source_authority_host_id TEXT",
+  "ALTER TABLE folder_seed_plans ADD COLUMN source_authority TEXT",
+  "ALTER TABLE folder_seed_plans ADD COLUMN filter_universe TEXT",
   "CREATE INDEX IF NOT EXISTS idx_folder_seed_plans_folder ON folder_seed_plans(folder_id, created_at)",
   "CREATE TABLE IF NOT EXISTS folder_seed_jobs (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, progress TEXT NOT NULL, source TEXT NOT NULL, archive TEXT NOT NULL, staging TEXT NOT NULL, lease_owner TEXT, lease_expires_at INTEGER, error TEXT, summary TEXT, created_at INTEGER NOT NULL, started_at INTEGER, updated_at INTEGER NOT NULL, finished_at INTEGER)",
   "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_folder ON folder_seed_jobs(folder_id, created_at)",

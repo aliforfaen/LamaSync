@@ -17,7 +17,7 @@
 
 // LAMA-346: the archive tooling reported with a health fact is defined by the
 // seed contract, so both modules share one shape.
-import type { SeedArchiveTooling } from "./folder-seed.ts";
+import type { SeedArchiveTooling, SeedStagingProof } from "./folder-seed.ts";
 
 // ---------------------------------------------------------------------------
 // Health states
@@ -214,6 +214,13 @@ export interface FolderHealthFacts {
    * (older daemons), which the plan treats as "not verified".
    */
   archive?: SeedArchiveTooling | null;
+  /**
+   * LAMA-346: the target's own proof that the staging sibling shares the
+   * target's parent directory and filesystem, so publishing is one atomic
+   * rename. `null`/absent means the device has not proven it, which makes a
+   * seed plan not runnable rather than optimistically runnable.
+   */
+  seedStaging?: SeedStagingProof | null;
   localDir: FolderHealthLocalDirState;
   freeSpaceBytes: number | null;
   freeSpaceThresholdBytes: number | null;

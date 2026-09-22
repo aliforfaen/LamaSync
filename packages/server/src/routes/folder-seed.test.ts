@@ -1,10 +1,12 @@
 // LAMA-346 — seed plan + job routes.
 //
 // Covers: admin-only plan creation, the operator-approval requirement, the
+// EXPLICIT source authority (assigned, not the target, fresh measurement), the
 // preflight built from reported facts (recommendation, space, tooling,
-// staging policy), the explicit "execution not available" refusal (never a
-// fake button), the phase state machine, the renewable lease, idempotent
-// completion and admin-only cancellation.
+// staging sibling + same-filesystem proof, filter universe), the explicit
+// "execution not available" refusal (never a fake button), the phase state
+// machine, the renewable lease, idempotent completion and admin-only
+// cancellation.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -13,7 +15,9 @@ import {
   MIGRATIONS,
   SERVER_SCHEMA,
   SEED_ARCHIVE_TRANSPORT_IMPLEMENTED,
+  SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
   SEED_RECOMMENDATION_FILE_THRESHOLD,
+  SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
   type FolderHealthFacts,
   type SeedJob,
 } from "@lamasync/core";
@@ -75,6 +79,14 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     runInProgress: false,
     rcloneAvailable: true,
     archive: { tar: true, zstd: true, gzip: true },
+    seedStaging: {
+      targetPath: "/home/b/Projects",
+      targetParent: "/home/b",
+      stagingParent: "/home/b",
+      sameFilesystem: true,
+      device: 42,
+      checkedAt: Date.now(),
+    },
     localDir: "ok",
     freeSpaceBytes: 100_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
@@ -112,12 +124,19 @@ function insertHealth(
   );
 }
 
-function createPlan(token: string, hostId: string, confirm = true): Promise<Response> {
+function createPlan(
+  token: string,
+  hostId: string,
+  options: { sourceHostId?: string; confirm?: boolean; omitSource?: boolean } = {},
+): Promise<Response> {
+  const { sourceHostId = "host-a", confirm = true, omitSource = false } = options;
+  const body: Record<string, unknown> = { hostId, confirm };
+  if (!omitSource) body["sourceHostId"] = sourceHostId;
   return app.handle(
     request("/api/v1/folders/f1/seed-plans", {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ hostId, confirm }),
+      body: JSON.stringify(body),
     }),
   );
 }
@@ -164,10 +183,61 @@ describe("seed plan creation", () => {
     const asDevice = await createPlan(deviceBToken, "host-b");
     expect(asDevice.status).toBe(403);
 
-    const noConfirm = await createPlan(adminToken, "host-b", false);
+    const noConfirm = await createPlan(adminToken, "host-b", { confirm: false });
     // Elysia's schema rejects a missing/invalid `confirm` at the boundary (422);
     // the handler's own parse is the second line of defence.
     expect(noConfirm.status).toBe(422);
+
+    // The source authority is REQUIRED at the boundary too.
+    const noSource = await createPlan(adminToken, "host-b", { omitSource: true });
+    expect(noSource.status).toBe(422);
+  });
+
+  test("the source authority is explicit and validated, never inferred from size", async () => {
+    // host-a is the biggest tree; host-c is a small one. Naming host-c must
+    // produce a plan about host-c, not about the largest device.
+    insertHealth("a1", "f1", "host-a", {
+      measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: Date.now() },
+    });
+    insertHealth("a2", "f1", "host-b", { freeSpaceBytes: 200_000_000_000 });
+
+    const named = (await (await createPlan(adminToken, "host-b", { sourceHostId: "host-a" })).json()) as {
+      plan: { sourceHostId: string; sourceAuthority: { hostId: string; measurementUsable: boolean } };
+    };
+    expect(named.plan.sourceHostId).toBe("host-a");
+    expect(named.plan.sourceAuthority.hostId).toBe("host-a");
+    expect(named.plan.sourceAuthority.measurementUsable).toBe(true);
+
+    // A device cannot seed itself. The request grammar rejects it at the
+    // boundary; `buildSeedPlan` refuses it again for direct callers.
+    const self = await createPlan(adminToken, "host-b", { sourceHostId: "host-b" });
+    expect(self.status).toBe(400);
+    expect(((await self.json()) as { error: string }).error).toContain("must be a different device from hostId");
+
+    // A device that is not assigned to the folder cannot be the source.
+    const unassigned = await createPlan(adminToken, "host-b", { sourceHostId: "host-zzz" });
+    expect(unassigned.status).toBe(404);
+    expect(((await unassigned.json()) as { error: string }).error).toContain("not assigned to this folder");
+  });
+
+  test("a stale source measurement is not usable, and says how old it is", async () => {
+    insertHealth("a1", "f1", "host-a", {
+      measurement: {
+        pathCount: 91_660,
+        totalBytes: 14_864_173_809,
+        measuredAt: Date.now() - SEED_SOURCE_MEASUREMENT_MAX_AGE_MS - 60_000,
+      },
+    });
+    insertHealth("a2", "f1", "host-b", { freeSpaceBytes: 200_000_000_000 });
+    const body = (await (await createPlan(adminToken, "host-b")).json()) as {
+      plan: { sourceAuthority: { measurementUsable: boolean; message: string }; space: { ok: boolean } };
+      validity: { valid: boolean; reason: string | null; message: string };
+    };
+    expect(body.plan.sourceAuthority.measurementUsable).toBe(false);
+    expect(body.plan.sourceAuthority.message).toContain("hours old");
+    expect(body.plan.space.ok).toBe(false);
+    expect(body.validity.valid).toBe(false);
+    expect(body.validity.reason).toBe("not_runnable");
   });
 
   test("404s for a device that is not assigned to the folder", async () => {
@@ -188,16 +258,24 @@ describe("seed plan creation", () => {
     const body = (await response.json()) as {
       plan: {
         hostId: string;
+        sourceHostId: string;
         recommendation: { recommended: boolean; thresholdFiles: number };
         source: { fileCount: number; totalBytes: number; measuredOnHostId: string | null };
         space: { ok: boolean; requiredFreeBytes: number; targetFreeBytes: number | null };
         archive: { format: string; toolingReady: boolean; fallback: boolean };
-        stagingPolicy: { adjacentToTarget: boolean; insideTarget: boolean };
+        stagingPolicy: {
+          adjacentToTarget: boolean;
+          derivedSibling: boolean;
+          insideTarget: boolean;
+          sameFilesystem: boolean | null;
+        };
+        filterUniverse: { fingerprint: string | null; match: boolean; archiveImplemented: boolean; message: string };
         execution: { available: boolean; reason: string };
       };
-      validity: { valid: boolean };
+      validity: { valid: boolean; reason: string | null; message: string };
     };
     expect(body.plan.hostId).toBe("host-b");
+    expect(body.plan.sourceHostId).toBe("host-a");
     expect(body.plan.recommendation.recommended).toBe(true);
     expect(body.plan.recommendation.thresholdFiles).toBe(SEED_RECOMMENDATION_FILE_THRESHOLD);
     expect(body.plan.source.fileCount).toBe(91_660);
@@ -207,15 +285,72 @@ describe("seed plan creation", () => {
     expect(body.plan.archive.format).toBe("tar.zstd");
     expect(body.plan.archive.toolingReady).toBe(true);
     expect(body.plan.archive.fallback).toBe(false);
-    // Staging is a sibling by construction — never inside the target.
+    // Staging is a derived sibling of the target, never inside it, and the
+    // same-filesystem verdict comes from the TARGET DEVICE's own proof.
     expect(body.plan.stagingPolicy.adjacentToTarget).toBe(true);
+    expect(body.plan.stagingPolicy.derivedSibling).toBe(true);
     expect(body.plan.stagingPolicy.insideTarget).toBe(false);
+    expect(body.plan.stagingPolicy.sameFilesystem).toBe(true);
+    // The filter universe comes from the source device and is not wired yet.
+    expect(body.plan.filterUniverse.fingerprint).toBe("fp-1");
+    expect(body.plan.filterUniverse.match).toBe(true);
+    expect(body.plan.filterUniverse.archiveImplemented).toBe(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED);
     // Execution is explicitly unavailable.
     expect(body.plan.execution.available).toBe(SEED_ARCHIVE_TRANSPORT_IMPLEMENTED);
     expect(body.plan.execution.available).toBe(false);
-    expect(body.plan.execution.reason).toContain("not implemented yet");
-    // The plan is valid as a plan even though it cannot be executed.
-    expect(body.validity.valid).toBe(true);
+    expect(body.plan.execution.reason).toContain("not available yet");
+    expect(body.plan.execution.reason).toContain("filter universe");
+    // The plan is NOT runnable while the Stage 1 prerequisites are open, and
+    // the reason names them rather than pretending.
+    expect(body.validity.valid).toBe(false);
+    expect(body.validity.reason).toBe("not_runnable");
+    expect(body.validity.message).toContain("filter universe");
+  });
+
+  test("an UNPROVEN same-filesystem verdict makes the plan not runnable", async () => {
+    insertHealth("a1", "f1", "host-a", {
+      measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: Date.now() },
+    });
+    // The target device has not reported its staging proof.
+    insertHealth("a2", "f1", "host-b", { freeSpaceBytes: 200_000_000_000, seedStaging: null });
+    const body = (await (await createPlan(adminToken, "host-b")).json()) as {
+      plan: {
+        stagingPolicy: {
+          adjacentToTarget: boolean;
+          derivedSibling: boolean;
+          sameFilesystem: boolean | null;
+          message: string;
+        };
+      };
+      validity: { valid: boolean; reason: string | null; message: string };
+    };
+    expect(body.plan.stagingPolicy.adjacentToTarget).toBe(true);
+    expect(body.plan.stagingPolicy.derivedSibling).toBe(true);
+    expect(body.plan.stagingPolicy.sameFilesystem).toBeNull();
+    // The staging policy's own message names the missing proof. (`validity`
+    // reports the FIRST unmet prerequisite, which is the filter universe.)
+    expect(body.plan.stagingPolicy.message).toContain("has not confirmed");
+    expect(body.validity.valid).toBe(false);
+    expect(body.validity.reason).toBe("not_runnable");
+  });
+
+  test("a target whose baseline used a different filter set is refused", async () => {
+    insertHealth("a1", "f1", "host-a", {
+      measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: Date.now() },
+    });
+    insertHealth("a2", "f1", "host-b", {
+      freeSpaceBytes: 200_000_000_000,
+      filter: { fingerprint: "fp-other", source: "lamasyncignore", changedSinceBaseline: false },
+    });
+    const body = (await (await createPlan(adminToken, "host-b")).json()) as {
+      plan: { filterUniverse: { fingerprint: string | null; targetFingerprint: string | null; match: boolean } };
+      validity: { valid: boolean; reason: string | null; message: string };
+    };
+    expect(body.plan.filterUniverse.fingerprint).toBe("fp-1");
+    expect(body.plan.filterUniverse.targetFingerprint).toBe("fp-other");
+    expect(body.plan.filterUniverse.match).toBe(false);
+    expect(body.validity.valid).toBe(false);
+    expect(body.validity.reason).toBe("not_runnable");
   });
 
   test("a plan is created but NOT runnable when the source was never measured", async () => {
@@ -227,7 +362,7 @@ describe("seed plan creation", () => {
       validity: { valid: boolean; reason: string | null; message: string };
     };
     expect(body.plan.space.ok).toBe(false);
-    expect(body.plan.space.message).toContain("source device has not been measured");
+    expect(body.plan.space.message).toContain("has not measured it yet");
     expect(body.plan.recommendation.recommended).toBe(false);
     expect(body.validity.valid).toBe(false);
     expect(body.validity.reason).toBe("not_runnable");
@@ -304,7 +439,8 @@ describe("seed job creation is explicitly unavailable", () => {
       planId: string;
     };
     expect(body.executionAvailable).toBe(false);
-    expect(body.error).toContain("not implemented yet");
+    expect(body.error).toContain("not available yet");
+    expect(body.error).toContain("filter universe");
     expect(body.planId).toBe(created.plan.id);
     // No job row was created.
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM folder_seed_jobs").get()?.n).toBe(0);

@@ -9,12 +9,15 @@
 import {
   formatSeedBytes,
   recommendSeed,
+  seedPlanPrerequisites,
   seedProgressFraction,
   SEED_RECOMMENDATION_FILE_THRESHOLD,
+  SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
   type SeedJob,
   type SeedJobPhaseOrTerminal,
   type SeedPlan,
   type SeedPlanValidity,
+  type SeedPrerequisite,
 } from "@lamasync/core/folder-seed";
 import type { FolderHealthRecord } from "@lamasync/core/folder-health";
 
@@ -57,6 +60,112 @@ export function seedSpaceSentence(plan: Pick<SeedPlan, "space">): string {
   return plan.space.message;
 }
 
+/**
+ * The source-authority sentence. The source device is the operator's explicit
+ * choice, so the panel shows the choice and whether it was usable — it never
+ * quietly substitutes another device.
+ */
+export function seedSourceAuthoritySentence(plan: Pick<SeedPlan, "sourceAuthority">): string {
+  return plan.sourceAuthority.message;
+}
+
+/**
+ * The filter-universe sentence: the archive must be built from exactly the
+ * universe the following sync baseline uses.
+ */
+export function seedFilterUniverseSentence(plan: Pick<SeedPlan, "filterUniverse">): string {
+  return plan.filterUniverse.message;
+}
+
+/** Every prerequisite of the plan, so the panel can list what is missing. */
+export function seedPrerequisites(
+  plan: Pick<SeedPlan, "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space">,
+): SeedPrerequisite[] {
+  return seedPlanPrerequisites(plan);
+}
+
+export interface SeedSourceCandidate {
+  hostId: string;
+  /** The device has reported a deep measurement. */
+  measured: boolean;
+  /** That measurement is within the freshness budget. */
+  fresh: boolean;
+  fileCount: number;
+  totalBytes: number;
+  /** Ready-to-render label for the picker. */
+  label: string;
+}
+
+/**
+ * The devices an operator may name as the source: every other assignment of
+ * the folder, with its own measurement. The target is never offered (a device
+ * cannot seed itself) and the target's own measurement is never reused as the
+ * source — that would seed the empty destination with itself.
+ */
+export function seedSourceCandidates(
+  records: readonly Pick<FolderHealthRecord, "hostId" | "facts">[],
+  targetHostId: string,
+  now: number,
+): SeedSourceCandidate[] {
+  const candidates: SeedSourceCandidate[] = [];
+  for (const record of records) {
+    if (record.hostId === targetHostId) continue;
+    const measurement = record.facts.measurement;
+    const ageMs = measurement === null ? null : Math.max(0, now - measurement.measuredAt);
+    const fresh = ageMs !== null && ageMs <= SEED_SOURCE_MEASUREMENT_MAX_AGE_MS;
+    const fileCount = measurement?.pathCount ?? 0;
+    const totalBytes = measurement?.totalBytes ?? 0;
+    candidates.push({
+      hostId: record.hostId,
+      measured: measurement !== null,
+      fresh,
+      fileCount,
+      totalBytes,
+      label:
+        measurement === null
+          ? `${record.hostId} — not measured yet`
+          : `${record.hostId} — ${fileCount.toLocaleString("en-US")} entries (${formatSeedBytes(totalBytes)})` +
+            (fresh ? "" : " — measurement is stale"),
+    });
+  }
+  candidates.sort((a, b) => {
+    const usableA = a.measured && a.fresh ? 1 : 0;
+    const usableB = b.measured && b.fresh ? 1 : 0;
+    if (usableA !== usableB) return usableB - usableA;
+    if (a.totalBytes !== b.totalBytes) return b.totalBytes - a.totalBytes;
+    return a.hostId.localeCompare(b.hostId);
+  });
+  return candidates;
+}
+
+/**
+ * Why the currently selected source cannot be used, or null when it can.
+ * The panel refuses to prepare a plan without a usable, explicit choice —
+ * there is no "pick one for me".
+ */
+export function seedSourceSelectionError(
+  candidates: readonly SeedSourceCandidate[],
+  selectedHostId: string | null,
+): string | null {
+  if (selectedHostId === null || selectedHostId.length === 0) {
+    return "Choose the device that holds the data. LamaSync never picks the source for you.";
+  }
+  const candidate = candidates.find((c) => c.hostId === selectedHostId) ?? null;
+  if (candidate === null) {
+    return "That device is not assigned to this folder, so it cannot be the source.";
+  }
+  if (!candidate.measured) {
+    return `${candidate.hostId} has not measured this folder yet. Open the folder on that device and choose Check this device now.`;
+  }
+  if (!candidate.fresh) {
+    return `${candidate.hostId}'s measurement is stale. Refresh it (Check this device now on that device) so the reserved space matches the tree.`;
+  }
+  if (candidate.fileCount === 0) {
+    return `${candidate.hostId} currently measures this folder as empty, so there is nothing to seed.`;
+  }
+  return null;
+}
+
 export function seedSpaceTone(plan: Pick<SeedPlan, "space">): SeedTone {
   return plan.space.ok ? "ok" : "bad";
 }
@@ -87,10 +196,14 @@ export function seedStagingSentence(plan: Pick<SeedPlan, "stagingPolicy">): stri
 
 /**
  * Whether the plan may run, and why not. The execution verdict from the server
- * is always shown; a non-runnable plan says exactly what is missing.
+ * is always shown; a non-runnable plan says exactly what is missing, from the
+ * plan's own prerequisite list rather than a single boolean.
  */
 export function seedRunnableVerdict(
-  plan: Pick<SeedPlan, "execution" | "space" | "archive" | "stagingPolicy">,
+  plan: Pick<
+    SeedPlan,
+    "execution" | "space" | "archive" | "stagingPolicy" | "sourceAuthority" | "filterUniverse"
+  >,
   validity: Pick<SeedPlanValidity, "valid" | "message"> | null,
 ): { runnable: boolean; message: string } {
   if (!plan.execution.available) {
@@ -100,6 +213,13 @@ export function seedRunnableVerdict(
     return { runnable: false, message: validity.message };
   }
   return { runnable: true, message: "This seed plan is ready to run." };
+}
+
+/** The unmet prerequisites, in the order they gate execution. */
+export function seedUnmetPrerequisites(
+  plan: Pick<SeedPlan, "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space">,
+): SeedPrerequisite[] {
+  return seedPrerequisites(plan).filter((item) => !item.ok);
 }
 
 /** Plain-language phase labels. Never rclone vocabulary. */
@@ -178,9 +298,12 @@ export function seedProgressPercent(job: Pick<SeedJob, "progress">): number | nu
 /** The single sentence shown when a seed plan exists but cannot run yet. */
 export function seedUnavailableHelp(): string {
   return (
-    "Seeding is not switched on yet. Preparing a plan is safe and read-only: it measures the folder, " +
-    "checks the target's free space and archive tools, and shows exactly what would be reserved. " +
-    "Ordinary sync is unaffected and still works for this folder."
+    "Seeding is not switched on yet. Preparing a plan is safe and read-only: it names the source device, checks " +
+    "that the archive would be built from the folder's effective ignore rules, checks the target's free space and " +
+    "archive tools, and shows exactly what would be reserved. " +
+    "Sync with an existing baseline is untouched and keeps its fixed timeout; a FIRST sync with no baseline yet is " +
+    "supervised by the progress-aware stall budget, so a large first transfer is no longer killed at 10 minutes " +
+    "while it is still moving data."
   );
 }
 
@@ -199,7 +322,7 @@ export const SEED_GLOSSARY: readonly SeedGlossaryEntry[] = [
   {
     term: "Staging directory",
     plain:
-      "A temporary directory created next to the destination — never inside it — where the archive is unpacked and checked. It is renamed into place in one step, so a half-finished seed is never visible to sync.",
+      "A temporary directory created next to the destination — in the same parent directory, never inside it — where the archive is unpacked and checked. It is renamed into place in one step, so a half-finished seed is never visible to sync.",
   },
   {
     term: "Archive format (tar + zstd / tar + gzip)",
@@ -207,8 +330,18 @@ export const SEED_GLOSSARY: readonly SeedGlossaryEntry[] = [
       "How the folder is packed. zstd is faster and smaller and is used when the device has it; gzip is the compatible fallback. Both are verified with a checksum before anything is unpacked.",
   },
   {
+    term: "Effective filter universe",
+    plain:
+      "The paths this folder's ignore rules actually sync: its lamasyncignore patterns, the ignore-git-metadata option, and respect-gitignore. A seed must archive exactly that set — not the raw folder — or the following sync would not agree with what was published.",
+  },
+  {
+    term: "Source device",
+    plain:
+      "The device that already holds the data. You name it explicitly when you prepare a plan; LamaSync never guesses it from which folder happens to be largest.",
+  },
+  {
     term: "Progress-aware timeout",
     plain:
-      "Large first transfers used to be killed at a fixed 10 minutes even while they were still moving data. A seed stage now keeps running while it keeps making measurable progress, and is stopped when it genuinely stalls.",
+      "A sync that already has a saved baseline keeps its exact fixed timeout, unchanged. A FIRST transfer with no baseline yet — the case that used to be killed at 10 minutes while it was still moving data — now keeps running while it makes measurable progress, and is stopped when it genuinely stalls or hits the 6-hour ceiling.",
   },
 ];

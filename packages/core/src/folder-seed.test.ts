@@ -12,9 +12,11 @@ import { describe, expect, test } from "bun:test";
 import {
   SEED_ARCHIVE_RATIO_DEFAULT,
   SEED_ARCHIVE_TRANSPORT_IMPLEMENTED,
+  SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
   SEED_JOB_PHASE_COUNT,
   SEED_JOB_PHASES,
   SEED_RECOMMENDATION_FILE_THRESHOLD,
+  SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
   SEED_SPACE_FIXED_OVERHEAD_BYTES,
   SEED_SPACE_SAFETY_FACTOR,
   SEED_STALL_TIMEOUT_FALLBACK_SEC,
@@ -26,6 +28,7 @@ import {
   isSafeArchiveMember,
   isSeedLeaseExpired,
   isTerminalSeedPhase,
+  parentPathOf,
   parseSeedJobCreatePayload,
   parseSeedPlanRequestPayload,
   parseSeedProgressPayload,
@@ -35,6 +38,7 @@ import {
   seedArchiveToolingReady,
   seedPhaseIndex,
   seedPlanExecution,
+  seedPlanPrerequisites,
   seedProgressFraction,
   seedStagingPath,
   selectSeedArchiveFormat,
@@ -65,13 +69,21 @@ describe("recommendSeed — recommended, never automatic", () => {
     ).toBe(true);
   });
 
-  test("a plan request always requires explicit confirmation", () => {
+  test("a plan request always requires explicit confirmation and a named source", () => {
     expect(parseSeedPlanRequestPayload({ folderId: "f", hostId: "h" }).ok).toBe(false);
     expect(parseSeedPlanRequestPayload({ folderId: "f", hostId: "h", confirm: false }).ok).toBe(false);
-    expect(parseSeedPlanRequestPayload({ folderId: "f", hostId: "h", confirm: true }).ok).toBe(true);
+    expect(
+      parseSeedPlanRequestPayload({ folderId: "f", hostId: "h", sourceHostId: "s", confirm: true }).ok,
+    ).toBe(true);
     // No free-form field can ride along.
     expect(
-      parseSeedPlanRequestPayload({ folderId: "f", hostId: "h", confirm: true, rcloneArgs: ["--x"] }).ok,
+      parseSeedPlanRequestPayload({
+        folderId: "f",
+        hostId: "h",
+        sourceHostId: "s",
+        confirm: true,
+        rcloneArgs: ["--x"],
+      }).ok,
     ).toBe(false);
   });
 });
@@ -196,38 +208,80 @@ describe("staging policy", () => {
     const verdict = validateStagingLocation({
       stagingPath: "/data/projects/.lamasync-seed-staging-x",
       targetPath: "/data/projects",
+      sameFilesystemProven: true,
     });
     expect(verdict.ok).toBe(false);
     expect(verdict.insideTarget).toBe(true);
     expect(verdict.message).toContain("inside the final target");
   });
 
+  test("refuses /data/elsewhere for a /data/projects target", () => {
+    // Same device, outside the target, and even in the same parent — but it is
+    // not a directory this feature created, and publishing renames the staging
+    // directory OVER the target.
+    const verdict = validateStagingLocation({
+      stagingPath: "/data/elsewhere",
+      targetPath: "/data/projects",
+      sameFilesystemProven: true,
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.insideTarget).toBe(false);
+    expect(verdict.derivedSibling).toBe(false);
+    expect(verdict.message).toContain("not a seed staging directory");
+  });
+
+  test("refuses staging whose direct parent is not the target's parent", () => {
+    const verdict = validateStagingLocation({
+      stagingPath: "/data/elsewhere/.lamasync-seed-staging-projects-job1",
+      targetPath: "/data/projects",
+      sameFilesystemProven: true,
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.adjacentToTarget).toBe(false);
+    expect(verdict.derivedSibling).toBe(true);
+    expect(verdict.message).toContain("not a sibling of the target");
+    expect(verdict.message).toContain("/data");
+  });
+
   test("refuses staging on a different filesystem", () => {
     const verdict = validateStagingLocation({
       stagingPath: "/tmp/.lamasync-seed-staging-x",
       targetPath: "/data/projects",
-      stagingDevice: 1,
-      targetDevice: 2,
+      sameFilesystemProven: false,
     });
     expect(verdict.ok).toBe(false);
     expect(verdict.insideTarget).toBe(false);
     expect(verdict.sameFilesystem).toBe(false);
   });
 
-  test("accepts a sibling on the same filesystem", () => {
+  test("FAILS CLOSED when the same-filesystem fact is unknown", () => {
     const verdict = validateStagingLocation({
       stagingPath: "/data/.lamasync-seed-staging-projects-job1",
       targetPath: "/data/projects",
-      stagingDevice: 7,
-      targetDevice: 7,
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.adjacentToTarget).toBe(true);
+    expect(verdict.derivedSibling).toBe(true);
+    expect(verdict.sameFilesystem).toBeNull();
+    expect(verdict.message).toContain("has not confirmed");
+  });
+
+  test("accepts a derived sibling with a proven same filesystem", () => {
+    const verdict = validateStagingLocation({
+      stagingPath: "/data/.lamasync-seed-staging-projects-job1",
+      targetPath: "/data/projects",
+      sameFilesystemProven: true,
     });
     expect(verdict.ok).toBe(true);
+    expect(verdict.adjacentToTarget).toBe(true);
+    expect(verdict.derivedSibling).toBe(true);
     expect(verdict.sameFilesystem).toBe(true);
   });
 
   test("derives a sibling staging path from the target, never a child", () => {
     const staging = seedStagingPath("/data/projects", "job-1");
     expect(staging).toBe("/data/.lamasync-seed-staging-projects-job-1");
+    expect(parentPathOf(staging!)).toBe(parentPathOf("/data/projects"));
     expect(staging!.startsWith("/data/projects/")).toBe(false);
     expect(seedStagingPath("relative/path", "j")).toBeNull();
   });
@@ -335,6 +389,35 @@ describe("progress-aware deadline — the timeout fix", () => {
 });
 
 describe("job/plan wire grammar", () => {
+  test("a seed-plan request names the source authority explicitly", () => {
+    const ok = parseSeedPlanRequestPayload({
+      folderId: "f",
+      hostId: "dev-vm",
+      sourceHostId: "master",
+      confirm: true,
+    });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.payload.sourceHostId).toBe("master");
+    // Required, never inferred.
+    expect(parseSeedPlanRequestPayload({ folderId: "f", hostId: "dev-vm", confirm: true }).ok).toBe(false);
+    expect(
+      parseSeedPlanRequestPayload({ folderId: "f", hostId: "dev-vm", sourceHostId: "", confirm: true }).ok,
+    ).toBe(false);
+    // A device cannot seed itself.
+    expect(
+      parseSeedPlanRequestPayload({ folderId: "f", hostId: "h", sourceHostId: "h", confirm: true }).ok,
+    ).toBe(false);
+    // Still operator-approved.
+    expect(
+      parseSeedPlanRequestPayload({ folderId: "f", hostId: "h", sourceHostId: "s" }).ok,
+    ).toBe(false);
+  });
+
+  test("the source measurement freshness budget is one deep-measurement cadence plus slack", () => {
+    expect(SEED_SOURCE_MEASUREMENT_MAX_AGE_MS).toBeGreaterThan(24 * 60 * 60_000);
+    expect(SEED_SOURCE_MEASUREMENT_MAX_AGE_MS).toBeLessThan(48 * 60 * 60_000);
+  });
+
   test("job creation requires a plan and an explicit confirmation", () => {
     expect(parseSeedJobCreatePayload({ planId: "p" }).ok).toBe(false);
     expect(parseSeedJobCreatePayload({ planId: "p", confirm: true }).ok).toBe(true);
@@ -371,7 +454,15 @@ describe("job/plan wire grammar", () => {
 describe("plan validity", () => {
   function basePlan(): Pick<
     SeedPlan,
-    "expiresAt" | "configRevision" | "filterFingerprint" | "baselineFingerprint" | "space" | "archive" | "stagingPolicy"
+    | "expiresAt"
+    | "configRevision"
+    | "filterFingerprint"
+    | "baselineFingerprint"
+    | "space"
+    | "archive"
+    | "stagingPolicy"
+    | "sourceAuthority"
+    | "filterUniverse"
   > {
     return {
       expiresAt: 2_000,
@@ -389,9 +480,34 @@ describe("plan validity", () => {
       },
       stagingPolicy: {
         adjacentToTarget: true,
+        derivedSibling: true,
         insideTarget: false,
         sameFilesystem: true,
         message: "sibling",
+      },
+      sourceAuthority: {
+        hostId: "master",
+        assignmentId: "a-source",
+        selectedBy: "operator",
+        assigned: true,
+        isTarget: false,
+        measurementUsable: true,
+        measurementAgeMs: 60_000,
+        fileCount: 91_660,
+        totalBytes: 14_864_173_809,
+        measuredAt: 1_000,
+        message: "Source authority: master.",
+      },
+      filterUniverse: {
+        fingerprint: "universe",
+        targetFingerprint: null,
+        match: true,
+        patternCount: 2,
+        // Stage 1 has not wired filter-aware archiving yet, so a REAL plan is
+        // not runnable. This fixture sets it true so the OTHER checks can be
+        // exercised independently.
+        archiveImplemented: true,
+        message: "universe",
       },
     };
   }
@@ -408,6 +524,35 @@ describe("plan validity", () => {
     expect(checkSeedPlanValidity(basePlan(), { ...live, baselineFingerprint: "zzz" }).reason).toBe("baseline_changed");
   });
 
+  test("dies when the source authority is not usable", () => {
+    const plan = basePlan();
+    plan.sourceAuthority = {
+      ...plan.sourceAuthority,
+      measurementUsable: false,
+      message: "The measurement from master is 40 hours old.",
+    };
+    const validity = checkSeedPlanValidity(plan, live);
+    expect(validity.valid).toBe(false);
+    expect(validity.reason).toBe("not_runnable");
+    expect(validity.message).toContain("40 hours old");
+  });
+
+  test("dies while filter-aware archiving is unwired, and on a filter mismatch", () => {
+    const unwired = basePlan();
+    unwired.filterUniverse = { ...unwired.filterUniverse, archiveImplemented: false, message: "Stage 1." };
+    expect(checkSeedPlanValidity(unwired, live).reason).toBe("not_runnable");
+    expect(checkSeedPlanValidity(unwired, live).message).toBe("Stage 1.");
+
+    const mismatched = basePlan();
+    mismatched.filterUniverse = {
+      ...mismatched.filterUniverse,
+      match: false,
+      targetFingerprint: "different",
+      message: "The target device's baseline used a different filter set.",
+    };
+    expect(checkSeedPlanValidity(mismatched, live).reason).toBe("not_runnable");
+  });
+
   test("dies when the plan is not runnable", () => {
     const noTooling = basePlan();
     noTooling.archive = { ...noTooling.archive, toolingReady: false };
@@ -420,21 +565,109 @@ describe("plan validity", () => {
     const insideTarget = basePlan();
     insideTarget.stagingPolicy = {
       adjacentToTarget: true,
+      derivedSibling: true,
       insideTarget: true,
       sameFilesystem: true,
       message: "inside",
     };
     expect(checkSeedPlanValidity(insideTarget, live).reason).toBe("not_runnable");
+
+    const notSibling = basePlan();
+    notSibling.stagingPolicy = {
+      adjacentToTarget: false,
+      derivedSibling: true,
+      insideTarget: false,
+      sameFilesystem: true,
+      message: "not a sibling",
+    };
+    expect(checkSeedPlanValidity(notSibling, live).reason).toBe("not_runnable");
+
+    // The correction: an UNKNOWN same-filesystem verdict is refused.
+    const unknownFilesystem = basePlan();
+    unknownFilesystem.stagingPolicy = {
+      adjacentToTarget: true,
+      derivedSibling: true,
+      insideTarget: false,
+      sameFilesystem: null,
+      message: "has not confirmed",
+    };
+    const validity = checkSeedPlanValidity(unknownFilesystem, live);
+    expect(validity.valid).toBe(false);
+    expect(validity.reason).toBe("not_runnable");
+    expect(validity.message).toBe("has not confirmed");
+  });
+});
+
+describe("seed prerequisites are listed, not collapsed into a boolean", () => {
+  test("names the two open Stage 1 prerequisites on a real plan", () => {
+    const execution = seedPlanExecution();
+    const prerequisites = seedPlanPrerequisites({
+      sourceAuthority: {
+        hostId: "master",
+        assignmentId: "a",
+        selectedBy: "operator",
+        assigned: true,
+        isTarget: false,
+        measurementUsable: true,
+        measurementAgeMs: 1_000,
+        fileCount: 10,
+        totalBytes: 100,
+        measuredAt: 0,
+        message: "ok",
+      },
+      filterUniverse: {
+        fingerprint: null,
+        targetFingerprint: null,
+        match: true,
+        patternCount: 0,
+        archiveImplemented: SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
+        message: "filter-aware archiving is Stage 1",
+      },
+      stagingPolicy: {
+        adjacentToTarget: true,
+        derivedSibling: true,
+        insideTarget: false,
+        sameFilesystem: true,
+        message: "sibling",
+      },
+      archive: {
+        format: "tar.zstd",
+        tooling: { tar: true, zstd: true, gzip: true },
+        toolingReady: true,
+        estimateBytes: 1,
+        choiceReason: "zstd",
+        fallback: false,
+      },
+      space: computeSeedSpacePlan({ sourceBytes: 100, sourceFiles: 1, targetFreeBytes: 1_000_000_000 }),
+    });
+    expect(prerequisites.map((p) => p.id)).toEqual([
+      "source_authority",
+      "filter_universe",
+      "staging_same_filesystem",
+      "target_tooling",
+      "target_space",
+      "transport",
+    ]);
+    expect(prerequisites.find((p) => p.id === "filter_universe")!.ok).toBe(false);
+    expect(prerequisites.find((p) => p.id === "transport")!.ok).toBe(false);
+    expect(prerequisites.find((p) => p.id === "staging_same_filesystem")!.ok).toBe(true);
+    expect(execution.available).toBe(false);
   });
 });
 
 describe("execution capability is explicit, not a fake button", () => {
-  test("execution is unavailable until the transport is implemented and validated", () => {
+  test("execution is unavailable until the transport AND filter-aware archiving are validated", () => {
     const execution = seedPlanExecution();
     expect(SEED_ARCHIVE_TRANSPORT_IMPLEMENTED).toBe(false);
+    expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(false);
     expect(execution.available).toBe(false);
-    expect(execution.reason).toContain("not implemented yet");
-    expect(execution.reason).toContain("has not been validated end-to-end");
+    expect(execution.reason).toContain("not available yet");
+    expect(execution.reason).toContain("filter universe");
+    expect(execution.reason).toContain("temporary seed space");
+    // The timeout change is stated precisely: an existing baseline is NOT
+    // silently re-scoped.
+    expect(execution.reason).toContain("existing baseline keeps its exact fixed timeout");
+    expect(execution.reason).toContain("first run with no usable baseline");
   });
 });
 

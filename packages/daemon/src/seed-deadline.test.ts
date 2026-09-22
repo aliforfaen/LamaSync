@@ -8,11 +8,13 @@
 //     that same nominal timeout (the dev-vm case: 91,660 files, exit 143 at
 //     600 s, before any completed transfer/check);
 //   * a seed stage that stops progressing is killed promptly;
-//   * a chatty-but-stuck stage is still bounded by the absolute hard cap.
+//   * a chatty-but-stuck stage is still bounded by the absolute hard cap;
+//   * the SCOPE rule: a sync against a ready baseline keeps the fixed timeout,
+//     while a first run with no baseline is supervised progress-aware.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { SEED_STAGE_HARD_CAP_MS, SEED_STALL_TIMEOUT_FALLBACK_SEC } from "@lamasync/core";
-import { seedStageWatchdog, superviseProcess } from "./executor.ts";
+import { seedStageWatchdog, superviseProcess, syncRunIsProgressAware } from "./executor.ts";
 
 const running: Array<{ kill: () => void }> = [];
 
@@ -117,6 +119,28 @@ describe("superviseProcess", () => {
     supervisor.stop();
     await Bun.sleep(400);
     expect(supervisor.timedOut()).toBe(false);
+  });
+});
+
+describe("syncRunIsProgressAware — the documented scope, not a slogan", () => {
+  test("a sync with a READY baseline keeps the fixed wall-clock timeout", () => {
+    expect(syncRunIsProgressAware({ baselineReady: true })).toBe(false);
+    // Even a planned resync on an established baseline stays fixed.
+    expect(syncRunIsProgressAware({ baselineReady: true, bisyncMode: "resync" })).toBe(false);
+    expect(syncRunIsProgressAware({ baselineReady: true, bisyncMode: null })).toBe(false);
+  });
+
+  test("a FIRST run with no usable baseline gets the progress-aware deadline", () => {
+    // This is the dev-vm shape: no baseline, killed at 600 s with exit 143
+    // before any completed transfer/check.
+    expect(syncRunIsProgressAware({ baselineReady: false })).toBe(true);
+  });
+
+  test("an explicit initialize/seed intervention and a flagged seed stage are progress-aware", () => {
+    expect(syncRunIsProgressAware({ baselineReady: true, bisyncMode: "initialize" })).toBe(true);
+    expect(syncRunIsProgressAware({ baselineReady: true, bisyncMode: "seed" })).toBe(true);
+    expect(syncRunIsProgressAware({ baselineReady: true, seedStage: true })).toBe(true);
+    expect(syncRunIsProgressAware({ baselineReady: false, seedStage: false })).toBe(true);
   });
 });
 

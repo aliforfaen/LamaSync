@@ -8,12 +8,18 @@
 //
 // Safety rules it enforces, all fail-closed:
 //
+//   * the manifest is built from the folder's EFFECTIVE FILTER UNIVERSE, never
+//     from the raw tree, and a member the universe includes but a seed cannot
+//     represent (a symlink, device, FIFO or socket) blocks the archive BEFORE
+//     tar runs — a seed never publishes a partial tree;
 //   * a source tree that changes while it is being archived is rejected
 //     (the archive could contain a half-written file);
 //   * every archive member must be a safe relative path AND a regular file
 //     or directory — a symlink, device, FIFO or hardlink aborts the seed;
+//   * the produced archive's member set must EQUAL the manifest's member set,
+//     so no unrepresented source content can reach the target;
 //   * extraction happens into a staging directory that is a SIBLING of the
-//     final target on the same filesystem, never inside the target;
+//     final target on a PROVEN same filesystem, never inside the target;
 //   * the extracted tree is verified against the source manifest (path, size,
 //     SHA-256) before anything is published;
 //   * publication is a single atomic rename, and a non-empty target is
@@ -30,15 +36,18 @@ import {
   rmdirSync,
   statSync,
   statfsSync,
+  unlinkSync,
 } from "fs";
 import { dirname, join, relative, sep } from "path";
 import {
   computeSeedSpacePlan,
+  parentPathOf,
   seedArchiveExtension,
   validateArchiveMembers,
   validateStagingLocation,
   type SeedArchiveFormat,
   type SeedArchiveTooling,
+  type SeedSourceFilterUniverse,
   type SeedSpacePlan,
 } from "@lamasync/core";
 
@@ -155,6 +164,25 @@ export interface SeedManifestEntry {
   sha256: string | null;
 }
 
+/**
+ * A member of the effective filter universe that a seed CANNOT represent.
+ *
+ * The seed's contract is "the published tree is identical to the source
+ * universe, so the following bisync validates to zero content changes". A
+ * symlink, device, FIFO or socket cannot be archived safely (a symlink in an
+ * archive is an extraction hazard) and cannot be silently dropped either —
+ * dropping it would make the baseline validation fail. Such a member
+ * therefore BLOCKS the seed, and `createSeedArchive` refuses before tar runs.
+ *
+ * In practice this is what the effective filter universe is for: excluding
+ * `node_modules` (where a Projects tree's symlinks live) removes them from the
+ * universe entirely, so they never appear here.
+ */
+export interface SeedUnsupportedMember {
+  path: string;
+  reason: string;
+}
+
 export interface SeedManifest {
   entries: SeedManifestEntry[];
   fileCount: number;
@@ -164,8 +192,21 @@ export interface SeedManifest {
   fingerprint: string;
   /** Cheap churn identity (path + size + mtime), used around archiving. */
   statsFingerprint: string;
-  /** Entries deliberately not archived (symlinks and other special files). */
-  excluded: { path: string; reason: string }[];
+  /** Members of the universe that a seed cannot represent. Must be empty. */
+  unsupported: SeedUnsupportedMember[];
+  /**
+   * The effective filter universe this manifest was built from. The archive is
+   * only valid for the SAME universe, which is why the fingerprint travels
+   * with the manifest and must equal the plan's `filterFingerprint`.
+   */
+  filter: {
+    fingerprint: string;
+    patternCount: number;
+    /** Entries the universe excluded (not measured, not hashed, not archived). */
+    skippedCount: number;
+    /** Bounded sample of excluded paths, for the plan and the audit trail. */
+    skippedSample: string[];
+  };
 }
 
 function sha256File(path: string): Promise<string> {
@@ -183,27 +224,46 @@ function toPosix(path: string): string {
 }
 
 export interface BuildManifestOptions {
+  /**
+   * The effective filter universe. REQUIRED, with no default: a manifest that
+   * walked the raw tree while sync filters a different tree would describe the
+   * wrong content, and the archive built from it could never validate to zero
+   * content changes.
+   */
+  filter: SeedSourceFilterUniverse;
   /** Hard cap on entries; reaching it fails the manifest rather than lying. */
   entryCap?: number;
 }
 
 export const SEED_MANIFEST_ENTRY_CAP = 2_000_000;
 
+/** Bounded sample of filter-excluded paths carried on the manifest. */
+export const SEED_MANIFEST_SKIPPED_SAMPLE_CAP = 20;
+
 /**
- * Walk a source tree and build a content manifest.
+ * Walk the effective filter universe of a source tree and build a manifest.
  *
- * Symlinks and special files are recorded in `excluded` and NOT archived: a
- * symlink in an archive is an extraction hazard, and the final bisync
- * validation is the honest place to discover that the tree was not fully
- * represented. Reaching the entry cap fails the whole manifest.
+ * Only paths the universe includes are walked, measured and hashed; an
+ * excluded directory is pruned whole (so an excluded `node_modules` costs
+ * nothing and its nested symlinks are never even seen). Members the universe
+ * DOES include but a seed cannot represent are recorded in `unsupported`, and
+ * `createSeedArchive` refuses while that list is non-empty. Reaching the entry
+ * cap fails the whole manifest.
  */
 export async function buildSeedManifest(
   root: string,
-  opts: BuildManifestOptions = {},
+  opts: BuildManifestOptions,
 ): Promise<SeedManifest> {
   const cap = opts.entryCap ?? SEED_MANIFEST_ENTRY_CAP;
+  const filter = opts.filter;
   const entries: SeedManifestEntry[] = [];
-  const excluded: { path: string; reason: string }[] = [];
+  const unsupported: SeedUnsupportedMember[] = [];
+  const skippedSample: string[] = [];
+  let skippedCount = 0;
+  const skip = (rel: string): void => {
+    skippedCount += 1;
+    if (skippedSample.length < SEED_MANIFEST_SKIPPED_SAMPLE_CAP) skippedSample.push(rel);
+  };
   const stack: string[] = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
@@ -217,23 +277,31 @@ export async function buildSeedManifest(
     }
     dirents.sort((a, b) => a.name.localeCompare(b.name));
     for (const dirent of dirents) {
-      if (entries.length + excluded.length >= cap) {
-        throw new Error(`source tree exceeds the ${cap}-entry manifest cap`);
+      if (entries.length + unsupported.length >= cap) {
+        throw new Error(`source universe exceeds the ${cap}-entry manifest cap`);
       }
       const full = join(dir, dirent.name);
       const rel = toPosix(relative(root, full));
-      if (dirent.isSymbolicLink()) {
-        excluded.push({ path: rel, reason: "symlink" });
+      const isDirectory = dirent.isDirectory();
+      // The filter decides first: an excluded path is not part of the seed and
+      // is never inspected further (a symlink inside an excluded directory is
+      // therefore irrelevant, which is exactly how Projects becomes seedable).
+      if (!filter.includes(rel, isDirectory)) {
+        skip(rel);
         continue;
       }
-      if (dirent.isDirectory()) {
+      if (dirent.isSymbolicLink()) {
+        unsupported.push({ path: rel, reason: "symlink" });
+        continue;
+      }
+      if (isDirectory) {
         const stat = statSync(full);
         entries.push({ path: rel, kind: "dir", size: 0, mtimeMs: Math.round(stat.mtimeMs), sha256: null });
         stack.push(full);
         continue;
       }
       if (!dirent.isFile()) {
-        excluded.push({ path: rel, reason: "not a regular file" });
+        unsupported.push({ path: rel, reason: "not a regular file" });
         continue;
       }
       const stat = statSync(full);
@@ -248,7 +316,7 @@ export async function buildSeedManifest(
     }
   }
   entries.sort((a, b) => a.path.localeCompare(b.path));
-  excluded.sort((a, b) => a.path.localeCompare(b.path));
+  unsupported.sort((a, b) => a.path.localeCompare(b.path));
 
   const contentHash = createHash("sha256");
   const statsHash = createHash("sha256");
@@ -272,8 +340,35 @@ export async function buildSeedManifest(
     totalBytes,
     fingerprint: contentHash.digest("hex"),
     statsFingerprint: statsHash.digest("hex"),
-    excluded,
+    unsupported,
+    filter: {
+      fingerprint: filter.fingerprint,
+      patternCount: filter.patterns.length,
+      skippedCount,
+      skippedSample,
+    },
   };
+}
+
+/**
+ * Why this manifest cannot be seeded, or null when it can.
+ *
+ * Fail closed: a seed whose source universe contains members it cannot
+ * represent would publish an incomplete tree, and the following bisync would
+ * then "repair" it by copying the difference — the exact silent divergence
+ * this feature exists to avoid.
+ */
+export function seedManifestBlockingReason(manifest: SeedManifest): string | null {
+  if (manifest.unsupported.length === 0) return null;
+  const sample = manifest.unsupported
+    .slice(0, 5)
+    .map((member) => `${member.path} (${member.reason})`)
+    .join(", ");
+  return (
+    `${manifest.unsupported.length} entr(y/ies) in this folder's effective filter universe are symlinks or special ` +
+    `files, which a seed cannot represent (for example ${sample}). Exclude them with the folder's ignore rules ` +
+    "(lamasyncignore) or remove them, then prepare the plan again — a seed never publishes a partial tree."
+  );
 }
 
 /** Cheap churn re-check: path + size + mtime only, no content hashing. */
@@ -322,6 +417,16 @@ export function buildStatsFingerprint(root: string): string {
 // Archive create / list / extract
 // ---------------------------------------------------------------------------
 
+/**
+ * `tar --create --directory <root> .` archives the WHOLE source root.
+ *
+ * That is only sound because the manifest is built from the effective filter
+ * universe and `createSeedArchive` (a) refuses when the universe contains
+ * members a seed cannot represent and (b) verifies afterwards that the
+ * archive's member set equals the manifest's. The raw tree may therefore only
+ * be archived when the manifest already represents all of it — the filter
+ * excludes are applied by the caller, not by tar.
+ */
 export function archiveCreateArgs(input: {
   format: SeedArchiveFormat;
   sourceRoot: string;
@@ -405,26 +510,41 @@ export interface ArchiveValidation {
 }
 
 /**
- * List an archive and validate every member before extracting it.
+ * Normalize a name as tar reports it for comparison against a manifest path.
  *
- * A member is acceptable only when its name is a safe relative path AND its
- * type is a regular file (`-`) or directory (`d`). Anything else — symlink,
- * hardlink, device, FIFO, socket, or an unparsable listing line — aborts.
+ * `tar --create --directory root .` stores `./sub/` and `./a.txt`; manifest
+ * paths are `sub` and `a.txt`. Comparison must not depend on those decorations.
  */
-export async function validateSeedArchive(input: {
+export function normalizeArchiveMemberName(name: string): string {
+  let out = name;
+  while (out.startsWith("./")) out = out.slice(2);
+  if (out.endsWith("/") && out.length > 1) out = out.slice(0, -1);
+  return out === "." ? "" : out;
+}
+
+interface ArchiveMemberListing {
+  ok: boolean;
+  /** Normalized names of regular files and directories. */
+  names: string[];
+  typeOffenders: string[];
+  message: string;
+}
+
+/** List an archive's regular-file/directory members, normalized. */
+async function listArchiveMembers(input: {
   format: SeedArchiveFormat;
   archivePath: string;
-  runner?: SeedCommandRunner;
-  sampleCap?: number;
-}): Promise<ArchiveValidation> {
-  const runner = input.runner ?? defaultSeedCommandRunner;
-  const sampleCap = input.sampleCap ?? 20;
-  const result = await runner(archiveListArgs({ format: input.format, archivePath: input.archivePath }));
+  runner: SeedCommandRunner;
+  sampleCap: number;
+}): Promise<ArchiveMemberListing> {
+  const result = await input.runner(
+    archiveListArgs({ format: input.format, archivePath: input.archivePath }),
+  );
   if (result.exitCode !== 0) {
     return {
       ok: false,
-      members: { count: 0, sample: [] },
-      offenders: [],
+      names: [],
+      typeOffenders: [],
       message: `the archive could not be listed (tar exit ${result.exitCode}): ${result.stderr.slice(-300)}`,
     };
   }
@@ -441,15 +561,53 @@ export async function validateSeedArchive(input: {
         typeOffenders.push(line.slice(0, 200));
         continue;
       }
-      names.push(line);
+      names.push(normalizeArchiveMemberName(line));
       continue;
     }
     if (parsed.type !== "-" && parsed.type !== "d") {
-      if (typeOffenders.length < sampleCap) typeOffenders.push(`${parsed.name} (type ${parsed.type})`);
+      if (typeOffenders.length < input.sampleCap) {
+        typeOffenders.push(`${parsed.name} (type ${parsed.type})`);
+      }
       continue;
     }
-    names.push(parsed.name);
+    const name = normalizeArchiveMemberName(parsed.name);
+    // `./` is the archive root — the target directory itself, not a path in
+    // it — so it is not a member to validate or to compare against.
+    if (name === "") continue;
+    names.push(name);
   }
+  return { ok: true, names, typeOffenders, message: "" };
+}
+
+/**
+ * List an archive and validate every member before extracting it.
+ *
+ * A member is acceptable only when its name is a safe relative path AND its
+ * type is a regular file (`-`) or directory (`d`). Anything else — symlink,
+ * hardlink, device, FIFO, socket, or an unparsable listing line — aborts.
+ */
+export async function validateSeedArchive(input: {
+  format: SeedArchiveFormat;
+  archivePath: string;
+  runner?: SeedCommandRunner;
+  sampleCap?: number;
+}): Promise<ArchiveValidation> {
+  const sampleCap = input.sampleCap ?? 20;
+  const listing = await listArchiveMembers({
+    format: input.format,
+    archivePath: input.archivePath,
+    runner: input.runner ?? defaultSeedCommandRunner,
+    sampleCap,
+  });
+  if (!listing.ok) {
+    return {
+      ok: false,
+      members: { count: 0, sample: [] },
+      offenders: [],
+      message: listing.message,
+    };
+  }
+  const { names, typeOffenders } = listing;
   const nameVerdict = validateArchiveMembers(names, sampleCap);
   if (!nameVerdict.ok || typeOffenders.length > 0) {
     return {
@@ -485,19 +643,44 @@ export interface CreateArchiveResult {
 /**
  * Create a seed archive from a source tree.
  *
- * The source tree's stats fingerprint is taken before and after tar runs. A
- * difference means the tree moved mid-archive, so the archive cannot be
- * trusted and the whole operation fails closed.
+ * The manifest is REQUIRED and is the authority for what may be archived:
+ *
+ *   1. the manifest must describe the whole source universe — if it contains
+ *      members a seed cannot represent, the archive is refused BEFORE tar runs
+ *      (an archive containing a symlink would be rejected at validation, and
+ *      dropping the symlink silently would leave a tree the following bisync
+ *      would then have to "repair");
+ *   2. after tar runs, the archive's member set must EQUAL the manifest's
+ *      member set, so unrepresented source content can never reach the target;
+ *   3. the source tree's stats fingerprint is taken before and after tar runs —
+ *      a difference means the tree moved mid-archive and the whole operation
+ *      fails closed.
  */
 export async function createSeedArchive(input: {
   format: SeedArchiveFormat;
   sourceRoot: string;
   outputPath: string;
+  /** The manifest of the effective filter universe. Required. */
+  manifest: SeedManifest;
   runner?: SeedCommandRunner;
   onProgress?: (membersDone: number) => void;
   signal?: AbortSignal;
 }): Promise<CreateArchiveResult> {
   const runner = input.runner ?? defaultSeedCommandRunner;
+  // Fail closed BEFORE tar: never build an archive that has unrepresented
+  // source content in it.
+  const blocking = seedManifestBlockingReason(input.manifest);
+  if (blocking !== null) {
+    return {
+      ok: false,
+      archivePath: input.outputPath,
+      bytes: 0,
+      sha256: null,
+      memberCount: 0,
+      churned: false,
+      error: blocking,
+    };
+  }
   const before = buildStatsFingerprint(input.sourceRoot);
   mkdirSync(dirname(input.outputPath), { recursive: true });
   let memberCount = 0;
@@ -535,6 +718,35 @@ export async function createSeedArchive(input: {
   const churned = before !== after;
   const bytes = existsSync(input.outputPath) ? statSync(input.outputPath).size : 0;
   const sha256 = existsSync(input.outputPath) ? await sha256File(input.outputPath) : null;
+
+  // The archive must represent EXACTLY the manifest. A difference in either
+  // direction means the target would receive content the plan never accounted
+  // for, or miss content it promised — both fail closed.
+  const mismatch = await compareArchiveToManifest({
+    format: input.format,
+    archivePath: input.outputPath,
+    manifest: input.manifest,
+    runner,
+  });
+  if (mismatch !== null) {
+    // Never leave an archive that does not represent the manifest behind: it
+    // would be uploaded and staged as if it were complete.
+    try {
+      unlinkSync(input.outputPath);
+    } catch {
+      /* best-effort */
+    }
+    return {
+      ok: false,
+      archivePath: input.outputPath,
+      bytes: 0,
+      sha256: null,
+      memberCount,
+      churned,
+      error: mismatch,
+    };
+  }
+
   return {
     ok: !churned,
     archivePath: input.outputPath,
@@ -546,6 +758,40 @@ export async function createSeedArchive(input: {
       ? "the source tree changed while it was being archived, so the archive may be inconsistent"
       : null,
   };
+}
+
+/**
+ * The archive's member set must equal the manifest's member set.
+ * Returns an operator-facing reason when it does not, or null when it matches.
+ */
+async function compareArchiveToManifest(input: {
+  format: SeedArchiveFormat;
+  archivePath: string;
+  manifest: SeedManifest;
+  runner: SeedCommandRunner;
+}): Promise<string | null> {
+  const listing = await listArchiveMembers({
+    format: input.format,
+    archivePath: input.archivePath,
+    runner: input.runner,
+    sampleCap: 20,
+  });
+  if (!listing.ok) return listing.message;
+  if (listing.typeOffenders.length > 0) {
+    return `the archive contains members that are not regular files or directories (for example ${listing.typeOffenders[0]})`;
+  }
+  const expected = new Set(input.manifest.entries.map((entry) => entry.path));
+  // tar stores the archive root as `./` (normalized to ""). The root is the
+  // target directory itself and is described implicitly by the manifest, so it
+  // is not a mismatch in either direction.
+  const actual = new Set(listing.names.filter((name) => name !== ""));
+  const unexpected = [...actual].filter((name) => !expected.has(name)).slice(0, 5);
+  const missing = [...expected].filter((path) => !actual.has(path)).slice(0, 5);
+  if (unexpected.length === 0 && missing.length === 0) return null;
+  const parts: string[] = [];
+  if (unexpected.length > 0) parts.push(`content the manifest does not describe (for example ${unexpected[0]})`);
+  if (missing.length > 0) parts.push(`content the manifest requires but the archive lacks (for example ${missing[0]})`);
+  return `the archive does not match the source manifest: ${parts.join("; ")}`;
 }
 
 export interface ExtractArchiveResult {
@@ -799,6 +1045,9 @@ export interface SeedPreflightInput {
   stagingDir: string;
   tooling: SeedArchiveTooling;
   format: SeedArchiveFormat;
+  /** The effective filter universe. Required — the preflight measures the
+   *  same tree the seed would archive, never the raw source. */
+  filter: SeedSourceFilterUniverse;
   runner?: SeedCommandRunner;
   manifest?: SeedManifest;
   /** Measured archive ratio from a previous archive, if any. */
@@ -814,20 +1063,20 @@ export interface SeedPreflightResult {
 }
 
 /**
- * Read-only preflight: measure the source, check the staging policy and
- * compute the target's space reservation. Never writes to the target and
- * never creates a staging directory.
+ * Read-only preflight: measure the effective filter universe of the source,
+ * check the staging policy and compute the target's space reservation. Never
+ * writes to the target and never creates a staging directory.
  */
 export async function seedPreflight(input: SeedPreflightInput): Promise<SeedPreflightResult> {
   const errors: string[] = [];
-  const manifest = input.manifest ?? (await buildSeedManifest(input.sourceRoot));
-  if (manifest.excluded.length > 0) {
-    errors.push(
-      `${manifest.excluded.length} entr(y/ies) are symlinks or special files and will not be seeded (for example ${manifest.excluded[0]!.path}).`,
-    );
-  }
-  const targetParent = input.targetPath.slice(0, input.targetPath.lastIndexOf("/")) || "/";
-  const stagingParent = input.stagingDir.slice(0, input.stagingDir.lastIndexOf("/")) || "/";
+  const manifest =
+    input.manifest ?? (await buildSeedManifest(input.sourceRoot, { filter: input.filter }));
+  // Members the universe includes but a seed cannot represent BLOCK the seed;
+  // they are not "silently skipped".
+  const blocking = seedManifestBlockingReason(manifest);
+  if (blocking !== null) errors.push(blocking);
+  const targetParent = parentPathOf(input.targetPath) ?? "/";
+  const stagingParent = parentPathOf(input.stagingDir) ?? "/";
   const policy = validateStagingLocation({
     stagingPath: input.stagingDir,
     targetPath: input.targetPath,

@@ -339,6 +339,31 @@ export function seedStageWatchdog(assignmentTimeoutSec?: number | null): Process
 }
 
 /**
+ * LAMA-346: does THIS sync run get the progress-aware deadline?
+ *
+ * The scope is deliberately narrow, and it is the exact rule the docs state:
+ *
+ *   * a sync against an EXISTING, ready baseline keeps its exact fixed
+ *     wall-clock timeout — nothing about ordinary steady-state sync changed;
+ *   * a FIRST run with no usable baseline (the dev-vm shape: the fixed 600 s
+ *     timeout killed a healthy initial transfer at exit 143), an explicit
+ *     `initialize`/`seed` intervention, or a caller-flagged seed stage gets
+ *     the stall budget plus the hard ceiling.
+ *
+ * Pure and exported so the selection is unit-tested rather than inferred from
+ * the surrounding control flow.
+ */
+export function syncRunIsProgressAware(input: {
+  seedStage?: boolean | undefined;
+  bisyncMode?: BisyncRunControl["mode"] | null | undefined;
+  baselineReady: boolean;
+}): boolean {
+  if (input.seedStage === true) return true;
+  if (input.bisyncMode === "initialize" || input.bisyncMode === "seed") return true;
+  return !input.baselineReady;
+}
+
+/**
  * Supervise one child process.
  *
  * Without a watchdog this is the historical fixed wall-clock kill. With one,
@@ -1080,12 +1105,13 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         // LAMA-346: the dev-vm incident was a FIRST run with no usable
         // baseline, so "initial seed stage" is `!inspection.ready` as well as
         // an explicit initialize/seed. A planned resync on an established
-        // baseline keeps the ordinary wall-clock timeout.
-        progressAware =
-          progressAware ||
-          bisync.mode === "initialize" ||
-          bisync.mode === "seed" ||
-          !inspection.ready;
+        // baseline keeps the ordinary wall-clock timeout. `syncRunIsProgressAware`
+        // is the single, unit-tested expression of that rule.
+        progressAware = syncRunIsProgressAware({
+          seedStage: opts.seedStage,
+          bisyncMode: bisync.mode,
+          baselineReady: inspection.ready,
+        });
       }
       break;
     }

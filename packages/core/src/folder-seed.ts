@@ -11,13 +11,21 @@
 // This module is the shared, dependency-free contract for the replacement:
 //
 //   * a user-approved SEED PLAN (never automatic) that is only *recommended*
-//     above a file-count threshold;
+//     above a file-count threshold, and that names its SOURCE DEVICE
+//     explicitly instead of guessing;
 //   * a deterministic space calculation for a temporary archive plus a
 //     staging directory beside the final target;
 //   * a resumable, persisted job state machine with phases, bounded progress
 //     and a renewable lease;
 //   * a progress-aware deadline: long work is allowed while measurable phase
 //     progress continues, and fails when it stalls.
+//
+// A seed archives exactly the EFFECTIVE FILTER UNIVERSE the following bisync
+// baseline syncs — never the raw source tree. That universe is an explicit,
+// fingerprinted input to the archive primitives, and filter-aware archive
+// construction is a declared Stage 1 prerequisite (`SEED_FILTER_AWARE_ARCHIVE_
+// IMPLEMENTED` is false today), so no arbitrary folder is presented as
+// seedable while the pieces are missing.
 //
 // It must stay free of node built-ins so the web UI can import it unchanged.
 
@@ -43,6 +51,17 @@ export const SEED_RECOMMENDATION_FILE_THRESHOLD = 3_000;
  * automatic: a plan must carry `createdBy` evidence of a human/admin request.
  */
 export const SEED_PLAN_REQUIRES_OPERATOR = true;
+
+/**
+ * How old a source measurement may be and still authorize a seed.
+ *
+ * The daemon's deep local measurement runs at most once a day
+ * (`FOLDER_HEALTH_DEEP_INTERVAL_MS`), so one cadence plus slack counts as
+ * fresh. An older measurement must be refreshed first: the entire point of a
+ * plan is to reserve the right space for the right tree, and a stale count
+ * would under-reserve.
+ */
+export const SEED_SOURCE_MEASUREMENT_MAX_AGE_MS = 26 * 60 * 60_000;
 
 /** Safety multiplier applied to the estimated peak staging footprint. */
 export const SEED_SPACE_SAFETY_FACTOR = 1.25;
@@ -162,6 +181,104 @@ export function seedArchiveExtension(format: SeedArchiveFormat): string {
 /** Object key for one seed job's archive in the dedicated seed namespace. */
 export function seedArchiveObjectKey(jobId: string, format: SeedArchiveFormat): string {
   return `${SEED_OBJECT_KEY_PREFIX}/${jobId}/payload${seedArchiveExtension(format)}`;
+}
+
+// ---------------------------------------------------------------------------
+// The effective filter universe (Stage 1 prerequisite)
+// ---------------------------------------------------------------------------
+
+/**
+ * A seed archives the SAME universe the following bisync baseline syncs.
+ *
+ * `lamasyncignore`, `ignoreGitMetadata` and `respectGitignore` decide which
+ * paths exist for sync. A seed that archived the raw source tree while sync
+ * filtered a different tree could not validate to zero content changes, and it
+ * would also drag in members a seed cannot represent — for example the symlinks
+ * nested in `node_modules` under a Projects tree, which the fleet's own
+ * `/home/messhias/lamasync/projects` currently contains.
+ *
+ * The universe is therefore an explicit, fingerprinted input to the manifest
+ * builder and the archive primitives. They never walk outside it.
+ */
+export interface SeedSourceFilterUniverse {
+  /** Must equal the assignment's effective bisync filter fingerprint. */
+  fingerprint: string;
+  /** The effective patterns, recorded for the plan and the audit trail. */
+  patterns: readonly string[];
+  /**
+   * Does this relative path belong to the seed universe? Returning false for
+   * a directory prunes the whole subtree, so an excluded `node_modules` is
+   * never walked, measured, hashed or archived.
+   */
+  includes: (relativePath: string, isDirectory: boolean) => boolean;
+}
+
+/**
+ * Stage 1 prerequisite: building an archive from the effective filter
+ * universe. Until this is wired, the archive primitives accept only an
+ * already-filtered, representable source and refuse anything else, and no
+ * folder is presented as seedable.
+ */
+export const SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED = false;
+
+export const SEED_FILTER_UNIVERSE_REQUIRED_REASON =
+  "A seed archive must be built from exactly the effective filter universe the following sync baseline uses " +
+  "(lamasyncignore, ignore-git-metadata, respect-gitignore). Archiving the raw source tree while sync filters a " +
+  "different tree would produce a seed that cannot validate to zero content changes, and would include members a " +
+  "seed cannot represent — the fleet's own Projects tree contains nested node_modules symlinks. Filter-aware " +
+  "archive construction is a Stage 1 prerequisite and is not wired yet, so no arbitrary folder can be seeded today.";
+
+export interface SeedFilterUniverseFacts {
+  /**
+   * The SOURCE device's effective filter fingerprint. The manifest must be
+   * built with exactly this universe; `null` means "no filters configured".
+   */
+  fingerprint: string | null;
+  /**
+   * The TARGET device's acknowledged baseline fingerprint. `null` when the
+   * target has no baseline yet — the normal case for a seed.
+   */
+  targetFingerprint: string | null;
+  /**
+   * True when the target cannot contradict the source universe: either the
+   * target has no acknowledged fingerprint yet, or it equals the source's.
+   * A target whose established baseline used a DIFFERENT filter set would
+   * make the published tree sync a second time, so it is refused.
+   */
+  match: boolean;
+  patternCount: number;
+  /** False until filter-aware archive construction is wired (Stage 1). */
+  archiveImplemented: boolean;
+  message: string;
+}
+
+/**
+ * The device that owns the data, named by the operator.
+ *
+ * Deliberately explicit: picking "the largest other assignment" would silently
+ * choose an authority from a number, and a wrong source produces a seed of the
+ * wrong tree. A plan therefore carries the operator's choice plus the evidence
+ * that the choice was usable.
+ */
+export interface SeedSourceAuthority {
+  /** The device the operator named as the source of truth for this seed. */
+  hostId: string;
+  /** That device's assignment of this folder. */
+  assignmentId: string;
+  /** How the authority was chosen — always an explicit operator request. */
+  selectedBy: "operator";
+  /** Is the named device actually assigned to this folder? */
+  assigned: boolean;
+  /** True when the named device is the target (never allowed). */
+  isTarget: boolean;
+  /** Is the named device's measurement present, fresh and usable? */
+  measurementUsable: boolean;
+  measurementAgeMs: number | null;
+  fileCount: number;
+  totalBytes: number;
+  measuredAt: number | null;
+  /** Exact operator-facing reason when the authority is not usable. */
+  message: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,23 +478,83 @@ export interface StagingLocationInput {
   stagingDevice?: number | null;
   /** `stat().dev` of the final target's parent, when known. */
   targetDevice?: number | null;
+  /**
+   * A same-filesystem verdict already proven by the TARGET device. Takes
+   * precedence over the device comparison, because a server building a plan
+   * cannot stat the target's filesystem and must use the device's own proof.
+   * `null`/omitted means unproven, which is refused rather than assumed.
+   */
+  sameFilesystemProven?: boolean | null;
 }
 
 export interface StagingLocationVerdict {
   ok: boolean;
+  /** True only when the staging directory shares the target's DIRECT parent. */
+  adjacentToTarget: boolean;
+  /**
+   * True when the staging directory is one this feature created, i.e. its name
+   * starts with `SEED_STAGING_DIR_PREFIX`. Publishing renames the staging
+   * directory over the target, so an arbitrary pre-existing directory beside
+   * the target must never qualify.
+   */
+  derivedSibling: boolean;
   insideTarget: boolean;
   sameFilesystem: boolean | null;
   message: string;
 }
 
+/** The parent directory of an absolute path, or null. */
+export function parentPathOf(path: string): string | null {
+  const normalized = normalizeAbsolutePath(path);
+  if (normalized === null) return null;
+  const index = normalized.lastIndexOf("/");
+  return index <= 0 ? "/" : normalized.slice(0, index);
+}
+
 /**
- * The staging directory must be a SIBLING of the final target on the same
- * filesystem — never inside it.
+ * Proof, from the TARGET device, that the staging sibling shares the target's
+ * parent and therefore its filesystem.
+ *
+ * The server cannot stat the target's filesystem, so it cannot prove that
+ * publishing is an atomic rename. The device can: it stats the directory that
+ * would hold the staging sibling. Reported with the ordinary heartbeat, so a
+ * plan is built from an observed fact and the same-filesystem verdict fails
+ * closed until it arrives.
+ */
+export interface SeedStagingProof {
+  /** The device's local path for the assignment. */
+  targetPath: string | null;
+  /** The directory that holds the target — where the staging sibling lives. */
+  targetParent: string | null;
+  /** The parent of the derived staging sibling (must equal `targetParent`). */
+  stagingParent: string | null;
+  /**
+   * True only when the two parents are the SAME directory and it was readable.
+   * Null means the device could not prove it, which is refused rather than
+   * assumed.
+   */
+  sameFilesystem: boolean | null;
+  /** `stat().dev` of that directory, when it could be read. */
+  device: number | null;
+  checkedAt: number;
+}
+
+/**
+ * The staging directory must be a SIBLING of the final target: same DIRECT
+ * parent, never inside the target, named as a seed staging directory, and
+ * provably on the same filesystem.
  *
  * Inside the target it would (a) be seen by bisync as managed content and
- * (b) make the final publish a copy instead of an atomic rename. A different
- * filesystem makes the publish a copy too, which reintroduces the very
- * timeout this feature exists to remove. Both are refused.
+ * (b) make the final publish a copy instead of an atomic rename. Somewhere
+ * else on the same device (`/data/elsewhere` for a `/data/projects` target)
+ * would still be a rename target in principle, but publishing renames the
+ * staging directory OVER the target, so only a directory this feature created
+ * beside the target may qualify — otherwise an unrelated directory could be
+ * published as the target.
+ *
+ * The same-filesystem verdict FAILS CLOSED when it is unknown: a caller that
+ * has not proven the two paths share a filesystem cannot approve the plan, and
+ * `publishStagedTree` refuses for the same reason.
  */
 export function validateStagingLocation(input: StagingLocationInput): StagingLocationVerdict {
   const staging = normalizeAbsolutePath(input.stagingPath);
@@ -385,19 +562,30 @@ export function validateStagingLocation(input: StagingLocationInput): StagingLoc
   if (staging === null || target === null) {
     return {
       ok: false,
+      adjacentToTarget: false,
+      derivedSibling: false,
       insideTarget: false,
       sameFilesystem: null,
       message: "Staging and target must both be absolute paths.",
     };
   }
+  const stagingParent = parentPathOf(staging);
+  const targetParent = parentPathOf(target);
+  const stagingBase = staging.slice(staging.lastIndexOf("/") + 1);
   const insideTarget = staging === target || staging.startsWith(`${target}/`);
+  const adjacentToTarget = stagingParent !== null && stagingParent === targetParent;
+  const derivedSibling = stagingBase.startsWith(SEED_STAGING_DIR_PREFIX);
   const sameFilesystem =
-    typeof input.stagingDevice === "number" && typeof input.targetDevice === "number"
-      ? input.stagingDevice === input.targetDevice
-      : null;
+    typeof input.sameFilesystemProven === "boolean"
+      ? input.sameFilesystemProven
+      : typeof input.stagingDevice === "number" && typeof input.targetDevice === "number"
+        ? input.stagingDevice === input.targetDevice
+        : null;
   if (insideTarget) {
     return {
       ok: false,
+      adjacentToTarget,
+      derivedSibling,
       insideTarget,
       sameFilesystem,
       message:
@@ -405,9 +593,36 @@ export function validateStagingLocation(input: StagingLocationInput): StagingLoc
         "so the finished tree can be published with one atomic rename and never appears as managed content.",
     };
   }
+  if (!adjacentToTarget) {
+    return {
+      ok: false,
+      adjacentToTarget,
+      derivedSibling,
+      insideTarget,
+      sameFilesystem,
+      message:
+        `The staging directory is not a sibling of the target: staging must sit directly in ` +
+        `\`${targetParent ?? "?"}\`, the same directory that holds the target.`,
+    };
+  }
+  if (!derivedSibling) {
+    return {
+      ok: false,
+      adjacentToTarget,
+      derivedSibling,
+      insideTarget,
+      sameFilesystem,
+      message:
+        `The staging directory \`${stagingBase}\` is not a seed staging directory. It must be named ` +
+        `\`${SEED_STAGING_DIR_PREFIX}…\` directly beside the target; publishing renames it over the target, so an ` +
+        "unrelated directory is never published as the target.",
+    };
+  }
   if (sameFilesystem === false) {
     return {
       ok: false,
+      adjacentToTarget,
+      derivedSibling,
       insideTarget,
       sameFilesystem,
       message:
@@ -415,13 +630,25 @@ export function validateStagingLocation(input: StagingLocationInput): StagingLoc
         "be a copy instead of an atomic rename. Put the staging directory beside the target.",
     };
   }
+  if (sameFilesystem === null) {
+    return {
+      ok: false,
+      adjacentToTarget,
+      derivedSibling,
+      insideTarget,
+      sameFilesystem,
+      message:
+        "The target device has not confirmed that the staging directory and the target share a filesystem, " +
+        "so publishing cannot be proven to be an atomic rename. The device confirms this in its next report.",
+    };
+  }
   return {
     ok: true,
+    adjacentToTarget,
+    derivedSibling,
     insideTarget,
     sameFilesystem,
-    message: sameFilesystem === true
-      ? "Staging is a sibling of the target on the same filesystem."
-      : "Staging is a sibling of the target (same-filesystem check needs both paths to exist).",
+    message: "Staging is a sibling of the target on the same filesystem.",
   };
 }
 
@@ -440,7 +667,7 @@ export function normalizeAbsolutePath(path: string): string | null {
 export function seedStagingPath(targetPath: string, jobId: string): string | null {
   const target = normalizeAbsolutePath(targetPath);
   if (target === null) return null;
-  const parent = target.includes("/") ? target.slice(0, target.lastIndexOf("/")) || "/" : "/";
+  const parent = parentPathOf(target) ?? "/";
   const base = target.slice(target.lastIndexOf("/") + 1) || "target";
   const safeJob = jobId.replace(/[^A-Za-z0-9-]/g, "").slice(0, 64) || "job";
   return `${parent === "/" ? "" : parent}/${SEED_STAGING_DIR_PREFIX}${base}-${safeJob}`;
@@ -710,15 +937,82 @@ export interface SeedPlanExecution {
   reason: string;
 }
 
+/**
+ * One thing a plan needs before it may run, and whether it is satisfied.
+ *
+ * Exported as data so the API and the UI can list what is missing instead of
+ * reducing every blocker to a single boolean. Two of these are Stage 1
+ * prerequisites that are deliberately unsatisfied today
+ * (`filter_universe`, `transport`), which is what keeps an arbitrary folder —
+ * for example the fleet's own Projects tree — from being presented as seedable.
+ */
+export type SeedPrerequisiteId =
+  | "source_authority"
+  | "filter_universe"
+  | "staging_same_filesystem"
+  | "target_tooling"
+  | "target_space"
+  | "transport";
+
+export interface SeedPrerequisite {
+  id: SeedPrerequisiteId;
+  ok: boolean;
+  message: string;
+}
+
+/** The prerequisites of a plan, in the order they gate execution. */
+export function seedPlanPrerequisites(
+  plan: Pick<
+    SeedPlan,
+    "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space"
+  >,
+): SeedPrerequisite[] {
+  return [
+    { id: "source_authority", ok: plan.sourceAuthority.measurementUsable, message: plan.sourceAuthority.message },
+    {
+      id: "filter_universe",
+      ok: plan.filterUniverse.archiveImplemented && plan.filterUniverse.match,
+      message: plan.filterUniverse.message,
+    },
+    {
+      id: "staging_same_filesystem",
+      ok:
+        plan.stagingPolicy.adjacentToTarget &&
+        plan.stagingPolicy.derivedSibling &&
+        !plan.stagingPolicy.insideTarget &&
+        plan.stagingPolicy.sameFilesystem === true,
+      message: plan.stagingPolicy.message,
+    },
+    {
+      id: "target_tooling",
+      ok: plan.archive.toolingReady,
+      message: plan.archive.toolingReady
+        ? "The target device has the archive tools it needs."
+        : "The target device has not reported that it has tar and the archive compressor.",
+    },
+    { id: "target_space", ok: plan.space.ok, message: plan.space.message },
+    { id: "transport", ok: SEED_ARCHIVE_TRANSPORT_IMPLEMENTED, message: SEED_EXECUTION_UNAVAILABLE_REASON },
+  ];
+}
+
 export interface SeedPlan {
   id: string;
   hostId: string;
   folderId: string;
   assignmentId: string;
   recommendation: SeedRecommendation;
+  /** The device the operator named as the source of truth (explicit, never inferred). */
+  sourceHostId: string;
+  sourceAuthority: SeedSourceAuthority;
   source: SeedSourceFacts;
   target: SeedTargetFacts;
   space: SeedSpacePlan;
+  /**
+   * The effective filter universe the archive must be built from. Recorded on
+   * the plan so a manifest can be checked against it, and so the plan is
+   * honestly not runnable while filter-aware archiving is unwired.
+   */
+  filterUniverse: SeedFilterUniverseFacts;
   archive: {
     format: SeedArchiveFormat;
     tooling: SeedArchiveTooling;
@@ -736,6 +1030,8 @@ export interface SeedPlan {
    */
   stagingPolicy: {
     adjacentToTarget: boolean;
+    /** True only for a directory this feature created (the staging prefix). */
+    derivedSibling: boolean;
     insideTarget: boolean;
     sameFilesystem: boolean | null;
     message: string;
@@ -808,16 +1104,35 @@ export function isSeedLeaseExpired(job: Pick<SeedJob, "leaseExpiresAt">, now: nu
 export const SEED_ARCHIVE_TRANSPORT_IMPLEMENTED = false;
 
 export const SEED_EXECUTION_UNAVAILABLE_REASON =
-  "Seed archive transport is not implemented yet. The plan, space calculation, staging rules and progress " +
-  "model are ready and reviewed, but uploading the archive to temporary seed space and staging it on the " +
-  "target has not been validated end-to-end. Ordinary sync is unaffected.";
+  "Seed execution is not available yet. The plan, space calculation, staging rules, archive primitives and " +
+  "progress model are ready and reviewed, but two Stage 1 prerequisites are still open: the archive must be " +
+  "built from the folder's effective filter universe, and the archive must be uploaded to temporary seed space " +
+  "and staged on the target. Neither has been validated end-to-end, so no folder can be seeded today.";
+
+/**
+ * The timeout change, stated precisely. It is NOT "ordinary sync is
+ * unaffected" in the broad sense — the dev-vm incident WAS an ordinary first
+ * sync. What changed is narrow and deliberate:
+ *
+ *   * a sync against an EXISTING baseline keeps its exact fixed wall-clock
+ *     timeout, unchanged;
+ *   * a FIRST run with no usable baseline (initialization), or an explicit
+ *     `initialize`/`seed` intervention, is supervised by the progress-aware
+ *     stall budget plus the hard ceiling, because that is the run that killed
+ *     dev-vm at 600 s while it was still moving data.
+ */
+export const SEED_TIMEOUT_CHANGE_SCOPE =
+  "A sync with an existing baseline keeps its exact fixed timeout. A first run with no usable baseline — the " +
+  "initialization case that hit the dev-vm timeout — is now supervised by a progress-aware stall budget instead, " +
+  "so it is stopped when it genuinely stalls rather than when it runs long.";
 
 export function seedPlanExecution(): SeedPlanExecution {
   return {
-    available: SEED_ARCHIVE_TRANSPORT_IMPLEMENTED,
-    reason: SEED_ARCHIVE_TRANSPORT_IMPLEMENTED
-      ? "Seed execution is available."
-      : SEED_EXECUTION_UNAVAILABLE_REASON,
+    available: SEED_ARCHIVE_TRANSPORT_IMPLEMENTED && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
+    reason:
+      SEED_ARCHIVE_TRANSPORT_IMPLEMENTED && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED
+        ? "Seed execution is available."
+        : `${SEED_EXECUTION_UNAVAILABLE_REASON} ${SEED_TIMEOUT_CHANGE_SCOPE}`,
   };
 }
 
@@ -828,9 +1143,13 @@ export function seedPlanExecution(): SeedPlanExecution {
 /**
  * A seed plan dies on expiry, on a config-revision bump, on a filter change
  * and on a baseline change — exactly like a reviewed sync plan. It also dies
- * when the operation itself is not runnable (tooling missing, space short,
- * staging policy violated), because approving such a plan could only fail
- * partway through.
+ * when the operation itself is not runnable, because approving such a plan
+ * could only fail partway through.
+ *
+ * The not-runnable checks are ordered by how fundamental they are: a wrong or
+ * unusable SOURCE authority and an unwired FILTER-AWARE archive come first,
+ * because neither can be fixed on the target device, then the staging proof,
+ * then the target's own tooling and space.
  */
 export function checkSeedPlanValidity(
   plan: Pick<
@@ -842,6 +1161,8 @@ export function checkSeedPlanValidity(
     | "space"
     | "archive"
     | "stagingPolicy"
+    | "sourceAuthority"
+    | "filterUniverse"
   >,
   live: {
     now: number;
@@ -874,6 +1195,22 @@ export function checkSeedPlanValidity(
       message: "The saved sync record changed since this seed plan was built — prepare a new one.",
     };
   }
+  // Source authority: the operator's named device must be assigned to this
+  // folder, must not be the target, and must hold a fresh usable measurement.
+  // A seed of the wrong tree is worse than no seed.
+  if (!plan.sourceAuthority.measurementUsable) {
+    return { valid: false, reason: "not_runnable", message: plan.sourceAuthority.message };
+  }
+  // The archive must come from the effective filter universe, not the raw
+  // tree. Not wired yet (Stage 1), so this plan is never runnable today.
+  if (!plan.filterUniverse.archiveImplemented) {
+    return { valid: false, reason: "not_runnable", message: plan.filterUniverse.message };
+  }
+  // A target whose established baseline used a different filter set would
+  // re-sync the published tree, so the seed is refused rather than wasted.
+  if (!plan.filterUniverse.match) {
+    return { valid: false, reason: "not_runnable", message: plan.filterUniverse.message };
+  }
   if (!plan.archive.toolingReady) {
     return {
       valid: false,
@@ -884,7 +1221,15 @@ export function checkSeedPlanValidity(
   if (!plan.space.ok) {
     return { valid: false, reason: "not_runnable", message: plan.space.message };
   }
-  if (!plan.stagingPolicy.adjacentToTarget || plan.stagingPolicy.insideTarget) {
+  // The staging proof: same direct parent as the target, a directory this
+  // feature created, never inside the target, and a PROVEN same filesystem.
+  // An unknown verdict is refused, not assumed.
+  if (
+    !plan.stagingPolicy.adjacentToTarget ||
+    !plan.stagingPolicy.derivedSibling ||
+    plan.stagingPolicy.insideTarget ||
+    plan.stagingPolicy.sameFilesystem !== true
+  ) {
     return { valid: false, reason: "not_runnable", message: plan.stagingPolicy.message };
   }
   return { valid: true, reason: null, message: "Seed plan is current and runnable." };
@@ -900,7 +1245,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export interface SeedPlanRequestPayload {
   folderId: string;
+  /** The target device the seed will be staged on. */
   hostId: string;
+  /**
+   * The device that holds the data, named explicitly by the operator.
+   * Required: the server must never infer the authority from a size, because a
+   * wrong source produces a seed of the wrong tree.
+   */
+  sourceHostId: string;
   /** The operator explicitly asked for a seed plan (never automatic). */
   confirm: true;
 }
@@ -910,12 +1262,13 @@ export type SeedPlanRequestParseResult =
   | { ok: false; error: string };
 
 /**
- * Validate a seed-plan request. `confirm: true` is required so a stray
- * request can never create a plan: the whole feature is operator-approved.
+ * Validate a seed-plan request. `confirm: true` and an explicit `sourceHostId`
+ * are both required: the whole feature is operator-approved, and the source
+ * authority is always a named device rather than a derived one.
  */
 export function parseSeedPlanRequestPayload(value: unknown): SeedPlanRequestParseResult {
   if (!isRecord(value)) return { ok: false, error: "payload must be an object" };
-  const allowed = new Set(["folderId", "hostId", "confirm"]);
+  const allowed = new Set(["folderId", "hostId", "sourceHostId", "confirm"]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) return { ok: false, error: `unsupported field: ${key}` };
   }
@@ -927,10 +1280,20 @@ export function parseSeedPlanRequestPayload(value: unknown): SeedPlanRequestPars
   if (typeof hostId !== "string" || hostId.length === 0) {
     return { ok: false, error: "hostId is required" };
   }
+  const sourceHostId = value["sourceHostId"];
+  if (typeof sourceHostId !== "string" || sourceHostId.length === 0) {
+    return {
+      ok: false,
+      error: "sourceHostId is required — name the device that holds the data; it is never inferred",
+    };
+  }
+  if (sourceHostId === hostId) {
+    return { ok: false, error: "sourceHostId must be a different device from hostId (the target)" };
+  }
   if (value["confirm"] !== true) {
     return { ok: false, error: "confirm: true is required — seed plans are always operator-approved" };
   }
-  return { ok: true, payload: { folderId, hostId, confirm: true } };
+  return { ok: true, payload: { folderId, hostId, sourceHostId, confirm: true } };
 }
 
 export interface SeedJobCreatePayload {

@@ -70,6 +70,20 @@ function plan(overrides: Partial<SeedPlan> = {}): SeedPlan {
     folderId: "f1",
     assignmentId: "a2",
     recommendation: { recommended: true, thresholdFiles: 3000, reason: "recommended" },
+    sourceHostId: "master",
+    sourceAuthority: {
+      hostId: "master",
+      assignmentId: "a1",
+      selectedBy: "operator",
+      assigned: true,
+      isTarget: false,
+      measurementUsable: true,
+      measurementAgeMs: 60_000,
+      fileCount: 91_660,
+      totalBytes: 14_864_173_809,
+      measuredAt: 1,
+      message: "Source authority: master — measured 91,660 entries 1 minutes ago.",
+    },
     source: { fileCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1, measuredOnHostId: "master", manifestFingerprint: null },
     target: { freeBytes: 200_000_000_000, freeBytesMeasuredAt: 1, measuredOnHostId: "dev-vm", stagingRoot: "/home/b", stagingSameFilesystem: null },
     space: {
@@ -92,24 +106,45 @@ function plan(overrides: Partial<SeedPlan> = {}): SeedPlan {
       choiceReason: "zstd is installed",
       fallback: false,
     },
+    filterUniverse: {
+      fingerprint: "universe",
+      targetFingerprint: null,
+      match: true,
+      patternCount: 0,
+      archiveImplemented: false,
+      message:
+        "A seed archive must be built from exactly the effective filter universe the following sync baseline uses.",
+    },
     stagingPolicy: {
       adjacentToTarget: true,
+      derivedSibling: true,
       insideTarget: false,
-      sameFilesystem: null,
-      message: "The device derives the staging directory as a sibling of its local path; it is never placed inside the target.",
+      sameFilesystem: true,
+      message: "Staging is a sibling of the target on the same filesystem.",
     },
     configRevision: 4,
     filterFingerprint: "fp",
     baselineFingerprint: "base",
     createdAt: 1,
     expiresAt: 2,
-    execution: { available: false, reason: "Seed archive transport is not implemented yet." },
+    execution: { available: false, reason: "Seed execution is not available yet." },
     ...overrides,
   };
 }
 
-function renderPanel(r: FolderHealthRecord): string {
-  return renderToStaticMarkup(<FolderSeedPlanCard folderId="f1" hostId="dev-vm" record={r} />);
+function renderPanel(r: FolderHealthRecord, siblings?: FolderHealthRecord[]): string {
+  return renderToStaticMarkup(
+    <FolderSeedPlanCard folderId="f1" hostId="dev-vm" record={r} siblingRecords={siblings} now={1_700_000_000_000} />,
+  );
+}
+
+/** A measured source device, as the panel needs for an explicit choice. */
+function masterRecord(): FolderHealthRecord {
+  return record({
+    hostId: "master",
+    assignmentId: "a1",
+    facts: facts({ measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1_700_000_000_000 - 60_000 } }),
+  });
 }
 
 describe("FolderSeedPlanCard", () => {
@@ -126,7 +161,29 @@ describe("FolderSeedPlanCard", () => {
     expect(html).toContain("recommended");
     expect(html).toContain("91,660");
     expect(html).toContain("Nothing happens until you review and approve a plan");
+  });
+
+  test("requires the operator to name the source device explicitly", () => {
+    const measured = record({
+      facts: facts({ measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1 } }),
+    });
+    const html = renderPanel(measured, [measured, masterRecord()]);
+    expect(html).toContain("Source device (the device that already holds the data)");
+    expect(html).toContain("Choose a device…");
+    expect(html).toContain("master — 91,660 entries");
+    expect(html).toContain("never picks the source for you");
     expect(html).toContain("Prepare a seed plan (read-only)");
+    // The target is never offered as its own source.
+    expect(html).not.toContain("dev-vm — 91,660 entries");
+  });
+
+  test("refuses to offer a plan when no other device is assigned", () => {
+    const measured = record({
+      facts: facts({ measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1 } }),
+    });
+    const html = renderPanel(measured, [measured]);
+    expect(html).toContain("No other device is assigned to this folder");
+    expect(html).not.toContain("Prepare a seed plan (read-only)");
   });
 
   test("asks the operator to measure first when there is no measurement", () => {
@@ -151,6 +208,9 @@ describe("SeedPlanSummary", () => {
     const html = renderToStaticMarkup(
       <SeedPlanSummary plan={plan()} validity={{ valid: true, reason: null, message: "current" }} />,
     );
+    expect(html).toContain("Source device");
+    expect(html).toContain("master");
+    expect(html).toContain("chosen by you");
     expect(html).toContain("Source size");
     expect(html).toContain("91,660");
     expect(html).toContain("measured on master");
@@ -160,6 +220,31 @@ describe("SeedPlanSummary", () => {
     expect(html).toContain("tar + zstd");
     expect(html).toContain("single atomic rename");
     expect(html).toContain("zero content changes");
+  });
+
+  test("lists the unmet prerequisites instead of a single opaque verdict", () => {
+    const html = renderToStaticMarkup(
+      <SeedPlanSummary plan={plan()} validity={{ valid: false, reason: "not_runnable", message: "not runnable" }} />,
+    );
+    expect(html).toContain("Before this seed can run:");
+    expect(html).toContain("effective filter universe");
+    expect(html).toContain("temporary seed space");
+  });
+
+  test("an unproven same-filesystem verdict is shown as a blocker", () => {
+    const unproven = plan({
+      stagingPolicy: {
+        adjacentToTarget: true,
+        derivedSibling: true,
+        insideTarget: false,
+        sameFilesystem: null,
+        message: "The target device has not confirmed that the staging directory and the target share a filesystem.",
+      },
+    });
+    const html = renderToStaticMarkup(
+      <SeedPlanSummary plan={unproven} validity={{ valid: false, reason: "not_runnable", message: "not runnable" }} />,
+    );
+    expect(html).toContain("has not confirmed that the staging directory and the target share a filesystem");
   });
 
   test("states a shortfall instead of hiding it", () => {

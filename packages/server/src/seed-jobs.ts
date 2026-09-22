@@ -18,7 +18,7 @@ import type { Database } from "bun:sqlite";
 import {
   checkSeedPlanValidity,
   computeSeedSpacePlan,
-  normalizeAbsolutePath,
+  parentPathOf,
   recommendSeed,
   seedArchiveToolingReady,
   seedPhaseIndex,
@@ -26,10 +26,14 @@ import {
   seedStagingPath,
   selectSeedArchiveFormat,
   validateStagingLocation,
+  SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
+  SEED_FILTER_UNIVERSE_REQUIRED_REASON,
   SEED_JOB_PHASE_COUNT,
   SEED_PLAN_TTL_MS,
+  SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
   type SeedArchiveFormat,
   type SeedArchiveTooling,
+  type SeedFilterUniverseFacts,
   type SeedJob,
   type SeedJobArchiveFacts,
   type SeedJobPhase,
@@ -39,6 +43,7 @@ import {
   type SeedJobStatus,
   type SeedPlan,
   type SeedPlanValidity,
+  type SeedSourceAuthority,
   type SeedSourceFacts,
   type SeedSpacePlan,
   type SeedTargetFacts,
@@ -49,7 +54,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function safeParse(text: string): unknown {
+function safeParse(text: string | null): unknown {
+  if (text === null) return null;
   try {
     return JSON.parse(text);
   } catch {
@@ -72,6 +78,9 @@ interface SeedPlanRow {
   source_file_count: number;
   source_bytes: number;
   source_measured_at: number;
+  source_authority_host_id: string | null;
+  source_authority: string | null;
+  filter_universe: string | null;
   source_host_id: string | null;
   source_manifest_fingerprint: string | null;
   target_free_bytes: number | null;
@@ -100,6 +109,9 @@ function rowToSeedPlan(row: SeedPlanRow): SeedPlan {
   const space = safeParse(row.space);
   const tooling = safeParse(row.archive_tooling);
   const policy = safeParse(row.staging_policy);
+  const authority = safeParse(row.source_authority);
+  const filterUniverse = safeParse(row.filter_universe);
+  const sourceHostId = row.source_authority_host_id ?? row.source_host_id ?? "";
   return {
     id: row.id,
     hostId: row.host_id,
@@ -110,6 +122,35 @@ function rowToSeedPlan(row: SeedPlanRow): SeedPlan {
       thresholdFiles: row.threshold_files,
       reason: row.recommendation,
     },
+    sourceHostId,
+    sourceAuthority: isRecord(authority)
+      ? {
+          hostId: typeof authority["hostId"] === "string" ? authority["hostId"] : sourceHostId,
+          assignmentId: typeof authority["assignmentId"] === "string" ? authority["assignmentId"] : "",
+          selectedBy: "operator",
+          assigned: authority["assigned"] === true,
+          isTarget: authority["isTarget"] === true,
+          measurementUsable: authority["measurementUsable"] === true,
+          measurementAgeMs: typeof authority["measurementAgeMs"] === "number" ? authority["measurementAgeMs"] : null,
+          fileCount: typeof authority["fileCount"] === "number" ? authority["fileCount"] : 0,
+          totalBytes: typeof authority["totalBytes"] === "number" ? authority["totalBytes"] : 0,
+          measuredAt: typeof authority["measuredAt"] === "number" ? authority["measuredAt"] : null,
+          message: typeof authority["message"] === "string" ? authority["message"] : "The source device is not usable.",
+        }
+      : {
+          hostId: sourceHostId,
+          assignmentId: "",
+          selectedBy: "operator",
+          assigned: false,
+          isTarget: false,
+          measurementUsable: false,
+          measurementAgeMs: null,
+          fileCount: row.source_file_count,
+          totalBytes: row.source_bytes,
+          measuredAt: null,
+          message:
+            "This plan predates the explicit source authority; prepare a new plan naming the source device.",
+        },
     source: {
       fileCount: row.source_file_count,
       totalBytes: row.source_bytes,
@@ -129,6 +170,27 @@ function rowToSeedPlan(row: SeedPlanRow): SeedPlan {
       sourceFiles: 0,
       targetFreeBytes: null,
     }),
+    filterUniverse: isRecord(filterUniverse)
+      ? {
+          fingerprint: typeof filterUniverse["fingerprint"] === "string" ? filterUniverse["fingerprint"] : null,
+          targetFingerprint:
+            typeof filterUniverse["targetFingerprint"] === "string" ? filterUniverse["targetFingerprint"] : null,
+          match: filterUniverse["match"] === true,
+          patternCount: typeof filterUniverse["patternCount"] === "number" ? filterUniverse["patternCount"] : 0,
+          archiveImplemented: filterUniverse["archiveImplemented"] === true,
+          message:
+            typeof filterUniverse["message"] === "string"
+              ? filterUniverse["message"]
+              : SEED_FILTER_UNIVERSE_REQUIRED_REASON,
+        }
+      : {
+          fingerprint: null,
+          targetFingerprint: null,
+          match: false,
+          patternCount: 0,
+          archiveImplemented: false,
+          message: SEED_FILTER_UNIVERSE_REQUIRED_REASON,
+        },
     archive: {
       format: row.archive_format === "tar.zstd" ? "tar.zstd" : "tar.gz",
       tooling: isRecord(tooling)
@@ -146,6 +208,7 @@ function rowToSeedPlan(row: SeedPlanRow): SeedPlan {
     stagingPolicy: isRecord(policy)
       ? {
           adjacentToTarget: policy["adjacentToTarget"] !== false,
+          derivedSibling: policy["derivedSibling"] !== false,
           insideTarget: policy["insideTarget"] === true,
           sameFilesystem:
             typeof policy["sameFilesystem"] === "boolean" ? policy["sameFilesystem"] : null,
@@ -153,6 +216,7 @@ function rowToSeedPlan(row: SeedPlanRow): SeedPlan {
         }
       : {
           adjacentToTarget: true,
+          derivedSibling: true,
           insideTarget: false,
           sameFilesystem: null,
           message: "Staging is a sibling of the target.",
@@ -170,7 +234,8 @@ function rowToSeedPlan(row: SeedPlanRow): SeedPlan {
 }
 
 const SEED_PLAN_SELECT = `SELECT id, folder_id, host_id, assignment_id, recommended, threshold_files,
-       recommendation, source_file_count, source_bytes, source_measured_at, source_host_id,
+       recommendation, source_file_count, source_bytes, source_measured_at,
+       source_authority_host_id, source_authority, filter_universe, source_host_id,
        source_manifest_fingerprint, target_free_bytes, target_free_measured_at, target_host_id,
        staging_root, staging_same_filesystem, space, archive_format, archive_tooling,
        archive_tooling_ready, archive_estimate_bytes, archive_choice_reason, archive_fallback,
@@ -182,18 +247,22 @@ export function recordSeedPlan(database: Database, plan: SeedPlan): void {
   database.run(
     `INSERT INTO folder_seed_plans
        (id, folder_id, host_id, assignment_id, recommended, threshold_files, recommendation,
-        source_file_count, source_bytes, source_measured_at, source_host_id,
+        source_file_count, source_bytes, source_measured_at,
+        source_authority_host_id, source_authority, filter_universe, source_host_id,
         source_manifest_fingerprint, target_free_bytes, target_free_measured_at, target_host_id,
         staging_root, staging_same_filesystem, space, archive_format, archive_tooling,
         archive_tooling_ready, archive_estimate_bytes, archive_choice_reason, archive_fallback,
         staging_policy, config_revision, filter_fingerprint, baseline_fingerprint,
         execution_available, execution_reason, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        recommendation = excluded.recommendation,
        source_file_count = excluded.source_file_count,
        source_bytes = excluded.source_bytes,
        source_measured_at = excluded.source_measured_at,
+       source_authority_host_id = excluded.source_authority_host_id,
+       source_authority = excluded.source_authority,
+       filter_universe = excluded.filter_universe,
        source_host_id = excluded.source_host_id,
        target_free_bytes = excluded.target_free_bytes,
        target_free_measured_at = excluded.target_free_measured_at,
@@ -223,6 +292,9 @@ export function recordSeedPlan(database: Database, plan: SeedPlan): void {
       plan.source.fileCount,
       plan.source.totalBytes,
       plan.source.measuredAt,
+      plan.sourceHostId,
+      JSON.stringify(plan.sourceAuthority),
+      JSON.stringify(plan.filterUniverse),
       plan.source.measuredOnHostId,
       plan.source.manifestFingerprint,
       plan.target.freeBytes,
@@ -523,21 +595,22 @@ export type SeedPlanBuildResult =
   | { ok: false; status: 404 | 409; error: string };
 
 function dirnameOf(path: string): string | null {
-  const normalized = normalizeAbsolutePath(path);
-  if (normalized === null) return null;
-  const index = normalized.lastIndexOf("/");
-  return index <= 0 ? "/" : normalized.slice(0, index);
+  return parentPathOf(path);
 }
 
 /**
  * Build an operator-approved seed plan for one target assignment.
  *
  * Read-only. Sources of truth, in order:
- *   * the SOURCE tree size comes from the largest measurement any assignment
- *     of this folder has reported (the heartbeat's slow-cadence deep
- *     measurement). No measurement → the plan is created but not runnable.
- *   * the TARGET free space and archive tooling come from the target
- *     assignment's own latest health report.
+ *   * the SOURCE device is the one the OPERATOR NAMED (`sourceHostId`). It must
+ *     be assigned to this folder, must not be the target, and must hold a
+ *     fresh usable measurement. Nothing is inferred from a size: picking "the
+ *     largest other assignment" would silently choose an authority from a
+ *     number, and a wrong source seeds the wrong tree.
+ *   * the TARGET free space, archive tooling and staging-sibling proof come
+ *     from the target assignment's own latest health report.
+ *   * the FILTER UNIVERSE comes from the source device, because the archive
+ *     must be built from the same universe the following sync baseline uses.
  *
  * Nothing here guesses: a missing fact makes the plan explicitly not runnable
  * with the exact reason, so the UI can say what to do instead of offering a
@@ -545,7 +618,7 @@ function dirnameOf(path: string): string | null {
  */
 export function buildSeedPlan(
   database: Database,
-  input: { folderId: string; targetHostId: string; now?: number },
+  input: { folderId: string; targetHostId: string; sourceHostId: string; now?: number },
 ): SeedPlanBuildResult {
   const now = input.now ?? Date.now();
   const assignments = database
@@ -560,35 +633,88 @@ export function buildSeedPlan(
   if (target === null) {
     return { ok: false, status: 404, error: "This device is not assigned to the folder" };
   }
+  // The source authority is the operator's explicit choice, and it must be a
+  // real, different assignment of THIS folder.
+  if (input.sourceHostId === input.targetHostId) {
+    return {
+      ok: false,
+      status: 409,
+      error: "The source device must be a different device from the target — a device cannot seed itself",
+    };
+  }
+  const sourceAssignment = assignments.find((a) => a.host_id === input.sourceHostId) ?? null;
+  if (sourceAssignment === null) {
+    return {
+      ok: false,
+      status: 404,
+      error:
+        "That device is not assigned to this folder, so it cannot be the source of this seed. " +
+        "Assign the folder to the device that holds the data first.",
+    };
+  }
 
   const records = loadDerivedFolderHealth(database, now, input.folderId);
   const targetRecord = records.find((r) => r.assignmentId === target.id) ?? null;
-
-  // Source: the largest reported deep measurement on a DIFFERENT assignment,
-  // falling back to any assignment's measurement (a single-host folder can
-  // still be seeded to a re-imaged device).
-  let sourceRecord = null as (typeof records)[number] | null;
-  for (const record of records) {
-    if (record.facts.measurement === null) continue;
-    if (record.assignmentId === target.id) continue;
-    if (sourceRecord === null) {
-      sourceRecord = record;
-      continue;
-    }
-    const current = sourceRecord.facts.measurement;
-    const candidate = record.facts.measurement;
-    if (candidate !== null && current !== null && candidate.totalBytes > current.totalBytes) {
-      sourceRecord = record;
-    }
-  }
+  const sourceRecord = records.find((r) => r.assignmentId === sourceAssignment.id) ?? null;
 
   const sourceMeasurement = sourceRecord?.facts.measurement ?? null;
+  const measurementAgeMs =
+    sourceMeasurement === null ? null : Math.max(0, now - sourceMeasurement.measuredAt);
+  const measurementFresh =
+    measurementAgeMs !== null && measurementAgeMs <= SEED_SOURCE_MEASUREMENT_MAX_AGE_MS;
+  const measurementUsable =
+    sourceMeasurement !== null && measurementFresh && sourceMeasurement.pathCount > 0;
+  const sourceAuthority: SeedSourceAuthority = {
+    hostId: sourceAssignment.host_id,
+    assignmentId: sourceAssignment.id,
+    selectedBy: "operator",
+    assigned: true,
+    isTarget: false,
+    measurementUsable,
+    measurementAgeMs,
+    fileCount: sourceMeasurement?.pathCount ?? 0,
+    totalBytes: sourceMeasurement?.totalBytes ?? 0,
+    measuredAt: sourceMeasurement?.measuredAt ?? null,
+    message: measurementUsable
+      ? `Source authority: ${sourceAssignment.host_id} — measured ${sourceMeasurement?.pathCount.toLocaleString("en-US")} entries ` +
+        `(${sourceMeasurement?.totalBytes.toLocaleString("en-US")} bytes) ${Math.round((measurementAgeMs ?? 0) / 60_000)} minutes ago.`
+      : sourceMeasurement === null
+        ? `${sourceAssignment.host_id} is assigned to this folder but has not measured it yet. Open this folder on that ` +
+          "device and choose Check this device now, then prepare the plan again."
+        : !measurementFresh
+          ? `The measurement from ${sourceAssignment.host_id} is ${Math.round((measurementAgeMs ?? 0) / 3_600_000)} hours old. ` +
+            "Refresh it (Check this device now on that device) before approving a seed, so the reserved space matches the tree."
+          : `${sourceAssignment.host_id} currently measures this folder as empty (0 entries), so there is nothing to seed.`,
+  };
+
   const source: SeedSourceFacts = {
     fileCount: sourceMeasurement?.pathCount ?? 0,
     totalBytes: sourceMeasurement?.totalBytes ?? 0,
     measuredAt: sourceMeasurement?.measuredAt ?? 0,
-    measuredOnHostId: sourceRecord?.hostId ?? null,
+    measuredOnHostId: sourceAssignment.host_id,
     manifestFingerprint: null,
+  };
+
+  // The archive must be built from the SOURCE's effective filter universe — the
+  // same universe the following sync baseline uses — and must not contradict an
+  // already-established target baseline.
+  const sourceFilterFingerprint = sourceRecord?.facts.filter.fingerprint ?? null;
+  const targetFilterFingerprint = targetRecord?.facts.filter.fingerprint ?? null;
+  const filterMatch =
+    targetFilterFingerprint === null || targetFilterFingerprint === sourceFilterFingerprint;
+  const filterUniverse: SeedFilterUniverseFacts = {
+    fingerprint: sourceFilterFingerprint,
+    targetFingerprint: targetFilterFingerprint,
+    match: filterMatch,
+    patternCount: 0,
+    archiveImplemented: SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
+    message: !SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED
+      ? SEED_FILTER_UNIVERSE_REQUIRED_REASON
+      : !filterMatch
+        ? "The target device's saved sync baseline was built with a different filter set than the source device's, " +
+          "so a seed would be re-synced afterwards. Make both devices use the same ignore rules, then prepare a new plan."
+        : `The archive will be built from ${sourceAssignment.host_id}'s effective filter universe ` +
+          `(fingerprint ${sourceFilterFingerprint ?? "none"}).`,
   };
 
   const tooling: SeedArchiveTooling | null = targetRecord?.facts.archive ?? null;
@@ -608,7 +734,7 @@ export function buildSeedPlan(
     freeBytesMeasuredAt: targetRecord?.reportedAt ?? null,
     measuredOnHostId: targetRecord === null ? null : target.host_id,
     stagingRoot: dirnameOf(target.local_path),
-    stagingSameFilesystem: null,
+    stagingSameFilesystem: targetRecord?.facts.seedStaging?.sameFilesystem ?? null,
   };
 
   const baseSpace = computeSeedSpacePlan({
@@ -617,39 +743,42 @@ export function buildSeedPlan(
     targetFreeBytes: targetFacts.freeBytes,
   });
   const space: SeedSpacePlan =
-    sourceMeasurement === null || source.totalBytes === 0
-      ? {
-          ...baseSpace,
-          ok: false,
-          message:
-            "The source device has not been measured yet, so the seed size is unknown. Open this " +
-            "folder on the device that holds the data and choose Check this device now, then prepare the plan again.",
-        }
+    !measurementUsable
+      ? { ...baseSpace, ok: false, message: sourceAuthority.message }
       : baseSpace;
 
   const targetPath = target.local_path;
-  const derivedStaging = seedStagingPath(
-    normalizeAbsolutePath(targetPath) ?? "/target",
-    "plan",
-  );
-  const stagingPolicy = derivedStaging === null
-    ? {
-        adjacentToTarget: true,
-        insideTarget: false,
-        sameFilesystem: null,
-        message:
-          "The device derives the staging directory as a sibling of its local path; it is never placed " +
-          "inside the target. The same-filesystem check runs on the device before any byte is written.",
-      }
-    : (() => {
-        const verdict = validateStagingLocation({ stagingPath: derivedStaging, targetPath });
-        return {
-          adjacentToTarget: true,
-          insideTarget: verdict.insideTarget,
-          sameFilesystem: verdict.sameFilesystem,
-          message: verdict.message,
-        };
-      })();
+  const derivedStaging = seedStagingPath(targetPath, "plan");
+  // The server can compare the parents (a pure string check) but cannot stat
+  // the target's filesystem, so the same-filesystem verdict comes from the
+  // TARGET DEVICE's own proof. Unknown is refused, never assumed.
+  const stagingPolicy =
+    derivedStaging === null
+      ? {
+          adjacentToTarget: false,
+          derivedSibling: false,
+          insideTarget: false,
+          sameFilesystem: null,
+          message:
+            "The device's local path is not an absolute path, so a staging sibling cannot be derived. " +
+            "Set the assignment's local path to an absolute path first.",
+        }
+      : (() => {
+          const verdict = validateStagingLocation({
+            stagingPath: derivedStaging,
+            targetPath,
+            // The device's own proof: the staging sibling's parent IS the
+            // target's parent, and the device read that directory's device.
+            sameFilesystemProven: targetRecord?.facts.seedStaging?.sameFilesystem ?? null,
+          });
+          return {
+            adjacentToTarget: verdict.adjacentToTarget,
+            derivedSibling: verdict.derivedSibling,
+            insideTarget: verdict.insideTarget,
+            sameFilesystem: verdict.sameFilesystem,
+            message: verdict.message,
+          };
+        })();
 
   const revisionRow = database
     .query<HostRevisionRow, [string]>("SELECT config_revision FROM hosts WHERE id = ?")
@@ -661,9 +790,12 @@ export function buildSeedPlan(
     folderId: input.folderId,
     assignmentId: target.id,
     recommendation: recommendSeed({ fileCount: source.fileCount, totalBytes: source.totalBytes }),
+    sourceHostId: sourceAssignment.host_id,
+    sourceAuthority,
     source,
     target: targetFacts,
     space,
+    filterUniverse,
     archive: {
       format: formatChoice.format,
       tooling: tooling ?? { tar: false, zstd: false, gzip: false },
@@ -674,7 +806,7 @@ export function buildSeedPlan(
     },
     stagingPolicy,
     configRevision: revisionRow?.config_revision ?? 0,
-    filterFingerprint: targetRecord?.facts.filter.fingerprint ?? null,
+    filterFingerprint: targetFilterFingerprint,
     baselineFingerprint: targetRecord?.facts.baseline.fingerprint ?? null,
     createdAt: now,
     expiresAt: now + SEED_PLAN_TTL_MS,

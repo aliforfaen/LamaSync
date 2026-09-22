@@ -15,6 +15,7 @@ import {
   measureLocalTree,
   probeFolderHealth,
   probeLocalDir,
+  seedStagingProofFor,
 } from "./folder-health.ts";
 import { RESYNC_REQUIRED_FILENAME } from "./bisync-baseline.ts";
 
@@ -158,7 +159,55 @@ describe("liveFilterFingerprint", () => {
   });
 });
 
+describe("seedStagingProofFor — the target's own sibling proof", () => {
+  test("proves the staging sibling shares the target's parent on a real directory", () => {
+    const local = tempDir();
+    const target = join(local, "Projects");
+    mkdirSync(target, { recursive: true });
+    const proof = seedStagingProofFor(target, 1_234);
+    expect(proof.targetPath).toBe(target);
+    expect(proof.targetParent).toBe(local);
+    // `seedStagingPath` derives a sibling, so the two parents are the SAME
+    // directory — which is the whole proof.
+    expect(proof.stagingParent).toBe(proof.targetParent);
+    expect(proof.sameFilesystem).toBe(true);
+    expect(typeof proof.device).toBe("number");
+    expect(proof.checkedAt).toBe(1_234);
+    rmSync(local, { recursive: true, force: true });
+  });
+
+  test("an unreadable parent is UNKNOWN, never optimistically true", () => {
+    // `/tmp/lamasync-does-not-exist-<n>` is not created.
+    const proof = seedStagingProofFor("/tmp/lamasync-does-not-exist-346/Projects", 7);
+    expect(proof.stagingParent).toBe(proof.targetParent);
+    expect(proof.sameFilesystem).toBeNull();
+    expect(proof.device).toBeNull();
+  });
+
+  test("a relative local path cannot produce a proof at all", () => {
+    const proof = seedStagingProofFor("relative/Projects", 7);
+    expect(proof.targetPath).toBeNull();
+    expect(proof.targetParent).toBeNull();
+    expect(proof.stagingParent).toBeNull();
+    expect(proof.sameFilesystem).toBeNull();
+  });
+});
+
 describe("probeFolderHealth", () => {
+  test("the heartbeat carries the archive tooling and the staging proof", () => {
+    const local = tempDir();
+    const state = tempDir();
+    const target = join(local, "Projects");
+    mkdirSync(target, { recursive: true });
+    const { report } = probe(target, state);
+    expect(report.facts.archive).not.toBeNull();
+    expect(typeof report.facts.archive?.tar).toBe("boolean");
+    expect(report.facts.seedStaging?.sameFilesystem).toBe(true);
+    expect(report.facts.seedStaging?.targetParent).toBe(local);
+    rmSync(local, { recursive: true, force: true });
+    rmSync(state, { recursive: true, force: true });
+  });
+
   test("a ready paired listing set with a clean last run is healthy", () => {
     const local = tempDir();
     const state = tempDir();

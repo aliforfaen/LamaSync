@@ -88,6 +88,7 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
       const result = buildSeedPlan(activeDb, {
         folderId: params.id,
         targetHostId: parsed.payload.hostId,
+        sourceHostId: parsed.payload.sourceHostId,
       });
       if (!result.ok) {
         set.status = result.status;
@@ -104,6 +105,9 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
       params: t.Object({ id: t.String() }),
       body: t.Object({
         hostId: t.String({ minLength: 1 }),
+        // The source device is named explicitly and is never inferred from a
+        // size: a wrong source would seed the wrong tree.
+        sourceHostId: t.String({ minLength: 1 }),
         // Seed plans are ALWAYS operator-approved; there is no automatic path.
         confirm: t.Literal(true),
       }),
@@ -112,9 +116,10 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Folder Seed"],
         responses: {
           201: { description: "Seed plan prepared with its current validity" },
-          400: { description: "Invalid request (hostId or confirm missing)" },
+          400: { description: "Invalid request (hostId, sourceHostId or confirm missing)" },
           403: { description: "Admin only" },
-          404: { description: "Folder or assignment not found" },
+          404: { description: "Folder, target assignment or source assignment not found" },
+          409: { description: "sourceHostId is the target device" },
           422: { description: "Body failed schema validation (confirm must be true)" },
           401: { description: "Unauthorized" },
         },

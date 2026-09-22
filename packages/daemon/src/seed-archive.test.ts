@@ -3,16 +3,19 @@
 //
 // The pipeline under test is exactly the local half of a seed:
 //
-//   fixture tree → manifest → tar(+zstd|gzip) → member validation
-//                → extract into a sibling staging dir → verify byte-for-byte
-//                → atomic rename into the final target
+//   fixture tree + effective filter universe → manifest → tar(+zstd|gzip)
+//                → member validation → extract into a sibling staging dir
+//                → verify byte-for-byte → atomic rename into the final target
 //
-// plus the fail-closed paths: source churn during archiving, a traversal
-// member, a symlink member, a non-empty target, and staging inside the target.
+// plus the fail-closed paths: a member the universe includes but a seed cannot
+// represent (symlink), source churn during archiving, an archive that does not
+// match the manifest, a traversal member, a non-empty target, staging inside
+// the target, and staging that is not a true sibling.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -35,16 +38,41 @@ import {
   defaultSeedCommandRunner,
   detectArchiveTooling,
   extractSeedArchive,
+  normalizeArchiveMemberName,
   parseVerboseMemberLine,
   publishStagedTree,
+  seedManifestBlockingReason,
   seedPreflight,
   validateSeedArchive,
   verifyExtractedTree,
   type SeedCommandRunner,
 } from "./seed-archive.ts";
-import { validateStagingLocation } from "@lamasync/core";
+import {
+  parentPathOf,
+  validateStagingLocation,
+  type SeedSourceFilterUniverse,
+} from "@lamasync/core";
 
 let root: string;
+
+/** The whole tree — the universe a folder with no ignore rules would have. */
+function allFilesFilter(): SeedSourceFilterUniverse {
+  return { fingerprint: "test-universe-all", patterns: [], includes: () => true };
+}
+
+/**
+ * The real-world shape: a folder whose ignore rules exclude a subtree. This is
+ * what makes a Projects tree (whose nested `node_modules` hold symlinks)
+ * seedable — the excluded subtree is never walked, so its symlinks never enter
+ * the manifest.
+ */
+function excludePrefixFilter(prefix: string, fingerprint: string): SeedSourceFilterUniverse {
+  return {
+    fingerprint,
+    patterns: [`- ${prefix}/**`],
+    includes: (relativePath) => relativePath !== prefix && !relativePath.startsWith(`${prefix}/`),
+  };
+}
 
 function fixture(): string {
   const source = join(root, "source");
@@ -83,28 +111,72 @@ describe("parseVerboseMemberLine", () => {
     expect(parseVerboseMemberLine("lrwxrwxrwx 1/1 0 2026-09-22 17:57 link -> /etc/passwd")?.type).toBe("l");
     expect(parseVerboseMemberLine("not a tar line")).toBeNull();
   });
+
+  test("normalizes tar's ./ and trailing-slash decorations", () => {
+    expect(normalizeArchiveMemberName("./a.txt")).toBe("a.txt");
+    expect(normalizeArchiveMemberName("./sub/")).toBe("sub");
+    expect(normalizeArchiveMemberName("./")).toBe("");
+    expect(normalizeArchiveMemberName("a.txt")).toBe("a.txt");
+  });
 });
 
 describe("manifest", () => {
   test("counts files, directories and bytes and is stable across runs", async () => {
     const source = fixture();
-    const first = await buildSeedManifest(source);
-    const second = await buildSeedManifest(source);
+    const first = await buildSeedManifest(source, { filter: allFilesFilter() });
+    const second = await buildSeedManifest(source, { filter: allFilesFilter() });
     expect(first.fileCount).toBe(3);
     // `sub` and `sub/deep`; the root itself is not an entry.
     expect(first.dirCount).toBe(2);
     expect(first.totalBytes).toBe(6 + 6 + 4096);
     expect(first.fingerprint).toBe(second.fingerprint);
     expect(first.statsFingerprint).toBe(second.statsFingerprint);
-    expect(first.excluded).toEqual([]);
+    expect(first.unsupported).toEqual([]);
+    expect(first.filter.fingerprint).toBe("test-universe-all");
+    expect(first.filter.skippedCount).toBe(0);
   });
 
-  test("records symlinks as excluded instead of archiving them", async () => {
+  test("records a symlink in the universe as UNSUPPORTED, never as silently excluded", async () => {
     const source = fixture();
     symlinkSync("/etc/passwd", join(source, "link"));
-    const manifest = await buildSeedManifest(source);
-    expect(manifest.excluded).toEqual([{ path: "link", reason: "symlink" }]);
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
+    expect(manifest.unsupported).toEqual([{ path: "link", reason: "symlink" }]);
     expect(manifest.entries.some((e) => e.path === "link")).toBe(false);
+    // And it BLOCKS the seed rather than being quietly dropped.
+    const blocking = seedManifestBlockingReason(manifest);
+    expect(blocking).not.toBeNull();
+    expect(blocking).toContain("link (symlink)");
+    expect(blocking).toContain("a seed never publishes a partial tree");
+  });
+
+  test("the effective filter universe prunes a subtree, so its symlinks never enter the manifest", async () => {
+    // The real shape: nested node_modules under a Projects worktree.
+    const source = fixture();
+    mkdirSync(join(source, "worktree", "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(source, "worktree", "node_modules", "pkg", "index.js"), "module.exports = 1;\n");
+    symlinkSync("pkg", join(source, "worktree", "node_modules", ".bin-link"));
+    symlinkSync("/etc/passwd", join(source, "worktree", "node_modules", "abs-link"));
+
+    // Without the exclude the folder cannot be seeded at all.
+    const raw = await buildSeedManifest(source, { filter: allFilesFilter() });
+    expect(raw.unsupported.map((m) => m.path)).toEqual([
+      "worktree/node_modules/.bin-link",
+      "worktree/node_modules/abs-link",
+    ]);
+    expect(seedManifestBlockingReason(raw)).not.toBeNull();
+
+    // With the folder's ignore rules the subtree is pruned before it is
+    // walked, so the same tree becomes seedable.
+    const filtered = await buildSeedManifest(source, {
+      filter: excludePrefixFilter("worktree/node_modules", "universe-excluding-node-modules"),
+    });
+    expect(filtered.unsupported).toEqual([]);
+    expect(seedManifestBlockingReason(filtered)).toBeNull();
+    expect(filtered.filter.fingerprint).toBe("universe-excluding-node-modules");
+    expect(filtered.filter.skippedCount).toBe(1);
+    expect(filtered.filter.skippedSample).toEqual(["worktree/node_modules"]);
+    // The excluded subtree contributed nothing to the size.
+    expect(filtered.entries.some((e) => e.path.startsWith("worktree/node_modules"))).toBe(false);
   });
 
   test("stats fingerprint changes when a file changes", async () => {
@@ -155,13 +227,14 @@ for (const format of formats) {
   describe(`seed archive pipeline — ${format}`, () => {
     test("creates, validates, extracts, verifies and publishes atomically", async () => {
       const source = fixture();
-      const manifest = await buildSeedManifest(source);
+      const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
       const archivePath = join(root, `payload${format === "tar.zstd" ? ".tar.zst" : ".tar.gz"}`);
       let archiveProgress = 0;
       const created = await createSeedArchive({
         format,
         sourceRoot: source,
         outputPath: archivePath,
+        manifest,
         onProgress: (n) => {
           archiveProgress = n;
         },
@@ -174,16 +247,21 @@ for (const format of formats) {
 
       const validation = await validateSeedArchive({ format, archivePath });
       expect(validation.ok).toBe(true);
-      // tar also emits the archive root (`./`), so the member count is the
-      // manifest entry count plus one.
-      expect(validation.members.count).toBe(manifest.entries.length + 1);
+      // The archive root (`./`) is the target directory itself, so the member
+      // set is exactly the manifest's entries.
+      expect(validation.members.count).toBe(manifest.entries.length);
       expect(validation.offenders).toEqual([]);
 
       // Staging is a sibling of the target, never inside it.
       const targetPath = join(root, "target");
       const stagingDir = join(root, ".lamasync-seed-staging-target-job1");
-      const policy = validateStagingLocation({ stagingPath: stagingDir, targetPath });
+      const policy = validateStagingLocation({
+        stagingPath: stagingDir,
+        targetPath,
+        sameFilesystemProven: true,
+      });
       expect(policy.ok).toBe(true);
+      expect(policy.adjacentToTarget).toBe(true);
       // The executor's pre-sync mkdir leaves an empty target behind.
       mkdirSync(targetPath);
 
@@ -208,10 +286,11 @@ for (const format of formats) {
 
     test("refuses a non-empty target rather than merging", async () => {
       const source = fixture();
+      const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
       const archivePath = join(root, "p.tar.gz");
-      await createSeedArchive({ format: "tar.gz", sourceRoot: source, outputPath: archivePath });
+      await createSeedArchive({ format: "tar.gz", sourceRoot: source, outputPath: archivePath, manifest });
       const targetPath = join(root, "target");
-      const stagingDir = join(root, "staging");
+      const stagingDir = join(root, ".lamasync-seed-staging-target-job1");
       await extractSeedArchive({ format: "tar.gz", archivePath, stagingDir });
       mkdirSync(targetPath);
       writeFileSync(join(targetPath, "existing.txt"), "keep me");
@@ -224,6 +303,52 @@ for (const format of formats) {
 }
 
 describe("fail-closed safety paths", () => {
+  test("create REFUSES a symlink in the universe before tar ever runs", async () => {
+    const source = fixture();
+    symlinkSync("/etc/passwd", join(source, "link"));
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
+    const archivePath = join(root, "link.tar.gz");
+    let runnerCalled = false;
+    const spyRunner: SeedCommandRunner = async (args, opts) => {
+      runnerCalled = true;
+      return defaultSeedCommandRunner(args, opts);
+    };
+    const created = await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest,
+      runner: spyRunner,
+    });
+    expect(created.ok).toBe(false);
+    expect(created.error).toContain("link (symlink)");
+    // The whole point: no archive was built from an unrepresentable universe.
+    expect(runnerCalled).toBe(false);
+    expect(existsSync(archivePath)).toBe(false);
+  });
+
+  test("create REFUSES an archive whose members do not equal the manifest", async () => {
+    const source = fixture();
+    // A manifest built from a NARROWER universe than the tree tar will archive:
+    // tar sees `sub/**`, the manifest does not describe it.
+    const narrowed = await buildSeedManifest(source, {
+      filter: excludePrefixFilter("sub", "universe-without-sub"),
+    });
+    expect(narrowed.unsupported).toEqual([]);
+    const archivePath = join(root, "mismatch.tar.gz");
+    const created = await createSeedArchive({
+      format: "tar.gz",
+      sourceRoot: source,
+      outputPath: archivePath,
+      manifest: narrowed,
+    });
+    expect(created.ok).toBe(false);
+    expect(created.error).toContain("does not match the source manifest");
+    expect(created.error).toContain("content the manifest does not describe");
+    // The inconsistent archive is not left behind to be uploaded.
+    expect(existsSync(archivePath)).toBe(false);
+  });
+
   test("a traversal member aborts validation", async () => {
     const source = fixture();
     const evil = join(root, "evil.tar.gz");
@@ -273,6 +398,7 @@ describe("fail-closed safety paths", () => {
 
   test("source churn during archiving is detected and fails the archive", async () => {
     const source = fixture();
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
     const archivePath = join(root, "churn.tar.gz");
     const churningRunner: SeedCommandRunner = async (args, opts) => {
       // Mutate the tree between the pre- and post-archive fingerprints.
@@ -283,6 +409,7 @@ describe("fail-closed safety paths", () => {
       format: "tar.gz",
       sourceRoot: source,
       outputPath: archivePath,
+      manifest,
       runner: churningRunner,
     });
     expect(created.churned).toBe(true);
@@ -292,10 +419,10 @@ describe("fail-closed safety paths", () => {
 
   test("verification catches a corrupted extracted tree", async () => {
     const source = fixture();
-    const manifest = await buildSeedManifest(source);
+    const manifest = await buildSeedManifest(source, { filter: allFilesFilter() });
     const archivePath = join(root, "p.tar.gz");
-    await createSeedArchive({ format: "tar.gz", sourceRoot: source, outputPath: archivePath });
-    const stagingDir = join(root, "staging");
+    await createSeedArchive({ format: "tar.gz", sourceRoot: source, outputPath: archivePath, manifest });
+    const stagingDir = join(root, ".lamasync-seed-staging-target-job1");
     await extractSeedArchive({ format: "tar.gz", archivePath, stagingDir });
     // Corrupt one file and add an unexpected one.
     writeFileSync(join(stagingDir, "a.txt"), "tampered\n");
@@ -315,6 +442,21 @@ describe("fail-closed safety paths", () => {
     expect(published.ok).toBe(false);
     expect(published.error).toContain("inside the final target");
   });
+
+  test("staging that is not a true sibling is refused by the publish step too", async () => {
+    const targetPath = join(root, "target");
+    mkdirSync(targetPath);
+    // Same device, outside the target, but NOT in the target's parent — the
+    // exact shape the sibling rule exists to reject.
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    const stagingDir = join(elsewhere, ".lamasync-seed-staging-target-job1");
+    mkdirSync(stagingDir);
+    writeFileSync(join(stagingDir, "a.txt"), "x");
+    const published = publishStagedTree({ stagingDir, targetPath });
+    expect(published.ok).toBe(false);
+    expect(published.error).toContain("not a sibling of the target");
+  });
 });
 
 describe("preflight", () => {
@@ -329,6 +471,7 @@ describe("preflight", () => {
       stagingDir,
       tooling: { tar: true, zstd: true, gzip: true },
       format: "tar.zstd",
+      filter: allFilesFilter(),
     });
     expect(preflight.manifest?.fileCount).toBe(3);
     expect(preflight.space).not.toBeNull();
@@ -347,8 +490,67 @@ describe("preflight", () => {
       stagingDir: join(targetPath, "staging"),
       tooling: { tar: true, zstd: false, gzip: true },
       format: "tar.gz",
+      filter: allFilesFilter(),
     });
     expect(preflight.ok).toBe(false);
     expect(preflight.errors.some((e) => e.includes("inside the final target"))).toBe(true);
+  });
+
+  test("reports an unrepresentable universe as an error, not as a silent skip", async () => {
+    const source = fixture();
+    symlinkSync("/etc/passwd", join(source, "link"));
+    const targetPath = join(root, "target");
+    mkdirSync(targetPath);
+    const preflight = await seedPreflight({
+      sourceRoot: source,
+      targetPath,
+      stagingDir: join(root, ".lamasync-seed-staging-target-job1"),
+      tooling: { tar: true, zstd: false, gzip: true },
+      format: "tar.gz",
+      filter: allFilesFilter(),
+    });
+    expect(preflight.ok).toBe(false);
+    expect(preflight.errors.some((e) => e.includes("a seed never publishes a partial tree"))).toBe(true);
+  });
+});
+
+describe("staging sibling rule", () => {
+  test("parentPathOf is the directory that must hold the staging sibling", () => {
+    expect(parentPathOf("/data/projects")).toBe("/data");
+    expect(parentPathOf("/data/a/b/")).toBe("/data/a");
+    expect(parentPathOf("/data")).toBe("/");
+    expect(parentPathOf("relative/path")).toBeNull();
+  });
+
+  test("rejects /data/elsewhere for a /data/projects target even on the same device", () => {
+    const verdict = validateStagingLocation({
+      stagingPath: "/data/elsewhere/staging",
+      targetPath: "/data/projects",
+      sameFilesystemProven: true,
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.adjacentToTarget).toBe(false);
+    expect(verdict.insideTarget).toBe(false);
+    expect(verdict.message).toContain("not a sibling of the target");
+  });
+
+  test("accepts a sibling and requires a PROVEN same filesystem", () => {
+    const ok = validateStagingLocation({
+      stagingPath: "/data/.lamasync-seed-staging-projects-job1",
+      targetPath: "/data/projects",
+      sameFilesystemProven: true,
+    });
+    expect(ok.ok).toBe(true);
+    expect(ok.adjacentToTarget).toBe(true);
+    expect(ok.sameFilesystem).toBe(true);
+
+    // Unknown is refused, never assumed.
+    const unknown = validateStagingLocation({
+      stagingPath: "/data/.lamasync-seed-staging-projects-job1",
+      targetPath: "/data/projects",
+    });
+    expect(unknown.ok).toBe(false);
+    expect(unknown.sameFilesystem).toBeNull();
+    expect(unknown.message).toContain("has not confirmed");
   });
 });

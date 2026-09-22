@@ -1472,6 +1472,7 @@ export function Folders() {
                                     folderId={folder.id}
                                     hostId={assignment.hostId}
                                     record={assignmentHealth}
+                                    siblingRecords={Object.values(health)}
                                   />
                                   </div>
                                 </td>

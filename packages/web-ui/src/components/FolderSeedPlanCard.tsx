@@ -21,6 +21,7 @@ import { api } from "../api.ts";
 import {
   SEED_GLOSSARY,
   seedArchiveSentence,
+  seedFilterUniverseSentence,
   seedJobTone,
   seedPhaseLabel,
   seedProgressPercent,
@@ -28,10 +29,14 @@ import {
   seedRecommendationSentence,
   seedRecommended,
   seedRunnableVerdict,
+  seedSourceAuthoritySentence,
+  seedSourceCandidates,
+  seedSourceSelectionError,
   seedSpaceSentence,
   seedSpaceTone,
   seedStagingSentence,
   seedUnavailableHelp,
+  seedUnmetPrerequisites,
   shouldOfferSeed,
   type SeedTone,
 } from "../folder-seed.ts";
@@ -40,27 +45,42 @@ export interface FolderSeedPlanCardProps {
   folderId: string;
   hostId: string;
   record: FolderHealthRecord;
+  /** Every assignment health record for this folder, so the source device can
+   *  be chosen explicitly. Defaults to just this device (no source offered). */
+  siblingRecords?: readonly Pick<FolderHealthRecord, "hostId" | "facts">[];
   /** Test/UI seam: plan lookup. Defaults to the real API. */
   fetchPlans?: (folderId: string) => Promise<Array<{ plan: SeedPlan; validity: SeedPlanValidity }>>;
   /** Test/UI seam: plan creation. Defaults to the real API. */
-  preparePlan?: (folderId: string, hostId: string) => Promise<{ plan: SeedPlan; validity: SeedPlanValidity }>;
+  preparePlan?: (
+    folderId: string,
+    hostId: string,
+    sourceHostId: string,
+  ) => Promise<{ plan: SeedPlan; validity: SeedPlanValidity }>;
   /** Test/UI seam: job creation. Defaults to the real API. */
   startJob?: (planId: string) => Promise<SeedJob>;
+  /** Test seam: the clock used for measurement freshness. */
+  now?: number;
 }
 
 export function FolderSeedPlanCard({
   folderId,
   hostId,
   record,
+  siblingRecords,
   fetchPlans,
   preparePlan,
   startJob,
+  now,
 }: FolderSeedPlanCardProps) {
   const [entry, setEntry] = useState<{ plan: SeedPlan; validity: SeedPlanValidity } | null>(null);
   const [job, setJob] = useState<SeedJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [sourceHostId, setSourceHostId] = useState<string>("");
+
+  const candidates = seedSourceCandidates(siblingRecords ?? [record], hostId, now ?? Date.now());
+  const sourceError = seedSourceSelectionError(candidates, sourceHostId === "" ? null : sourceHostId);
 
   const loadPlans = useCallback(async () => {
     const fn = fetchPlans ?? ((id: string) => api.seedPlans(id, 1));
@@ -95,13 +115,15 @@ export function FolderSeedPlanCard({
   }, [hostId, loadJobs, loadPlans]);
 
   const onPrepare = useCallback(async () => {
+    if (sourceHostId === "") return;
     setBusy(true);
     setError(null);
     try {
       const fn =
         preparePlan ??
-        ((id: string, host: string) => api.createSeedPlan(id, { hostId: host, confirm: true }));
-      const created = await fn(folderId, hostId);
+        ((id: string, host: string, source: string) =>
+          api.createSeedPlan(id, { hostId: host, sourceHostId: source, confirm: true }));
+      const created = await fn(folderId, hostId, sourceHostId);
       setEntry(created);
       setStatus(
         "Plan prepared. Nothing has been transferred and nothing on the target has changed — this is a read-only measurement.",
@@ -111,7 +133,7 @@ export function FolderSeedPlanCard({
     } finally {
       setBusy(false);
     }
-  }, [folderId, hostId, preparePlan]);
+  }, [folderId, hostId, preparePlan, sourceHostId]);
 
   const onStart = useCallback(async () => {
     if (!entry) return;
@@ -161,9 +183,47 @@ export function FolderSeedPlanCard({
 
         {offer && entry === null ? (
           <div className="folder-seed-actions">
-            <button type="button" className="action" disabled={busy} onClick={() => void onPrepare()}>
-              Prepare a seed plan (read-only)
-            </button>
+            {candidates.length === 0 ? (
+              <p className="muted">
+                No other device is assigned to this folder, so there is nothing to seed from. A device cannot seed
+                itself.
+              </p>
+            ) : (
+              <>
+                <label className="folder-seed-source" htmlFor={`seed-source-${folderId}-${hostId}`}>
+                  Source device (the device that already holds the data)
+                </label>
+                <select
+                  id={`seed-source-${folderId}-${hostId}`}
+                  className="folder-seed-source-select"
+                  value={sourceHostId}
+                  disabled={busy}
+                  onChange={(event) => setSourceHostId(event.target.value)}
+                >
+                  <option value="">Choose a device…</option>
+                  {candidates.map((candidate) => (
+                    <option key={candidate.hostId} value={candidate.hostId}>
+                      {candidate.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="muted folder-seed-source-help">
+                  LamaSync never picks the source for you. If the device you need is not listed, assign the folder to
+                  it first.
+                </p>
+                <button
+                  type="button"
+                  className="action"
+                  disabled={busy || sourceError !== null}
+                  onClick={() => void onPrepare()}
+                >
+                  Prepare a seed plan (read-only)
+                </button>
+                {sourceError !== null ? (
+                  <span className="muted folder-seed-disabled-reason">{sourceError}</span>
+                ) : null}
+              </>
+            )}
           </div>
         ) : null}
 
@@ -228,9 +288,17 @@ export function SeedPlanSummary({
   validity: SeedPlanValidity;
 }) {
   const tone = seedSpaceTone(plan);
+  const unmet = seedUnmetPrerequisites(plan);
   return (
     <div className="folder-seed-plan">
       <dl className="folder-seed-facts">
+        <div>
+          <dt>Source device</dt>
+          <dd>
+            {plan.sourceHostId || "not recorded"}
+            <span className="muted"> (chosen by you)</span>
+          </dd>
+        </div>
         <div>
           <dt>Source size</dt>
           <dd>
@@ -254,12 +322,29 @@ export function SeedPlanSummary({
         </div>
       </dl>
 
+      <p className={plan.sourceAuthority.measurementUsable ? "muted" : "folder-seed-warning"}>
+        {seedSourceAuthoritySentence(plan)}
+      </p>
       <p className={tone === "ok" ? "muted" : "folder-seed-warning"}>{seedSpaceSentence(plan)}</p>
+      <p className={plan.filterUniverse.archiveImplemented && plan.filterUniverse.match ? "muted" : "folder-seed-warning"}>
+        {seedFilterUniverseSentence(plan)}
+      </p>
       <p className="muted">{seedArchiveSentence(plan)}</p>
       <p className="muted">{seedStagingSentence(plan)}</p>
       <p className={validity.valid ? "muted" : "folder-seed-warning"}>
         {validity.valid ? "This plan is still current." : validity.message}
       </p>
+
+      {unmet.length > 0 ? (
+        <div className="folder-seed-prerequisites">
+          <p className="folder-seed-warning">Before this seed can run:</p>
+          <ul>
+            {unmet.map((item) => (
+              <li key={item.id}>{item.message}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <details className="folder-seed-technical">
         <summary>Technical details</summary>
@@ -269,16 +354,21 @@ export function SeedPlanSummary({
             {formatBytes(plan.space.extractedBytes)}), times the safety factor, plus fixed overhead.
           </li>
           <li>
-            The archive is built with {plan.archive.format === "tar.zstd" ? "tar + zstd" : "tar + gzip"} and verified
-            by SHA-256 before anything is unpacked.
+            The archive is built with {plan.archive.format === "tar.zstd" ? "tar + zstd" : "tar + gzip"} from the
+            folder's effective filter universe, and verified by SHA-256 before anything is unpacked.
           </li>
           <li>
-            The staging directory is a sibling of the target and is published with a single atomic rename. A non-empty
-            target is refused rather than merged.
+            The staging directory is a sibling of the target — the same parent directory — and is published with a
+            single atomic rename. A non-empty target is refused rather than merged, and so is a staging directory
+            this feature did not create.
           </li>
           <li>
-            After publishing, a fresh bisync baseline validation must report zero content changes; otherwise the seed is
-            treated as failed.
+            The same-filesystem proof comes from the target device itself, which stats the directory that holds both
+            paths. An unproven verdict is not runnable.
+          </li>
+          <li>
+            After publishing, a fresh bisync baseline validation must report zero content changes; otherwise the seed
+            is treated as failed.
           </li>
         </ul>
       </details>
