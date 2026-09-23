@@ -238,6 +238,18 @@ export const SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED = true;
  * Why the universe is required at all. Kept as a named, exported string so the
  * API contract, the plan and the UI all quote the same sentence.
  */
+/**
+ * The universe fingerprint of a folder that ignores NOTHING.
+ *
+ * `buildSeedFilterUniverse` (daemon) reports this instead of a digest because
+ * there is no rule set to hash, and `null` already means something else on the
+ * health side ("this device has not reported a universe yet"). It must never be
+ * mistaken for a digest: the manifest transport carries it as `null` in
+ * `SeedManifestDocument.filterFingerprint`, so an empty universe is explicit
+ * rather than a fake hash.
+ */
+export const SEED_EMPTY_FILTER_FINGERPRINT = "none";
+
 export const SEED_FILTER_UNIVERSE_REQUIRED_REASON =
   "A seed archive must be built from exactly the effective filter universe the following sync baseline uses " +
   "(lamasyncignore, ignore-git-metadata, respect-gitignore). Archiving the raw source tree while sync filters a " +
@@ -882,6 +894,102 @@ export function seedCleanupAllowed(facts: SeedClaimFacts, owner: string, now: nu
   return seedLeaseIsLive(facts, owner, now);
 }
 
+// ---------------------------------------------------------------------------
+// Roles (LAMA-346 Stage 2d)
+// ---------------------------------------------------------------------------
+//
+// A seed has TWO parties, and until Stage 2d only one of them was named on the
+// job row: `hostId` is the TARGET (the device whose folder is being seeded),
+// and the SOURCE was reachable only through the plan. That made device-key
+// authorization impossible for the source, which is why the Stage 2c harness
+// used the master key.
+//
+// The job now carries `sourceHostId` (copied from the plan at creation), so the
+// server can answer "which side of this job are you?" from the job alone,
+// without a join that a pruned plan could break. The rules below are pure: they
+// are the single statement of who may do what, and the routes and the daemon
+// both read them.
+
+/** Which side of a seed job a device is. */
+export type SeedJobRole = "source" | "target";
+
+/**
+ * The role `hostId` plays on this job, or null when it is not a party.
+ *
+ * Structural, so it serves a job and a plan alike (`SeedPlan` carries the same
+ * two ids). A device that is neither the target nor the named source is a
+ * stranger: it may not read the job, let alone write it. The plan refuses a
+ * source that IS the target, so the two roles are always distinct hosts.
+ */
+export function seedJobRoleFor(
+  job: { hostId: string; sourceHostId: string | null },
+  hostId: string | null | undefined,
+): SeedJobRole | null {
+  if (typeof hostId !== "string" || hostId.length === 0) return null;
+  if (hostId === job.hostId) return "target";
+  if (job.sourceHostId !== null && hostId === job.sourceHostId) return "source";
+  return null;
+}
+
+/**
+ * The role that owns a phase.
+ *
+ * The state machine is strictly forward and the two roles act in sequence: the
+ * source measures, archives and uploads; the target downloads, verifies,
+ * extracts, publishes and validates the baseline. `preflight` is the SOURCE's,
+ * because the source claims the job first. That also makes the target's start
+ * condition structural: the target's first phase (`downloading_archive`) is
+ * exactly one step after the source's last (`uploading_archive`), so a target
+ * that tried to start early would be refused by `canTransitionSeedPhase` as
+ * well as by this rule — two independent gates, not one.
+ */
+export function seedJobPhaseRole(phase: SeedJobPhase): SeedJobRole {
+  switch (phase) {
+    case "preflight":
+    case "measuring_source":
+    case "archiving_source":
+    case "uploading_archive":
+      return "source";
+    case "downloading_archive":
+    case "verifying_archive":
+    case "extracting_target":
+    case "verifying_target":
+    case "publishing":
+    case "baseline_validation":
+      return "target";
+  }
+}
+
+/** May this role report progress for `phase` at all? */
+export function seedJobRoleMayEnterPhase(role: SeedJobRole, phase: SeedJobPhase): boolean {
+  return seedJobPhaseRole(phase) === role;
+}
+
+/**
+ * May this role record the immutable archive facts?
+ *
+ * Only the SOURCE, and only because it is the producer: the digest, byte count,
+ * member count and manifest identity are the source's statement about an
+ * archive it just built and uploaded. The target's job is to RE-DERIVE and
+ * check those facts — never to author them. A target that could rewrite them
+ * could make any bytes on disk verify.
+ */
+export function seedJobRoleMayReportArchive(role: SeedJobRole | null): boolean {
+  return role === "source";
+}
+
+/**
+ * May this role end the job?
+ *
+ * Only the TARGET, because only the target holds the verdict a seed's success
+ * depends on: that the published tree equals the transported manifest and that
+ * the following resync moved no content. A source may fail its own side, but it
+ * may not declare the seed complete.
+ */
+export function seedJobRoleMayComplete(role: SeedJobRole | null): boolean {
+  return role === "target";
+}
+
 export interface SeedJobProgress {
   phase: SeedJobPhase;
   phaseIndex: number;
@@ -1315,6 +1423,55 @@ function positiveIntOrZero(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
+/**
+ * Does this job carry every immutable archive fact a TARGET needs before it may
+ * start?
+ *
+ * Fail closed, and deliberately one predicate: the target may not download a
+ * single byte until it has a digest to verify, a manifest object to re-derive
+ * the source universe from, and a recorded manifest fingerprint to compare the
+ * re-derivation against. A missing one of these is not "unknown, proceed" — it
+ * is "refuse", because the alternative is extracting bytes nobody can check.
+ */
+export function seedArchiveFactsComplete(archive: SeedJobArchiveFacts): boolean {
+  return (
+    archive.sha256 !== null &&
+    archive.bytes !== null &&
+    archive.objectKey !== null &&
+    archive.memberCount !== null &&
+    archive.manifestFingerprint !== null &&
+    archive.manifestObjectKey !== null &&
+    archive.manifestBytes !== null &&
+    archive.manifestSha256 !== null
+  );
+}
+
+/**
+ * Do two archive-fact records describe the SAME transported archive and
+ * manifest?
+ *
+ * This is the immutability comparison, and it is deliberately narrow: it covers
+ * only the fields that IDENTIFY the bytes (format, digest, byte count, member
+ * count, object key) and the manifest (fingerprint, key, bytes, digest). The
+ * bookkeeping fields — `uploadedAt`, `verifiedAt`, `cleanup` — are excluded on
+ * purpose: a retry that re-sends the same archive must be accepted even if its
+ * clock reading differs, while a retry that changes any identifying field must
+ * be refused.
+ */
+export function seedArchiveFactsEqual(a: SeedJobArchiveFacts, b: SeedJobArchiveFacts): boolean {
+  return (
+    a.format === b.format &&
+    a.bytes === b.bytes &&
+    a.sha256 === b.sha256 &&
+    a.objectKey === b.objectKey &&
+    a.memberCount === b.memberCount &&
+    a.manifestFingerprint === b.manifestFingerprint &&
+    a.manifestObjectKey === b.manifestObjectKey &&
+    a.manifestBytes === b.manifestBytes &&
+    a.manifestSha256 === b.manifestSha256
+  );
+}
+
 function hexDigestOrNull(value: unknown): string | null {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
 }
@@ -1330,7 +1487,16 @@ export interface SeedJob {
   id: string;
   planId: string;
   folderId: string;
+  /** The TARGET device — the one whose folder is being seeded. */
   hostId: string;
+  /**
+   * The SOURCE device the operator named on the plan, copied onto the job at
+   * creation (LAMA-346 Stage 2d). It is what makes device-key authorization of
+   * the source possible without joining a plan row that may have been pruned,
+   * and it is `null` only for a job created before this field existed — a row
+   * that then authorizes nobody but the target.
+   */
+  sourceHostId: string | null;
   assignmentId: string;
   status: SeedJobStatus;
   phase: SeedJobPhaseOrTerminal;
@@ -1573,6 +1739,44 @@ export function parseSeedPlanRequestPayload(value: unknown): SeedPlanRequestPars
 export interface SeedJobCreatePayload {
   planId: string;
   confirm: true;
+}
+
+/**
+ * The bounded payload of the `seed_job` queued action (LAMA-346 Stage 2d).
+ *
+ * Two fields, and both are re-checked by the daemon against the server's own
+ * state: `jobId` must name a job the daemon is a party to, and `role` must
+ * agree with the role the JOB assigns to that host. The payload therefore
+ * carries intent, never authority — a tampered action cannot make a device act
+ * outside its half, and it cannot carry a path, an rclone flag or a credential
+ * in the first place.
+ */
+export interface SeedJobActionPayload {
+  jobId: string;
+  role: SeedJobRole;
+}
+
+export type SeedJobActionParseResult =
+  | { ok: true; payload: SeedJobActionPayload }
+  | { ok: false; error: string };
+
+/** Validate a `seed_job` action payload. The wire stays closed: unknown fields
+ *  are refused rather than ignored. */
+export function parseSeedJobActionPayload(value: unknown): SeedJobActionParseResult {
+  if (!isRecord(value)) return { ok: false, error: "payload must be an object" };
+  const allowed = new Set(["jobId", "role"]);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) return { ok: false, error: `unsupported field: ${key}` };
+  }
+  const jobId = value["jobId"];
+  if (typeof jobId !== "string" || jobId.length === 0 || jobId.length > 128) {
+    return { ok: false, error: "jobId is required" };
+  }
+  const role = value["role"];
+  if (role !== "source" && role !== "target") {
+    return { ok: false, error: "role must be \"source\" or \"target\"" };
+  }
+  return { ok: true, payload: { jobId, role } };
 }
 
 export type SeedJobCreateParseResult =

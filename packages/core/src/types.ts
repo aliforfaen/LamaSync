@@ -248,7 +248,14 @@ export type QueuedActionType =
   // path or command. Older daemons ack all three as unknown action types.
   | "diagnose_folder"
   | "plan_folder"
-  | "folder_intervention";
+  | "folder_intervention"
+  // LAMA-346 Stage 2d: run ONE side of an initial seed. The payload is the
+  // bounded `{ jobId, role }` grammar in ./folder-seed.ts — never a path, an
+  // rclone flag or a credential. The daemon re-derives its role from the job +
+  // plan and refuses if the payload disagrees, and the whole action is inert
+  // unless the doubly-gated seed seam is on, so an older daemon and a build
+  // without the seam both ack it as an unknown/refused action.
+  | "seed_job";
 
 export type QueuedActionStatus = "pending" | "taken" | "done" | "failed";
 

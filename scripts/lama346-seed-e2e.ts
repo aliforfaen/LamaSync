@@ -87,9 +87,11 @@ const TARGET_PARENT = join(SANDBOX, "host-target");
 const SOURCE_ROOT = join(SOURCE_PARENT, "Projects");
 const TARGET_ROOT = join(TARGET_PARENT, "Projects");
 const WORK_DIR = join(SANDBOX, "work");
+// The daemons point TMPDIR at the sandbox (see `daemonEnv`), so it must exist.
+const TMP_DIR = join(SANDBOX, "tmp");
 const RULES_PATH = join(SANDBOX, "filter-rules.txt");
 const TEST_KEY = `lama346-e2e-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-for (const dir of [HOME, DATA_DIR, BACKUP_DIR, dirname(SOCKET_PATH), SOURCE_ROOT, TARGET_ROOT, WORK_DIR]) {
+for (const dir of [HOME, DATA_DIR, BACKUP_DIR, dirname(SOCKET_PATH), SOURCE_ROOT, TARGET_ROOT, WORK_DIR, TMP_DIR]) {
   mkdirSync(dir, { recursive: true });
 }
 
@@ -128,6 +130,37 @@ function freePort(): number {
 const PORT = freePort();
 const BASE = `http://127.0.0.1:${PORT}/api/v1`;
 
+/**
+ * A server call made with a DEVICE key rather than the harness's master key.
+ *
+ * The Stage 2d denial checks must be made by a credential the server can only
+ * know as a device — the same shape a real daemon uses — so the authorization
+ * rules are exercised on the real boundary, not on an admin shortcut.
+ */
+async function deviceRequest(
+  token: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = text.length > 0 ? JSON.parse(text) : null;
+  } catch {
+    parsed = text;
+  }
+  return { status: res.status, body: parsed };
+}
+
 function sandboxEnv(extra: Record<string, string> = {}): Record<string, string> {
   return {
     ...(process.env as Record<string, string>),
@@ -163,8 +196,7 @@ async function api(method: string, path: string, body?: unknown): Promise<{ stat
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-}
-function str(value: unknown, fallback = ""): string {
+}function str(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 function num(value: unknown, fallback = 0): number {
@@ -176,6 +208,11 @@ function num(value: unknown, fallback = 0): number {
 // ---------------------------------------------------------------------------
 
 let MINIO_CONTAINER: string | null = null;
+// The device keys the daemons use. The Stage 2c worker diagnostic reuses them so
+// it speaks the SAME per-role contract: the archive-facts route admits the
+// source device and refuses the master key, which is the point of Stage 2d.
+let SOURCE_DEVICE_KEY = "";
+let TARGET_DEVICE_KEY = "";
 let S3 = {
   endpoint: "",
   bucket: "lamasync-seed-e2e",
@@ -307,6 +344,32 @@ function plainLog(text: string): string {
   return text.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
+/**
+ * The source manifest, rebuilt by the HARNESS from the source tree.
+ *
+ * The daemon path's independent check uses this: it trusts no log any worker or
+ * daemon emitted — only the bytes on disk and the folder's own ignore rules.
+ */
+async function harnessManifestFixture(folderId: string) {
+  const built = await buildSeedSourceManifest(
+    {
+      id: "e2e-source",
+      folderId,
+      hostId: "seed-source",
+      role: "both",
+      localPath: SOURCE_ROOT,
+      enabled: true,
+      ignorePath: ".lamasyncignore",
+      ignoreGitMetadata: true,
+    },
+    "sync",
+  );
+  if (built.manifest === null) {
+    throw new Error(`the harness could not rebuild the source manifest: ${built.blocking.join("; ")}`);
+  }
+  return built.manifest;
+}
+
 function runBisync(resync: boolean): { exitCode: number; raw: string; transfers: number; bytes: number } {
   const state = join(SANDBOX, "harness-bisync-state");
   if (resync) rmSync(state, { recursive: true, force: true });
@@ -354,7 +417,9 @@ async function runWorker(role: "source" | "target", jobId: string, extra: Record
     LAMASYNC_SEED_ROLE: role,
     LAMASYNC_SEED_JOB_ID: jobId,
     LAMASYNC_SEED_SERVER_URL: `http://127.0.0.1:${PORT}`,
-    LAMASYNC_SEED_API_KEY: TEST_KEY,
+    // A DEVICE key, never the master key: the server admits only the job's own
+    // source to the archive route, and the target may not author those facts.
+    LAMASYNC_SEED_API_KEY: role === "source" ? SOURCE_DEVICE_KEY : TARGET_DEVICE_KEY,
     LAMASYNC_SEED_HOST_ID: role === "source" ? "seed-source" : "seed-target",
     LAMASYNC_SEED_FOLDER_ROOT: role === "source" ? SOURCE_ROOT : TARGET_ROOT,
     LAMASYNC_SEED_FOLDER_TYPE: "sync",
@@ -401,6 +466,28 @@ async function waitForTerminalJob(jobId: string, timeoutMs = 180_000): Promise<S
     if (job && ["completed", "failed", "cancelled"].includes(job.phase)) return job;
     if (Date.now() > deadline) throw new Error(`job ${jobId} did not reach a terminal state`);
     await Bun.sleep(300);
+  }
+}
+
+/**
+ * The diagnostic sections' variant: return whatever the job is when the wait
+ * runs out, and say so.
+ *
+ * A job whose owner died without acking stays `running` until its lease lapses
+ * (the reaper fails it), so a bounded wait can legitimately time out. Aborting
+ * the whole harness there would hide the failure's real shape, which is exactly
+ * what the checks below are for.
+ */
+async function waitForTerminalJobTolerant(jobId: string, timeoutMs = 180_000): Promise<SeedJob> {
+  try {
+    return await waitForTerminalJob(jobId, timeoutMs);
+  } catch (err) {
+    const res = await api("GET", `/seed-jobs/${jobId}`);
+    const job = res.body as SeedJob;
+    console.error(
+      `[harness] ${err instanceof Error ? err.message : String(err)}; job is phase=${job?.phase ?? "?"} status=${job?.status ?? "?"}`,
+    );
+    return job;
   }
 }
 
@@ -537,6 +624,251 @@ async function createJob(folderId: string): Promise<string> {
   return str(record(jobRes.body)["id"]);
 }
 
+// ---------------------------------------------------------------------------
+// Stage 2d: two REAL lamasyncd processes, driven by their own device keys
+// ---------------------------------------------------------------------------
+//
+// This is the acceptance evidence for the daemon wiring, and it deliberately
+// looks nothing like the worker diagnostic above:
+//
+//   * the two sides are the SHIPPED daemon (`packages/daemon/src/index.ts`),
+//     started as two separate OS processes with their own HOME, their own
+//     `client.toml` and their own DATA DIRECTORY;
+//   * their credentials are DEVICE keys minted through the real pairing
+//     exchange — never the master key — and the server authorizes each side's
+//     half of the job from `seedJobRoleFor`;
+//   * the seed is driven by the real queued-action loop: `POST /seed-jobs`
+//     enqueues one `seed_job` action per party and each daemon claims its own;
+//   * the target daemon OWNS the zero-change baseline gate: it will not report
+//     the job completed unless a real `rclone bisync --resync` moved nothing.
+//
+// The worker-based sections below remain as a lower-level diagnostic (they can
+// drive failure injection cheaply), and they are labelled as such.
+
+interface DaemonHandle {
+  side: "source" | "target";
+  hostId: string;
+  home: string;
+  proc: Bun.Subprocess;
+  logs: () => string;
+  stop: () => void;
+}
+
+/**
+ * The environment a sandbox daemon gets: an ALLOWLIST, not the harness env.
+ *
+ * `HOME` and `XDG_RUNTIME_DIR` are per-daemon so no client.toml, cache, socket,
+ * unit or update marker can be the operator's, and the D-Bus session address is
+ * pointed at a path that does not exist so a `systemctl --user` probe cannot
+ * reach the real session manager.
+ */
+function daemonEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
+  const runtimeDir = join(home, "run");
+  mkdirSync(runtimeDir, { recursive: true });
+  return {
+    PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+    HOME: home,
+    TMPDIR: join(SANDBOX, "tmp"),
+    XDG_RUNTIME_DIR: runtimeDir,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(runtimeDir, "no-session-bus")}`,
+    LAMASYNC_SOCKET_PATH: join(runtimeDir, "lamasyncd.sock"),
+    // The doubly-gated seam, and the relay space the sandbox owns.
+    LAMASYNC_SEED_E2E: "1",
+    LAMASYNC_TEST: "1",
+    LAMASYNC_SEED_S3_ENDPOINT: S3.endpoint,
+    LAMASYNC_SEED_S3_BUCKET: S3.bucket,
+    LAMASYNC_SEED_S3_REGION: S3.region,
+    LAMASYNC_SEED_S3_ACCESS_KEY: S3.accessKeyId,
+    LAMASYNC_SEED_S3_SECRET_KEY: S3.secretAccessKey,
+    ...extra,
+  };
+}
+
+async function waitForLog(handle: DaemonHandle, needle: string, timeoutMs = 60_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (handle.logs().includes(needle)) return true;
+    await Bun.sleep(200);
+  }
+  return handle.logs().includes(needle);
+}
+
+/** Mint a real device key for one host through the documented pairing flow. */
+async function mintDeviceKey(hostId: string): Promise<string> {
+  const created = await api("POST", "/pairing", { ttlSeconds: 600 });
+  if (created.status !== 201) {
+    throw new Error(`pairing create answered ${created.status}: ${JSON.stringify(created.body)}`);
+  }
+  const code = str(record(created.body)["code"]);
+  if (code.length === 0) throw new Error("pairing create returned no code");
+  const res = await fetch(`${BASE}/pairing/${encodeURIComponent(code)}/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostId, hostname: hostId }),
+  });
+  const body = record(await res.json().catch(() => null));
+  if (res.status !== 200) {
+    throw new Error(`pairing exchange for ${hostId} answered ${res.status}: ${JSON.stringify(body)}`);
+  }
+  const apiKey = str(body["apiKey"]);
+  if (apiKey.length === 0) throw new Error("pairing exchange returned no apiKey");
+  return apiKey;
+}
+
+async function startDaemon(
+  side: "source" | "target",
+  hostId: string,
+  apiKey: string,
+): Promise<DaemonHandle> {
+  const home = join(SANDBOX, `daemon-${side}`);
+  const configDir = join(home, ".config", "lamasync");
+  const dataDir = join(home, "data");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "client.toml"),
+    [
+      `serverUrl = "http://127.0.0.1:${PORT}"`,
+      `apiKey = "${apiKey}"`,
+      `hostname = "${hostId}"`,
+      `dataDir = "${dataDir}"`,
+      `socketPath = "${join(home, "run", "lamasyncd.sock")}"`,
+      "",
+    ].join("\n"),
+  );
+  // Skip the boot release check: no outbound call, and deterministic timing.
+  writeFileSync(
+    join(configDir, "update-state.json"),
+    JSON.stringify({ lastCheckAt: Date.now() }),
+  );
+  const env = daemonEnv(home, side === "target" ? { LAMASYNC_SEED_DAEMON_PEER_PATH: SOURCE_ROOT } : {});
+  const proc = Bun.spawn(["bun", "run", join(ROOT, "packages", "daemon", "src", "index.ts")], {
+    cwd: ROOT,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let buffer = "";
+  const decoder = new TextDecoder();
+  const pump = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
+    const reader = stream.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+    }
+  };
+  void pump(proc.stdout as ReadableStream<Uint8Array>);
+  void pump(proc.stderr as ReadableStream<Uint8Array>);
+  const handle: DaemonHandle = {
+    side,
+    hostId,
+    home,
+    proc,
+    logs: () => buffer,
+    stop: () => {
+      try {
+        proc.kill();
+      } catch {
+        // already gone
+      }
+    },
+  };
+  children.push({ name: `daemon-${side}`, kill: handle.stop });
+  return handle;
+}
+
+interface DaemonSeedResult {
+  job: SeedJob;
+  source: DaemonHandle;
+  target: DaemonHandle;
+  sourceKey: string;
+  targetKey: string;
+  actions: Array<Record<string, unknown>>;
+}
+
+/**
+ * Start the two real daemons and wait until each has registered and reported.
+ *
+ * Both are given their own device key minted through the pairing exchange, so
+ * from here on neither side ever sees an admin credential.
+ */
+async function startDaemons(): Promise<{
+  source: DaemonHandle;
+  target: DaemonHandle;
+  sourceKey: string;
+  targetKey: string;
+}> {
+  const sourceKey = await mintDeviceKey("seed-source");
+  const targetKey = await mintDeviceKey("seed-target");
+  SOURCE_DEVICE_KEY = sourceKey;
+  TARGET_DEVICE_KEY = targetKey;
+  check(
+    "each daemon got its own DEVICE key through the pairing exchange",
+    sourceKey.length > 0 &&
+      targetKey.length > 0 &&
+      sourceKey !== targetKey &&
+      sourceKey !== TEST_KEY &&
+      targetKey !== TEST_KEY,
+  );
+
+  const source = await startDaemon("source", "seed-source", sourceKey);
+  const target = await startDaemon("target", "seed-target", targetKey);
+  const sourceUp = await waitForLog(source, "[boot] registered and reported online");
+  const targetUp = await waitForLog(target, "[boot] registered and reported online");
+  check("the source daemon booted and registered", sourceUp, sourceUp ? "" : source.logs().slice(-300));
+  check("the target daemon booted and registered", targetUp, targetUp ? "" : target.logs().slice(-300));
+  return { source, target, sourceKey, targetKey };
+}
+
+/**
+ * Create the plan and the job, then wait for the daemons to drive it home.
+ *
+ * The plan is created with the master key — preparing and approving a seed IS
+ * operator work — and the job creation is what enqueues one action per party.
+ * No device credential is used for either.
+ */
+async function runDaemonSeed(
+  folderId: string,
+  daemons: { source: DaemonHandle; target: DaemonHandle; sourceKey: string; targetKey: string },
+): Promise<DaemonSeedResult> {
+  const planRes = await api("POST", `/folders/${folderId}/seed-plans`, {
+    hostId: "seed-target",
+    sourceHostId: "seed-source",
+    confirm: true,
+  });
+  if (planRes.status !== 201) {
+    throw new Error(`seed-plan answered ${planRes.status}: ${JSON.stringify(planRes.body).slice(0, 300)}`);
+  }
+  const planId = str(record(record(planRes.body)["plan"])["id"]);
+  const jobRes = await api("POST", "/seed-jobs", { planId, confirm: true });
+  if (jobRes.status !== 201) {
+    throw new Error(`seed-job answered ${jobRes.status}: ${JSON.stringify(jobRes.body).slice(0, 300)}`);
+  }
+  const jobId = str(record(jobRes.body)["id"]);
+
+  // The server enqueues ONE action per party; the daemons claim their own.
+  const sourceQueue = await api("GET", "/hosts/seed-source/actions");
+  const targetQueue = await api("GET", "/hosts/seed-target/actions");
+  const mine = (body: unknown): Array<Record<string, unknown>> =>
+    Array.isArray(body)
+      ? body
+          .map(record)
+          .filter(
+            (a) => str(a["type"]) === "seed_job" && str(record(a["payload"])["jobId"]) === jobId,
+          )
+      : [];
+  const actions = [...mine(sourceQueue.body), ...mine(targetQueue.body)];
+  check(
+    "the server enqueued one seed_job action per party",
+    actions.length === 2,
+    `found ${actions.length}`,
+  );
+
+  const job = await waitForTerminalJob(jobId, 300_000);
+  return { job, ...daemons, actions };
+}
+
 async function runSeedJob(folderId: string, options: RunOptions): Promise<{ job: SeedJob; source: WorkerResult; target: WorkerResult }> {
   section(`Seed run: ${options.label}`);
   const jobId = await createJob(folderId);
@@ -549,7 +881,7 @@ async function runSeedJob(folderId: string, options: RunOptions): Promise<{ job:
       runWorker("source", jobId, options.sourceExtra ?? {}),
       runWorker("target", jobId, options.targetExtra ?? {}),
     ]);
-    const job = await waitForTerminalJob(jobId);
+    const job = await waitForTerminalJobTolerant(jobId);
     return { job, source, target };
   }
   if (options.cancelAfterMs !== undefined) {
@@ -558,12 +890,12 @@ async function runSeedJob(folderId: string, options: RunOptions): Promise<{ job:
     await Bun.sleep(options.cancelAfterMs);
     await api("POST", `/seed-jobs/${jobId}/cancel`);
     const [source, target] = await Promise.all([sourcePromise, targetPromise]);
-    const job = await waitForTerminalJob(jobId);
+    const job = await waitForTerminalJobTolerant(jobId);
     return { job, source, target };
   }
   const source = await runWorker("source", jobId, options.sourceExtra ?? {});
   const target = await runWorker("target", jobId, options.targetExtra ?? {});
-  const job = await waitForTerminalJob(jobId);
+  const job = await waitForTerminalJobTolerant(jobId);
   return { job, source, target };
 }
 
@@ -615,10 +947,26 @@ async function main(): Promise<void> {
   const folderId = str(record(folderRes.body)["id"]);
   check("folder created", folderId.length > 0, `status ${folderRes.status}: ${str(record(folderRes.body)["error"])}`);
   const assignSource = await api("POST", `/folders/${folderId}/assign`, {
-    hostId: "seed-source", role: "both", localPath: SOURCE_ROOT, syncExpr: "0 0 1 1 *", enabled: true,
+    hostId: "seed-source",
+    role: "both",
+    localPath: SOURCE_ROOT,
+    syncExpr: "0 0 1 1 *",
+    enabled: true,
+    // The daemon derives its effective filter universe from this assignment, so
+    // the sandbox must configure the same universe the harness compiles its
+    // reference rules from — otherwise the plan's reported fingerprint and the
+    // archive's actual universe would describe different trees.
+    ignorePath: ".lamasyncignore",
+    ignoreGitMetadata: true,
   });
   const assignTarget = await api("POST", `/folders/${folderId}/assign`, {
-    hostId: "seed-target", role: "both", localPath: TARGET_ROOT, syncExpr: "0 0 1 1 *", enabled: true,
+    hostId: "seed-target",
+    role: "both",
+    localPath: TARGET_ROOT,
+    syncExpr: "0 0 1 1 *",
+    enabled: true,
+    ignorePath: ".lamasyncignore",
+    ignoreGitMetadata: true,
   });
   check(
     "both devices are assigned",
@@ -644,6 +992,219 @@ async function main(): Promise<void> {
     filterFingerprint: universe.fingerprint, patternCount: universe.rules.length,
   });
   check("both devices reported the health facts the plan needs", true);
+
+  // --- Stage 2d: the real daemon path (the acceptance evidence) --------------
+  section("Stage 2d: two real lamasyncd processes, each with its own device key");
+  const daemons = await startDaemons();
+  // A daemon's boot health report is lightweight by design (no deep tree walk),
+  // so it REPLACES the harness's earlier row with `measurement: null`. The plan
+  // needs the source's fresh measurement, so re-report it here, immediately
+  // before the plan is built.
+  await reportHealth({
+    hostId: "seed-source",
+    folderId,
+    root: SOURCE_ROOT,
+    isSource: true,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+  });
+  await reportHealth({
+    hostId: "seed-target",
+    folderId,
+    root: TARGET_ROOT,
+    isSource: false,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+  });
+  const daemonSeed = await runDaemonSeed(folderId, daemons);
+  results["daemonJob"] = daemonSeed.job;
+  const daemonPhases = [
+    "measuring_source",
+    "archiving_source",
+    "uploading_archive",
+    "downloading_archive",
+    "verifying_archive",
+    "extracting_target",
+    "verifying_target",
+    "publishing",
+    "baseline_validation",
+  ];
+  const daemonLogs = `${daemonSeed.source.logs()}\n${daemonSeed.target.logs()}`;
+  check(
+    "the daemon-driven seed completed",
+    daemonSeed.job.status === "completed",
+    `status=${daemonSeed.job.status} phase=${daemonSeed.job.phase} error=${daemonSeed.job.error ?? "(none)"}`,
+  );
+  check(
+    "every seed phase was entered by the daemons",
+    daemonPhases.every((phase) => daemonLogs.includes(`phase=${phase}`)),
+    daemonPhases.filter((phase) => !daemonLogs.includes(`phase=${phase}`)).join(", ") || "all present",
+  );
+  check(
+    "the SOURCE daemon recorded the immutable archive facts",
+    daemonSeed.job.archive.sha256 !== null &&
+      daemonSeed.job.archive.manifestSha256 !== null &&
+      daemonSeed.job.archive.manifestObjectKey !== null &&
+      daemonSeed.job.archive.memberCount !== null,
+  );
+  check(
+    "the TARGET daemon re-derived the source manifest fingerprint",
+    daemonSeed.job.archive.manifestFingerprint !== null &&
+      daemonLogs.includes(`re-derived manifest fingerprint=${daemonSeed.job.archive.manifestFingerprint}`),
+  );
+  check(
+    "the TARGET daemon ran the baseline resync that gates completion",
+    daemonLogs.includes("target baseline resync"),
+  );
+  check(
+    "the job's terminal state released the lease",
+    daemonSeed.job.leaseOwner === null && daemonSeed.job.leaseExpiresAt === null && daemonSeed.job.startedAt !== null,
+    `lease=${daemonSeed.job.leaseOwner ?? "(none)"}`,
+  );
+
+  // Content, exclusions, and an independent re-verification of the tree.
+  const daemonSourceTree = treeMap(SOURCE_ROOT, (rel) => rel === "node_modules" || rel.startsWith("node_modules/") || rel === "tmp" || rel.startsWith("tmp/") || rel.endsWith(".log"));
+  const daemonTargetTree = treeMap(TARGET_ROOT, (rel) => rel === "node_modules" || rel.startsWith("node_modules/") || rel === "tmp" || rel.startsWith("tmp/") || rel.endsWith(".log"));
+  check(
+    "the daemon-published target holds exactly the source universe",
+    daemonSourceTree.size === daemonTargetTree.size &&
+      [...daemonSourceTree].every(([rel, size]) => daemonTargetTree.get(rel) === size),
+    `${daemonSourceTree.size} vs ${daemonTargetTree.size} entries`,
+  );
+  check(
+    "ignored content never reached the target through the daemon path",
+    !existsSync(join(TARGET_ROOT, "node_modules")) &&
+      !existsSync(join(TARGET_ROOT, "debug.log")) &&
+      !existsSync(join(TARGET_ROOT, "tmp")),
+  );
+  const daemonVerified = await verifyExtractedTree({
+    root: TARGET_ROOT,
+    manifest: await harnessManifestFixture(folderId),
+  });
+  check(
+    "the harness independently re-verifies the daemon-published tree",
+    daemonVerified.ok,
+    daemonVerified.message,
+  );
+
+  if (rcloneAvailable) {
+    const daemonBaseline = runBisync(true);
+    check(
+      "after the daemon seed, bisync --resync reports ZERO changed files",
+      daemonBaseline.exitCode === 0 &&
+        daemonBaseline.transfers === 0 &&
+        daemonBaseline.bytes === 0 &&
+        daemonBaseline.raw.includes("Bisync successful") &&
+        !daemonBaseline.raw.includes("File changed") &&
+        !daemonBaseline.raw.includes("Safety abort"),
+      `exit=${daemonBaseline.exitCode} transfers=${daemonBaseline.transfers} bytes=${daemonBaseline.bytes}`,
+    );
+    writeFileSync(join(SOURCE_ROOT, "README.md"), "# E2E fixture\n\nedited after the daemon seed\n");
+    const daemonForward = runBisync(false);
+    check(
+      "a post-daemon source edit propagates to the target",
+      daemonForward.exitCode === 0 &&
+        daemonForward.transfers > 0 &&
+        readFileSync(join(TARGET_ROOT, "README.md"), "utf8").includes("edited after the daemon seed"),
+      `transfers=${daemonForward.transfers}`,
+    );
+    writeFileSync(join(TARGET_ROOT, "src", "module-01", "file-001.ts"), "// edited on the target after the daemon seed\n");
+    const daemonBackward = runBisync(false);
+    check(
+      "a post-daemon target edit propagates back to the source",
+      daemonBackward.exitCode === 0 &&
+        daemonBackward.transfers > 0 &&
+        readFileSync(join(SOURCE_ROOT, "src", "module-01", "file-001.ts"), "utf8").includes(
+          "edited on the target after the daemon seed",
+        ),
+      `transfers=${daemonBackward.transfers}`,
+    );
+  } else {
+    gated("the daemon path's zero-change baseline and both-way edits", "rclone is not on PATH");
+  }
+
+  const daemonStore = createS3SeedRelayStore(S3);
+  const daemonLeftovers = await daemonStore.list("lamasync/seed/");
+  check(
+    "the daemon-run job's relay objects were cleaned up",
+    daemonLeftovers.ok && daemonLeftovers.value.keys.length === 0,
+    daemonLeftovers.ok ? `${daemonLeftovers.value.keys.length} object(s) left` : "list failed",
+  );
+
+  // Denial: the OTHER party's key, and a stranger's key, cannot touch the job,
+  // and the recorded facts cannot be rewritten by anyone.
+  const targetArchiveAttempt = await deviceRequest(
+    daemonSeed.targetKey,
+    "POST",
+    `/seed-jobs/${daemonSeed.job.id}/archive`,
+    daemonSeed.job.archive,
+  );
+  check(
+    "the TARGET device may not rewrite the source's archive facts",
+    targetArchiveAttempt.status === 403,
+    `status ${targetArchiveAttempt.status}`,
+  );
+  const strangerKey = await mintDeviceKey("seed-stranger");
+  const strangerRead = await deviceRequest(strangerKey, "GET", `/seed-jobs/${daemonSeed.job.id}`);
+  check(
+    "a third device with a valid key cannot read another fleet's seed job",
+    strangerRead.status === 403,
+    `status ${strangerRead.status}`,
+  );
+  const lateReport = await deviceRequest(
+    daemonSeed.targetKey,
+    "POST",
+    `/seed-jobs/${daemonSeed.job.id}/progress`,
+    { phase: "baseline_validation" },
+  );
+  check(
+    "a late device report cannot reopen the finished job",
+    lateReport.status === 409,
+    `status ${lateReport.status}`,
+  );
+  const sourceArchiveRetry = await deviceRequest(
+    daemonSeed.sourceKey,
+    "POST",
+    `/seed-jobs/${daemonSeed.job.id}/archive`,
+    { ...daemonSeed.job.archive, sha256: "f".repeat(64) },
+  );
+  check(
+    "the recorded archive digest cannot be rewritten after the fact",
+    sourceArchiveRetry.status === 409,
+    `status ${sourceArchiveRetry.status}`,
+  );
+
+  daemonSeed.source.stop();
+  daemonSeed.target.stop();
+  await Bun.sleep(500);
+  // Reset both trees so the worker-based diagnostic below starts from the same
+  // empty-target precondition it was written for. The daemons are gone, so a
+  // fresh health report now sticks — and the worker path needs the source's
+  // measurement just as the daemon path did.
+  rmSync(TARGET_ROOT, { recursive: true, force: true });
+  mkdirSync(TARGET_ROOT, { recursive: true });
+  rmSync(SOURCE_ROOT, { recursive: true, force: true });
+  mkdirSync(SOURCE_ROOT, { recursive: true });
+  buildSourceFixture();
+  await reportHealth({
+    hostId: "seed-source",
+    folderId,
+    root: SOURCE_ROOT,
+    isSource: true,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+  });
+  await reportHealth({
+    hostId: "seed-target",
+    folderId,
+    root: TARGET_ROOT,
+    isSource: false,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+  });
+
+  // --- Lower-level diagnostic: the test-only workers (NOT daemon evidence) ---
+  section("Lower-level diagnostic: test-only workers drive the same primitives");
 
   // --- Happy path -----------------------------------------------------------
   const happy = await runSeedJob(folderId, { label: "happy path", expect: "completed" });
@@ -774,7 +1335,9 @@ async function main(): Promise<void> {
   const listedWithOrphan = await store.list("lamasync/seed/");
   const sweep = seedRelayOrphanKeys({
     listedKeys: listedWithOrphan.ok ? listedWithOrphan.value.keys : [],
-    knownJobIds: [happy.job.id],
+    // Both known jobs are in the set: the worker happy path AND the daemon job.
+    // An object belonging to a job the harness knows about is not an orphan.
+    knownJobIds: [happy.job.id, daemonSeed.job.id],
   });
   check("the abandoned object is detected as an orphan", sweep.orphans.includes(orphanKey), sweep.orphans.join(", "));
   await store.delete(orphanKey);

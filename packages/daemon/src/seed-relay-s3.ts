@@ -347,6 +347,11 @@ export function createS3SeedRelayStore(options: S3SeedRelayStoreOptions): SeedRe
       } else {
         tempPath = join(tmpdir(), `lamasync-s3-put-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.bin`);
         try {
+          // `os.tmpdir()` honors TMPDIR, which a sandboxed daemon points at its
+          // own directory. That directory may not exist yet, and a staging
+          // failure must not surface as a confusing ENOENT — create the parent
+          // this call is about to use.
+          mkdirSync(dirname(tempPath), { recursive: true });
           writeFileSync(tempPath, input.source.data);
         } catch (err) {
           return seedRelayFailure(

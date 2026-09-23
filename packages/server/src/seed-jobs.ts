@@ -361,6 +361,7 @@ interface SeedJobRow {
   plan_id: string;
   folder_id: string;
   host_id: string;
+  source_host_id: string | null;
   assignment_id: string;
   status: string;
   phase: string;
@@ -402,6 +403,7 @@ function rowToSeedJob(row: SeedJobRow): SeedJob {
     planId: row.plan_id,
     folderId: row.folder_id,
     hostId: row.host_id,
+    sourceHostId: row.source_host_id,
     assignmentId: row.assignment_id,
     status: row.status as SeedJobStatus,
     phase: row.phase as SeedJobPhaseOrTerminal,
@@ -427,7 +429,7 @@ function rowToSeedJob(row: SeedJobRow): SeedJob {
   };
 }
 
-const SEED_JOB_SELECT = `SELECT id, plan_id, folder_id, host_id, assignment_id, status, phase,
+const SEED_JOB_SELECT = `SELECT id, plan_id, folder_id, host_id, source_host_id, assignment_id, status, phase,
        progress, source, archive, staging, lease_owner, lease_expires_at, error, summary,
        created_at, started_at, updated_at, finished_at
   FROM folder_seed_jobs`;
@@ -435,15 +437,16 @@ const SEED_JOB_SELECT = `SELECT id, plan_id, folder_id, host_id, assignment_id, 
 export function createSeedJob(database: Database, job: SeedJob): void {
   database.run(
     `INSERT INTO folder_seed_jobs
-       (id, plan_id, folder_id, host_id, assignment_id, status, phase, progress, source,
+       (id, plan_id, folder_id, host_id, source_host_id, assignment_id, status, phase, progress, source,
         archive, staging, lease_owner, lease_expires_at, error, summary, created_at,
         started_at, updated_at, finished_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       job.id,
       job.planId,
       job.folderId,
       job.hostId,
+      job.sourceHostId,
       job.assignmentId,
       job.status,
       job.phase,
@@ -725,20 +728,238 @@ export function finishOwnedSeedJob(
   return getSeedJob(database, jobId);
 }
 
-/** Renew a live lease without changing progress. */
-export function renewSeedJobLease(
+// ---------------------------------------------------------------------------
+// Role-scoped writes (LAMA-346 Stage 2d — the device routes' contract)
+// ---------------------------------------------------------------------------
+//
+// The coordinator's family above is role-blind and *demands* that the caller
+// already hold a live lease. That is the right shape for one process driving one
+// job. A seed between two hosts has a different shape: the SOURCE owns the first
+// four phases (`preflight` → `uploading_archive`) and the TARGET owns the last
+// six, so the lease is handed over exactly once — when the source records its
+// archive facts — and the server must let the second party claim without letting
+// either party touch the other's half.
+//
+// Every writer below is ONE atomic statement with a compare-and-set on the
+// PHASE the route read (`phase = fromPhase`). That CAS is what removes the
+// read-then-write window: if another writer moved the job between the route's
+// read and its write, the statement matches zero rows, and the route answers 409
+// instead of writing over the new state. The role and phase-ownership rules live
+// in `@lamasync/core` (`seedJobRoleFor`, `seedJobRoleMayEnterPhase`,
+// `seedJobRoleMayReportArchive`, `seedJobRoleMayComplete`) and are checked by the
+// route before it writes; these functions enforce the LEASE half.
+
+/** The lease predicate shared by the role-scoped writers: free, or ours. */
+const CLAIMABLE_BY = `(lease_owner IS NULL OR lease_owner = ? OR (lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`;
+
+/**
+ * Report a phase (or renew the current one) for a device that has been
+ * authorized as a party.
+ *
+ * Claimable when the lease is free, held by this same host (a renewal — the
+ * routes are the device's own state machine, so self-renewal is the normal
+ * case), or demonstrably lapsed. A LIVE lease held by the other party — or by
+ * the same host in another role — is not in the predicate, so the write matches
+ * nothing and the route refuses: that is what makes the source's handover
+ * meaningful, because until it happens the target cannot start.
+ */
+export function reportSeedJobProgressGuarded(
+  database: Database,
+  jobId: string,
+  progress: SeedJobProgress,
+  lease: SeedConditionalLease & { fromPhase: SeedJobPhaseOrTerminal },
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET phase = ?, progress = ?, status = 'running',
+            started_at = COALESCE(started_at, ?),
+            lease_owner = ?, lease_expires_at = ?, updated_at = ?
+      WHERE id = ?
+        AND phase = ?
+        AND status IN ('planned', 'running')
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND ${CLAIMABLE_BY}`,
+    [
+      progress.phase,
+      JSON.stringify(progress),
+      progress.updatedAt,
+      lease.owner,
+      lease.expiresAt,
+      progress.updatedAt,
+      jobId,
+      lease.fromPhase,
+      lease.owner,
+      lease.now,
+    ],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Record the source's IMMUTABLE archive facts — once — and hand the lease over.
+ *
+ * Three properties, each enforced by the statement rather than by the caller:
+ *
+ *   * IMMUTABLE — `json_extract(archive, '$.sha256') IS NULL` is in the
+ *     predicate, so the transport facts can be written exactly once. A second
+ *     report matches zero rows; the route then reads the row back and answers
+ *     200 when the report is byte-identical (a retry) or 409 when it differs (a
+ *     rewrite). The digest is the target's only authority for what may be
+ *     extracted, so a rewrite would make any bytes verify.
+ *   * OWNED — the reporter must hold the LIVE lease. A run whose lease lapsed
+ *     during a long upload cannot stamp its facts over the new owner's, and the
+ *     facts are always attributed to the source that actually uploaded.
+ *   * ATOMIC HANDOVER — the same statement clears `lease_owner`, which is the
+ *     source's final act and the only gate the target waits behind. Coupling it
+ *     to the fact write means the target can never see a free lease without the
+ *     facts it needs.
+ */
+export function reportSeedJobArchiveOnce(
+  database: Database,
+  jobId: string,
+  archive: SeedJobArchiveFacts,
+  lease: { owner: string; now: number; fromPhase: SeedJobPhaseOrTerminal },
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET archive = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = ?
+        AND phase = ?
+        AND status IN ('planned', 'running')
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND lease_owner = ?
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > ?
+        AND json_extract(archive, '$.sha256') IS NULL`,
+    [JSON.stringify(archive), lease.now, jobId, lease.fromPhase, lease.owner, lease.now],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Renew the lease of the party that owns the CURRENT phase.
+ *
+ * Conditional on still holding a live lease and on the phase being unchanged,
+ * so a renewal that races a handover or a cancellation is refused rather than
+ * reviving a job someone else has moved on.
+ */
+export function renewSeedJobLeaseGuarded(
   database: Database,
   jobId: string,
   owner: string,
   expiresAt: number,
   now: number,
+  fromPhase: SeedJobPhaseOrTerminal,
 ): SeedJob | null {
-  database.run(
+  const result = database.run(
     `UPDATE folder_seed_jobs
-        SET lease_owner = ?, lease_expires_at = ?, updated_at = ?
-      WHERE id = ? AND status = 'running'`,
-    [owner, expiresAt, now, jobId],
+        SET lease_expires_at = ?, updated_at = ?
+      WHERE id = ?
+        AND phase = ?
+        AND status = 'running'
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND lease_owner = ?
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > ?`,
+    [expiresAt, now, jobId, fromPhase, owner, now],
   );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Terminal transition for a device party: only while it still holds the live
+ * lease, and only from the phase the route read.
+ *
+ * A party may report its own half failed, and the TARGET alone may report
+ * `completed` — the route enforces which statuses a role may send; this function
+ * enforces that the writer still owned the job when it did.
+ */
+export function finishSeedJobOwnedBy(
+  database: Database,
+  jobId: string,
+  input: {
+    owner: string;
+    status: Extract<SeedJobStatus, "completed" | "failed">;
+    phase: SeedJobPhaseOrTerminal;
+    summary: string | null;
+    error: string | null;
+    now: number;
+    fromPhase: SeedJobPhaseOrTerminal;
+  },
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET status = ?, phase = ?, summary = ?, error = ?,
+            lease_owner = NULL, lease_expires_at = NULL,
+            updated_at = ?, finished_at = ?
+      WHERE id = ?
+        AND phase = ?
+        AND status = 'running'
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND lease_owner = ?
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > ?`,
+    [
+      input.status,
+      input.phase,
+      input.summary,
+      input.error,
+      input.now,
+      input.now,
+      jobId,
+      input.fromPhase,
+      input.owner,
+      input.now,
+    ],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Terminal transition by the OPERATOR (master/admin/web-session-admin).
+ *
+ * The operator holds no lease — it is not a party to the transfer — so this is
+ * the one terminal writer that does not require one. It still compare-and-sets
+ * on the phase the route read, so an operator report cannot clobber a job that
+ * moved on, and it still refuses a job that is already terminal.
+ */
+export function finishSeedJobAsOperator(
+  database: Database,
+  jobId: string,
+  input: {
+    status: Extract<SeedJobStatus, "completed" | "failed" | "cancelled">;
+    phase: SeedJobPhaseOrTerminal;
+    summary: string | null;
+    error: string | null;
+    now: number;
+    fromPhase: SeedJobPhaseOrTerminal;
+  },
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET status = ?, phase = ?, summary = ?, error = ?,
+            lease_owner = NULL, lease_expires_at = NULL,
+            updated_at = ?, finished_at = ?
+      WHERE id = ?
+        AND phase = ?
+        AND status IN ('planned', 'running')
+        AND phase NOT IN ('completed', 'failed', 'cancelled')`,
+    [
+      input.status,
+      input.phase,
+      input.summary,
+      input.error,
+      input.now,
+      input.now,
+      jobId,
+      input.fromPhase,
+    ],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
   return getSeedJob(database, jobId);
 }
 

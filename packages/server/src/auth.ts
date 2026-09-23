@@ -136,6 +136,11 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   { method: "GET", pattern: "/api/v1/seed-plans/*" },
   { method: "GET", pattern: "/api/v1/seed-jobs/*" },
   { method: "POST", pattern: "/api/v1/seed-jobs/*/progress" },
+  // LAMA-346 Stage 2d: the SOURCE device records its own immutable archive
+  // facts. The route admits only the job's source (never the target, never a
+  // stranger), the write is one-shot and compare-and-set, and it doubles as the
+  // lease handover — so the target may start only once the facts exist.
+  { method: "POST", pattern: "/api/v1/seed-jobs/*/archive" },
   { method: "POST", pattern: "/api/v1/seed-jobs/*/lease" },
   { method: "POST", pattern: "/api/v1/seed-jobs/*/complete" },
   // its own config (embeds assignments, pause state, dotfile manifests)

@@ -282,8 +282,17 @@ export interface SeedManifestDocument {
   version: 1;
   /** Content fingerprint, re-derived by the target from `entries`. */
   fingerprint: string;
-  /** Effective filter universe the manifest was built from. */
-  filterFingerprint: string;
+  /**
+   * Effective filter universe the manifest was built from.
+   *
+   * `null` means the source folder ignores NOTHING, which is a legitimate and
+   * common configuration. It is deliberately not a sentinel string: a
+   * placeholder like `"none"` reads exactly like a digest to every consumer
+   * that only checks "is it a non-empty string", and the whole point of this
+   * module is that a fingerprint is either a verified digest or an explicit
+   * absence.
+   */
+  filterFingerprint: string | null;
   fileCount: number;
   dirCount: number;
   totalBytes: number;
@@ -326,8 +335,8 @@ export function seedManifestDocumentProblem(document: SeedManifestDocument): str
   if (!SEED_SHA256_RE.test(document.fingerprint)) {
     return "the transported manifest content fingerprint is not a 64-character hex digest";
   }
-  if (!SEED_SHA256_RE.test(document.filterFingerprint)) {
-    return "the transported manifest filter fingerprint is not a 64-character hex digest";
+  if (document.filterFingerprint !== null && !SEED_SHA256_RE.test(document.filterFingerprint)) {
+    return "the transported manifest filter fingerprint is neither null nor a 64-character hex digest";
   }
   for (const [label, value] of [
     ["fileCount", document.fileCount],
@@ -408,7 +417,12 @@ export function parseSeedManifestDocument(value: unknown): SeedManifestDocument 
   const dirCount = record["dirCount"];
   const totalBytes = record["totalBytes"];
   const rawEntries = record["entries"];
-  if (typeof fingerprint !== "string" || typeof filterFingerprint !== "string") return null;
+  if (
+    typeof fingerprint !== "string" ||
+    (typeof filterFingerprint !== "string" && filterFingerprint !== null)
+  ) {
+    return null;
+  }
   if (typeof fileCount !== "number" || typeof dirCount !== "number" || typeof totalBytes !== "number") {
     return null;
   }

@@ -48,6 +48,7 @@ import { effectiveSyncFilterPatterns, loadFilterPatterns, resolveFilterPath } fr
 import { buildSeedManifest, type SeedManifest } from "./seed-archive.ts";
 import type { FolderAssignment, FolderType } from "@lamasync/core";
 import type { SeedSourceFilterUniverse } from "@lamasync/core";
+import { SEED_EMPTY_FILTER_FINGERPRINT } from "@lamasync/core";
 
 /** A rule line rclone would accept, compiled into a predicate. */
 export interface RcloneFilterRule {
@@ -367,7 +368,7 @@ export function buildSeedFilterUniverse(
       : null;
   return {
     universe: {
-      fingerprint: fingerprint ?? "none",
+      fingerprint: fingerprint ?? SEED_EMPTY_FILTER_FINGERPRINT,
       patterns: rules,
       includes: compiled.includes,
     },

@@ -21,19 +21,30 @@ import {
   parseSeedProgressPayload,
   SEED_JOB_LEASE_MS,
   SEED_JOB_PHASES,
+  seedArchiveFactsComplete,
+  seedArchiveFactsEqual,
+  seedJobPhaseRole,
+  seedJobRoleFor,
+  seedJobRoleMayComplete,
+  seedJobRoleMayEnterPhase,
+  seedJobRoleMayReportArchive,
   seedPlanExecution,
   startSeedProgress,
+  type AuthPrincipal,
   type SeedJob,
+  type SeedJobPhase,
   type SeedJobPhaseOrTerminal,
+  type SeedJobRole,
   type SeedPlan,
   type WSEvent,
 } from "@lamasync/core";
 import { broadcast } from "../ws.ts";
-import { deviceMayAccessHost, principalOf, requireAdmin } from "../auth.ts";
+import { principalOf, requireAdmin } from "../auth.ts";
 import {
   buildSeedPlan,
   createSeedJob,
-  finishSeedJob,
+  finishSeedJobAsOperator,
+  finishSeedJobOwnedBy,
   getSeedJob,
   getSeedPlan,
   initialSeedJobProgress,
@@ -42,11 +53,11 @@ import {
   pruneExpiredSeedPlans,
   reapStaleSeedJobs,
   recordSeedPlan,
-  renewSeedJobLease,
+  reportSeedJobArchiveOnce,
+  reportSeedJobProgressGuarded,
+  renewSeedJobLeaseGuarded,
   seedPlanValidityFor,
   seedTransportE2eEnabled,
-  updateSeedJobArchive,
-  updateSeedJobProgress,
 } from "../seed-jobs.ts";
 
 let activeDb: Database = defaultDb;
@@ -70,6 +81,102 @@ function folderExists(folderId: string): boolean {
       .query<{ id: string }, [string]>("SELECT id FROM folders WHERE id = ?")
       .get(folderId) !== null
   );
+}
+
+// ---------------------------------------------------------------------------
+// Who may act on ONE seed job (LAMA-346 Stage 2d)
+// ---------------------------------------------------------------------------
+//
+// A seed has two parties — the SOURCE the operator named on the plan and the
+// TARGET whose folder is being seeded — and neither needs a master or admin key
+// to do its half. The rules are stated once in `@lamasync/core`
+// (`seedJobRoleFor`, `seedJobRoleMayEnterPhase`, `seedJobRoleMayReportArchive`,
+// `seedJobRoleMayComplete`) and resolved for a request here.
+//
+// The operator (master / managed admin / admin web session) is a deliberate
+// third authority: it may read any job, cancel any job and force a terminal
+// outcome, because reconciling a stuck transfer is an operator's job. It is NOT
+// a party: it holds no lease, and it may never author a party's facts.
+
+type SeedJobAuthority =
+  | { kind: "operator" }
+  | { kind: "party"; role: SeedJobRole; hostId: string }
+  | { kind: "denied" };
+
+/** The host id of a device principal, or null for every other credential kind. */
+function deviceHostId(principal: AuthPrincipal | null): string | null {
+  return principal !== null && principal.kind === "device" ? principal.hostId : null;
+}
+
+/**
+ * Resolve the caller's authority on one seed job.
+ *
+ * A device that is neither the target nor the named source is a STRANGER: not a
+ * party, not the operator, and denied. A mobile native token or a deploy key is
+ * denied too — only the two parties and the operator are authorities here. The
+ * role comes from the JOB (which carries `sourceHostId`), never from the
+ * request, so a caller cannot claim to be the source.
+ */
+function seedJobAuthority(
+  request: Request,
+  job: { hostId: string; sourceHostId: string | null },
+): SeedJobAuthority {
+  const principal = principalOf(request);
+  if (requireAdmin({ principal }) !== null) return { kind: "operator" };
+  const hostId = deviceHostId(principal);
+  if (hostId === null) return { kind: "denied" };
+  const role = seedJobRoleFor(job, hostId);
+  return role === null ? { kind: "denied" } : { kind: "party", role, hostId };
+}
+
+/** A human label for a role, for an operator-facing refusal. */
+function roleLabel(role: SeedJobRole): string {
+  return role === "source" ? "source" : "target";
+}
+
+/**
+ * Enqueue one `seed_job` action per PARTY (LAMA-346 Stage 2d).
+ *
+ * This is the remote orchestration: the server decides which host runs which
+ * half, and each daemon claims its own action with its own device key. The
+ * payload is the bounded `{ jobId, role }` grammar — the daemon re-derives its
+ * role from the job and refuses a payload that disagrees — so an action cannot
+ * make a device act outside its half, and no path, flag or credential travels
+ * in the queue.
+ *
+ * Only reachable from `POST /seed-jobs`, which is itself 503 without the test
+ * seam, so a production build enqueues nothing.
+ */
+function enqueueSeedJobActions(job: SeedJob): void {
+  const parties: Array<{ hostId: string; role: SeedJobRole }> = [];
+  if (job.sourceHostId !== null && job.sourceHostId.length > 0) {
+    parties.push({ hostId: job.sourceHostId, role: "source" });
+  }
+  parties.push({ hostId: job.hostId, role: "target" });
+  const createdAt = Date.now();
+  for (const party of parties) {
+    const id = crypto.randomUUID();
+    activeDb.run(
+      `INSERT INTO queued_actions (id, host_id, type, payload, status, created_at)
+       VALUES (?, ?, 'seed_job', ?, 'pending', ?)`,
+      [id, party.hostId, JSON.stringify({ jobId: job.id, role: party.role }), createdAt],
+    );
+    const event: WSEvent = {
+      kind: "action",
+      action: {
+        id,
+        hostId: party.hostId,
+        type: "seed_job",
+        payload: { jobId: job.id, role: party.role },
+        status: "pending",
+        createdAt,
+        takenAt: null,
+        completedAt: null,
+        result: null,
+      },
+    };
+    broadcast(event);
+  }
 }
 
 export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
@@ -170,7 +277,14 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         return { error: "Seed plan not found" };
       }
       const principal = principalOf(request);
-      if (!requireAdmin({ principal }) && !deviceMayAccessHost(principal, plan.hostId)) {
+      // Both PARTIES may read the plan they were approved for: the target needs
+      // its staging/format decisions and the source needs the filter universe
+      // it must archive. `seedJobRoleFor` is structural, so it serves the plan
+      // exactly as it serves the job.
+      if (
+        requireAdmin({ principal }) === null &&
+        seedJobRoleFor(plan, deviceHostId(principal)) === null
+      ) {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -183,7 +297,7 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Folder Seed"],
         responses: {
           200: { description: "Seed plan and validity" },
-          403: { description: "Admin only, or the plan's own device" },
+          403: { description: "Admin only, or a party to the plan" },
           404: { description: "Seed plan not found" },
           401: { description: "Unauthorized" },
         },
@@ -229,6 +343,10 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         planId: plan.id,
         folderId: plan.folderId,
         hostId: plan.hostId,
+        // The source authority travels WITH the job (Stage 2d), so the server
+        // can authorize the source device from the job row alone — the plan is
+        // pruned on a TTL and must not be load-bearing for authorization.
+        sourceHostId: plan.sourceHostId,
         assignmentId: plan.assignmentId,
         status: "planned",
         phase: "preflight",
@@ -251,6 +369,9 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         finishedAt: null,
       };
       createSeedJob(activeDb, job);
+      // Remote orchestration: each party is told to run its own half. A
+      // daemon that is offline simply claims its pending action later.
+      enqueueSeedJobActions(job);
       const event: WSEvent = { kind: "seed_job", job };
       broadcast(event);
       set.status = 201;
@@ -314,8 +435,12 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Seed job not found" };
       }
-      const principal = principalOf(request);
-      if (!requireAdmin({ principal }) && !deviceMayAccessHost(principal, job.hostId)) {
+      // Both parties read the SAME row: the target must see the source's
+      // recorded facts to verify them, and the source must see the phase it
+      // left the job in. A stranger sees nothing — not even that the job exists
+      // (404 stays reserved for a job that genuinely does not exist, so a
+      // stranger never learns the difference from an authorized party).
+      if (seedJobAuthority(request, job).kind === "denied") {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -328,7 +453,7 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         tags: ["Folder Seed"],
         responses: {
           200: { description: "Seed job" },
-          403: { description: "Admin only, or the job's own device" },
+          403: { description: "Admin, or one of the job's two parties" },
           404: { description: "Seed job not found" },
           401: { description: "Unauthorized" },
         },
@@ -343,7 +468,8 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Seed job not found" };
       }
-      if (!deviceMayAccessHost(principalOf(request), job.hostId)) {
+      const authority = seedJobAuthority(request, job);
+      if (authority.kind === "denied") {
         set.status = 403;
         return { error: "Forbidden" };
       }
@@ -356,7 +482,50 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 400;
         return { error: parsed.error };
       }
-      const next: SeedJobPhaseOrTerminal = parsed.payload.phase;
+      const next: SeedJobPhase = parsed.payload.phase;
+      if (authority.kind === "party") {
+        // A party may only ever report ITS OWN half of the pipeline, and the
+        // job — not the request — says which half that is. A source may not
+        // claim to be downloading, and a target may not claim to be archiving.
+        // This is the AUTHORIZATION rule and it is checked first: a refusal
+        // must name the rule that actually applies.
+        if (!seedJobRoleMayEnterPhase(authority.role, next)) {
+          set.status = 403;
+          return {
+            error:
+              `This device is the ${roleLabel(authority.role)} of the seed, so it may not report ` +
+              `the ${next} phase — that phase belongs to the ${roleLabel(seedJobPhaseRole(next))}.`,
+          };
+        }
+        // The source's archive report is FINAL and is also the lease handover,
+        // so once those facts are recorded the source has no more phases to
+        // report. Without this refusal a late source progress line would
+        // RE-CLAIM the lease it just handed over (the claim predicate sees a
+        // free lease) and strand the target behind a live holder — which is
+        // exactly the footgun this rule closes. A refusal is safe: the source
+        // has nothing left to do, and its action ack is separate from progress.
+        if (authority.role === "source" && job.archive.sha256 !== null) {
+          set.status = 409;
+          return {
+            error:
+              "This device has already recorded the archive facts, which handed the job to the " +
+              "target. The source's half is finished and it may not report again.",
+          };
+        }
+        // The target may not start before the source's immutable facts exist.
+        // Without a digest and a manifest there is nothing to verify against,
+        // so starting would mean extracting bytes nobody can check. The source's
+        // archive report is also the lease handover, so this is the mirror of
+        // that write: no facts, no start.
+        if (authority.role === "target" && !seedArchiveFactsComplete(job.archive)) {
+          set.status = 409;
+          return {
+            error:
+              "The source has not recorded the archive facts yet, so there is nothing to verify " +
+              "against. The target starts only after the source's archive and manifest are recorded.",
+          };
+        }
+      }
       if (!canTransitionSeedPhase(job.phase, next)) {
         set.status = 409;
         return {
@@ -370,17 +539,28 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
       });
       progress.bytesDone = parsed.payload.bytesDone;
       progress.entriesDone = parsed.payload.entriesDone;
-      const owner = parsed.payload.leaseOwner ?? job.hostId;
+      // The lease owner is the AUTHENTICATED device, never a client-supplied
+      // string: `leaseOwner` in the body is honored only for the operator, who
+      // has no host of its own.
+      const owner =
+        authority.kind === "party" ? authority.hostId : (parsed.payload.leaseOwner ?? job.hostId);
       const leaseMs = parsed.payload.leaseMs ?? SEED_JOB_LEASE_MS;
-      const updated = updateSeedJobProgress(activeDb, job.id, progress, {
+      const updated = reportSeedJobProgressGuarded(activeDb, job.id, progress, {
         owner,
         expiresAt: now + Math.min(Math.max(leaseMs, 30_000), 60 * 60_000),
+        now,
+        fromPhase: job.phase,
       });
-      if (updated) {
-        const event: WSEvent = { kind: "seed_job", job: updated };
-        broadcast(event);
+      if (updated === null) {
+        // The compare-and-set matched nothing: the job moved on between our read
+        // and our write (a cancellation, the other party advancing, or a lease
+        // we no longer hold). Reporting the old row would be a lie.
+        set.status = 409;
+        return { error: "This seed job moved on while the report was in flight" };
       }
-      return updated ?? job;
+      const event: WSEvent = { kind: "seed_job", job: updated };
+      broadcast(event);
+      return updated;
     },
     {
       params: t.Object({ jobId: t.String() }),
@@ -429,24 +609,65 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Seed job not found" };
       }
-      if (!deviceMayAccessHost(principalOf(request), job.hostId)) {
+      const authority = seedJobAuthority(request, job);
+      if (authority.kind === "denied") {
         set.status = 403;
         return { error: "Forbidden" };
+      }
+      // The facts are the PRODUCER's statement about an archive it just built
+      // and uploaded. The target re-derives and checks them; it may never author
+      // them, because a target that could rewrite the digest could make any
+      // bytes on disk verify. The operator is not a producer either.
+      if (authority.kind !== "party" || !seedJobRoleMayReportArchive(authority.role)) {
+        set.status = 403;
+        return {
+          error:
+            authority.kind === "operator"
+              ? "The archive facts are recorded by the SOURCE device that produced them; an operator has no archive to report."
+              : "Only the source device may record a seed job's archive facts. The target verifies them; it never authors them.",
+        };
       }
       if (isTerminalSeedPhase(job.phase)) {
         set.status = 409;
         return { error: "This seed job is already finished" };
       }
+      // The source's final act is the one that follows the upload. Recording
+      // facts from any other phase would let a source stamp identities for an
+      // upload that has not happened (or has already been handed over).
+      if (job.phase !== "uploading_archive") {
+        set.status = 409;
+        return {
+          error: `Archive facts are recorded while the job is uploading_archive; this job is ${job.phase}.`,
+        };
+      }
       const facts = normalizeSeedJobArchiveFacts(
         { ...job.archive, ...body },
         job.archive.format,
       );
-      const updated = updateSeedJobArchive(activeDb, job.id, facts, Date.now());
-      if (updated) {
-        const event: WSEvent = { kind: "seed_job", job: updated };
-        broadcast(event);
+      const updated = reportSeedJobArchiveOnce(activeDb, job.id, facts, {
+        owner: authority.hostId,
+        now: Date.now(),
+        fromPhase: job.phase,
+      });
+      if (updated === null) {
+        // The write was refused. The one refusal that is NOT an error is a
+        // byte-identical retry of the same report (a lost response), and the
+        // only way to tell the two apart is to read the row back and compare
+        // the identity fields — never the caller's assertion.
+        const current = getSeedJob(activeDb, job.id);
+        if (current !== null && seedArchiveFactsEqual(current.archive, facts)) {
+          return current;
+        }
+        set.status = 409;
+        return {
+          error:
+            "This seed job's archive facts are already recorded and immutable. A differing report is refused; " +
+            "only a byte-identical retry of the recorded facts is accepted.",
+        };
       }
-      return updated ?? job;
+      const event: WSEvent = { kind: "seed_job", job: updated };
+      broadcast(event);
+      return updated;
     },
     {
       params: t.Object({ jobId: t.String() }),
@@ -472,22 +693,35 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Seed job not found" };
       }
-      if (!deviceMayAccessHost(principalOf(request), job.hostId)) {
+      const authority = seedJobAuthority(request, job);
+      if (authority.kind === "denied") {
         set.status = 403;
         return { error: "Forbidden" };
       }
+      // Only the party that owns the CURRENT phase may hold the lease. The
+      // source cannot keep renewing into the target's half, and the target
+      // cannot take the lease before its own half begins.
+      if (
+        authority.kind === "party" &&
+        !isTerminalSeedPhase(job.phase) &&
+        !seedJobRoleMayEnterPhase(authority.role, job.phase)
+      ) {
+        set.status = 409;
+        return {
+          error: `This device is the ${roleLabel(authority.role)}, and the job is in the ${job.phase} phase, which belongs to the ${roleLabel(seedJobPhaseRole(job.phase))}.`,
+        };
+      }
       const now = Date.now();
       const leaseMs = Math.min(Math.max(body.leaseMs ?? SEED_JOB_LEASE_MS, 30_000), 60 * 60_000);
-      const updated = renewSeedJobLease(
-        activeDb,
-        job.id,
-        body.owner ?? job.hostId,
-        now + leaseMs,
-        now,
-      );
+      // The owner is the AUTHENTICATED device. `owner` in the body is honored
+      // only for the operator, which has no host of its own — a device may not
+      // renew a lease in another host's name.
+      const owner =
+        authority.kind === "party" ? authority.hostId : (body.owner ?? job.leaseOwner ?? job.hostId);
+      const updated = renewSeedJobLeaseGuarded(activeDb, job.id, owner, now + leaseMs, now, job.phase);
       if (!updated) {
         set.status = 409;
-        return { error: "This seed job is not running" };
+        return { error: "This seed job is not running, or this device no longer holds its lease" };
       }
       return updated;
     },
@@ -517,28 +751,66 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Seed job not found" };
       }
-      if (!deviceMayAccessHost(principalOf(request), job.hostId)) {
+      const authority = seedJobAuthority(request, job);
+      if (authority.kind === "denied") {
         set.status = 403;
         return { error: "Forbidden" };
       }
       // Idempotent: a duplicate acknowledgement returns the stored outcome
       // instead of rewriting it.
       if (isTerminalSeedPhase(job.phase)) return job;
+      // Who may declare WHICH outcome is the role rule, and it is the point of
+      // the split: only the TARGET can say a seed completed, because only the
+      // target holds the manifest comparison and the zero-change baseline
+      // verdict. Either party may report its own half FAILED. A device may not
+      // cancel — cancellation is the operator's, on its own route.
+      if (authority.kind === "party") {
+        if (body.status === "completed" && !seedJobRoleMayComplete(authority.role)) {
+          set.status = 403;
+          return {
+            error:
+              "Only the target device may report a seed as completed: it is the side that verifies the " +
+              "published tree and the following zero-change resync. A source may report its own side failed.",
+          };
+        }
+        if (body.status === "cancelled") {
+          set.status = 403;
+          return { error: "A device may not cancel a seed job; cancellation is operator-only." };
+        }
+      }
       const now = Date.now();
       const phase: SeedJobPhaseOrTerminal =
         body.status === "completed" ? "completed" : body.status === "cancelled" ? "cancelled" : "failed";
-      const updated = finishSeedJob(activeDb, job.id, {
-        status: body.status,
-        phase,
-        summary: body.summary ?? null,
-        error: body.error ?? null,
-        now,
-      });
-      if (updated) {
-        const event: WSEvent = { kind: "seed_job", job: updated };
-        broadcast(event);
+      const updated =
+        authority.kind === "party"
+          ? finishSeedJobOwnedBy(activeDb, job.id, {
+              owner: authority.hostId,
+              status: body.status === "completed" ? "completed" : "failed",
+              phase,
+              summary: body.summary ?? null,
+              error: body.error ?? null,
+              now,
+              fromPhase: job.phase,
+            })
+          : finishSeedJobAsOperator(activeDb, job.id, {
+              status: body.status,
+              phase,
+              summary: body.summary ?? null,
+              error: body.error ?? null,
+              now,
+              fromPhase: job.phase,
+            });
+      if (updated === null) {
+        set.status = 409;
+        return {
+          error:
+            "This seed job moved on while the outcome was in flight (it finished, was cancelled, or this " +
+            "device no longer holds its lease).",
+        };
       }
-      return updated ?? job;
+      const event: WSEvent = { kind: "seed_job", job: updated };
+      broadcast(event);
+      return updated;
     },
     {
       params: t.Object({ jobId: t.String() }),
@@ -572,18 +844,21 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
       }
       if (isTerminalSeedPhase(job.phase)) return job;
       const now = Date.now();
-      const updated = finishSeedJob(activeDb, job.id, {
+      const updated = finishSeedJobAsOperator(activeDb, job.id, {
         status: "cancelled",
         phase: "cancelled",
         summary: "Cancelled by an operator.",
         error: null,
         now,
+        fromPhase: job.phase,
       });
-      if (updated) {
-        const event: WSEvent = { kind: "seed_job", job: updated };
-        broadcast(event);
+      if (updated === null) {
+        set.status = 409;
+        return { error: "This seed job moved on while the cancellation was in flight" };
       }
-      return updated ?? job;
+      const event: WSEvent = { kind: "seed_job", job: updated };
+      broadcast(event);
+      return updated;
     },
     {
       params: t.Object({ jobId: t.String() }),

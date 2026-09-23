@@ -699,36 +699,47 @@ distributable binary build.
 ## Active follow-ups
 
 1. **LAMA-346 — the transport, remote orchestration and live acceptance.**
-   Stages 1a, 1b, 2a and 2b are implemented and locally validated. **Stage 2c's
-   first slice is now implemented and passing on this host**: a real
-   S3-compatible relay store (SigV4, digest as object metadata, immutability,
-   abort safety; `packages/daemon/src/seed-relay-s3.ts`), the **manifest
-   handoff** (the source uploads a canonical manifest, the target re-derives its
-   content fingerprint and refuses a mismatch), and
-   `scripts/lama346-seed-e2e.ts` — a fully isolated run with a real server on a
-   random port, a disposable MinIO container, TWO INDEPENDENT WORKER PROCESSES
-   driving the real job API, real GNU tar and a real `rclone bisync --resync`
-   that reports zero changed files, plus failure cases (manifest mismatch,
-   non-empty target, cancellation, an aborted upload) and orphan cleanup.
-   Execution is still deliberately unavailable: `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
-   is `false` and `POST /seed-jobs` still returns 503 unless the doubly-gated
-   test seam (`LAMASYNC_SEED_E2E=1` **and** `LAMASYNC_TEST=1`) is set. Remaining
-   work, in order:
-   (a) authorize the SOURCE host on the job (or add an explicit delegation) and
-   resolve the one-job/two-hosts/one-lease model, which the E2E sidesteps with
-   the master key; (b) wire a seed action into the shipped daemon action loop
-   (the E2E workers are daemon-shaped test processes, not `lamasyncd`); (c) the
-   GATED host proofs — a real two-MACHINE hop with network-partition/retry
-   behaviour, real ENOSPC on a bounded disposable volume, and the live
-   dev-vm-shape run on a **copy** of a large tree (no timeout kill while
-   progressing, one correct resume after a deliberate stall, a zero-change
-   baseline afterwards); (d) confirm the target's archive tooling **and**
-   staging proof are reported before the Run control is enabled for that device.
-   The retention/cleanup policy is decided (delete on the terminal phase, 24 h
-   for abandoned objects, idempotent, namespace-confined). Only after (a)-(c)
-   and an independent review may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip. See
+   Stages 1a, 1b, 2a, 2b and 2c are implemented and locally validated, and
+   **Stage 2d is now implemented and passing on this host**. The job carries
+   `sourceHostId`, so each side of a seed has its own IDENTITY: a device key is
+   authorized for the source half or the target half (`seedJobRoleFor` +
+   `seedJobPhaseRole`), the archive facts are written exactly once by the
+   source in a compare-and-set that doubles as the single lease HANDOVER, and
+   every device-facing write is role-scoped and compare-and-set (a stale
+   writer or a lost race is a 409, never an overwrite). A device can no longer
+   forge a lease owner, the target cannot author the facts it must verify, and
+   only the target may report a seed completed. The shipped `lamasyncd` runs a
+   `seed_job` queued action through `packages/daemon/src/seed-runner.ts`
+   (dynamic-imported behind the doubly-gated seam) using the existing
+   archive/transport/staging primitives and the real S3 store, and its
+   `baseline_validation` phase runs a real `rclone bisync --resync` whose
+   zero-change verdict is REQUIRED before `completed` (no peer ⇒ the phase
+   fails, never a false pass). `scripts/lama346-seed-e2e.ts` starts TWO REAL
+   daemon processes, each with a device key minted through the pairing
+   exchange, and passes **53 checks / 0 fail / 3 GATED** — including four
+   device-key denials (the target cannot rewrite the source's facts, a third
+   device cannot read the job, a late report cannot reopen it, and the digest
+   cannot be rewritten). Execution is still unavailable by default:
+   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` and `POST /seed-jobs` still
+   returns 503 unless the seam is fully open on BOTH the server and the daemon.
+   Remaining work, in order:
+   (a) resolve the target's production resync peer (the assignment's own remote
+   + rclone config) inside the runner — today it is seam-supplied and the phase
+   fails closed without it; (b) decide where the fleet's temporary seed space
+   (endpoint/bucket/credentials) is configured; (c) the GATED host proofs — a
+   real two-MACHINE hop with a network partition and one retry/resume, real
+   ENOSPC on a bounded disposable volume, and the live dev-vm-shape run on a
+   **copy** of a large tree (no timeout kill while progressing, one correct
+   resume after a deliberate stall, a zero-change baseline afterwards); (d)
+   confirm the target's archive tooling **and** staging proof are reported
+   before the Run control is enabled for that device; (e) persist the cleanup
+   block server-side for a daemon-run job (the objects ARE deleted; the
+   bookkeeping field stays `not_started`). The retention/cleanup policy is
+   decided (delete on the terminal phase, 24 h for abandoned objects,
+   idempotent, namespace-confined). Only after (a)-(c) and an independent
+   review may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip. See
    [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md)
-   §2.13.
+   §2.14.
 
 2. **LAMA-337 — release, and the one device-path question it leaves open.**
    The reconnect flow is merged with the

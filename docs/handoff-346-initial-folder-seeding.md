@@ -934,23 +934,191 @@ Reported as GATED by the harness, never as a pass:
    unwritable destination are still the only disk-full evidence.
 3. **The live dev-vm-shape run** on a copy of a large tree (stage 3).
 
-Two design gaps this slice surfaces rather than hides, both required before the
-gate may flip:
+Two design gaps this slice surfaced rather than hid — **both are closed by
+§2.14 (Stage 2d)**:
 
 * **One job, two hosts, one lease.** The seed job's `hostId` is the TARGET, and
-  the device routes authorize only that host; the source worker therefore used
-  the harness's master key. Production remote orchestration needs the source
-  host to be authorized (or an explicit delegation), and the single
-  last-writer-wins lease cannot distinguish the two roles. The E2E uses the
-  existing unguarded device helpers deliberately; the coordinator's
-  ownership-conditional family is unchanged and still the server-side contract.
-* **The production daemon action loop does not dispatch seed work.** The workers
-  are daemon-shaped test processes, not `lamasyncd`. Wiring a seed action into
-  the shipped daemon is a separate, reviewable change.
+  the device routes authorized only that host, so the source worker used the
+  harness's master key. §2.14 gives the job a `sourceHostId`, defines the two
+  roles and their halves, and hands the single lease over exactly once.
+* **The production daemon action loop did not dispatch seed work.** The workers
+  were daemon-shaped test processes. §2.14 adds a `seed_job` queued action and
+  runs it in the shipped `lamasyncd` — and demotes these workers to a
+  lower-level diagnostic.
 
-Only when both are resolved, and the §2.11 host proofs (two machines, real
-ENOSPC, a live large-tree run) are on record, may
+Only when the §2.11 host proofs (two machines, real ENOSPC, a live large-tree
+run) are on record, and the §2.14 blockers (a production resync peer, a
+production relay-space configuration, §2.14.6) are resolved, may
 `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip.
+
+### 2.14 Stage 2d — the shipped daemon, and one identity per side (done)
+
+Stage 2c left the two gaps §2.13 named. This slice closes both, and it changes
+two contracts rather than adding a parallel path.
+
+#### 2.14.1 Role-scoped authorization (the source no longer needs a master key)
+
+The seed job now carries `sourceHostId`, copied from the plan at creation
+(`folder_seed_jobs.source_host_id`, additive column + `ALTER TABLE` migration).
+That is what makes a device key sufficient for the source: the role is read from
+the JOB, never from the request, and it survives the plan being pruned on its
+TTL.
+
+`@lamasync/core/folder-seed` states the rules once, as pure functions:
+
+| Function | Rule |
+|---|---|
+| `seedJobRoleFor(job, hostId)` | `target` for `hostId`, `source` for `sourceHostId`, `null` for everyone else (including a legacy row with no source — which then authorizes only the target) |
+| `seedJobPhaseRole(phase)` | source: `preflight`, `measuring_source`, `archiving_source`, `uploading_archive`; target: the other six |
+| `seedJobRoleMayEnterPhase(role, phase)` | a party may only report its OWN half |
+| `seedJobRoleMayReportArchive(role)` | only the source — the target RE-DERIVES the facts, it never authors them |
+| `seedJobRoleMayComplete(role)` | only the target — it holds the manifest comparison and the baseline verdict |
+
+The target's start is therefore doubly gated: the phase `downloading_archive` is
+exactly one step after `uploading_archive` (so `canTransitionSeedPhase` refuses
+an early start), AND the route refuses until
+`seedArchiveFactsComplete(job.archive)` — there is nothing to verify against
+before that. An operator (master / admin key / admin web session) still reads
+any job, cancels it, and can force a terminal outcome; it is explicitly NOT a
+producer and is refused on the archive route.
+
+#### 2.14.2 The archive report is immutable, owned, and the handover
+
+`POST /seed-jobs/:jobId/archive` was unguarded and status-blind in Stage 2c. It
+is now one atomic statement whose predicate carries three properties:
+
+* `json_extract(archive, '$.sha256') IS NULL` — **immutable**. The bytes are
+  describable exactly once. A second report matches zero rows, and the route
+  then reads the row back: byte-identical is 200 (a lost response retried),
+  different is 409 with the stored facts untouched. `seedArchiveFactsEqual`
+  compares identity fields only, so a retry with a later clock reading is still
+  the same record.
+* `lease_owner = <source> AND lease_expires_at > now` — **owned**. A run whose
+  lease lapsed during a long upload cannot stamp its facts over the new owner's.
+* `lease_owner = NULL` in the `SET` clause — **the handover**. Recording the
+  facts IS the source's final act, and coupling the two means the target can
+  never observe a free lease without the facts it needs.
+
+The handover is final: a later source progress report is refused (409), because
+otherwise the claim predicate would see a free lease, let the source RE-claim
+it, and strand the target behind a live holder. That footgun was found by this
+slice's E2E, not by inspection — the worker diagnostic hung on it.
+
+#### 2.14.3 Every device write is a compare-and-set
+
+`reportSeedJobProgressGuarded`, `renewSeedJobLeaseGuarded`,
+`finishSeedJobOwnedBy` and `finishSeedJobAsOperator` each decide in ONE
+`UPDATE ... WHERE` that includes `phase = <the phase the route read>`. A writer
+that lost a race, a cancelled job, and a lease that lapsed all produce a
+zero-row write, and the route answers 409 instead of overwriting. The lease
+owner is always the AUTHENTICATED host — the `leaseOwner`/`owner` body fields
+are honored for the operator only, because a device that could name its own
+owner could renew another host's lease.
+
+`packages/server/src/seed-role-authorization.test.ts` pins all of it: the
+permission matrix, wrong-host refusals, stale/late reports, digest and
+manifest-identity rewrite attempts, the handover's finality, and lease-owner
+forgery (17 tests).
+
+#### 2.14.4 The shipped daemon runs a side
+
+`QueuedActionType` gains `seed_job` with the bounded payload
+`{ jobId, role: "source" | "target" }`, and `POST /seed-jobs` enqueues exactly
+one per party. It is deliberately NOT accepted on
+`POST /hosts/:hostId/actions`, so an operator cannot hand-craft one, and the
+payload can carry no path, flag or credential by construction.
+
+`lamasyncd`'s existing dispatcher handles it:
+
+* the payload is validated by `parseSeedJobActionPayload` (unknown fields are
+  refused);
+* the seam is checked (`seedDaemonE2eEnabled()`);
+* only then is the runner loaded, by **dynamic `import()`**, so a build without
+  the seam never loads the relay transport or the S3 store into its module
+  graph;
+* the runner re-checks the seam, re-derives the role from the JOB, and refuses a
+  payload that disagrees;
+* the action stays inside the daemon's single-flight guard and lease-renewal
+  timer, so a long seed cannot be reclaimed and re-run.
+
+`packages/daemon/src/seed-runner.ts` reuses the existing primitives rather than
+re-implementing them: `buildSeedSourceManifest`, `createSeedArchive`,
+`extractSeedArchive`, `verifyExtractedTree`, `publishStagedTree`,
+`uploadSeedArchive`/`uploadSeedManifest`/`downloadSeedArchive`/
+`downloadSeedManifest`/`cleanupSeedRelayObjects`, and the real S3 store. It
+invents no state: the phase the server reports is the phase this side may be in,
+and the facts it reads are the source's.
+
+The target's `baseline_validation` phase runs a real `rclone bisync --resync`
+and `seedBaselineVerdict` decides — pure, and pinned by a test — that the run
+passed only on exit 0, `Bisync successful`, `totalTransfers=0`, `bytes=0`, no
+`errors`, no `File changed` and no `Safety abort`. **With no peer configured the
+phase FAILS.** A seed may never be reported completed without that proof.
+
+#### 2.14.5 The bounded module graph, restated (and strengthened)
+
+Stage 1b's rule was "no production module imports the transport". Stage 2d had
+to make the transport reachable from the shipped daemon, so the rule was
+RESTATED rather than dropped, and `seed-transport-bounded.test.ts` now asserts
+all of it from the module graph:
+
+* the transport and the S3 store have **exactly one** production importer,
+  `seed-runner.ts`;
+* the daemon reaches the runner only through a dynamic `import()` that appears
+  AFTER `if (!seedDaemonE2eEnabled())` in `index.ts`, and never statically;
+* there is exactly ONE daemon seam module, and it requires BOTH
+  `LAMASYNC_SEED_E2E=1` and `LAMASYNC_TEST=1`;
+* credential-shaped seed configuration exists only in the store and the runner,
+  and the runner reads it from `LAMASYNC_SEED_S3_*`;
+* `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is still `false` and
+  `seedPlanExecution()` is still unavailable.
+
+#### 2.14.6 Two real daemons, and what is still blocked
+
+`scripts/lama346-seed-e2e.ts` now starts **two real `lamasyncd` processes**:
+
+| Piece | What it is |
+|---|---|
+| daemon identity | a DEVICE key minted through the real pairing exchange (`POST /pairing` → `POST /pairing/:code/exchange`) — never the master key |
+| isolation | per-daemon `HOME`, `client.toml`, data dir, `TMPDIR`, `XDG_RUNTIME_DIR`, and a D-Bus address pointing at a path that does not exist, so no systemd unit, socket, cache or update marker can be the operator's |
+| orchestration | `POST /seed-jobs` enqueues one `seed_job` action per party; each daemon claims its own from the real queue |
+| object space | the disposable MinIO container, as before |
+| sync engine | the target daemon's own `rclone bisync --resync` gate, plus the harness's independent `--resync` acceptance |
+
+53 checks pass, 0 fail, 3 GATED on this host. The four DENIALS are asserted with
+device keys: the target may not rewrite the source's facts, a third device with a
+valid key may not read the job, a late report cannot reopen a finished job, and
+the digest cannot be rewritten.
+
+Still blocked, and reported as blockers rather than as done:
+
+1. **The target's resync peer is seam-supplied**
+   (`LAMASYNC_SEED_DAEMON_PEER_PATH`). In production it is the assignment's
+   resolved remote (`<remote>:<destination>` + the daemon's rclone config), and
+   resolving it inside the seed runner is the remaining orchestration item. The
+   phase FAILS closed until it exists — which is why this cannot silently pass
+   for the wrong reason.
+2. **The relay space is seam-configured.** The relay contract deliberately
+   carries no credential, and WHERE the fleet's temporary seed space is
+   configured is a product decision (host config? server config? a new admin
+   surface?). Until that is decided the daemon reads `LAMASYNC_SEED_S3_*` behind
+   the seam.
+3. **A party cannot fail a job it does not hold.** If the source dies before
+   recording facts, the target cannot end the job; the lease reaper does, after
+   the 10-minute lease lapses. That is the designed path (`a live daemon renews
+   every minute`), and this slice documents it rather than widening the rule.
+4. The §2.11 host proofs (a real two-MACHINE hop, real ENOSPC on a bounded
+   volume, the live dev-vm-shape large-tree run) remain GATED.
+
+A small pre-existing contract bug was found and fixed on the way: an assignment
+that ignores NOTHING produced the sentinel filter fingerprint `"none"`, which
+the manifest-transport validator rejected as "not a 64-character hex digest" —
+so such a folder could never be seeded, with a confusing error. The sentinel is
+now `SEED_EMPTY_FILTER_FINGERPRINT` in core and travels as `null`
+(`SeedManifestDocument.filterFingerprint`), so an empty universe is explicit
+rather than a fake hash. The S3 store also now creates its `TMPDIR` parent
+before staging bytes, which a sandboxed daemon (whose `TMPDIR` is its own
+directory) needs.
 
 ## 3. Space calculation
 
@@ -1095,14 +1263,22 @@ state machine with injected sides and an injected local store, and
 failures, cancellation, lease expiry, cleanup idempotency, illegal-transition
 refusal and lease renewal. See §2.12.
 
-**Stage 2c — the same chain through a real daemon and a real temporary object
-space (first slice done).** The real S3-compatible store, the manifest handoff
-and a two-process isolated E2E run through the real server job API with a
-disposable MinIO object space and a real zero-change bisync baseline are
-implemented and pass on this host (see §2.13). Still open before the constant
-may flip: a real two-MACHINE hop, real ENOSPC on a bounded volume, the
-production daemon action loop, and the one-job-two-hosts authz/lease gap §2.13
-records.
+**Stage 2c — the real network vertical path (done).** The real S3-compatible
+store, the manifest handoff and a two-process isolated E2E run through the real
+server job API with a disposable MinIO object space and a real zero-change
+bisync baseline (see §2.13).
+
+**Stage 2d — the shipped daemon, and one identity per side (done).** The job
+carries `sourceHostId`; the source and target halves are defined and enforced
+role-scoped with immutable, ownership-conditional, compare-and-set writes; the
+source's archive report IS the single lease handover; `lamasyncd` runs a
+`seed_job` queued action through the seam-gated runner with the existing
+archive/transport/staging primitives and the real S3 store; and the disposable
+E2E starts TWO REAL daemons, each with a device key minted through the pairing
+exchange, and asserts the whole path plus four device-key denials (53 pass /
+0 fail / 3 GATED — see §2.14). Still open before the constant may flip: a
+production resync peer and a production relay-space configuration (§2.14.6), and
+the §2.11 host proofs.
 
 **Stage 3 — live acceptance on the real pair.**
 Re-run the dev-vm shape with a copy of a large tree (never the live
@@ -1136,21 +1312,26 @@ control. The seed remains opt-in per folder.
 | Real S3-compatible relay store (SigV4, digest metadata, immutability, abort safety), test-only | **implemented + tested against a real MinIO** (env-gated) |
 | Manifest handoff: source uploads the canonical manifest, target re-derives the content fingerprint and refuses a mismatch | **implemented + tested** (local store + real MinIO) |
 | Two-process isolated E2E through the real server job API, disposable MinIO, real tar and a real zero-change bisync baseline, plus failure cases | **implemented + passing on this host**; two-machine hop, real ENOSPC and the live large-tree run are GATED |
-| **Wiring a real store and the job/daemon orchestration that calls it** | **partially implemented** — the store and the two-sided worker exist and pass; the shipped daemon action loop still does not dispatch seed work |
-| Remote orchestration (which host runs which phase) | **NOT implemented** — the E2E uses the master key; the job authorizes only its target host and has one lease |
-| Post-seed zero-change bisync validation as an automated gate | **designed, not implemented** |
+| **Wiring a real store and the job/daemon orchestration that calls it** | **implemented** — `lamasyncd` runs a `seed_job` queued action through the seam-gated runner using the existing primitives and the real S3 store |
+| Per-role device authorization (source vs target, immutable/ownership-conditional/compare-and-set writes, one handover) | **implemented + tested** (17 focused authorization tests + the daemon E2E's four device-key denials) |
+| Remote orchestration (which host runs which phase) | **implemented + tested** — `POST /seed-jobs` enqueues one `seed_job` per party and each daemon claims its own with its device key |
+| A production resync peer (the assignment's resolved remote + rclone config) for `baseline_validation` | **NOT implemented** — seam-supplied in the sandbox; the phase FAILS closed without it |
+| A production relay-space configuration surface (endpoint/bucket/credentials) | **NOT implemented** — seam-supplied; the relay contract deliberately carries no credential |
+| Post-seed zero-change bisync validation as an automated gate | **implemented for the daemon path** — `seedBaselineVerdict` gates `completed`, and the harness independently re-runs `bisync --resync` |
 
-Because no store is wired to a running job, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
-is `false` (while `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`),
-`POST /seed-jobs` returns `503 { executionAvailable: false, reason }`, and the
-UI shows a disabled control. **No folder can be seeded today**, and no live
-archive transfer is claimed anywhere: Stage 1a made the *local* half of a seed
-correct and provable, Stage 1b's foundation made the transport contract
-testable, and Stage 2c proved the whole vertical path through a real object
-space and two independent processes — but that proof is test-only (a
-doubly-gated seam), the production daemon does not dispatch seed work yet, and
-the two-machine and disk-full host proofs are still GATED. The gate therefore
-stays `false`.
+Because the constant is still `false`, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` in
+a released build keeps `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` true but
+`POST /seed-jobs` returning `503 { executionAvailable: false, reason }` with the
+UI control disabled. **No folder can be seeded from a released build**, and no
+live archive transfer is claimed for one: Stage 1a made the *local* half of a
+seed correct and provable, Stage 1b made the transport contract testable,
+Stage 2c proved the vertical path through a real object space and two
+independent processes, and Stage 2d made the SHIPPED daemon run a side with its
+own device key and its own zero-change-baseline gate — but the whole path is
+reachable only through a doubly-gated seam, the resync peer and the relay space
+are seam-supplied rather than production-configured (§2.14.6), and the
+two-machine and disk-full host proofs are still GATED. The gate therefore stays
+`false`.
 
 ## 8. Changed files
 
@@ -1278,20 +1459,109 @@ Web UI
   (`createSeedPlan` now sends `sourceHostId`).
 - `packages/web-ui/src/index.css` — panel styles.
 
+Stage 2d (this slice)
+- `packages/core/src/folder-seed.ts` — `seedJobRoleFor`, `seedJobPhaseRole`,
+  `seedJobRoleMayEnterPhase` / `...ReportArchive` / `...Complete` / `...Read`,
+  `seedArchiveFactsComplete`, `seedArchiveFactsEqual`,
+  `SEED_EMPTY_FILTER_FINGERPRINT`, `parseSeedJobActionPayload`, and
+  `sourceHostId` on `SeedJob`.
+- `packages/core/src/seed-relay.ts` — `SeedManifestDocument.filterFingerprint`
+  is `string | null` (an empty universe travels as `null`, never a sentinel that
+  looks like a digest), with the parser and validator updated to match.
+- `packages/core/src/types.ts` — the `seed_job` queued-action type.
+- `packages/core/src/api-client.ts` — `getSeedJob`, `getSeedPlan`,
+  `reportSeedProgress`, `recordSeedArchiveFacts`, `renewSeedJobLease`,
+  `completeSeedJob`.
+- `packages/core/src/db/schema.ts` — `folder_seed_jobs.source_host_id` in both
+  `SERVER_SCHEMA` and `MIGRATIONS`.
+- `packages/core/src/seed-roles.test.ts` (new) — the pure role rules and the
+  immutability comparison.
+- `packages/server/src/seed-jobs.ts` — the role-scoped, compare-and-set writer
+  family (`reportSeedJobProgressGuarded`, `reportSeedJobArchiveOnce`,
+  `renewSeedJobLeaseGuarded`, `finishSeedJobOwnedBy`, `finishSeedJobAsOperator`)
+  plus `source_host_id` persistence.
+- `packages/server/src/routes/folder-seed.ts` — role-scoped authorization on
+  every device-facing route, the source-only immutable archive route, the
+  handover finality rule, and `enqueueSeedJobActions` on job creation.
+- `packages/server/src/seed-role-authorization.test.ts` (new) — 18 focused
+  authorization tests.
+- `packages/server/src/auth.ts` — `POST /seed-jobs/*/archive` in the device
+  allowlist, with the role rule enforced in the route.
+- `packages/daemon/src/seed-daemon-seam.ts` (new) — the single, dependency-free
+  daemon seam predicate.
+- `packages/daemon/src/seed-runner.ts` (new) — the shipped runner: one side of
+  a job, using the existing primitives and the real S3 store, with the
+  `baseline_validation` gate (`seedBaselineVerdict`).
+- `packages/daemon/src/seed-daemon-seam.test.ts` (new) — the seam, the
+  fail-closed relay config, the runner's pre-flight refusals, and the baseline
+  verdict.
+- `packages/daemon/src/index.ts` — the `seed_job` dispatch case, with the runner
+  behind a dynamic `import()` after the seam check.
+- `packages/daemon/src/seed-relay-s3.ts` — create the staging parent before
+  writing staged bytes (a sandboxed daemon's `TMPDIR` may not exist yet).
+- `packages/daemon/src/seed-filter-universe.ts` — the empty-universe sentinel is
+  the shared `SEED_EMPTY_FILTER_FINGERPRINT`.
+- `packages/daemon/src/seed-transport.ts` — the document carries an empty
+  universe as `null`.
+- `packages/daemon/src/seed-transport-bounded.test.ts` — the invariant
+  RESTATED: exactly one production importer, a dynamic seam-guarded import,
+  one daemon seam, and the flags still `false`.
+- `packages/daemon/src/seed-transport-manifest.test.ts` — the empty-universe
+  round trip and the strictness of a non-null fingerprint.
+- `scripts/lama346-seed-e2e.ts` — the two-real-daemon Stage 2d section, the
+  device-key denials, and the worker sections demoted to a labelled diagnostic.
+- `scripts/lama346-seed-worker.ts` — device keys, and no post-handover report.
+
 Docs / skill
 - `packages/agent-skill/reference/api.md` — every new route + the contract.
 - `packages/agent-skill/reference/recipes.md` — the seed-plan recipe.
 - `docs/handoff-346-initial-folder-seeding.md` (this file).
-- `docs/status.md`, `docs/agent-start.md`, `docs/features.md`, `docs/README.md`.
+- `docs/status.md`, `docs/agent-start.md`, `docs/development.md`, `docs/features.md`, `docs/README.md`.
 
 ## 9. Validation
 
 ```bash
-bun x tsc --noEmit                      # clean
-bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2572 pass / 0 fail, 173 files
-bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
+bun x tsc --noEmit                              # clean
+bun run build:web-ui                            # clean (one self-contained index.html)
+bun test                                        # 2633 pass / 0 fail / 5 skip, 179 files
+bun run scripts/check-skill-drift.ts --strict   # OK (181 API rows, 182 routes)
+bun run scripts/lama346-seed-e2e.ts             # 53 pass / 0 fail / 3 GATED
+# the gated real-object-space suite, against a disposable MinIO:
+LAMASYNC_TEST_S3_ENDPOINT=… LAMASYNC_TEST_S3_BUCKET=… \
+LAMASYNC_TEST_S3_ACCESS_KEY=… LAMASYNC_TEST_S3_SECRET_KEY=… \
+  bun test packages/daemon/src/seed-relay-s3.test.ts   # 7 pass / 0 fail
 ```
+
+Stage 2d suites:
+
+- `packages/core/src/seed-roles.test.ts` — **9 tests**: who is a party, the
+  legacy no-source row authorizing only the target, the phase halves being
+  complete/disjoint/adjacent, per-role phase entry, archive/completion/read
+  authority, the target's start predicate (every fact required, fail closed),
+  the immutability comparison (bookkeeping differs ⇒ same record; any identity
+  field differs ⇒ different record).
+- `packages/server/src/seed-role-authorization.test.ts` — **18 tests**: the
+  archive route's 503 default and the seam needing BOTH variables; the source
+  recording once and handing over; an idempotent retry; a differing digest or
+  manifest identity refused with the stored facts untouched; a lapsed source
+  lease refused; a non-`uploading_archive` phase refused; the target, a
+  stranger and the operator all refused as authors; a late report after
+  cancellation refused; the handover's finality plus the target then claiming
+  and the source unable to take the lease back; the per-role permission matrix
+  (target, source, stranger, operator); and lease-owner forgery refused on both
+  the progress and the lease route.
+- `packages/daemon/src/seed-daemon-seam.test.ts` — **9 tests**: neither/either/
+  both seam variables; a partial relay config is no config; no peer by default;
+  the runner refusing before it touches the client (seam off, and seam on with
+  no relay); and the baseline verdict's acceptance set, including the
+  zero-byte-but-changed-file trap.
+- `packages/daemon/src/seed-transport-bounded.test.ts` — **7 tests**: the
+  restated module-graph invariant (§2.14.5).
+- `packages/daemon/src/seed-transport-manifest.test.ts` — **13 tests**: the
+  algorithm pin, the handoff's hops, malformed documents, and the empty
+  universe travelling as `null` while a non-null value must still be a digest.
+- `scripts/lama346-seed-e2e.ts` — **53 checks** (§2.14.6), of which 27 are the
+  Stage 2d daemon section and the four device-key denials.
 
 Focused suites:
 
@@ -1389,7 +1659,8 @@ Focused suites:
   verdict; operator cancellation, a lost lease and the existing reaper; cleanup
   idempotency and a retryable cleanup failure; an illegal phase transition that
   a side cannot ignore; lease renewal observed on a fake clock; and the schema
-  check proving no column was added. Then §2.12.1's correction: an active delayed
+  check proving the transport adds no column (Stage 2d later added ONE, for
+  authorization: `source_host_id`). Then §2.12.1's correction: an active delayed
   owner versus a contender (with an in-flight object that must survive), a
   crashed owner's expired lease versus a live one, a self-expiring owner that
   stops instead of racing the reaper, the three conditional helpers against a
@@ -1418,24 +1689,35 @@ Focused suites:
 
 ## 10. Remaining live validation (owner / later stage)
 
-1. **Stage 1b (wiring):** wire a real store and the job/daemon orchestration
-   that calls `uploadSeedArchive` / `downloadSeedArchive` /
-   `cleanupSeedRelayObjects`, then flip `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` —
-   the one open prerequisite. The contract, the local store and the
-   verification logic are already implemented and tested.
-2. **Stage 2c:** the same chain through a real daemon with a real temporary
-   object space between two machines, plus the host proofs listed in §2.11
-   (real ENOSPC, the network hop, concurrency, retention under load) and the
-   manifest-handoff gap §2.12 records.
-3. A live dev-vm-shape run on a **copy** of a large tree, confirming no
-   timeout kill while progressing and a correct resume after a deliberate
-   stall (stage 3).
+1. **A production resync peer for the target's `baseline_validation`.** The
+   sandbox supplies `LAMASYNC_SEED_DAEMON_PEER_PATH`; production must resolve
+   the assignment's own remote (`<remote>:<destination>` plus the daemon's
+   rclone config) inside the seed runner. Until then the phase FAILS closed —
+   which is why nothing is falsely reported complete.
+2. **A production relay-space configuration surface.** The relay contract
+   carries no credential by design; where the fleet's temporary seed space
+   (endpoint, bucket, credentials) is configured is an owner decision. The
+   daemon reads it from `LAMASYNC_SEED_S3_*` behind the seam today.
+3. **The host proofs** of §2.11/§2.14.6: a real two-MACHINE hop with a network
+   partition and one retry/resume, real ENOSPC on a bounded disposable volume,
+   and the live dev-vm-shape run on a **copy** of a large tree (no timeout kill
+   while progressing, one correct resume after a deliberate stall, a
+   zero-change baseline afterwards).
 4. Confirm the target's archive tooling *and* staging proof are reported before
    the Run control is enabled for that device.
-5. ~~Decide the retention/cleanup policy~~ — decided in §2.10: delete on the
+5. Independent review of the Stage 2c + Stage 2d evidence. Only then may
+   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip; a released build keeps
+   `POST /seed-jobs` at 503 until it does.
+6. ~~Decide the retention/cleanup policy~~ — decided in §2.10: delete on the
    terminal phase, a 24 h window for abandoned objects, idempotent retries,
    namespace-confined sweeps, never delete on an unknown age.
+   *(Open sub-item: a daemon-run job deletes its objects but does not yet
+   persist the `cleanup` block server-side — there is no device route for it.
+   The objects are gone, which is the safety-relevant part; the bookkeeping
+   field stays `not_started` for a daemon-run job.)*
 
-Stage 1a is done and Stage 1b's foundation is done: the local half of a seed and
-the transport CONTRACT are correct and provable, and the plan's remaining gate is
-wiring a real store to a running job.
+Stages 1a, 1b, 2a, 2b, 2c and 2d are done: the local half of a seed, the
+transport contract and its real store, the manifest handoff, the lifecycle
+rules, per-role device authorization, and the shipped daemon's action-loop path
+are all implemented and provable. What remains is production configuration for
+the two seam-supplied inputs, and the live host proofs.

@@ -498,6 +498,11 @@ CREATE TABLE IF NOT EXISTS folder_seed_jobs (
     plan_id          TEXT NOT NULL,
     folder_id        TEXT NOT NULL,
     host_id          TEXT NOT NULL,
+    -- LAMA-346 Stage 2d: the SOURCE host, copied from the plan at creation.
+    -- It is what lets a device key be authorized for the source side of the job
+    -- without joining folder_seed_plans (whose rows are pruned) and without a
+    -- master key. NULL only on a pre-Stage-2d row.
+    source_host_id   TEXT,
     assignment_id    TEXT NOT NULL,
     status           TEXT NOT NULL,
     phase            TEXT NOT NULL,
@@ -1098,6 +1103,11 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE folder_seed_plans ADD COLUMN filter_universe TEXT",
   "CREATE INDEX IF NOT EXISTS idx_folder_seed_plans_folder ON folder_seed_plans(folder_id, created_at)",
   "CREATE TABLE IF NOT EXISTS folder_seed_jobs (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, progress TEXT NOT NULL, source TEXT NOT NULL, archive TEXT NOT NULL, staging TEXT NOT NULL, lease_owner TEXT, lease_expires_at INTEGER, error TEXT, summary TEXT, created_at INTEGER NOT NULL, started_at INTEGER, updated_at INTEGER NOT NULL, finished_at INTEGER)",
+  // LAMA-346 Stage 2d: the source host is part of the job identity so a device
+  // key can be authorized for the source side without a plan join. Added after
+  // the table shipped in the same unreleased branch; duplicate-column errors
+  // are ignored by the runner.
+  "ALTER TABLE folder_seed_jobs ADD COLUMN source_host_id TEXT",
   "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_folder ON folder_seed_jobs(folder_id, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_status_lease ON folder_seed_jobs(status, lease_expires_at)",
 ];

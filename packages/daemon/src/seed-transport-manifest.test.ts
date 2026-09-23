@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "os";
 import { join } from "path";
 import {
+  SEED_EMPTY_FILTER_FINGERPRINT,
   emptySeedJobArchiveFacts,
   parseSeedManifestDocument,
   seedManifestContentDigestInput,
@@ -87,8 +88,7 @@ describe("the manifest fingerprint algorithm has exactly one description", () =>
     expect(seedManifestContentDigestInput(document.entries)).toContain("\0file\0");
   });
 
-  test("the transported document excludes the ignored universe", async () => {
-    const { manifest } = await realManifest("excludes");
+  test("the transported document excludes the ignored universe", async () => {    const { manifest } = await realManifest("excludes");
     const document = seedManifestToDocument(manifest);
     const paths = document.entries.map((entry) => entry.path);
     expect(paths).toContain("README.md");
@@ -96,6 +96,42 @@ describe("the manifest fingerprint algorithm has exactly one description", () =>
     expect(paths).not.toContain("node_modules/pkg/index.js");
     expect(paths).not.toContain("debug.log");
     expect(seedManifestDocumentProblem(document)).toBeNull();
+  });
+});
+
+describe("an empty filter universe travels as null, never as a fake digest", () => {
+  // A folder that ignores nothing is legitimate and common. Its universe
+  // fingerprint is the `"none"` sentinel (there is no rule set to hash), and the
+  // transport must carry that as `null` — a placeholder that LOOKS like a
+  // fingerprint would make every consumer that only checks "non-empty string"
+  // believe it had verified something.
+  test("a no-rule assignment produces a valid document with a null filter fingerprint", async () => {
+    const root = join(SANDBOX, "empty-universe");
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "README.md"), "# no ignore file here\n");
+    writeFileSync(join(root, "src", "index.ts"), "export const one = 1;\n");
+    const built = buildSeedFilterUniverse(
+      { ...assignmentFor(root), ignorePath: null, ignoreGitMetadata: false },
+      "sync",
+    );
+    expect(built.errors).toEqual([]);
+    expect(built.universe.fingerprint).toBe(SEED_EMPTY_FILTER_FINGERPRINT);
+    const manifest = await buildSeedManifest(root, { filter: built.universe });
+    const document = seedManifestToDocument(manifest);
+    expect(document.filterFingerprint).toBeNull();
+    expect(seedManifestDocumentProblem(document)).toBeNull();
+    // It round-trips through the parser and stays null.
+    expect(parseSeedManifestDocument(JSON.parse(JSON.stringify(document)))?.filterFingerprint).toBeNull();
+    // ...and the content identity is untouched by the change.
+    expect(seedManifestContentFingerprint(document.entries)).toBe(manifest.fingerprint);
+  });
+
+  test("a non-null filter fingerprint is still required to be a digest", async () => {
+    const { manifest } = await realManifest("algorithm-strict");
+    const document = seedManifestToDocument(manifest);
+    expect(seedManifestDocumentProblem({ ...document, filterFingerprint: "none" })).toContain(
+      "neither null nor a 64-character hex digest",
+    );
   });
 });
 

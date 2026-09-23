@@ -34,6 +34,7 @@ const { createSeedJob, getSeedJob, reapStaleSeedJobs } = await import("../seed-j
 let db: Database;
 let app: { handle(request: Request): Promise<Response> };
 let adminToken: string;
+let deviceAToken: string;
 let deviceBToken: string;
 
 beforeEach(() => {
@@ -57,6 +58,7 @@ beforeEach(() => {
   `);
   __setApiKeysDb(db);
   adminToken = insertManagedApiKey({ name: "admin", kind: "admin", hostId: null }).token;
+  deviceAToken = insertManagedApiKey({ name: "dev-a", kind: "device", hostId: "host-a" }).token;
   deviceBToken = insertManagedApiKey({ name: "dev-b", kind: "device", hostId: "host-b" }).token;
   __setSeedDb(db);
   app = new Elysia().use(getAuthPlugin()).use(folderSeedRoutes);
@@ -149,6 +151,9 @@ function seedJobFixture(overrides: Partial<SeedJob> = {}): SeedJob {
     planId: "plan-1",
     folderId: "f1",
     hostId: "host-b",
+    // The operator named host-a as the source on the plan; the job carries it so
+    // the source device can be authorized without a plan join.
+    sourceHostId: "host-a",
     assignmentId: "a2",
     status: "planned",
     phase: "preflight",
@@ -475,11 +480,11 @@ describe("seed job progress, lease and terminal states", () => {
     createSeedJob(db, seedJobFixture());
   });
 
-  test("a device reports a legal phase transition and renews its lease", async () => {
+  test("the SOURCE device reports its own half and takes the lease", async () => {
     const response = await app.handle(
       request("/api/v1/seed-jobs/job-1/progress", {
         method: "POST",
-        headers: { Authorization: `Bearer ${deviceBToken}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${deviceAToken}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           phase: "measuring_source",
           message: "measuring the source tree",
@@ -495,35 +500,119 @@ describe("seed job progress, lease and terminal states", () => {
     expect(job.status).toBe("running");
     expect(job.phase).toBe("measuring_source");
     expect(job.progress.bytesDone).toBe(10);
-    expect(job.leaseOwner).toBe("host-b");
+    expect(job.leaseOwner).toBe("host-a");
     expect(job.leaseExpiresAt).toBeGreaterThan(Date.now());
   });
 
-  test("an illegal phase transition is refused", async () => {
+  test("a party may not report the OTHER half's phase", async () => {
+    // host-b is the TARGET: the source phases are not its to report, even
+    // though the phase machine would accept the step.
+    const asTarget = await app.handle(
+      request("/api/v1/seed-jobs/job-1/progress", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceBToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ phase: "measuring_source" }),
+      }),
+    );
+    expect(asTarget.status).toBe(403);
+    expect(((await asTarget.json()) as { error: string }).error).toContain("may not report");
+
+    // And the source may not run ahead into the target's half.
+    const asSource = await app.handle(
+      request("/api/v1/seed-jobs/job-1/progress", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceAToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ phase: "downloading_archive" }),
+      }),
+    );
+    expect(asSource.status).toBe(403);
+  });
+
+  test("the target may not start before the source's facts are recorded", async () => {
+    // Move the job to the end of the source's half without recording facts: the
+    // source's half is over, but there is nothing for the target to verify.
+    db.run(
+      "UPDATE folder_seed_jobs SET status = 'running', phase = 'uploading_archive', lease_owner = 'host-a', lease_expires_at = ? WHERE id = 'job-1'",
+      [Date.now() + 600_000],
+    );
     const response = await app.handle(
       request("/api/v1/seed-jobs/job-1/progress", {
         method: "POST",
         headers: { Authorization: `Bearer ${deviceBToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ phase: "publishing" }),
+        body: JSON.stringify({ phase: "downloading_archive" }),
+      }),
+    );
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: string }).error).toContain("archive facts");
+  });
+
+  test("the target may not take the lease while the source still holds it", async () => {
+    db.run(
+      "UPDATE folder_seed_jobs SET status = 'running', phase = 'uploading_archive', lease_owner = 'host-a', lease_expires_at = ? WHERE id = 'job-1'",
+      [Date.now() + 600_000],
+    );
+    const response = await app.handle(
+      request("/api/v1/seed-jobs/job-1/lease", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceBToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ owner: "host-b" }),
+      }),
+    );
+    // The phase is the source's, so the target is refused before any write; a
+    // device can never take a lease in another host's name either.
+    expect(response.status).toBe(409);
+  });
+
+  test("an illegal phase transition is refused", async () => {
+    db.run(
+      "UPDATE folder_seed_jobs SET status = 'running', phase = 'measuring_source' WHERE id = 'job-1'",
+    );
+    const response = await app.handle(
+      request("/api/v1/seed-jobs/job-1/progress", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceAToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ phase: "uploading_archive" }),
       }),
     );
     expect(response.status).toBe(409);
     expect(((await response.json()) as { error: string }).error).toContain("illegal phase transition");
   });
 
-  test("a different device cannot report progress for this job", async () => {
-    const otherToken = insertManagedApiKey({ name: "dev-a", kind: "device", hostId: "host-a" }).token;
-    const response = await app.handle(
-      request("/api/v1/seed-jobs/job-1/progress", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${otherToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ phase: "measuring_source" }),
-      }),
-    );
-    expect(response.status).toBe(403);
+  test("a stranger device cannot report progress, read, or be the source", async () => {
+    db.exec("INSERT INTO hosts (id, hostname, config_revision) VALUES ('host-c', 'other', 1)");
+    const strangerToken = insertManagedApiKey({ name: "dev-c", kind: "device", hostId: "host-c" }).token;
+    const body = JSON.stringify({ phase: "measuring_source" });
+    const headers = { Authorization: `Bearer ${strangerToken}`, "Content-Type": "application/json" };
+    expect(
+      (await app.handle(request("/api/v1/seed-jobs/job-1/progress", { method: "POST", headers, body }))).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.handle(
+          request("/api/v1/seed-jobs/job-1", { headers: { Authorization: `Bearer ${strangerToken}` } }),
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.handle(
+          request("/api/v1/seed-jobs/job-1/complete", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ status: "completed" }),
+          }),
+        )
+      ).status,
+    ).toBe(403);
   });
 
   test("completion is idempotent and freezes the outcome", async () => {
+    // The TARGET owns the terminal outcome, and only while it holds the lease
+    // in its own last phase.
+    db.run(
+      "UPDATE folder_seed_jobs SET status = 'running', phase = 'baseline_validation', lease_owner = 'host-b', lease_expires_at = ? WHERE id = 'job-1'",
+      [Date.now() + 600_000],
+    );
     const first = await app.handle(
       request("/api/v1/seed-jobs/job-1/complete", {
         method: "POST",
@@ -556,6 +645,41 @@ describe("seed job progress, lease and terminal states", () => {
       }),
     );
     expect(late.status).toBe(409);
+  });
+
+  test("only the target may declare a seed completed; either party may fail its own half", async () => {
+    db.run(
+      "UPDATE folder_seed_jobs SET status = 'running', phase = 'uploading_archive', lease_owner = 'host-a', lease_expires_at = ? WHERE id = 'job-1'",
+      [Date.now() + 600_000],
+    );
+    const asSource = await app.handle(
+      request("/api/v1/seed-jobs/job-1/complete", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceAToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "completed" }),
+      }),
+    );
+    expect(asSource.status).toBe(403);
+    expect(((await asSource.json()) as { error: string }).error).toContain("target");
+    // A device may not cancel through the completion route.
+    const asCancel = await app.handle(
+      request("/api/v1/seed-jobs/job-1/complete", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceAToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "cancelled" }),
+      }),
+    );
+    expect(asCancel.status).toBe(403);
+    // But the source may report its own half failed.
+    const failed = await app.handle(
+      request("/api/v1/seed-jobs/job-1/complete", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${deviceAToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "failed", error: "the source tree changed while archiving" }),
+      }),
+    );
+    expect(failed.status).toBe(200);
+    expect(((await failed.json()) as SeedJob).status).toBe("failed");
   });
 
   test("cancel is admin-only and terminal", async () => {

@@ -82,16 +82,29 @@ For isolated Docker tests of the `curl | bash` install and update paths:
 ./scripts/test-update.sh
 ```
 
-For the LAMA-346 Stage 2c seed vertical path (an isolated server, a disposable
-MinIO container, two independent worker processes, real GNU tar and a real
-`rclone bisync` zero-change baseline), run:
+For the LAMA-346 seed vertical path (an isolated server, a disposable MinIO
+container, **two real `lamasyncd` processes each with its own device key minted
+through the pairing exchange**, the real queued-action loop, real GNU tar and a
+real `rclone bisync` zero-change baseline), run:
 
 ```bash
 bun run scripts/lama346-seed-e2e.ts --json /tmp/lama346-e2e.json
 ```
 
-It needs Docker (for MinIO) and rclone; a missing one is reported as `GATED`,
-never as a pass. The real S3 store's own gated integration test runs against an
+That is the acceptance evidence for the daemon wiring. The same file also runs
+the older test-only workers as a labelled **lower-level diagnostic** (they can
+drive failure injection cheaply); they are not the daemon evidence. It needs
+Docker (for MinIO) and rclone; a missing one is reported as `GATED`, never as a
+pass.
+
+The daemon's seed path is opened by a doubly-gated seam: the server needs
+`LAMASYNC_SEED_E2E=1` AND `LAMASYNC_TEST=1` (`seedTransportE2eEnabled()`) and the
+daemon needs both as well (`seedDaemonE2eEnabled()`, in
+`packages/daemon/src/seed-daemon-seam.ts`), plus `LAMASYNC_SEED_S3_*` for the
+relay space and, on the target, `LAMASYNC_SEED_DAEMON_PEER_PATH` for the
+post-seed resync peer. Without a peer the `baseline_validation` phase FAILS
+rather than passing, so a seed is never reported complete without the
+zero-change proof. The real S3 store's own gated integration test runs against an
 existing MinIO with `LAMASYNC_TEST_S3_ENDPOINT`,
 `LAMASYNC_TEST_S3_BUCKET`, `LAMASYNC_TEST_S3_ACCESS_KEY` and
 `LAMASYNC_TEST_S3_SECRET_KEY` set (it skips explicitly otherwise):

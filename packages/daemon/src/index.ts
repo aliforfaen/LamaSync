@@ -26,6 +26,7 @@ import {
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
+  parseSeedJobActionPayload,
   planHasContentChanges,
   resolveDestination,
   resolveWatchQuietSec,
@@ -116,6 +117,7 @@ import {
 import { DAEMON_KNOWN_FLAGS, daemonUsage } from "./usage.ts";
 import { createLinuxInotifyFactory } from "./folder-watch.ts";
 import { WatchCoordinator } from "./watch-control.ts";
+import { seedDaemonE2eEnabled } from "./seed-daemon-seam.ts";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CONFIG_REFRESH_MS = 5 * 60 * 1000;
@@ -1530,6 +1532,41 @@ async function main(): Promise<void> {
               : "intervention did not run",
           );
           await ack(outcome.status, outcome.result);
+          return;
+        }
+        case "seed_job": {
+          // LAMA-346 Stage 2d: run ONE side of an initial seed. This is the
+          // shipped daemon's seed path, and it is inert unless the doubly-gated
+          // seam is fully open.
+          //
+          // The runner is imported DYNAMICALLY, after the seam check, so a
+          // build that never opens the seam does not even load the relay
+          // transport or the S3 store — that reachability is what
+          // `seed-transport-bounded.test.ts` asserts from this module graph.
+          const parsedSeed = parseSeedJobActionPayload(payload);
+          if (!parsedSeed.ok) {
+            await ack("failed", parsedSeed.error);
+            return;
+          }
+          if (!seedDaemonE2eEnabled()) {
+            await ack(
+              "failed",
+              "seed execution is not available on this build (the seed seam is off)",
+            );
+            return;
+          }
+          const { runSeedAction } = await import("./seed-runner.ts");
+          const seedOutcome = await runSeedAction({
+            client,
+            hostId,
+            jobId: parsedSeed.payload.jobId,
+            payloadRole: parsedSeed.payload.role,
+            getHostConfig: () => hostConfig,
+            refreshConfig,
+            dataDir: clientConfig.dataDir,
+            log: (message) => console.log(message),
+          });
+          await ack(seedOutcome.status, seedOutcome.result);
           return;
         }
         default: {

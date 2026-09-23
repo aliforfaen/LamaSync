@@ -35,6 +35,7 @@
 
 import { existsSync, readFileSync, rmSync, statSync } from "fs";
 import {
+  SEED_EMPTY_FILTER_FINGERPRINT,
   SEED_SHA256_RE,
   canTransitionSeedPhase,
   describeSeedRelayFailure,
@@ -410,7 +411,10 @@ export function seedManifestToDocument(manifest: SeedManifest): SeedManifestDocu
   return {
     version: 1,
     fingerprint: manifest.fingerprint,
-    filterFingerprint: manifest.filter.fingerprint,
+    filterFingerprint:
+      manifest.filter.fingerprint === SEED_EMPTY_FILTER_FINGERPRINT
+        ? null
+        : manifest.filter.fingerprint,
     fileCount: manifest.fileCount,
     dirCount: manifest.dirCount,
     totalBytes: manifest.totalBytes,

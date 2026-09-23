@@ -55,6 +55,7 @@ function plannedJob(): SeedJob {
     planId: "plan-1",
     folderId: "f1",
     hostId: "host-b",
+    sourceHostId: "host-a",
     assignmentId: "a2",
     status: "planned",
     phase: "preflight",
@@ -163,7 +164,7 @@ describe("archive facts persist on the existing job row", () => {
     expect(getSeedJob(db, JOB_ID)!.archive).toEqual(emptySeedJobArchiveFacts("tar.gz"));
   });
 
-  test("the transport adds no column: the schema is unchanged", () => {
+  test("the transport adds NO column: the only extra one is Stage 2d's source authority", () => {
     const columns = db
       .query<{ name: string }, []>(`PRAGMA table_info(folder_seed_jobs)`)
       .all()
@@ -183,6 +184,7 @@ describe("archive facts persist on the existing job row", () => {
       "plan_id",
       "progress",
       "source",
+      "source_host_id",
       "staging",
       "started_at",
       "status",

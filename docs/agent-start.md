@@ -84,23 +84,69 @@ real GNU tar and a real `rclone bisync --resync` that reports zero changed
 files, plus manifest-mismatch, non-empty-target, cancellation, aborted-upload
 and orphan-cleanup cases. `POST /seed-jobs` and `POST /seed-jobs/:jobId/archive`
 open only under the doubly-gated seam (`LAMASYNC_SEED_E2E=1` **and**
-`LAMASYNC_TEST=1`); `seed-e2e-seam.test.ts` pins that, and the S3 store is
-asserted test-only from the module graph. Two gaps this slice surfaces rather
-than hides: the job authorizes only its TARGET host and has one lease (the E2E
-uses the master key; production needs source-host authorization or delegation),
-and the shipped daemon action loop does not dispatch seed work. The GATED host
-proofs (a real two-machine hop, real ENOSPC on a bounded volume, the live
-large-tree run) remain. Never give the store, the worker or the seam a
-production credential, endpoint, rclone config or live folder.
+`LAMASYNC_TEST=1`); `seed-e2e-seam.test.ts` pins that. The GATED host proofs (a real two-machine
+hop, real ENOSPC on a bounded volume, the live large-tree run) remain. Never
+give the store, the worker or the seam a production credential, endpoint,
+rclone config or live folder. Stage 2d demoted those workers to a **lower-level
+diagnostic** and fixed the two gaps this paragraph used to list — see the next
+paragraph.
 
-**Execution is deliberately unavailable**: no store is wired to a running job,
-so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
+**Stage 2d is implemented: the shipped daemon runs a seed side, and each side has
+its own identity.** The seed job now carries `sourceHostId`
+(`folder_seed_jobs.source_host_id`), so a device key is authorized for its OWN
+half without a plan join and without a master key. `@lamasync/core/folder-seed`
+states the rules once (`seedJobRoleFor`, `seedJobPhaseRole`,
+`seedJobRoleMayEnterPhase`, `seedJobRoleMayReportArchive`,
+`seedJobRoleMayComplete`, `seedArchiveFactsComplete`, `seedArchiveFactsEqual`)
+and the routes enforce them: the source owns
+`preflight → uploading_archive` and the target the other six; only the source
+authors the immutable archive facts and ONLY ONCE (a compare-and-set whose
+predicate also clears the lease, which is the single source→target HANDOVER);
+only the target may report `completed`; either party may report its own half
+`failed`; a stranger is refused everywhere; and the lease owner is always the
+AUTHENTICATED host, so a device cannot forge another host's lease. Every
+device-facing write is ONE atomic statement with a compare-and-set on the phase
+the route read, so a stale writer or a lost race is a 409. A source report after
+the handover is refused — otherwise it would re-claim the lease it just gave
+away and strand the target (a footgun the E2E found, not inspection).
+
+`lamasyncd`'s dispatcher handles a `seed_job` queued action (`{ jobId, role }`,
+enqueued automatically by `POST /seed-jobs`, one per party — it is NOT accepted
+on `POST /hosts/:hostId/actions`), re-derives its role from the job, refuses a
+disagreeing payload, and loads `packages/daemon/src/seed-runner.ts` by DYNAMIC
+`import()` only after the seam check. The runner reuses the existing primitives
+and the real S3 store, and its `baseline_validation` phase runs a real
+`rclone bisync --resync` whose zero-change verdict (`seedBaselineVerdict`) is
+REQUIRED before `completed`: with no peer configured the phase FAILS. The seam
+is now two-sided — `seedDaemonE2eEnabled()` (daemon) and
+`seedTransportE2eEnabled()` (server), each requiring BOTH
+`LAMASYNC_SEED_E2E=1` and `LAMASYNC_TEST=1` — and
+`seed-transport-bounded.test.ts` now asserts the restated invariant: the
+transport and the store have exactly ONE production importer (`seed-runner.ts`),
+the daemon reaches it only through that seam-guarded dynamic import, there is
+exactly one daemon seam module, and the flags stay `false`. Do not add a static
+import, a second importer, or a seam that accepts one variable. Also: never let
+the runner resolve a production remote or read a credential outside the seam.
+
+Two inputs are deliberately still SEAM-SUPPLIED, and both are required before
+the constant may flip: the target's resync PEER (in production the assignment's
+resolved remote + the daemon's rclone config) and the relay SPACE
+(`LAMASYNC_SEED_S3_*`). The relay contract carries no credential by design, and
+where the fleet's temporary seed space lives is an owner decision. A daemon-run
+job deletes its relay objects but does not yet persist the `cleanup` block
+server-side (no device route for it); the objects are gone, the bookkeeping
+field stays `not_started`.
+
+**Execution is deliberately unavailable by default**:
+`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
 `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`), `POST /seed-jobs` returns
 `503 { executionAvailable: false, reason }`, and the Folders page shows a
-disabled control. Do not flip the transport constant without a two-host fixture
-acceptance that includes a zero-content-change bisync baseline validation, and
-do not add a credential to the relay contract: the store is constructed by
-whoever owns the configuration.
+disabled control. The path IS reachable behind the doubly-gated seam, and the
+disposable E2E proves it with two real daemons — do not flip the transport
+constant without the §2.11/§2.14.6 host proofs (a real two-machine hop, real
+ENOSPC, the live large-tree run) on record and reviewed, and do not add a
+credential to the relay contract: the store is constructed by whoever owns the
+configuration.
 
 The archive primitives (create/validate/extract/verify/atomic-publish) are
 implemented and fixture-tested end-to-end with the host's real GNU tar, and

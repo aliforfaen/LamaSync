@@ -30,6 +30,7 @@ import {
   validateSeedArchive,
 } from "./seed-archive.ts";
 import type { FolderAssignment } from "@lamasync/core";
+import { SEED_EMPTY_FILTER_FINGERPRINT } from "@lamasync/core";
 
 let root: string;
 
@@ -297,7 +298,7 @@ describe("the universe of a Projects-shaped tree", () => {
     const built = buildSeedFilterUniverse(assignment(), "sync");
     expect(built.rules).toEqual([]);
     expect(built.fingerprint).toBeNull();
-    expect(built.universe.fingerprint).toBe("none");
+    expect(built.universe.fingerprint).toBe(SEED_EMPTY_FILTER_FINGERPRINT);
     expect(built.universe.includes("anything", false)).toBe(true);
   });
 

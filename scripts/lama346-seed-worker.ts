@@ -37,6 +37,7 @@ import {
   seedRelayArchiveKey,
   seedRelayManifestKey,
   seedStagingPath,
+  SEED_EMPTY_FILTER_FINGERPRINT,
   type SeedJob,
   type SeedJobArchiveFacts,
   type SeedManifestDocument,
@@ -150,7 +151,7 @@ function documentAsManifest(document: SeedManifestDocument): SeedManifest {
     unsupported: [],
     emptyDirsPruned: [],
     filter: {
-      fingerprint: document.filterFingerprint,
+      fingerprint: document.filterFingerprint ?? SEED_EMPTY_FILTER_FINGERPRINT,
       patternCount: 0,
       skippedCount: 0,
       skippedSample: [],
@@ -272,10 +273,9 @@ async function runSource(): Promise<void> {
   if (recorded.status !== 200) {
     throw new Error(`recording archive facts answered ${recorded.status}: ${JSON.stringify(recorded.body).slice(0, 200)}`);
   }
-  await report("uploading_archive", "Archive and manifest are recorded.", {
-    bytesDone: archive.bytes,
-    bytesTotal: archive.bytes,
-  });
+  // Deliberately NO further progress report here: recording the facts also hands
+  // the lease to the target, and a later source report would re-claim it and
+  // strand the target. The server refuses such a report outright.
   emit({ event: "done", role: ROLE, facts });
 }
 
