@@ -571,6 +571,12 @@ export interface SeedConditionalLease {
  * This is the write that makes "owner B steals owner A's running job"
  * impossible: a live owner's lease is not in the predicate, so B's UPDATE
  * matches nothing and B is told so.
+ *
+ * A live lease is refused EVEN FOR THE SAME OWNER. The owner here is a host id,
+ * not a run id, so "it says me" does not mean "it is this run": a second run on
+ * the same host would otherwise claim, rewind the phase and work concurrently on
+ * a job another run is already driving. Renewal is
+ * `reportOwnedSeedJobProgress`, which needs no claim.
  */
 export function claimSeedJobProgress(
   database: Database,
@@ -588,7 +594,6 @@ export function claimSeedJobProgress(
         AND phase NOT IN ('completed', 'failed', 'cancelled')
         AND (
               lease_owner IS NULL
-           OR (lease_owner = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?)
            OR (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
         )`,
     [
@@ -599,8 +604,6 @@ export function claimSeedJobProgress(
       lease.expiresAt,
       progress.updatedAt,
       jobId,
-      lease.owner,
-      lease.now,
       lease.now,
     ],
   );
@@ -639,6 +642,38 @@ export function reportOwnedSeedJobProgress(
       lease.owner,
       lease.now,
     ],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Record IN-FLIGHT archive facts, conditional on still holding a live lease.
+ *
+ * The unguarded `updateSeedJobArchive` above is deliberately status-blind, and
+ * that is right for the cleanup state — which is written after the job ends. It
+ * is wrong for the transport facts: those are written while the job is running,
+ * so a run whose lease lapsed during a long source/target phase could otherwise
+ * overwrite the facts of the owner that took the job over. The archive digest is
+ * the target's only authority for what may be extracted, so that write has to be
+ * as conditional as the outcome write is.
+ */
+export function updateOwnedSeedJobArchive(
+  database: Database,
+  jobId: string,
+  archive: SeedJobArchiveFacts,
+  lease: { owner: string; now: number },
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET archive = ?, updated_at = ?
+      WHERE id = ?
+        AND status = 'running'
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND lease_owner = ?
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > ?`,
+    [JSON.stringify(archive), lease.now, jobId, lease.owner, lease.now],
   );
   if (Number(result.changes ?? 0) === 0) return null;
   return getSeedJob(database, jobId);

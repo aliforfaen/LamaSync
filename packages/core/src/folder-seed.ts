@@ -838,19 +838,30 @@ export interface SeedClaimFacts extends SeedLeaseFacts {
  *
  *   1. a job that already ended is nobody's to claim;
  *   2. only `planned`/`running` jobs can be claimed at all;
- *   3. our own live lease may be renewed by re-claiming;
- *   4. a job with no recorded owner has never been claimed;
- *   5. someone else's lease is claimable only once it has demonstrably LAPSED —
- *      a recorded owner with no expiry is left alone and left to the reaper.
+ *   3. a job with no recorded owner has never been claimed;
+ *   4. a lease that has demonstrably LAPSED is claimable;
+ *   5. a LIVE lease is never claimable — NOT EVEN OUR OWN.
  *
- * Rule 5 is the one that matters: the earlier rule ("the lease owner is me")
- * made a live owner unstealable only by accident, and a lease that expired
- * blocked every later owner until the reaper happened to run.
+ * Rule 5 is the subtle one, and it is about `owner` being a HOST ID rather than
+ * a run id. "The lease owner is me, so I may claim" reads like a renewal, but a
+ * new run of the same host is a *second* piece of work on the same job: it would
+ * claim, rewind the phase to `preflight`, and run concurrently with the first —
+ * two writers, one job. Renewal is a different operation
+ * (`reportOwnedSeedJobProgress`), and it does not need a claim.
+ *
+ * Rule 4 is the other half: an expired lease IS claimable (that is how a crashed
+ * owner's job is recovered), while a recorded owner with no expiry is not — we
+ * cannot tell whether that owner is alive, so it fails closed and is left to the
+ * reaper.
+ *
+ * The residual risk is deliberate and is the lease's whole premise: a run that
+ * is merely SLOW past its lease can be taken over. Keeping the lease renewed
+ * while work happens is what makes that window a crash detector rather than a
+ * concurrency bug.
  */
 export function seedJobClaimableBy(facts: SeedClaimFacts, owner: string, now: number): boolean {
   if (isTerminalSeedPhase(facts.phase)) return false;
   if (facts.status !== "planned" && facts.status !== "running") return false;
-  if (seedLeaseIsLive(facts, owner, now)) return true;
   if (facts.leaseOwner === null) return true;
   return facts.leaseExpiresAt !== null && facts.leaseExpiresAt <= now;
 }

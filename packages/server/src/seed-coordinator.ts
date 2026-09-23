@@ -65,7 +65,11 @@ import {
   finishOwnedSeedJob,
   getSeedJob,
   reportOwnedSeedJobProgress,
+  // The UNGUARDED archive write is used by cleanup only, and deliberately: the
+  // cleanup state is recorded after the job has ended, which is exactly when its
+  // objects become deletable. In-flight transport facts use the conditional one.
   updateSeedJobArchive,
+  updateOwnedSeedJobArchive,
 } from "./seed-jobs.ts";
 
 /**
@@ -429,9 +433,17 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
       // has nothing to transfer, so the target is never started on it.
       failure = "the source side reported success without recording archive facts";
     } else {
-      // Persisted before the target side is allowed to run.
-      archiveFacts = source.archive;
-      if (updateSeedJobArchive(options.db, options.jobId, source.archive, now()) !== null) {
+      // Persisted — CONDITIONALLY — before the target side is allowed to run. A
+      // refusal means the lease lapsed while the source was working and someone
+      // else may own the job now, so these facts are not ours to record.
+      const persisted = updateOwnedSeedJobArchive(options.db, options.jobId, source.archive, {
+        owner: options.owner,
+        now: now(),
+      });
+      if (persisted === null) {
+        leaseLost = true;
+      } else {
+        archiveFacts = source.archive;
         emit({
           kind: "archive",
           phase: currentPhase,
@@ -451,17 +463,26 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
         failure = target.error ?? "the target side failed";
       } else {
         if (target.archive !== null) {
-          archiveFacts = target.archive;
-          updateSeedJobArchive(options.db, options.jobId, target.archive, now());
+          const persisted = updateOwnedSeedJobArchive(options.db, options.jobId, target.archive, {
+            owner: options.owner,
+            now: now(),
+          });
+          if (persisted === null) {
+            // Our lease lapsed during the target's work: do not record its
+            // facts, and do not let the baseline verdict complete the job.
+            leaseLost = true;
+          } else {
+            archiveFacts = target.archive;
+          }
         }
         // A seed may NOT be reported as completed without the
         // zero-content-change verdict: that check is the whole point of the
         // transfer, so its absence is a failure rather than a pass.
         const baseline = target.baseline;
-        if (baseline === null) {
+        if (!leaseLost && baseline === null) {
           failure = "the target side did not validate the published tree against the source universe";
-        } else if (!baseline.validated) {
-          failure = boundedMessage(`the published tree was not validated: ${baseline.message}`);
+        } else if (!leaseLost && !baseline!.validated) {
+          failure = boundedMessage(`the published tree was not validated: ${baseline!.message}`);
         }
       }
     }
@@ -553,7 +574,6 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
     jobId: options.jobId,
     owner: options.owner,
     job: finalJob,
-    archiveFacts,
     now,
     onEvent: emit,
   });
@@ -583,27 +603,32 @@ export async function cleanupJobObjects(input: {
   /** The owner asking to clean up. Gates the delete; see `seedCleanupAllowed`. */
   owner: string;
   job: SeedJob;
-  archiveFacts: SeedJobArchiveFacts | null;
   now: () => number;
   onEvent?: (event: SeedCoordinatorEvent) => void;
 }): Promise<{ job: SeedJob; deletedKeys: string[]; cleanup: SeedRelayCleanup }> {
+  // The row is re-read and the CURRENT facts are authoritative. Cleanup only
+  // ever sets the `cleanup` field: a caller's in-memory facts may belong to a run
+  // that lost the lease, and writing them here would overwrite the owner's — the
+  // same leak the conditional in-flight write closes on the transport path.
+  const current = getSeedJob(input.db, input.jobId) ?? input.job;
+
   // DO NOT DELETE AN OBJECT ANOTHER LIVE OWNER MAY BE USING. A terminal job is
   // nobody's and its objects are done with; a job still in flight is cleaned
   // only by a live owner. A contender that merely lost a race therefore leaves
   // the relay alone — and reports nothing as cleaned, because nothing was.
-  if (!seedCleanupAllowed(input.job, input.owner, input.now())) {
+  if (!seedCleanupAllowed(current, input.owner, input.now())) {
     input.onEvent?.({
       kind: "cleanup",
-      phase: input.job.phase,
+      phase: current.phase,
       message: `cleanup deferred: ${input.owner} does not hold ${input.jobId} and the job has not ended`,
     });
     return {
-      job: input.job,
+      job: current,
       deletedKeys: [],
-      cleanup: input.job.archive.cleanup ?? initialSeedRelayCleanup(),
+      cleanup: current.archive.cleanup ?? initialSeedRelayCleanup(),
     };
   }
-  const facts = input.archiveFacts ?? input.job.archive;
+  const facts = current.archive;
   const format: SeedArchiveFormat = facts.format;
   const keys = new Set<string>();
   if (facts.objectKey !== null) keys.add(facts.objectKey);
@@ -621,11 +646,11 @@ export async function cleanupJobObjects(input: {
   const updated = updateSeedJobArchive(input.db, input.jobId, nextFacts, input.now());
   input.onEvent?.({
     kind: "cleanup",
-    phase: (updated ?? input.job).phase,
+    phase: (updated ?? current).phase,
     message: result.error ?? `cleaned ${result.deleted.length} seed object(s)`,
   });
   return {
-    job: updated ?? input.job,
+    job: updated ?? current,
     deletedKeys: result.deleted,
     cleanup: result.cleanup,
   };

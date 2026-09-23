@@ -110,8 +110,11 @@ describe("Stage 2b is test-only orchestration, not production wiring", () => {
       .split("\nimport ")
       .find((part) => part.includes('} from "./seed-jobs.ts";'));
     expect(block).toBeDefined();
-    const names = block!
-      .slice(0, block!.indexOf("} from"))
+    // Comments inside the import (there is a deliberate one explaining the
+    // cleanup exception) are stripped, so prose cannot become an "import name".
+    const clean = stripComments(block!);
+    const names = clean
+      .slice(0, clean.indexOf("} from"))
       .replace(/^\{/, "")
       .split(",")
       .map((name) => name.trim())
@@ -121,13 +124,22 @@ describe("Stage 2b is test-only orchestration, not production wiring", () => {
       "finishOwnedSeedJob",
       "getSeedJob",
       "reportOwnedSeedJobProgress",
+      "updateOwnedSeedJobArchive",
+      // Cleanup is the ONE deliberate exception: it records the cleanup state
+      // after the job has ended, when its objects are already deletable, so it
+      // uses the status-blind write on purpose.
       "updateSeedJobArchive",
     ]);
-    // And the unguarded trio appears nowhere in its body.
+    // The unguarded trio appears nowhere in its body.
     for (const unguarded of ["updateSeedJobProgress", "finishSeedJob", "renewSeedJobLease"]) {
       expect(names).not.toContain(unguarded);
       expect(stripComments(coordinator.text)).not.toContain(`${unguarded}(`);
     }
+    // `updateSeedJobArchive` may appear exactly ONCE — in cleanup — and never on
+    // the in-flight transport path, where it would let a run whose lease lapsed
+    // overwrite the facts of the owner that took the job over.
+    const code = stripComments(coordinator.text);
+    expect(code.split("updateSeedJobArchive(").length - 1).toBe(1);
   });
 
   test("the coordinator invents no phase: it drives the machine's own list", () => {

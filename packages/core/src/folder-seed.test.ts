@@ -723,14 +723,20 @@ describe("seed lease ownership rules (LAMA-346 Stage 2b)", () => {
   test("a live owner's job is not claimable, and an expired one is", () => {
     // Someone else holds a live lease: no.
     expect(seedJobClaimableBy(running(), "host-b", NOW)).toBe(false);
-    // The holder may re-claim (that is a renewal).
-    expect(seedJobClaimableBy(running(), "host-a", NOW)).toBe(true);
+    // NOT EVEN THE HOLDER. `owner` is a host id, not a run id, so "it says me"
+    // does not mean "it is this run": allowing it would let a second run on the
+    // same host claim, rewind the phase and work concurrently on a live job.
+    // Renewal is `reportOwnedSeedJobProgress`, which needs no claim.
+    expect(seedJobClaimableBy(running(), "host-a", NOW)).toBe(false);
     // Expired: yes, whoever asks.
     expect(seedJobClaimableBy(running({ leaseExpiresAt: NOW }), "host-b", NOW)).toBe(true);
     expect(seedJobClaimableBy(running({ leaseExpiresAt: NOW - 1 }), "host-b", NOW)).toBe(true);
     // An owner with no expiry is NOT lapsed: fail closed and let the reaper decide.
     expect(seedJobClaimableBy(running({ leaseExpiresAt: null }), "host-b", NOW)).toBe(false);
     expect(seedJobClaimableBy(running({ leaseExpiresAt: null }), "host-a", NOW)).toBe(false);
+    // An expired lease is claimable by its own holder too — that is how a run
+    // that lost its lease recovers, and it is a NEW run's claim, not a renewal.
+    expect(seedJobClaimableBy(running({ leaseExpiresAt: NOW - 1 }), "host-a", NOW)).toBe(true);
   });
 
   test("an unclaimed job is claimable, and an ended one never is", () => {

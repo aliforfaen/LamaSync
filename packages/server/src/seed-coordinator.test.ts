@@ -63,6 +63,7 @@ import {
   initialSeedJobProgress,
   reapStaleSeedJobs,
   reportOwnedSeedJobProgress,
+  updateOwnedSeedJobArchive,
   finishSeedJob,
 } from "./seed-jobs.ts";
 import {
@@ -974,7 +975,6 @@ describe("a live lease is never stolen, and an expired one is claimable", () => 
       jobId: job.id,
       owner: "host-contender",
       job: held,
-      archiveFacts: null,
       now: () => now,
     });
     expect(refused.deletedKeys).toEqual([]);
@@ -990,7 +990,6 @@ describe("a live lease is never stolen, and an expired one is claimable", () => 
       jobId: job.id,
       owner: "host-owner",
       job: getSeedJob(db, job.id)!,
-      archiveFacts: null,
       now: () => now,
     });
     expect(owner.cleanup.state).toBe("cleaned");
@@ -1196,6 +1195,236 @@ describe("a live lease is never stolen, and an expired one is claimable", () => 
   });
 });
 
+describe("a run whose lease lapsed cannot touch the new owner's job", () => {
+  test("a stalled source A returning late cannot overwrite B's archive facts, progress or outcome", async () => {
+    const source = identity("lateA-source", "host-lateA-src");
+    const target = identity("lateB-target", "host-lateB-tgt");
+    const job = newJob(target.hostId);
+
+    // One shared, monotonic clock so both runs agree on when a lease lapses.
+    let tick = 5_000_000;
+    const objectKey = seedArchiveObjectKey(job.id, "tar.gz");
+    const digestA = "a".repeat(64);
+    const digestB = "b".repeat(64);
+    const facts = (digest: string, bytes: number): SeedJobArchiveFacts => ({
+      ...emptySeedJobArchiveFacts("tar.gz"),
+      objectKey,
+      bytes,
+      sha256: digest,
+      manifestFingerprint: digest,
+      memberCount: bytes === 111 ? 1 : 9,
+      uploadedAt: tick,
+    });
+
+    // An object is already in the relay: neither run may delete it yet.
+    const relay = store();
+    const inFlight = new TextEncoder().encode("in-flight");
+    const digestOfBytes = new Bun.CryptoHasher("sha256").update(inFlight).digest("hex");
+    expect(
+      (
+        await relay.put({
+          key: objectKey,
+          source: { kind: "bytes", data: inFlight },
+          expected: { bytes: inFlight.length, sha256: digestOfBytes },
+        })
+      ).ok,
+    ).toBe(true);
+
+    // --- Owner A claims, then stalls inside its source side.
+    const aStalled = deferred<void>();
+    const aMayReturn = deferred<void>();
+    const a = runSeedJob({
+      db,
+      store: relay,
+      jobId: job.id,
+      owner: "host-lateA",
+      cleanup: cleanupSeedRelayObjects,
+      leaseMs: 30_000,
+      now: () => tick,
+      source: async (reporter) => {
+        expect(reporter.owned()).toBe(true);
+        aStalled.resolve();
+        await aMayReturn.promise;
+        // A's work finishes AFTER its lease lapsed and B took the job.
+        return { ok: true, error: null, archive: facts(digestA, 111), baseline: null };
+      },
+      target: async () => ({ ok: false, error: "not reached", archive: null, baseline: null }),
+    });
+    await aStalled.promise;
+
+    // --- A's lease lapses, and B claims the job and records ITS facts.
+    tick += 60_000;
+    const bLive = deferred<void>();
+    const bMayReturn = deferred<void>();
+    const b = runSeedJob({
+      db,
+      store: relay,
+      jobId: job.id,
+      owner: "host-lateB",
+      cleanup: cleanupSeedRelayObjects,
+      leaseMs: 30_000,
+      now: () => tick,
+      source: async () => ({ ok: true, error: null, archive: facts(digestB, 999), baseline: null }),
+      target: async () => {
+        bLive.resolve();
+        await bMayReturn.promise;
+        return { ok: false, error: "B stopped for the test", archive: null, baseline: null };
+      },
+    });
+    await bLive.promise;
+    const bOwned = getSeedJob(db, job.id)!;
+    expect(bOwned.leaseOwner).toBe("host-lateB");
+    expect(bOwned.archive.sha256).toBe(digestB);
+    expect(bOwned.archive.bytes).toBe(999);
+    const bProgress = bOwned.progress.phase;
+
+    // --- A returns late. Its facts must NOT land.
+    aMayReturn.resolve();
+    const aOutcome = await a;
+    expect(aOutcome.status).toBe("lease_lost");
+
+    const afterA = getSeedJob(db, job.id)!;
+    expect(afterA.archive.sha256).toBe(digestB); // B's facts, not A's
+    expect(afterA.archive.bytes).toBe(999);
+    expect(afterA.archive.manifestFingerprint).toBe(digestB);
+    expect(afterA.archive.memberCount).toBe(9);
+    expect(afterA.progress.phase).toBe(bProgress); // B's progress, not a rewind
+    expect(afterA.leaseOwner).toBe("host-lateB"); // still B's job
+    expect(afterA.status).toBe("running");
+    expect(afterA.error).toBeNull();
+    expect(afterA.finishedAt).toBeNull();
+    // A recorded nothing as cleaned, and B's in-flight object survives.
+    expect(aOutcome.cleanedKeys).toEqual([]);
+    expect((await relay.head(objectKey)).ok).toBe(true);
+
+    // --- B still owns the job and its own outcome is the one recorded.
+    bMayReturn.resolve();
+    const bOutcome = await b;
+    expect(bOutcome.status).toBe("failed");
+    expect(bOutcome.error).toBe("B stopped for the test");
+    const final = getSeedJob(db, job.id)!;
+    expect(final.status).toBe("failed");
+    expect(final.error).toBe("B stopped for the test");
+    expect(final.archive.sha256).toBe(digestB);
+  });
+
+  test("a late run cannot rewrite the archive facts of a job that already ended", async () => {
+    const source = identity("lateend-source", "host-lateend-src");
+    const target = identity("lateend-target", "host-lateend-tgt");
+    buildSourceTree(source.root, 4);
+    const job = newJob(target.hostId);
+
+    // A completed job holds its final facts.
+    const { outcome } = await run({ jobId: job.id, owner: source.hostId, source, target });
+    expect(outcome.status).toBe("completed");
+    const completedDigest = getSeedJob(db, job.id)!.archive.sha256;
+    expect(completedDigest).not.toBeNull();
+
+    // A late writer with a valid-looking lease cannot touch them.
+    const late = updateOwnedSeedJobArchive(
+      db,
+      job.id,
+      { ...getSeedJob(db, job.id)!.archive, sha256: "c".repeat(64), bytes: 42 },
+      { owner: source.hostId, now: Date.now() },
+    );
+    expect(late).toBeNull();
+    expect(getSeedJob(db, job.id)!.archive.sha256).toBe(completedDigest);
+  });
+
+  test("a second run from the SAME host cannot start concurrent work on a live job", async () => {
+    const source = identity("samehost-source", "host-samehost-src");
+    const target = identity("samehost-target", "host-samehost-tgt");
+    buildSourceTree(source.root, 6);
+    const job = newJob(target.hostId);
+    // One owner string, two invocations — the case a host-id owner cannot tell
+    // apart from itself.
+    const SAME = source.hostId;
+
+    const firstStalled = deferred<void>();
+    const firstMayReturn = deferred<void>();
+    // One shared state for BOTH sides of the first run, as `run()` does.
+    const firstShared: SharedSourceState = { manifest: null };
+    const first = runSeedJob({
+      db,
+      store: store(),
+      jobId: job.id,
+      owner: SAME,
+      cleanup: cleanupSeedRelayObjects,
+      source: async (reporter) => {
+        expect(reporter.owned()).toBe(true);
+        firstStalled.resolve();
+        await firstMayReturn.promise;
+        return sourceSide(source, STORE_ROOT, firstShared)(reporter);
+      },
+      target: targetSide(target, STORE_ROOT, firstShared),
+    });
+    await firstStalled.promise;
+
+    // The second invocation must be refused, not run concurrently: it would
+    // claim, rewind the phase to `preflight`, and work on the same job.
+    let secondRan = false;
+    const second = await runSeedJob({
+      db,
+      store: store(),
+      jobId: job.id,
+      owner: SAME,
+      cleanup: cleanupSeedRelayObjects,
+      source: async (reporter) => {
+        secondRan = true;
+        // If it ever ran, it would see the phase rewound — assert it does not.
+        return { ok: false, error: "the second run worked", archive: null, baseline: null };
+      },
+      target: async () => ({ ok: false, error: "the second run worked", archive: null, baseline: null }),
+    });
+
+    expect(second.status).toBe("lease_lost");
+    expect(second.error).toContain("another owner holds");
+    expect(secondRan).toBe(false);
+    expect(second.phases).toEqual([]);
+    // The first run still holds the job, at its own phase.
+    const held = getSeedJob(db, job.id)!;
+    expect(held.status).toBe("running");
+    expect(held.leaseOwner).toBe(SAME);
+    expect(held.error).toBeNull();
+
+    // The first run finishes normally: the refusal changed nothing for it.
+    firstMayReturn.resolve();
+    const firstOutcome = await first;
+    expect(firstOutcome.status).toBe("completed");
+    expect(getSeedJob(db, job.id)!.status).toBe("completed");
+  });
+
+  test("the same host MAY take over once the lease has demonstrably lapsed", async () => {
+    const target = identity("takeover-target", "host-takeover-tgt");
+    const job = newJob(target.hostId);
+    const now = Date.now();
+    // A crashed run of THIS host: its lease is in the past.
+    db.run(
+      `UPDATE folder_seed_jobs
+          SET status = 'running', phase = 'archiving_source',
+              lease_owner = 'host-self', lease_expires_at = ?
+        WHERE id = ?`,
+      [now - 1, job.id],
+    );
+
+    const outcome = await runSeedJob({
+      db,
+      store: store(),
+      jobId: job.id,
+      owner: "host-self",
+      cleanup: cleanupSeedRelayObjects,
+      source: async (reporter) => {
+        expect(reporter.owned()).toBe(true);
+        return { ok: false, error: "the recovery run stopped", archive: null, baseline: null };
+      },
+      target: async () => ({ ok: false, error: "not reached", archive: null, baseline: null }),
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toBe("the recovery run stopped");
+    expect(getSeedJob(db, job.id)!.status).toBe("failed");
+  });
+});
+
 describe("a job cannot complete without its evidence", () => {
   test("a source that reports success without archive facts fails before the target runs", async () => {
     const source = identity("noarchive-source", "host-noarchive-src");
@@ -1310,7 +1539,6 @@ describe("cleanup is idempotent and recorded on the job", () => {
       jobId: job.id,
       owner: source.hostId,
       job: stored,
-      archiveFacts: stored.archive,
       now: () => Date.now(),
     });
     // Idempotent: the state is unchanged and nothing was deleted twice.
@@ -1364,7 +1592,6 @@ describe("cleanup is idempotent and recorded on the job", () => {
       jobId: job.id,
       owner: source.hostId,
       job: stored,
-      archiveFacts: stored.archive,
       now: () => Date.now(),
     });
     expect(retry.cleanup.state).toBe("cleaned");
