@@ -847,6 +847,9 @@ async function main(): Promise<void> {
 }
 
 function finish(): void {
+  // Stop the server before returning from main: its open pipes otherwise keep
+  // Bun alive, so the exit-hook fallback never gets a chance to run.
+  cleanupChildren();
   // Tear the disposable container down here, where a synchronous spawn still
   // works; the exit hook is only a fallback for an unexpected path.
   removeMinioContainer();

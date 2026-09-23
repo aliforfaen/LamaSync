@@ -69,6 +69,31 @@ describe("the real-network relay gate is explicit, not silent", () => {
   });
 });
 
+test("a network failure during HEAD returns a relay failure", async () => {
+  const store = createS3SeedRelayStore({
+    endpoint: "http://127.0.0.1:1",
+    bucket: "seed-test",
+    region: "us-east-1",
+    accessKeyId: "test",
+    secretAccessKey: "test",
+    fetchImpl: Object.assign(
+      async () => { throw new Error("connection refused"); },
+      { preconnect: () => {} },
+    ),
+  });
+  const key = seedRelayArchiveKey("network-failure", "tar.gz");
+  const head = await store.head(key);
+  expect(head.ok).toBe(false);
+  if (!head.ok) expect(head.error).toContain("could not be reached");
+
+  const put = await store.put({
+    key,
+    source: { kind: "bytes", data: new Uint8Array([1]) },
+    expected: { bytes: 1, sha256: sha256Hex(new Uint8Array([1])) },
+  });
+  expect(put.ok).toBe(false);
+});
+
 describe.skipIf(!AVAILABLE)("the S3 relay store is a real object space", () => {
   test("put → head → get → list → delete, with the digest as object metadata", async () => {
     await ensureS3SeedRelayBucket(options());

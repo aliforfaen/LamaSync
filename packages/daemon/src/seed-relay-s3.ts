@@ -268,7 +268,13 @@ export function createS3SeedRelayStore(options: S3SeedRelayStoreOptions): SeedRe
     });
   };
 
-  const headKey = async (key: string): Promise<SeedRelayResult<SeedRelayObjectHead>> => {    const response = await send({ method: "HEAD", key, payloadSha256: EMPTY_SHA256, now: now() });
+  const headKey = async (key: string): Promise<SeedRelayResult<SeedRelayObjectHead>> => {
+    let response: Response;
+    try {
+      response = await send({ method: "HEAD", key, payloadSha256: EMPTY_SHA256, now: now() });
+    } catch {
+      return seedRelayFailure("the object space could not be reached for HEAD");
+    }
     if (response.status === 404) return seedRelayFailure(`no object stored at ${key}`, true);
     if (!response.ok) return seedRelayFailure(await s3Error(response));
     const length = Number.parseInt(response.headers.get("content-length") ?? "", 10);
