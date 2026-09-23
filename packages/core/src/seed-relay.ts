@@ -228,6 +228,251 @@ export function seedArchiveMetadataProblem(metadata: SeedArchiveMetadata): strin
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Manifest handoff — the source universe travels WITH the archive
+// ---------------------------------------------------------------------------
+//
+// Stage 2b recorded a real gap rather than hiding it: the archive carries the
+// member set and the digest, but the target never received the SOURCE MANIFEST
+// itself, so a production target could not independently know what universe it
+// was supposed to publish. In the Stage 2a/2b proofs both sides shared the
+// manifest inside one test process.
+//
+// This is the fix at the contract level: the source uploads a canonical,
+// immutable manifest document to `lamasync/seed/<jobId>/manifest.json` in the
+// SAME temporary namespace as the archive, records its byte count and SHA-256
+// alongside the archive facts, and the target downloads it, verifies the
+// transit digest, RE-DERIVES the content fingerprint from the entries it
+// received, and only then may extract. Nothing is trusted from the source: the
+// target recomputes.
+//
+// The document is transport, not authority: the authority stays the archive
+// facts the source recorded once. A manifest whose re-derived fingerprint does
+// not equal the recorded `manifestFingerprint` is refused, exactly like a
+// mismatched archive digest.
+
+/** Object name of one job's manifest inside its seed namespace. */
+export const SEED_RELAY_MANIFEST_NAME = "manifest.json";
+
+/** The object key of one job's manifest: `lamasync/seed/<jobId>/manifest.json`. */
+export function seedRelayManifestKey(jobId: string): string {
+  return `${SEED_OBJECT_KEY_PREFIX}/${jobId}/${SEED_RELAY_MANIFEST_NAME}`;
+}
+
+/** One member of the transported manifest. Structurally the daemon's entry. */
+export interface SeedManifestEntryDocument {
+  /** Path relative to the source root, POSIX separators. */
+  path: string;
+  kind: "file" | "dir";
+  size: number;
+  mtimeMs: number;
+  /** SHA-256 for regular files; null for directories. */
+  sha256: string | null;
+}
+
+/**
+ * The canonical manifest document that travels through the relay.
+ *
+ * `fingerprint` is the content identity the source computed (path + kind +
+ * size + hash). The target must NOT trust it: it re-derives it from `entries`
+ * with the same algorithm and refuses a mismatch, which is what makes the
+ * handoff evidence rather than a claim.
+ */
+export interface SeedManifestDocument {
+  version: 1;
+  /** Content fingerprint, re-derived by the target from `entries`. */
+  fingerprint: string;
+  /** Effective filter universe the manifest was built from. */
+  filterFingerprint: string;
+  fileCount: number;
+  dirCount: number;
+  totalBytes: number;
+  entries: SeedManifestEntryDocument[];
+}
+
+/** Bound on how many members a transported manifest may carry. */
+export const SEED_MANIFEST_ENTRY_LIMIT = 2_000_000;
+
+/**
+ * The exact, deterministic bytes of the content-identity input.
+ *
+ * This is the SAME string the daemon's `buildSeedManifest` hashes, kept here so
+ * the algorithm has one description: `path\0kind\0size\0sha256-or-dash\n` per
+ * entry, in manifest order. The daemon hashes it with SHA-256; core cannot
+ * (it is dependency-free), so it exposes the input and the daemon owns the
+ * digest.
+ */
+export function seedManifestContentDigestInput(
+  entries: readonly SeedManifestEntryDocument[],
+): string {
+  let out = "";
+  for (const entry of entries) {
+    out += `${entry.path}\0${entry.kind}\0${entry.size}\0${entry.sha256 ?? "-"}\n`;
+  }
+  return out;
+}
+
+/**
+ * Why this document is not a usable manifest, or null when it is.
+ *
+ * Fail closed on every field: an unknown version, a non-hex fingerprint, a
+ * negative count, a member with a non-`file`/`dir` kind, a directory that
+ * claims a hash, a file that has none, an absolute or traversal path, or an
+ * entry count that disagrees with `entries` are all refusals. A target must
+ * never extract against a document it cannot fully describe.
+ */
+export function seedManifestDocumentProblem(document: SeedManifestDocument): string | null {
+  if (document.version !== 1) return "the transported manifest has an unknown version";
+  if (!SEED_SHA256_RE.test(document.fingerprint)) {
+    return "the transported manifest content fingerprint is not a 64-character hex digest";
+  }
+  if (!SEED_SHA256_RE.test(document.filterFingerprint)) {
+    return "the transported manifest filter fingerprint is not a 64-character hex digest";
+  }
+  for (const [label, value] of [
+    ["fileCount", document.fileCount],
+    ["dirCount", document.dirCount],
+    ["totalBytes", document.totalBytes],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      return `the transported manifest ${label} is not a non-negative integer`;
+    }
+  }
+  if (!Array.isArray(document.entries)) return "the transported manifest has no member list";
+  if (document.entries.length > SEED_MANIFEST_ENTRY_LIMIT) {
+    return "the transported manifest has more members than a seed can describe";
+  }
+  if (document.entries.length !== document.fileCount + document.dirCount) {
+    return "the transported manifest's member count does not match its file and directory counts";
+  }
+  let files = 0;
+  let dirs = 0;
+  let bytes = 0;
+  for (const entry of document.entries) {
+    if (typeof entry !== "object" || entry === null) return "the transported manifest has a malformed member";
+    if (entry.kind !== "file" && entry.kind !== "dir") {
+      return "a transported manifest member is neither a file nor a directory";
+    }
+    if (typeof entry.path !== "string" || entry.path.length === 0 || entry.path.length > SEED_PATH_MAX_LENGTH) {
+      return "a transported manifest member has an unusable path";
+    }
+    if (entry.path.startsWith("/") || entry.path.includes("\\") || entry.path.split("/").some((s) => s === "" || s === "." || s === "..")) {
+      return `a transported manifest member path is not a safe relative path: ${entry.path.slice(0, 120)}`;
+    }
+    for (let i = 0; i < entry.path.length; i += 1) {
+      const code = entry.path.charCodeAt(i);
+      if (code < 0x20 || code === 0x7f) return "a transported manifest member path contains a control character";
+    }
+    if (!Number.isSafeInteger(entry.size) || entry.size < 0) {
+      return `a transported manifest member has an unusable size: ${entry.path.slice(0, 120)}`;
+    }
+    if (typeof entry.mtimeMs !== "number" || !Number.isFinite(entry.mtimeMs)) {
+      return `a transported manifest member has an unusable modification time: ${entry.path.slice(0, 120)}`;
+    }
+    if (entry.kind === "file") {
+      if (entry.sha256 === null || !SEED_SHA256_RE.test(entry.sha256)) {
+        return `a transported manifest file member has no usable checksum: ${entry.path.slice(0, 120)}`;
+      }
+      files += 1;
+      bytes += entry.size;
+    } else {
+      if (entry.sha256 !== null) {
+        return `a transported manifest directory member carries a checksum: ${entry.path.slice(0, 120)}`;
+      }
+      dirs += 1;
+    }
+  }
+  if (files !== document.fileCount || dirs !== document.dirCount) {
+    return "the transported manifest's member kinds do not match its declared counts";
+  }
+  if (bytes !== document.totalBytes) {
+    return "the transported manifest's total byte count does not match its members";
+  }
+  return null;
+}
+
+/**
+ * Parse an untrusted manifest document, or return null.
+ *
+ * Never casts: an unknown shape becomes null and the caller fails closed. The
+ * returned object is structurally validated by `seedManifestDocumentProblem`
+ * so a caller can rely on every field.
+ */
+export function parseSeedManifestDocument(value: unknown): SeedManifestDocument | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record["version"] !== 1) return null;
+  const fingerprint = record["fingerprint"];
+  const filterFingerprint = record["filterFingerprint"];
+  const fileCount = record["fileCount"];
+  const dirCount = record["dirCount"];
+  const totalBytes = record["totalBytes"];
+  const rawEntries = record["entries"];
+  if (typeof fingerprint !== "string" || typeof filterFingerprint !== "string") return null;
+  if (typeof fileCount !== "number" || typeof dirCount !== "number" || typeof totalBytes !== "number") {
+    return null;
+  }
+  if (!Array.isArray(rawEntries)) return null;
+  const entries: SeedManifestEntryDocument[] = [];
+  for (const raw of rawEntries) {
+    if (typeof raw !== "object" || raw === null) return null;
+    const entry = raw as Record<string, unknown>;
+    const path = entry["path"];
+    const kind = entry["kind"];
+    const size = entry["size"];
+    const mtimeMs = entry["mtimeMs"];
+    const sha256 = entry["sha256"];
+    if (typeof path !== "string" || (kind !== "file" && kind !== "dir")) return null;
+    if (typeof size !== "number" || typeof mtimeMs !== "number") return null;
+    if (sha256 !== null && typeof sha256 !== "string") return null;
+    entries.push({ path, kind, size, mtimeMs, sha256: sha256 ?? null });
+  }
+  const document: SeedManifestDocument = {
+    version: 1,
+    fingerprint,
+    filterFingerprint,
+    fileCount,
+    dirCount,
+    totalBytes,
+    entries,
+  };
+  return seedManifestDocumentProblem(document) === null ? document : null;
+}
+
+/**
+ * The immutable transport metadata of one job's manifest object.
+ *
+ * Written ONCE by the source from the document it just serialized. The target
+ * downloads against these values; it never amends them.
+ */
+export interface SeedManifestMetadata {
+  jobId: string;
+  objectKey: string;
+  /** Exact byte count of the serialized document. */
+  bytes: number;
+  /** SHA-256 of the serialized document, lowercase hex. */
+  sha256: string;
+  /** Content fingerprint carried inside the document. */
+  contentFingerprint: string;
+}
+
+/** Why this manifest metadata is not usable, or null when it is. */
+export function seedManifestMetadataProblem(metadata: SeedManifestMetadata): string | null {
+  const key = validateSeedRelayObjectKey(metadata.objectKey, metadata.jobId);
+  if (!key.ok) return key.error;
+  if (metadata.objectKey !== seedRelayManifestKey(metadata.jobId)) {
+    return `the object key ${metadata.objectKey} is not the manifest key for this job (${seedRelayManifestKey(metadata.jobId)})`;
+  }
+  if (!Number.isSafeInteger(metadata.bytes) || metadata.bytes <= 0) {
+    return "the manifest byte count is not a positive integer";
+  }
+  if (!SEED_SHA256_RE.test(metadata.sha256)) return "the manifest SHA-256 is not a 64-character hex digest";
+  if (!SEED_SHA256_RE.test(metadata.contentFingerprint)) {
+    return "the manifest content fingerprint is not a 64-character hex digest";
+  }
+  return null;
+}
+
 /** The subset a stored object can actually be checked against. */
 export interface SeedArchiveObservation {
   bytes: number;

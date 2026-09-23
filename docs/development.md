@@ -82,6 +82,24 @@ For isolated Docker tests of the `curl | bash` install and update paths:
 ./scripts/test-update.sh
 ```
 
+For the LAMA-346 Stage 2c seed vertical path (an isolated server, a disposable
+MinIO container, two independent worker processes, real GNU tar and a real
+`rclone bisync` zero-change baseline), run:
+
+```bash
+bun run scripts/lama346-seed-e2e.ts --json /tmp/lama346-e2e.json
+```
+
+It needs Docker (for MinIO) and rclone; a missing one is reported as `GATED`,
+never as a pass. The real S3 store's own gated integration test runs against an
+existing MinIO with `LAMASYNC_TEST_S3_ENDPOINT`,
+`LAMASYNC_TEST_S3_BUCKET`, `LAMASYNC_TEST_S3_ACCESS_KEY` and
+`LAMASYNC_TEST_S3_SECRET_KEY` set (it skips explicitly otherwise):
+
+```bash
+bun test packages/daemon/src/seed-relay-s3.test.ts
+```
+
 For a full client end-to-end sandbox (install, registration, normal backup,
 dotfile backup, operation-log verification) in Docker Compose:
 

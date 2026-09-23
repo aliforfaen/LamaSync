@@ -1072,7 +1072,9 @@ export function seedPlanPrerequisites(
     SeedPlan,
     "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space"
   >,
+  options: { transportImplemented?: boolean } = {},
 ): SeedPrerequisite[] {
+  const transportImplemented = options.transportImplemented ?? SEED_ARCHIVE_TRANSPORT_IMPLEMENTED;
   return [
     { id: "source_authority", ok: plan.sourceAuthority.measurementUsable, message: plan.sourceAuthority.message },
     {
@@ -1097,7 +1099,7 @@ export function seedPlanPrerequisites(
         : "The target device has not reported that it has tar and the archive compressor.",
     },
     { id: "target_space", ok: plan.space.ok, message: plan.space.message },
-    { id: "transport", ok: SEED_ARCHIVE_TRANSPORT_IMPLEMENTED, message: SEED_EXECUTION_UNAVAILABLE_REASON },
+    { id: "transport", ok: transportImplemented, message: SEED_EXECUTION_UNAVAILABLE_REASON },
   ];
 }
 
@@ -1216,6 +1218,16 @@ export interface SeedJobArchiveFacts {
   memberCount: number | null;
   /** Content fingerprint of the manifest the archive was built from. */
   manifestFingerprint: string | null;
+  /**
+   * LAMA-346 Stage 2c: the transported manifest object, so the TARGET can
+   * independently know the source universe instead of sharing it in-process.
+   * Written ONCE by the source with the archive facts; `null` on a job that has
+   * not reached the transport (or an older row), which makes the target refuse
+   * rather than extract against an unknown universe.
+   */
+  manifestObjectKey: string | null;
+  manifestBytes: number | null;
+  manifestSha256: string | null;
   /** When the source finished uploading the object. */
   uploadedAt: number | null;
   /** When the target last verified the downloaded bytes against this record. */
@@ -1237,6 +1249,9 @@ export function emptySeedJobArchiveFacts(format: SeedArchiveFormat): SeedJobArch
     objectKey: null,
     memberCount: null,
     manifestFingerprint: null,
+    manifestObjectKey: null,
+    manifestBytes: null,
+    manifestSha256: null,
     uploadedAt: null,
     verifiedAt: null,
     cleanup: initialSeedRelayCleanup(),
@@ -1274,6 +1289,9 @@ export function normalizeSeedJobArchiveFacts(
     objectKey: typeof record["objectKey"] === "string" ? record["objectKey"] : null,
     memberCount: positiveIntOrNull(record["memberCount"]),
     manifestFingerprint: hexDigestOrNull(record["manifestFingerprint"]),
+    manifestObjectKey: typeof record["manifestObjectKey"] === "string" ? record["manifestObjectKey"] : null,
+    manifestBytes: positiveIntOrNull(record["manifestBytes"]),
+    manifestSha256: hexDigestOrNull(record["manifestSha256"]),
     uploadedAt: positiveIntOrNull(record["uploadedAt"]),
     verifiedAt: positiveIntOrNull(record["verifiedAt"]),
     cleanup: {
@@ -1370,11 +1388,12 @@ export const SEED_TIMEOUT_CHANGE_SCOPE =
   "initialization case that hit the dev-vm timeout — is now supervised by a progress-aware stall budget instead, " +
   "so it is stopped when it genuinely stalls rather than when it runs long.";
 
-export function seedPlanExecution(): SeedPlanExecution {
+export function seedPlanExecution(options: { transportImplemented?: boolean } = {}): SeedPlanExecution {
+  const transportImplemented = options.transportImplemented ?? SEED_ARCHIVE_TRANSPORT_IMPLEMENTED;
   return {
-    available: SEED_ARCHIVE_TRANSPORT_IMPLEMENTED && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
+    available: transportImplemented && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
     reason:
-      SEED_ARCHIVE_TRANSPORT_IMPLEMENTED && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED
+      transportImplemented && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED
         ? "Seed execution is available."
         : `${SEED_EXECUTION_UNAVAILABLE_REASON} ${SEED_TIMEOUT_CHANGE_SCOPE}`,
   };
@@ -1414,6 +1433,7 @@ export function checkSeedPlanValidity(
     filterFingerprint: string | null;
     baselineFingerprint: string | null;
   },
+  options: { transportImplemented?: boolean } = {},
 ): SeedPlanValidity {
   if (live.now >= plan.expiresAt) {
     return { valid: false, reason: "expired", message: "This seed plan has expired — prepare a new one." };
@@ -1482,7 +1502,7 @@ export function checkSeedPlanValidity(
   // would let a caller show a plan as ready for something that cannot run. The
   // plan's own blockers are reported first, because those are the ones the
   // operator can act on; this one is fleet-wide.
-  const execution = seedPlanExecution();
+  const execution = seedPlanExecution(options);
   if (!execution.available) {
     return { valid: false, reason: "not_runnable", message: execution.reason };
   }

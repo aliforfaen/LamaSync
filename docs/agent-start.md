@@ -69,6 +69,30 @@ last-writer-wins helpers. No production module may import it —
 `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` must stay `false` while it is test-only.
 Never give it a configured backend, a credential or a live folder.
 
+**Stage 2c's first slice is implemented, and it is TEST-ONLY.**
+`packages/daemon/src/seed-relay-s3.ts` is a real S3-compatible relay store
+(SigV4 over `fetch`, digest written as `x-amz-meta-sha256`, immutability, abort
+safety); `seed-transport.ts` gained the **manifest handoff**
+(`uploadSeedManifest` / `downloadSeedManifest`: the target re-derives the content
+fingerprint from the received entries and refuses a mismatch, so it
+independently knows the source universe); `SeedJobArchiveFacts` carries the
+manifest object key/bytes/digest (additive, no migration); and
+`scripts/lama346-seed-e2e.ts` runs the whole vertical path in one disposable
+sandbox — a real isolated server, a disposable MinIO container, TWO INDEPENDENT
+WORKER PROCESSES (`scripts/lama346-seed-worker.ts`) driving the real job API,
+real GNU tar and a real `rclone bisync --resync` that reports zero changed
+files, plus manifest-mismatch, non-empty-target, cancellation, aborted-upload
+and orphan-cleanup cases. `POST /seed-jobs` and `POST /seed-jobs/:jobId/archive`
+open only under the doubly-gated seam (`LAMASYNC_SEED_E2E=1` **and**
+`LAMASYNC_TEST=1`); `seed-e2e-seam.test.ts` pins that, and the S3 store is
+asserted test-only from the module graph. Two gaps this slice surfaces rather
+than hides: the job authorizes only its TARGET host and has one lease (the E2E
+uses the master key; production needs source-host authorization or delegation),
+and the shipped daemon action loop does not dispatch seed work. The GATED host
+proofs (a real two-machine hop, real ENOSPC on a bounded volume, the live
+large-tree run) remain. Never give the store, the worker or the seam a
+production credential, endpoint, rclone config or live folder.
+
 **Execution is deliberately unavailable**: no store is wired to a running job,
 so `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
 `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`), `POST /seed-jobs` returns

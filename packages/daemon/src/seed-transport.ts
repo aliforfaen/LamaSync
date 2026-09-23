@@ -33,7 +33,7 @@
 // is still `false`, `POST /seed-jobs` still refuses, and nothing here is wired
 // to a configured S3 backend, an rclone remote or a live host.
 
-import { existsSync, rmSync, statSync } from "fs";
+import { existsSync, readFileSync, rmSync, statSync } from "fs";
 import {
   SEED_SHA256_RE,
   canTransitionSeedPhase,
@@ -42,21 +42,29 @@ import {
   initialSeedRelayCleanup,
   isSeedRelayCleanupComplete,
   isTerminalSeedPhase,
+  parseSeedManifestDocument,
   seedArchiveMatchesMetadata,
   seedArchiveMetadataProblem,
+  seedManifestContentDigestInput,
+  seedManifestDocumentProblem,
+  seedManifestMetadataProblem,
   seedRelayArchiveKey,
+  seedRelayManifestKey,
   validateSeedRelayObjectKey,
   type SeedArchiveFormat,
   type SeedArchiveMetadata,
   type SeedJobArchiveFacts,
   type SeedJobPhase,
   type SeedJobPhaseOrTerminal,
+  type SeedManifestDocument,
+  type SeedManifestMetadata,
   type SeedRelayCleanup,
   type SeedRelayProgress,
   type SeedRelayStore,
 } from "@lamasync/core";
 import { createHash } from "crypto";
 import { createReadStream } from "fs";
+import type { SeedManifest } from "./seed-archive.ts";
 
 export interface SeedTransportProgress {
   bytesDone: number;
@@ -375,6 +383,237 @@ export async function downloadSeedArchive(
     archive: { ...archive, verifiedAt: input.now },
     error: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Source side: the manifest handoff
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-derive the content fingerprint of a member list.
+ *
+ * This MUST stay byte-for-byte identical to the daemon's `buildSeedManifest`:
+ * `path\0kind\0size\0sha256-or-dash\n` per entry, in order. The target uses it
+ * to check the manifest it received against the fingerprint the source
+ * recorded, so a transport that mangled or reordered members is caught here
+ * rather than by the following bisync. A dedicated test pins it against a real
+ * `buildSeedManifest` result.
+ */
+export function seedManifestContentFingerprint(
+  entries: SeedManifestDocument["entries"],
+): string {
+  return createHash("sha256").update(seedManifestContentDigestInput(entries)).digest("hex");
+}
+
+/** Project the daemon's in-memory manifest into the transported document. */
+export function seedManifestToDocument(manifest: SeedManifest): SeedManifestDocument {
+  return {
+    version: 1,
+    fingerprint: manifest.fingerprint,
+    filterFingerprint: manifest.filter.fingerprint,
+    fileCount: manifest.fileCount,
+    dirCount: manifest.dirCount,
+    totalBytes: manifest.totalBytes,
+    entries: manifest.entries.map((entry) => ({
+      path: entry.path,
+      kind: entry.kind,
+      size: entry.size,
+      mtimeMs: entry.mtimeMs,
+      sha256: entry.sha256,
+    })),
+  };
+}
+
+/** Deterministic bytes for the document, so the digest is reproducible. */
+export function serializeSeedManifestDocument(document: SeedManifestDocument): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(document));
+}
+
+export interface UploadSeedManifestInput {
+  store: SeedRelayStore;
+  jobId: string;
+  manifest: SeedManifest;
+  now: number;
+  signal?: AbortSignal;
+}
+
+export interface UploadSeedManifestResult {
+  ok: boolean;
+  metadata: SeedManifestMetadata | null;
+  error: string | null;
+}
+
+/**
+ * Serialize the source manifest, store it in the job's seed namespace, and
+ * prove the store holds what we sent.
+ *
+ * The document is validated BEFORE it is uploaded, so a manifest the target
+ * could not trust is never put on the relay. On any failure the object is
+ * deleted, exactly like a failed archive upload.
+ */
+export async function uploadSeedManifest(
+  input: UploadSeedManifestInput,
+): Promise<UploadSeedManifestResult> {
+  const document = seedManifestToDocument(input.manifest);
+  const problem = seedManifestDocumentProblem(document);
+  if (problem !== null) {
+    return { ok: false, metadata: null, error: `the source manifest cannot be transported: ${problem}` };
+  }
+  const objectKey = seedRelayManifestKey(input.jobId);
+  const keyVerdict = validateSeedRelayObjectKey(objectKey, input.jobId);
+  if (!keyVerdict.ok) {
+    return { ok: false, metadata: null, error: keyVerdict.error ?? "the manifest key is not usable" };
+  }
+  const bytes = serializeSeedManifestDocument(document);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const expected = { bytes: bytes.byteLength, sha256 };
+
+  const put = await input.store.put({
+    key: objectKey,
+    source: { kind: "bytes", data: bytes },
+    expected,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  if (!put.ok) {
+    await bestEffortDelete(input.store, objectKey);
+    return { ok: false, metadata: null, error: describeSeedRelayFailure(input.store.kind, put.error) };
+  }
+  const head = await input.store.head(objectKey);
+  if (!head.ok) {
+    await bestEffortDelete(input.store, objectKey);
+    return { ok: false, metadata: null, error: describeSeedRelayFailure(input.store.kind, head.error) };
+  }
+  const match = seedArchiveMatchesMetadata(expected, { bytes: head.value.bytes, sha256: head.value.sha256 });
+  if (!match.ok) {
+    await bestEffortDelete(input.store, objectKey);
+    return {
+      ok: false,
+      metadata: null,
+      error: describeSeedRelayFailure(
+        input.store.kind,
+        `${match.error ?? "the stored manifest does not match"}; the object was removed`,
+      ),
+    };
+  }
+  const metadata: SeedManifestMetadata = {
+    jobId: input.jobId,
+    objectKey,
+    bytes: expected.bytes,
+    sha256,
+    contentFingerprint: document.fingerprint,
+  };
+  const metadataProblem = seedManifestMetadataProblem(metadata);
+  if (metadataProblem !== null) {
+    await bestEffortDelete(input.store, objectKey);
+    return { ok: false, metadata: null, error: metadataProblem };
+  }
+  return { ok: true, metadata, error: null };
+}
+
+// ---------------------------------------------------------------------------
+// Target side: the manifest handoff
+// ---------------------------------------------------------------------------
+
+export interface DownloadSeedManifestInput {
+  store: SeedRelayStore;
+  /** The job's IMMUTABLE archive facts, which carry the manifest metadata. */
+  archive: SeedJobArchiveFacts;
+  jobId: string;
+  /** Where to write the document. Must be inside the target's staging area. */
+  destPath: string;
+  signal?: AbortSignal;
+}
+
+export interface DownloadSeedManifestResult {
+  ok: boolean;
+  /** The re-verified document, or null. */
+  document: SeedManifestDocument | null;
+  error: string | null;
+}
+
+/**
+ * Download the source manifest and RE-DERIVE its content fingerprint.
+ *
+ * Three independent checks, all fail-closed:
+ *   1. the bytes on disk must hash to the digest the source recorded;
+ *   2. the document must parse and validate;
+ *   3. the fingerprint re-derived from the received entries must equal BOTH the
+ *      recorded `manifestFingerprint` AND the fingerprint the document claims.
+ *
+ * Only then may the caller extract. The source's own report is never evidence:
+ * the target recomputes. A failure deletes the download.
+ */
+export async function downloadSeedManifest(
+  input: DownloadSeedManifestInput,
+): Promise<DownloadSeedManifestResult> {
+  const fail = (error: string): DownloadSeedManifestResult => ({
+    ok: false,
+    document: null,
+    error: describeSeedRelayFailure(input.store.kind, error),
+  });
+  const { archive } = input;
+  if (archive.manifestObjectKey === null || archive.manifestBytes === null || archive.manifestSha256 === null) {
+    return fail("this job has no recorded source manifest, so the target cannot know the source universe");
+  }
+  if (archive.manifestFingerprint === null) {
+    return fail("this job recorded no manifest content fingerprint to verify against");
+  }
+  const expectedKey = seedRelayManifestKey(input.jobId);
+  if (archive.manifestObjectKey !== expectedKey) {
+    return fail(`the recorded manifest object key is not this job's manifest key (${expectedKey})`);
+  }
+  const keyVerdict = validateSeedRelayObjectKey(archive.manifestObjectKey, input.jobId);
+  if (!keyVerdict.ok) return fail(keyVerdict.error ?? "the recorded manifest key is not usable");
+
+  const expected = { bytes: archive.manifestBytes, sha256: archive.manifestSha256 };
+  const get = await input.store.get({
+    key: archive.manifestObjectKey,
+    destPath: input.destPath,
+    expected,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  if (!get.ok) {
+    bestEffortRm(input.destPath);
+    return fail(get.error);
+  }
+
+  let onDisk: { bytes: number; sha256: string };
+  let text: string;
+  try {
+    onDisk = await seedRelayFileDigest(input.destPath);
+    text = readFileSync(input.destPath, "utf8");
+  } catch (err) {
+    bestEffortRm(input.destPath);
+    return fail(`the downloaded manifest could not be read back: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const match = seedArchiveMatchesMetadata(expected, onDisk);
+  if (!match.ok) {
+    bestEffortRm(input.destPath);
+    return fail(`${match.error ?? "the downloaded manifest does not match"}; the download was removed`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    bestEffortRm(input.destPath);
+    return fail("the transported manifest is not valid JSON");
+  }
+  const document = parseSeedManifestDocument(parsed);
+  if (document === null) {
+    bestEffortRm(input.destPath);
+    return fail("the transported manifest failed validation");
+  }
+  const derived = seedManifestContentFingerprint(document.entries);
+  if (derived !== document.fingerprint) {
+    bestEffortRm(input.destPath);
+    return fail("the transported manifest's content fingerprint does not match the members it carries");
+  }
+  if (derived !== archive.manifestFingerprint) {
+    bestEffortRm(input.destPath);
+    return fail("the transported manifest describes a different universe than the job recorded");
+  }
+  return { ok: true, document, error: null };
 }
 
 // ---------------------------------------------------------------------------

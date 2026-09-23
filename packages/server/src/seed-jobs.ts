@@ -1027,7 +1027,7 @@ export function buildSeedPlan(
     baselineFingerprint: targetRecord?.facts.baseline.fingerprint ?? null,
     createdAt: now,
     expiresAt: now + SEED_PLAN_TTL_MS,
-    execution: seedPlanExecution(),
+    execution: seedPlanExecution({ transportImplemented: seedTransportE2eEnabled() }),
   };
   return { ok: true, plan };
 }
@@ -1043,12 +1043,32 @@ export function seedPlanValidityFor(
     .get(plan.hostId);
   const records = loadDerivedFolderHealth(database, now, plan.folderId);
   const record = records.find((r) => r.assignmentId === plan.assignmentId) ?? null;
-  return checkSeedPlanValidity(plan, {
-    now,
-    configRevision: revisionRow?.config_revision ?? 0,
-    filterFingerprint: record?.facts.filter.fingerprint ?? plan.filterFingerprint,
-    baselineFingerprint: record?.facts.baseline.fingerprint ?? plan.baselineFingerprint,
-  });
+  return checkSeedPlanValidity(
+    plan,
+    {
+      now,
+      configRevision: revisionRow?.config_revision ?? 0,
+      filterFingerprint: record?.facts.filter.fingerprint ?? plan.filterFingerprint,
+      baselineFingerprint: record?.facts.baseline.fingerprint ?? plan.baselineFingerprint,
+    },
+    { transportImplemented: seedTransportE2eEnabled() },
+  );
+}
+
+/**
+ * LAMA-346 Stage 2c — the TEST-ONLY transport seam.
+ *
+ * `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false` and production must keep
+ * refusing job creation. The disposable E2E harness is the only caller that
+ * opens this, and it must set BOTH variables, so a stray `LAMASYNC_TEST=1` (or
+ * a stray `LAMASYNC_SEED_E2E=1`) alone changes nothing. Opening the seam only
+ * makes a plan runnable and `POST /seed-jobs` create a job; it does NOT wire a
+ * store or an executor into the server — no production module imports the
+ * coordinator, the S3 store or the seed sides, and no daemon polls for seed
+ * work. Without the seam the route still answers 503, unchanged.
+ */
+export function seedTransportE2eEnabled(): boolean {
+  return process.env["LAMASYNC_SEED_E2E"] === "1" && process.env["LAMASYNC_TEST"] === "1";
 }
 
 /** Build the starting progress record for a newly created job. */

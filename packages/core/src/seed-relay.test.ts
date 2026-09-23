@@ -288,6 +288,9 @@ describe("archive facts are the transport state, and normalize fail-closed", () 
       objectKey: null,
       memberCount: null,
       manifestFingerprint: null,
+      manifestObjectKey: null,
+      manifestBytes: null,
+      manifestSha256: null,
       uploadedAt: null,
       verifiedAt: null,
       cleanup: { state: "not_started", attempts: 0, lastAttemptAt: null, deletedKeys: [], message: null },
@@ -298,7 +301,10 @@ describe("archive facts are the transport state, and normalize fail-closed", () 
       "bytes",
       "cleanup",
       "format",
+      "manifestBytes",
       "manifestFingerprint",
+      "manifestObjectKey",
+      "manifestSha256",
       "memberCount",
       "objectKey",
       "sha256",
@@ -327,6 +333,9 @@ describe("archive facts are the transport state, and normalize fail-closed", () 
     expect(partial.objectKey).toBeNull();
     expect(partial.memberCount).toBeNull();
     expect(partial.manifestFingerprint).toBeNull();
+    expect(partial.manifestObjectKey).toBeNull();
+    expect(partial.manifestBytes).toBeNull();
+    expect(partial.manifestSha256).toBeNull();
     expect(partial.uploadedAt).toBeNull();
     expect(partial.verifiedAt).toBeNull();
     expect(partial.cleanup.state).toBe("not_started");

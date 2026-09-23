@@ -49,21 +49,49 @@ function productionSources(): Array<{ path: string; text: string }> {
 
 describe("Stage 1b is a bounded foundation, not a live seed", () => {
   test("the transport is a library: no production module imports it", () => {
-    const self = new Set(["seed-transport.ts", "seed-relay-local.ts"]);
+    // `seed-relay-s3.ts` is the test-only network store (Stage 2c). It imports
+    // the transport's hashing helper, so it is in the self-set — but nothing in
+    // production may import IT either; a separate test below pins that.
+    const self = new Set(["seed-transport.ts", "seed-relay-local.ts", "seed-relay-s3.ts"]);
     const importers = productionSources()
       .filter((file) => !self.has(file.path.slice(file.path.lastIndexOf("/") + 1)))
-      .filter((file) => /from "\.\/seed-transport\.ts"|from "\.\/seed-relay-local\.ts"/.test(file.text))
+      .filter((file) =>
+        /from "\.\/seed-transport\.ts"|from "\.\/seed-relay-local\.ts"|from "\.\/seed-relay-s3\.ts"/.test(
+          file.text,
+        ),
+      )
       .map((file) => file.path.slice(REPO_ROOT.length + 1));
     // Tests import it (that is how it is exercised); production does not.
     expect(importers).toEqual([]);
   });
 
+  test("the S3 store is test-only: no production module imports or constructs it", () => {
+    // The S3 store legitimately carries credential-shaped constructor fields,
+    // so the invariant is not "no file mentions a key" — it is "only the
+    // test-only store does, and production never reaches it".
+    const sources = productionSources();
+    const storeName = "seed-relay-s3.ts";
+    // Among modules that reach the seed transport, only the test-only store may
+    // carry credential-shaped fields (backends elsewhere legitimately do, for
+    // the managed-folder namespace — which is why the filter is combined).
+    const credentialShaped = sources
+      .filter((file) => file.text.includes("seed-transport"))
+      .filter((file) => file.text.includes("secretAccessKey"))
+      .map((file) => file.path.slice(REPO_ROOT.length + 1));
+    expect(credentialShaped).toEqual([`packages/daemon/src/${storeName}`]);
+    const importers = sources
+      .filter((file) => file.path.slice(file.path.lastIndexOf("/") + 1) !== storeName)
+      .filter((file) => /from "\.\/seed-relay-s3\.ts"|\.\/seed-relay-s3/.test(file.text))
+      .map((file) => file.path.slice(REPO_ROOT.length + 1));
+    expect(importers).toEqual([]);
+  });
+
   test("no production module reaches a configured S3 or rclone for seeds", () => {
     // The relay contract has no credential, endpoint or bucket parameter, and
-    // the only implementation is the local object store. A production file that
-    // tried to build an S3 client for the seed namespace would have to mention
-    // one of these.
+    // the only production-adjacent implementation is the local object store.
+    // The S3 store is test-only (asserted above), so it is excluded here.
     const suspicious = productionSources()
+      .filter((file) => file.path.slice(file.path.lastIndexOf("/") + 1) !== "seed-relay-s3.ts")
       .filter((file) => file.text.includes("seed-transport"))
       .filter((file) => /secretAccessKey|accessKeyId|buildS3RelayConfig|rclone/i.test(file.text))
       .map((file) => file.path.slice(REPO_ROOT.length + 1));

@@ -15,6 +15,7 @@ import {
   canTransitionSeedPhase,
   emptySeedJobArchiveFacts,
   isTerminalSeedPhase,
+  normalizeSeedJobArchiveFacts,
   parseSeedJobCreatePayload,
   parseSeedPlanRequestPayload,
   parseSeedProgressPayload,
@@ -43,6 +44,8 @@ import {
   recordSeedPlan,
   renewSeedJobLease,
   seedPlanValidityFor,
+  seedTransportE2eEnabled,
+  updateSeedJobArchive,
   updateSeedJobProgress,
 } from "../seed-jobs.ts";
 
@@ -204,7 +207,7 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Seed plan not found" };
       }
-      const execution = seedPlanExecution();
+      const execution = seedPlanExecution({ transportImplemented: seedTransportE2eEnabled() });
       if (!execution.available) {
         // Explicitly unavailable — never a fake button. The plan, space
         // calculation and progress model are reviewed; the transport is not.
@@ -400,6 +403,63 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
           403: { description: "Device may not report for this job" },
           404: { description: "Seed job not found" },
           409: { description: "Job finished, or the phase transition is illegal" },
+        },
+      },
+    },
+  )
+  .post(
+    "/seed-jobs/:jobId/archive",
+    ({ params, body, set, request }) => {
+      // LAMA-346 Stage 2c, TEST-ONLY. Recording the source's immutable archive
+      // facts is a real remote-orchestration need, but the whole seed surface
+      // stays inert until the E2E is reviewed: without the seam this answers
+      // 503 exactly like POST /seed-jobs. The body is normalized fail-closed,
+      // so a malformed digest becomes null and the target then refuses to
+      // download rather than trusting a shape it cannot verify.
+      if (!seedTransportE2eEnabled()) {
+        set.status = 503;
+        return {
+          error: "Seed execution is not available yet.",
+          executionAvailable: false,
+          jobId: params.jobId,
+        };
+      }
+      const job = getSeedJob(activeDb, params.jobId);
+      if (!job) {
+        set.status = 404;
+        return { error: "Seed job not found" };
+      }
+      if (!deviceMayAccessHost(principalOf(request), job.hostId)) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (isTerminalSeedPhase(job.phase)) {
+        set.status = 409;
+        return { error: "This seed job is already finished" };
+      }
+      const facts = normalizeSeedJobArchiveFacts(
+        { ...job.archive, ...body },
+        job.archive.format,
+      );
+      const updated = updateSeedJobArchive(activeDb, job.id, facts, Date.now());
+      if (updated) {
+        const event: WSEvent = { kind: "seed_job", job: updated };
+        broadcast(event);
+      }
+      return updated ?? job;
+    },
+    {
+      params: t.Object({ jobId: t.String() }),
+      body: t.Record(t.String(), t.Unknown()),
+      detail: {
+        summary: "Record a seed job's immutable archive/manifest facts (device → server; test-gated)",
+        tags: ["Folder Seed"],
+        responses: {
+          200: { description: "Seed job with the recorded archive facts" },
+          403: { description: "Device may not report for this job" },
+          404: { description: "Seed job not found" },
+          409: { description: "Job already finished" },
+          503: { description: "Seed execution is not available yet" },
         },
       },
     },
