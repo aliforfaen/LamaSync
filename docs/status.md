@@ -699,8 +699,8 @@ distributable binary build.
 ## Active follow-ups
 
 1. **LAMA-346 — the transport, remote orchestration and live acceptance.**
-   Stages 1a, 1b, 2a, 2b and 2c are implemented and locally validated, and
-   **Stage 2d is now implemented and passing on this host**. The job carries
+   Stages 1a, 1b, 2a, 2b and 2c are implemented and locally validated;
+   **Stages 2d and 2e are now implemented and passing on this host**. The job carries
    `sourceHostId`, so each side of a seed has its own IDENTITY: a device key is
    authorized for the source half or the target half (`seedJobRoleFor` +
    `seedJobPhaseRole`), the archive facts are written exactly once by the
@@ -716,10 +716,27 @@ distributable binary build.
    zero-change verdict is REQUIRED before `completed` (no peer ⇒ the phase
    fails, never a false pass). `scripts/lama346-seed-e2e.ts` starts TWO REAL
    daemon processes, each with a device key minted through the pairing
-   exchange, and passes **53 checks / 0 fail / 3 GATED** — including four
+   exchange, and passes **66 checks / 0 fail / 3 GATED** — including four
    device-key denials (the target cannot rewrite the source's facts, a third
    device cannot read the job, a late report cannot reopen it, and the digest
-   cannot be rewritten). Execution is still unavailable by default:
+   cannot be rewritten).
+   **Stage 2e closed a review finding that would have reproduced the original
+   incident:** the runner renewed the seed job lease only between stages, so a
+   healthy transfer longer than the 10-minute lease lost the job and its
+   handover write was refused. `packages/daemon/src/seed-lease-supervisor.ts`
+   now renews from a TIMER that runs alongside every long stage (tar, upload,
+   download, extraction, verification, `rclone`), with a grace window bounded
+   strictly inside the lease, an `AbortSignal` threaded into every long
+   operation, and an authority check immediately before publishing and before
+   completing. A cancellation or a lost lease now stops the run mid-stage: it
+   publishes nothing, leaves no staging sibling or work directory, and is
+   reported as a STOP rather than as a job failure. The reaper no longer fails
+   the handover window (a `running` job with no lease is given a grace), and
+   the target no longer renews a lease it does not hold while it waits for the
+   source. The E2E proves it against two real daemons with a 30 s lease: a 35 s
+   source stage was LIVE at all 116 observations and RENEWED 12 times, and an
+   operator cancellation inside the target's 10 s hold published nothing.
+   Execution is still unavailable by default:
    `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` and `POST /seed-jobs` still
    returns 503 unless the seam is fully open on BOTH the server and the daemon.
    Remaining work, in order:
@@ -734,12 +751,14 @@ distributable binary build.
    confirm the target's archive tooling **and** staging proof are reported
    before the Run control is enabled for that device; (e) persist the cleanup
    block server-side for a daemon-run job (the objects ARE deleted; the
-   bookkeeping field stays `not_started`). The retention/cleanup policy is
+   bookkeeping field stays `not_started`; a STOPPED side also leaves that
+   job's relay objects to the retention sweep, asserted in the E2E). The
+   retention/cleanup policy is
    decided (delete on the terminal phase, 24 h for abandoned objects,
    idempotent, namespace-confined). Only after (a)-(c) and an independent
    review may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip. See
    [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md)
-   §2.14.
+   §2.14 and §2.15.
 
 2. **LAMA-337 — release, and the one device-path question it leaves open.**
    The reconnect flow is merged with the

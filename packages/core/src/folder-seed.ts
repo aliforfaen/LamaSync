@@ -98,6 +98,52 @@ export const SEED_STAGE_HARD_CAP_MS = 6 * 60 * 60_000;
 /** A running seed job's lease is renewed by its owner; a stale one is reclaimable. */
 export const SEED_JOB_LEASE_MS = 10 * 60_000;
 
+/**
+ * How often a working seed side renews its JOB lease.
+ *
+ * Deliberately a small fraction of `SEED_JOB_LEASE_MS` and deliberately the
+ * same shape as `ACTION_LEASE_RENEW_INTERVAL_MS` (LAMA-345), which exists for
+ * exactly this reason on the queued-action lease. A seed stage can outlive the
+ * lease many times over — the incident that started LAMA-346 was a 43.5-minute
+ * attempt against a 10-minute budget — so a side that only renewed BETWEEN
+ * stages would lose the job in the middle of a healthy transfer, and the
+ * handover write that requires a live lease would then be refused. Renewal is
+ * therefore a timer that runs alongside the stage, not a step between stages.
+ *
+ * The two leases are NOT the same thing and are renewed independently: this is
+ * `folder_seed_jobs.lease_expires_at`, and `ACTION_LEASE_MS` is
+ * `queued_actions.lease_expires_at`. Neither one implies the other — a job can
+ * outlive the action that started it, and a daemon that keeps its action lease
+ * alive can still lose the job (and must then stop).
+ */
+export const SEED_JOB_LEASE_RENEW_INTERVAL_MS = 60_000;
+
+/**
+ * How long a seed side may go without a SUCCESSFUL renewal before it must stop
+ * working.
+ *
+ * Bounded strictly below the lease TTL, so a side that can no longer reach the
+ * server stops on its own — releasing its staging and refusing to publish —
+ * while its lease is still nominally live. It therefore never has to discover
+ * the loss by having a write refused after the fact, and the operator sees one
+ * honest sentence instead of a job that half-finished under someone else's
+ * lease.
+ */
+export const SEED_JOB_LEASE_STOP_GRACE_MS = SEED_JOB_LEASE_MS - SEED_JOB_LEASE_RENEW_INTERVAL_MS;
+
+/**
+ * How long a RUNNING job may have NO lease holder before the reaper ends it.
+ *
+ * A seed's lease is handed over by CLEARING the owner (the source's archive-fact
+ * write), and the target normally claims within a second — so a running job with
+ * no lease is usually a handover in flight, not an abandoned job. Without a
+ * grace period the reaper would fail a perfectly healthy handover caught in
+ * that window. The target's whole start is bounded by a phase adjacency and by
+ * `seedArchiveFactsComplete`, so this grace only ever covers a target that never
+ * showed up.
+ */
+export const SEED_JOB_HANDOVER_GRACE_MS = 5 * 60_000;
+
 /** Plans are a reviewed intent, not a standing grant. */
 export const SEED_PLAN_TTL_MS = 30 * 60_000;
 

@@ -38,13 +38,14 @@ import {
   seedRelayArchiveKey,
   seedRelayManifestKey,
   seedRelayOrphanKeys,
+  seedStagingPath,
   type SeedJob,
 } from "@lamasync/core";
 import { detectArchiveTooling, verifyExtractedTree } from "../packages/daemon/src/seed-archive.ts";
 import { buildSeedFilterUniverse, buildSeedSourceManifest } from "../packages/daemon/src/seed-filter-universe.ts";
 import { measureLocalTree } from "../packages/daemon/src/folder-health.ts";
 import { createS3SeedRelayStore, ensureS3SeedRelayBucket } from "../packages/daemon/src/seed-relay-s3.ts";
-import { seedManifestContentFingerprint } from "../packages/daemon/src/seed-transport.ts";
+import { cleanupSeedRelayObjects, seedManifestContentFingerprint } from "../packages/daemon/src/seed-transport.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const KEEP = process.argv.includes("--keep");
@@ -458,15 +459,55 @@ async function runWorker(role: "source" | "target", jobId: string, extra: Record
   return { code, events, stdout, stderr };
 }
 
-async function waitForTerminalJob(jobId: string, timeoutMs = 180_000): Promise<SeedJob> {
+interface TerminalWaitOptions {
+  timeoutMs?: number;
+  /** Called with every poll, so a test can watch the lease move. */
+  onSample?: (job: SeedJob) => void;
+  /** Cancel the job as soon as this returns true, exactly once. */
+  cancelWhen?: () => boolean;
+}
+
+async function waitForTerminalJobWith(jobId: string, options: TerminalWaitOptions = {}): Promise<SeedJob> {
+  const timeoutMs = options.timeoutMs ?? 180_000;
   const deadline = Date.now() + timeoutMs;
+  let cancelled = false;
   for (;;) {
     const res = await api("GET", `/seed-jobs/${jobId}`);
     const job = res.body as SeedJob;
+    if (job) options.onSample?.(job);
     if (job && ["completed", "failed", "cancelled"].includes(job.phase)) return job;
+    if (options.cancelWhen !== undefined && !cancelled && options.cancelWhen()) {
+      cancelled = true;
+      const cancelledRes = await api("POST", `/seed-jobs/${jobId}/cancel`);
+      console.log(`  (operator cancellation sent: status ${cancelledRes.status})`);
+    }
     if (Date.now() > deadline) throw new Error(`job ${jobId} did not reach a terminal state`);
     await Bun.sleep(300);
   }
+}
+
+async function waitForTerminalJob(jobId: string, timeoutMs = 180_000): Promise<SeedJob> {
+  return waitForTerminalJobWith(jobId, { timeoutMs });
+}
+
+/** How many times a marker appears in a log buffer (per-job scoping). */
+function occurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index >= 0) {
+    count += 1;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
+/** Two tree snapshots are equal when they hold the same paths at the same sizes. */
+function sameTree(a: Map<string, number>, b: Map<string, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [rel, size] of a) {
+    if (b.get(rel) !== size) return false;
+  }
+  return true;
 }
 
 /**
@@ -645,6 +686,36 @@ async function createJob(folderId: string): Promise<string> {
 // The worker-based sections below remain as a lower-level diagnostic (they can
 // drive failure injection cheaply), and they are labelled as such.
 
+/**
+ * The lease shape this run uses, and the one deliberately LONG stage per side.
+ *
+ * The lease is shortened to the smallest window the route accepts (30 s) and the
+ * renewal interval to 3 s, so a stage held for 35 s OUTLIVES the lease many times
+ * over: that is the incident's shape (a healthy 43-minute transfer against a
+ * 10-minute budget) compressed into half a minute. Without a renewal DURING the
+ * stage the source's handover write — which requires a LIVE lease — is refused
+ * and a healthy seed fails; with one it completes.
+ *
+ * All of it is seam-gated (`LAMASYNC_SEED_*` is read only when the doubly-gated
+ * seam is open, and the lease is floored at the route's own minimum), so none of
+ * it can reach a production build.
+ */
+const LEASE_MS = 30_000;
+const LEASE_INTERVAL_MS = 3_000;
+const SOURCE_HOLD_MS = 35_000;
+const TARGET_HOLD_MS = 10_000;
+const SOURCE_HOLD_PHASE = "uploading_archive";
+const TARGET_HOLD_PHASE = "extracting_target";
+
+function seamLeaseEnv(side: "source" | "target"): Record<string, string> {
+  return {
+    LAMASYNC_SEED_LEASE_MS: String(LEASE_MS),
+    LAMASYNC_SEED_LEASE_INTERVAL_MS: String(LEASE_INTERVAL_MS),
+    LAMASYNC_SEED_STAGE_DELAY_PHASE: side === "source" ? SOURCE_HOLD_PHASE : TARGET_HOLD_PHASE,
+    LAMASYNC_SEED_STAGE_DELAY_MS: String(side === "source" ? SOURCE_HOLD_MS : TARGET_HOLD_MS),
+  };
+}
+
 interface DaemonHandle {
   side: "source" | "target";
   hostId: string;
@@ -741,7 +812,10 @@ async function startDaemon(
     join(configDir, "update-state.json"),
     JSON.stringify({ lastCheckAt: Date.now() }),
   );
-  const env = daemonEnv(home, side === "target" ? { LAMASYNC_SEED_DAEMON_PEER_PATH: SOURCE_ROOT } : {});
+  const env = daemonEnv(home, {
+    ...(side === "target" ? { LAMASYNC_SEED_DAEMON_PEER_PATH: SOURCE_ROOT } : {}),
+    ...seamLeaseEnv(side),
+  });
   const proc = Bun.spawn(["bun", "run", join(ROOT, "packages", "daemon", "src", "index.ts")], {
     cwd: ROOT,
     env,
@@ -831,6 +905,7 @@ async function startDaemons(): Promise<{
 async function runDaemonSeed(
   folderId: string,
   daemons: { source: DaemonHandle; target: DaemonHandle; sourceKey: string; targetKey: string },
+  options: TerminalWaitOptions & { label?: string } = {},
 ): Promise<DaemonSeedResult> {
   const planRes = await api("POST", `/folders/${folderId}/seed-plans`, {
     hostId: "seed-target",
@@ -846,6 +921,7 @@ async function runDaemonSeed(
     throw new Error(`seed-job answered ${jobRes.status}: ${JSON.stringify(jobRes.body).slice(0, 300)}`);
   }
   const jobId = str(record(jobRes.body)["id"]);
+  console.log(`job ${jobId} (${options.label ?? "daemon seed"})`);
 
   // The server enqueues ONE action per party; the daemons claim their own.
   const sourceQueue = await api("GET", "/hosts/seed-source/actions");
@@ -865,7 +941,11 @@ async function runDaemonSeed(
     `found ${actions.length}`,
   );
 
-  const job = await waitForTerminalJob(jobId, 300_000);
+  const job = await waitForTerminalJobWith(jobId, {
+    timeoutMs: 300_000,
+    ...(options.onSample === undefined ? {} : { onSample: options.onSample }),
+    ...(options.cancelWhen === undefined ? {} : { cancelWhen: options.cancelWhen }),
+  });
   return { job, ...daemons, actions };
 }
 
@@ -1016,7 +1096,12 @@ async function main(): Promise<void> {
     filterFingerprint: universe.fingerprint,
     patternCount: universe.rules.length,
   });
-  const daemonSeed = await runDaemonSeed(folderId, daemons);
+  const leaseSamples: Array<{ phase: string; leaseExpiresAt: number | null; at: number }> = [];
+  const daemonSeed = await runDaemonSeed(folderId, daemons, {
+    label: "daemon happy path",
+    onSample: (job) =>
+      leaseSamples.push({ phase: job.phase, leaseExpiresAt: job.leaseExpiresAt, at: Date.now() }),
+  });
   results["daemonJob"] = daemonSeed.job;
   const daemonPhases = [
     "measuring_source",
@@ -1060,6 +1145,40 @@ async function main(): Promise<void> {
     "the job's terminal state released the lease",
     daemonSeed.job.leaseOwner === null && daemonSeed.job.leaseExpiresAt === null && daemonSeed.job.startedAt !== null,
     `lease=${daemonSeed.job.leaseOwner ?? "(none)"}`,
+  );
+
+  // A stage that OUTLIVES the lease TTL, which is the whole point of the job
+  // lease supervisor: a 35 s hold against a 30 s lease. Without a renewal during
+  // the stage the source's handover write (live lease required) is refused and a
+  // perfectly healthy seed fails, which is the failure the original issue hit.
+  const held = daemonLogs.includes(`holding phase=${SOURCE_HOLD_PHASE} for ${SOURCE_HOLD_MS}ms`);
+  const uploadSamples = leaseSamples.filter(
+    (sample) => sample.phase === SOURCE_HOLD_PHASE && sample.leaseExpiresAt !== null,
+  );
+  const uploadLeases = uploadSamples.map((sample) => sample.leaseExpiresAt as number);
+  const spread = uploadLeases.length === 0 ? 0 : Math.max(...uploadLeases) - Math.min(...uploadLeases);
+  // The server's own row, read while the stage ran: the lease was in the future
+  // at EVERY observation, even though the stage outlived the whole lease window.
+  const everLapsed = uploadSamples.filter((sample) => (sample.leaseExpiresAt as number) <= sample.at);
+  check(
+    `the source held a stage that OUTLIVED the lease TTL (${SOURCE_HOLD_MS / 1000}s hold, ${LEASE_MS / 1000}s lease)`,
+    held,
+    held ? "" : "the seam delay never ran",
+  );
+  check(
+    "the job's lease was LIVE at every observation of that stage (no reaper could fire)",
+    uploadSamples.length >= 10 && everLapsed.length === 0,
+    `${uploadSamples.length} sample(s), ${everLapsed.length} observed as lapsed`,
+  );
+  check(
+    "the job's lease was RENEWED during that stage, in the server's own row",
+    new Set(uploadLeases).size >= 2 && spread >= 2 * LEASE_INTERVAL_MS,
+    `${new Set(uploadLeases).size} distinct expiry value(s), spread ${spread}ms`,
+  );
+  check(
+    "the source's handover write was accepted AFTER the long stage (it requires a live lease)",
+    daemonSeed.job.archive.sha256 !== null && daemonSeed.job.finishedAt !== null,
+    `sha256=${daemonSeed.job.archive.sha256 === null ? "absent" : "recorded"}`,
   );
 
   // Content, exclusions, and an independent re-verification of the tree.
@@ -1172,6 +1291,113 @@ async function main(): Promise<void> {
     "the recorded archive digest cannot be rewritten after the fact",
     sourceArchiveRetry.status === 409,
     `status ${sourceArchiveRetry.status}`,
+  );
+
+  // --- A cancellation that lands in the MIDDLE of a long target stage ---------
+  //
+  // The target holds `extracting_target` for ten seconds. The operator cancels
+  // while it holds. What must NOT happen is a published tree, a staging sibling
+  // left behind, or a work directory left behind — and the run must end as a STOP
+  // rather than as a job failure, because a cancelled job is not a broken one.
+  //
+  // The target already holds job 1's tree, so "nothing was published" is a real
+  // assertion here: a publish would have replaced it.
+  section(`Stage 2e: an operator cancellation during a ${TARGET_HOLD_MS / 1000}s target stage`);
+  // A daemon heartbeat reports health WITHOUT a deep tree walk, so it replaces
+  // the harness's measurement with `null`; the plan builder needs a fresh one, so
+  // re-report immediately before asking for the plan (exactly as above).
+  await reportHealth({
+    hostId: "seed-source",
+    folderId,
+    root: SOURCE_ROOT,
+    isSource: true,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+  });
+  await reportHealth({
+    hostId: "seed-target",
+    folderId,
+    root: TARGET_ROOT,
+    isSource: false,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+  });
+  const targetTreeBefore = treeMap(TARGET_ROOT, () => false);
+  const holdMarker = `holding phase=${TARGET_HOLD_PHASE}`;
+  const holdsBefore = occurrences(daemons.target.logs(), holdMarker);
+  const cancelledSeed = await runDaemonSeed(folderId, daemons, {
+    label: "cancel mid-stage",
+    cancelWhen: () => occurrences(daemons.target.logs(), holdMarker) > holdsBefore,
+  });
+  // The server is terminal the moment the operator cancels, but the daemon only
+  // observes it on its next renewal tick (3 s here). Wait for the side to have
+  // actually stopped before asserting what it left behind — otherwise this would
+  // be a race, not a check.
+  const targetStopped = await waitForLog(
+    daemons.target,
+    `job=${cancelledSeed.job.id} stopped:`,
+    60_000,
+  );
+  const cancelledTargetTree = treeMap(TARGET_ROOT, () => false);
+  const cancelledStaging = seedStagingPath(TARGET_ROOT, cancelledSeed.job.id);
+  check(
+    "the operator cancellation ended the side as a STOP, not as a job failure",
+    cancelledSeed.job.phase === "cancelled" &&
+      targetStopped &&
+      daemons.target.logs().includes("the job is cancelled") &&
+      !daemons.target.logs().includes(`job=${cancelledSeed.job.id} target failed:`),
+    `phase=${cancelledSeed.job.phase} stopped=${targetStopped}`,
+  );
+  check(
+    "a cancelled target published NOTHING (the previous tree is untouched)",
+    sameTree(targetTreeBefore, cancelledTargetTree),
+    `${cancelledTargetTree.size} entries vs ${targetTreeBefore.size} before`,
+  );
+  check(
+    "the cancelled target never reached the publishing phase for that job",
+    !daemons.target.logs().includes(`job=${cancelledSeed.job.id} target phase=publishing`),
+  );
+  check(
+    "the cancelled run left no staging sibling behind",
+    cancelledStaging !== null && !existsSync(cancelledStaging),
+    cancelledStaging ?? "(no staging path)",
+  );
+  check(
+    "the cancelled run left no work directory behind",
+    !existsSync(join(daemons.target.home, "data", "seed-work", cancelledSeed.job.id)),
+  );
+  check(
+    "the cancelled job released its lease",
+    cancelledSeed.job.leaseOwner === null && cancelledSeed.job.leaseExpiresAt === null,
+    `lease=${cancelledSeed.job.leaseOwner ?? "(none)"}`,
+  );
+
+  // A cancelled job's relay objects are deliberately NOT deleted by the side that
+  // was stopped: the target never reached the terminal-phase cleanup, and only
+  // the retention sweep is entitled to remove objects a job may still be reading.
+  // Assert that, then sweep them so the diagnostic sections below start clean.
+  const cancelledStore = createS3SeedRelayStore(S3);
+  const cancelledNamespace = `lamasync/seed/${cancelledSeed.job.id}/`;
+  const cancelledLeft = await cancelledStore.list(cancelledNamespace);
+  check(
+    "a cancelled job's relay objects are left for the retention sweep, not deleted by the stopped side",
+    cancelledLeft.ok &&
+      cancelledLeft.value.keys.filter((key) => key !== cancelledNamespace).length === 2,
+    cancelledLeft.ok ? `${cancelledLeft.value.keys.length} entry(ies)` : "list failed",
+  );
+  const sweptCancelled = await cleanupSeedRelayObjects({
+    store: cancelledStore,
+    keys: [
+      seedRelayArchiveKey(cancelledSeed.job.id, cancelledSeed.job.archive.format),
+      seedRelayManifestKey(cancelledSeed.job.id),
+    ],
+    cleanup: cancelledSeed.job.archive.cleanup,
+    now: Date.now(),
+  });
+  check(
+    "the retention sweep then removes exactly those objects",
+    sweptCancelled.complete && sweptCancelled.deleted.length === 2,
+    `complete=${sweptCancelled.complete} deleted=${sweptCancelled.deleted.length}`,
   );
 
   daemonSeed.source.stop();

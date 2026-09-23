@@ -128,6 +128,34 @@ exactly one daemon seam module, and the flags stay `false`. Do not add a static
 import, a second importer, or a seam that accepts one variable. Also: never let
 the runner resolve a production remote or read a credential outside the seam.
 
+**Stage 2e made a long stage safe, and a cancelled one harmless.** A seed stage
+is routinely longer than the 10-minute job lease (the incident was 43.5
+minutes), so `packages/daemon/src/seed-lease-supervisor.ts` renews the JOB lease
+from a TIMER that runs ALONGSIDE each stage — never merely between stages — with
+the interval clamped to at most half the lease, and a grace window
+(`SEED_JOB_LEASE_STOP_GRACE_MS`) bounded strictly INSIDE the lease, so a side
+that can no longer reach the server stops on its own rather than discovering the
+loss from a refused write. A 4xx latches a stop (and the job is re-read to report
+the real reason); a 5xx is tolerated inside the grace. The stop is an
+`AbortSignal` threaded into tar, extraction, the manifest/extracted-tree
+verification, both object transfers and the `rclone bisync` child (which has no
+graceful cancel, so it is killed — its workdir lives in this run's work
+directory and `--resync` is restartable). `verifyAuthority()` — a real GET —
+runs immediately BEFORE `publishStagedTree` and immediately BEFORE the completion
+report, so a cancellation that lands during a long stage can never publish or
+complete, and a stage that throws while aborted is a STOP rather than a job
+failure. The staging sibling is recorded before the first byte lands in it and
+removed on failure only while nothing was published.
+
+Two traps worth remembering: the TARGET must NOT renew while the SOURCE owns the
+job (during its wait for the facts the lease route correctly refuses, and reading
+that refusal as "the job is lost" would abandon a healthy wait) — it reads the
+job instead and starts the supervisor when its own half begins; and the reaper
+must not treat the handover window (facts recorded, lease cleared, still
+`running`) as stale, so a no-lease running job is only reaped after
+`SEED_JOB_HANDOVER_GRACE_MS`. The ACTION lease (`ACTION_LEASE_MS`, renewed by the
+daemon's action timer) is a DIFFERENT lease and neither implies the other.
+
 Two inputs are deliberately still SEAM-SUPPLIED, and both are required before
 the constant may flip: the target's resync PEER (in production the assignment's
 resolved remote + the daemon's rclone config) and the relay SPACE
@@ -135,7 +163,8 @@ resolved remote + the daemon's rclone config) and the relay SPACE
 where the fleet's temporary seed space lives is an owner decision. A daemon-run
 job deletes its relay objects but does not yet persist the `cleanup` block
 server-side (no device route for it); the objects are gone, the bookkeeping
-field stays `not_started`.
+field stays `not_started`. A STOPPED side deletes nothing at all and leaves its
+objects to the retention sweep, which the E2E asserts.
 
 **Execution is deliberately unavailable by default**:
 `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while

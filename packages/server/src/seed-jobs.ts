@@ -28,6 +28,7 @@ import {
   validateStagingLocation,
   SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
   SEED_FILTER_UNIVERSE_REQUIRED_REASON,
+  SEED_JOB_HANDOVER_GRACE_MS,
   SEED_JOB_PHASE_COUNT,
   SEED_PLAN_TTL_MS,
   SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
@@ -990,8 +991,15 @@ export function updateSeedJobArchive(
 /**
  * Flip a running job whose lease expired back to `failed`. This is the only
  * path that ends a job the daemon stopped reporting on, and it is deliberately
- * conservative: a live daemon renews every minute, so a 10-minute lease means
- * "the owner is gone", not "the owner is slow".
+ * conservative: a live daemon renews every `SEED_JOB_LEASE_RENEW_INTERVAL_MS`,
+ * so a 10-minute lease means "the owner is gone", not "the owner is slow".
+ *
+ * A running job with NO lease at all is NOT immediately stale: clearing the
+ * owner is exactly how the source hands the job to the target, and the target
+ * claims a fraction of a second later. Reaping on `lease_expires_at IS NULL`
+ * would fail a healthy handover caught in that window, so a no-lease job is only
+ * reaped once it has been untouched for `SEED_JOB_HANDOVER_GRACE_MS` — by which
+ * time the handover is not in flight but abandoned (the target never showed up).
  */
 export function reapStaleSeedJobs(database: Database, now: number = Date.now()): number {
   const result = database.run(
@@ -1004,8 +1012,11 @@ export function reapStaleSeedJobs(database: Database, now: number = Date.now()):
             updated_at = ?,
             finished_at = ?
       WHERE status = 'running'
-        AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`,
-    [now, now, now],
+        AND (
+              (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+           OR (lease_expires_at IS NULL AND updated_at <= ?)
+        )`,
+    [now, now, now, now - SEED_JOB_HANDOVER_GRACE_MS],
   );
   return Number(result.changes ?? 0);
 }

@@ -104,7 +104,25 @@ daemon needs both as well (`seedDaemonE2eEnabled()`, in
 relay space and, on the target, `LAMASYNC_SEED_DAEMON_PEER_PATH` for the
 post-seed resync peer. Without a peer the `baseline_validation` phase FAILS
 rather than passing, so a seed is never reported complete without the
-zero-change proof. The real S3 store's own gated integration test runs against an
+zero-change proof.
+
+Three more variables exist ONLY to make the lease provable in a sandbox, and are
+read (like the others) only when the seam is open:
+
+| Variable | What it does |
+|---|---|
+| `LAMASYNC_SEED_LEASE_MS` | shortens the seed JOB lease (floored at the route's 30 s minimum), so a test can outlive it without waiting ten minutes |
+| `LAMASYNC_SEED_LEASE_INTERVAL_MS` | how often the lease supervisor renews (clamped to at most half the lease) |
+| `LAMASYNC_SEED_STAGE_DELAY_PHASE` + `LAMASYNC_SEED_STAGE_DELAY_MS` | holds ONE named phase still for N ms (E2E only), which can only ever make a stage slower |
+
+They are what lets the E2E prove the review's requirement: a 35 s source stage
+against a 30 s lease completes because the lease is renewed from a timer running
+alongside the stage. The deterministic coverage of the same behaviour lives in
+`packages/daemon/src/seed-lease-supervisor.test.ts` (a fake clock),
+`packages/daemon/src/seed-runner.test.ts` (a fake server that enforces the
+role/phase/lease rules) and `packages/server/src/seed-lease-reaper.test.ts` (the
+real schema) — all of which run in the normal `bun test`, with no Docker and no
+rclone. The real S3 store's own gated integration test runs against an
 existing MinIO with `LAMASYNC_TEST_S3_ENDPOINT`,
 `LAMASYNC_TEST_S3_BUCKET`, `LAMASYNC_TEST_S3_ACCESS_KEY` and
 `LAMASYNC_TEST_S3_SECRET_KEY` set (it skips explicitly otherwise):

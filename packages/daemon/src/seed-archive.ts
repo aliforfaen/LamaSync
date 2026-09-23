@@ -1047,6 +1047,13 @@ export async function verifyExtractedTree(input: {
   root: string;
   manifest: SeedManifest;
   mismatchCap?: number;
+  /**
+   * Cooperative cancellation. A tree walk cannot be interrupted mid-syscall, so
+   * the signal is checked between entries and between directories; the caller
+   * must treat `aborted` as a STOP, not as a verification failure, because a
+   * half-checked tree is not evidence about the tree.
+   */
+  signal?: AbortSignal;
 }): Promise<VerifyTreeResult> {
   const cap = input.mismatchCap ?? SEED_VERIFY_MISMATCH_CAP;
   const mismatches: string[] = [];
@@ -1054,6 +1061,9 @@ export async function verifyExtractedTree(input: {
   let checked = 0;
   for (const entry of input.manifest.entries) {
     if (mismatches.length >= cap) break;
+    if (input.signal?.aborted === true) {
+      return { ok: false, checked, mismatches: [], message: "the verification was cancelled before it finished" };
+    }
     const full = join(input.root, entry.path);
     let stat;
     try {
@@ -1087,6 +1097,9 @@ export async function verifyExtractedTree(input: {
   if (mismatches.length < cap) {
     const stack: string[] = [input.root];
     while (stack.length > 0 && mismatches.length < cap) {
+      if (input.signal?.aborted === true) {
+        return { ok: false, checked, mismatches: [], message: "the verification was cancelled before it finished" };
+      }
       const dir = stack.pop()!;
       let dirents;
       try {

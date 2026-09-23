@@ -1120,6 +1120,98 @@ rather than a fake hash. The S3 store also now creates its `TMPDIR` parent
 before staging bytes, which a sandboxed daemon (whose `TMPDIR` is its own
 directory) needs.
 
+### 2.15 Stage 2e — the lease that outlives a stage, and a cancellation that stops one (done)
+
+**The review finding.** Stage 2d's runner renewed the seed job lease in exactly
+one place: the target's wait for the source's facts. It did NOT renew during
+`createSeedArchive`, `uploadSeedArchive`, `uploadSeedManifest`,
+`downloadSeedArchive`/`Manifest`, `extractSeedArchive`, `verifyExtractedTree` or
+`rclone bisync --resync`. The queued ACTION lease is a different lease (renewed
+by the daemon's own `actionLeaseTimer` since LAMA-345) and does not help. So a
+healthy Projects-scale transfer that outlived `SEED_JOB_LEASE_MS` (10 minutes)
+would have had its handover write refused — `reportSeedJobArchiveOnce` requires
+`lease_expires_at > now` — and the job would have failed *exactly* as the
+original issue did, three stages later. Cancellation and a lost lease were also
+only noticed at the next phase boundary, and a stopped target could leave its
+staging sibling behind.
+
+**The fix: a bounded per-stage lease supervisor**
+(`packages/daemon/src/seed-lease-supervisor.ts`). One timer per side, running
+ALONGSIDE the stage rather than between stages:
+
+| Guarantee | How |
+|---|---|
+| renew well before expiry | every `SEED_JOB_LEASE_RENEW_INTERVAL_MS` (60 s), through the existing `POST /seed-jobs/:id/lease`; the interval is CLAMPED to at most HALF the lease, so "well before" is enforced rather than documented |
+| bounded tolerance | a TRANSPORT failure is tolerated only until `SEED_JOB_LEASE_STOP_GRACE_MS` (9 min) has passed since the last SUCCESSFUL renewal — strictly inside the 10-minute lease — and then the run stops on its own |
+| stop on a refusal | a 4xx is the server saying no; the supervisor READS the job to report the real reason ("the job is cancelled") instead of guessing, and latches a stop. A 5xx is a transport problem and may be outlived |
+| one signal | the stop is an `AbortSignal`, threaded into GNU tar, extraction, `verifyExtractedTree`, the upload/download of both objects and the `rclone bisync` child |
+| nothing irreversible without a live lease | `verifyAuthority()` (a real GET) runs immediately BEFORE `publishStagedTree` and immediately BEFORE the completion report |
+| an aborted stage is a STOP | `run()` re-checks liveness after the stage, and a stage that THROWS while aborted is dropped in favour of the stop, so a cancellation is never recorded as a job failure |
+| release only what this run created | the staging sibling is recorded BEFORE the first byte lands in it, and is removed on failure only while nothing was published; the work directory is removed by the caller |
+
+A lapsed lease is NOT revivable: `renewSeedJobLeaseGuarded` refuses a renewal
+once `lease_expires_at` has passed ("a lease that lapsed counts as lost, so the
+reaper decides that job"), and that is deliberate — it is why the grace window
+is bounded strictly INSIDE the lease, and it is pinned by a test.
+
+**Two traps found on the way.**
+
+1. **The target must not renew while the source owns the job.** The target
+   waits up to 30 minutes for the source's facts, during which the job is in a
+   SOURCE phase. A renewal then is refused by the lease route (correctly), and a
+   supervisor that read that refusal as "the job is lost" would abandon a healthy
+   wait. The target therefore does NOT renew during the wait: it only reads the
+   job to notice that it ended, and starts the supervisor when its own half
+   begins. A daemon-side test asserts the wait never renews.
+2. **The reaper could kill a healthy handover.** The handover clears the lease
+   by design, leaving a `running` job with `lease_expires_at IS NULL` — and
+   `reapStaleSeedJobs` treated a NULL lease as stale, so a reaper landing in that
+   (normally sub-second) window would have failed a healthy job. A no-lease
+   `running` job is now reaped only after `SEED_JOB_HANDOVER_GRACE_MS` (5 min)
+   of being untouched, which still covers the case the grace exists for: a target
+   that never showed up.
+
+Both sides now state the lease window EXPLICITLY on every phase report
+(`leaseMs` on the progress body), so a phase entry grants the same window the
+supervisor renews; relying on the route's default granted 10 minutes on entry
+and then shortened it on the first renewal.
+
+**A `seed_job` action still holds its own lease.** The two are renewed
+independently and neither implies the other; the daemon's action timer keeps the
+ACTION alive, this supervisor keeps the JOB alive.
+
+**Deterministic tests, not wall-clock waits.**
+
+| Suite | What it pins |
+|---|---|
+| `packages/daemon/src/seed-lease-supervisor.test.ts` (17) | a 40-**fake**-minute stage against a 30 s lease with the reaper modelled from the server's own predicate: 160 renewals, 0 refusals, lease live at every step; the SAME stage with no renewals loses the job (the reported bug, as a control); cancellation mid-stage reported as the job's state; a 4xx latches, a 5xx does not; the grace window measured from the last SUCCESS, and reset by one; overlapping ticks collapse; `verifyAuthority` before an irreversible step; `stop()` is clean |
+| `packages/daemon/src/seed-runner.test.ts` (6) | the shipped side against a fake server that enforces the phase/role/adjacency rules and the live-lease handover: the happy source half; a cancellation DURING the upload and DURING the download, asserting the stage was really interrupted, no facts were recorded, no job failure was reported, NOTHING was published and the staging sibling is gone; the target's wait never renews; the fail-closed peer gate; a completion with a real zero-change baseline |
+| `packages/server/src/seed-lease-reaper.test.ts` (5) | on the real schema: a 60-minute run in 1-minute steps is never reaped and its handover still succeeds; the same run without renewals is reaped and every later write is refused; renewal at/after expiry is refused; the handover window survives the grace and is reaped after it; the target's claim after a handover, and the source's refusal to renew into the target's half |
+
+**The disposable E2E now proves it against two real daemons.** The seam
+shortens the lease to the smallest window the route accepts (30 s), the renewal
+interval to 3 s, and holds ONE named phase per side: the source holds
+`uploading_archive` for **35 s — longer than the whole lease** — and the target
+holds `extracting_target` for 10 s. 66 checks pass, 0 fail, 3 GATED:
+
+* the source held a stage that OUTLIVED the lease TTL;
+* the job's lease was **LIVE at every one of 116 observations** of that stage (no
+  reaper could fire), read from the server's own row;
+* the lease was **RENEWED** during it — 12 distinct expiry values, ~33 s of
+  movement — and the handover write was accepted after the stage;
+* an operator cancellation sent DURING the target's 10 s hold ends the side as a
+  **STOP**, not a failure; the previously published tree is byte-identical
+  (`sameTree`), the target never entered `phase=publishing` for that job, and no
+  staging sibling or work directory is left behind;
+* a cancelled job's relay objects are LEFT for the retention sweep (the stopped
+  side is not entitled to delete them) and the sweep then removes exactly those
+  two.
+
+The two real daemons still hold their own DEVICE keys, and no production
+credential, endpoint, folder or rclone config is involved: the lease/delay
+variables are read ONLY when the doubly-gated seam is open, and the lease is
+floored at the route's own minimum.
+
 ## 3. Space calculation
 
 The peak staging footprint is `archive + extracted tree`, because the archive
@@ -1280,6 +1372,20 @@ exchange, and asserts the whole path plus four device-key denials (53 pass /
 production resync peer and a production relay-space configuration (§2.14.6), and
 the §2.11 host proofs.
 
+**Stage 2e — the lease that outlives a stage, and a cancellation that stops one
+(done).** The review found that the runner renewed the seed job lease only in the
+target's fact wait, so a healthy stage longer than the 10-minute lease lost the
+job (the original issue's shape). `seed-lease-supervisor.ts` now renews from a
+timer that runs ALONGSIDE every long stage, with a grace window bounded strictly
+inside the lease, an `AbortSignal` threaded into tar/extraction/verification/the
+object transfers/`rclone`, and an authority check immediately before publishing
+and before completing; a cancelled or lost run publishes nothing and releases
+only its own staging. The reaper no longer fails the handover window, and the
+target no longer renews a lease it does not hold (see §2.15). The E2E proves it
+with two real daemons: a 35 s source stage against a 30 s lease (116 observations,
+0 lapsed, 12 renewals) and an operator cancellation landing inside the target's
+10 s hold (66 pass / 0 fail / 3 GATED).
+
 **Stage 3 — live acceptance on the real pair.**
 Re-run the dev-vm shape with a copy of a large tree (never the live
 authoritative tree) and confirm: no timeout kill while progressing, one
@@ -1318,6 +1424,9 @@ control. The seed remains opt-in per folder.
 | A production resync peer (the assignment's resolved remote + rclone config) for `baseline_validation` | **NOT implemented** — seam-supplied in the sandbox; the phase FAILS closed without it |
 | A production relay-space configuration surface (endpoint/bucket/credentials) | **NOT implemented** — seam-supplied; the relay contract deliberately carries no credential |
 | Post-seed zero-change bisync validation as an automated gate | **implemented for the daemon path** — `seedBaselineVerdict` gates `completed`, and the harness independently re-runs `bisync --resync` |
+| Seed JOB lease kept alive DURING a stage (a timer, not a step between stages), with a grace window bounded inside the lease, an abort signal into every long operation, and an authority check before publishing and completing | **implemented + tested** (17 supervisor tests, 6 runner tests, 5 real-schema lease/reaper tests, and the daemon E2E's 35 s stage against a 30 s lease) |
+| Cancellation or lease loss observed MID-STAGE, with no publish and no leftover staging | **implemented + tested** — daemon tests for a stop during the upload and during the download, plus the E2E's cancellation inside the target's 10 s hold |
+| The reaper and the handover window | **implemented + tested** — a `running` job with no lease is reaped only after `SEED_JOB_HANDOVER_GRACE_MS`, so a healthy handover is never failed |
 
 Because the constant is still `false`, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` in
 a released build keeps `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` true but
@@ -1326,12 +1435,13 @@ UI control disabled. **No folder can be seeded from a released build**, and no
 live archive transfer is claimed for one: Stage 1a made the *local* half of a
 seed correct and provable, Stage 1b made the transport contract testable,
 Stage 2c proved the vertical path through a real object space and two
-independent processes, and Stage 2d made the SHIPPED daemon run a side with its
-own device key and its own zero-change-baseline gate — but the whole path is
-reachable only through a doubly-gated seam, the resync peer and the relay space
-are seam-supplied rather than production-configured (§2.14.6), and the
-two-machine and disk-full host proofs are still GATED. The gate therefore stays
-`false`.
+independent processes, Stage 2d made the SHIPPED daemon run a side with its own
+device key and its own zero-change-baseline gate, and Stage 2e made a stage that
+OUTLIVES the job lease safe (a renewal timer, an abort signal, and an authority
+check before anything irreversible) — but the whole path is reachable only
+through a doubly-gated seam, the resync peer and the relay space are
+seam-supplied rather than production-configured (§2.14.6), and the two-machine
+and disk-full host proofs are still GATED. The gate therefore stays `false`.
 
 ## 8. Changed files
 
@@ -1512,6 +1622,38 @@ Stage 2d (this slice)
   device-key denials, and the worker sections demoted to a labelled diagnostic.
 - `scripts/lama346-seed-worker.ts` — device keys, and no post-handover report.
 
+Stage 2e (the lease that outlives a stage)
+- `packages/core/src/folder-seed.ts` — `SEED_JOB_LEASE_RENEW_INTERVAL_MS`,
+  `SEED_JOB_LEASE_STOP_GRACE_MS`, `SEED_JOB_HANDOVER_GRACE_MS`, each with the
+  reasoning that ties it to `SEED_JOB_LEASE_MS`.
+- `packages/server/src/seed-jobs.ts` — `reapStaleSeedJobs` no longer treats a
+  no-lease `running` job as stale on sight (the handover window), and imports the
+  shared handover grace. The unguarded `renewSeedJobLease` helper was removed
+  (the guarded writer replaced it).
+- `packages/daemon/src/seed-lease-supervisor.ts` (new) — the bounded per-stage
+  renewal/cancellation supervisor: timer, grace window, abort signal, latch,
+  `verifyAuthority`, and the stage wrapper. States the ACTION-lease vs
+  JOB-lease distinction at the top.
+- `packages/daemon/src/seed-lease-supervisor.test.ts` (new) — 17 deterministic
+  tests with a fake clock, a manual scheduler and a server model built from the
+  real predicates.
+- `packages/daemon/src/seed-runner.ts` — every stage runs inside the supervisor
+  with its `AbortSignal`; the target deliberately does NOT renew while the source
+  owns the job; the supervisor starts when each side's own half begins; the
+  explicit `leaseMs` on phase reports; the authority checks before publishing and
+  completing; staging recorded before the first byte and released on failure;
+  `rclone` killed on abort (documented); the seam-gated lease/delay variables.
+- `packages/daemon/src/seed-runner.test.ts` (new) — 6 tests against a fake server
+  that enforces the phase/role/adjacency rules and the live-lease handover.
+- `packages/server/src/seed-lease-reaper.test.ts` (new) — 5 tests on the real
+  schema for the lease, the grace window and the reaper.
+- `packages/daemon/src/seed-archive.ts` — `verifyExtractedTree` takes an optional
+  `AbortSignal` (checked between entries and between directories), returning a
+  cancellation result the caller must read as a STOP.
+- `scripts/lama346-seed-e2e.ts` — the seam-gated short lease and per-phase hold,
+  the lease-outliving checks read from the server's own row, and the
+  cancellation-mid-stage section (including the cancelled job's retention).
+
 Docs / skill
 - `packages/agent-skill/reference/api.md` — every new route + the contract.
 - `packages/agent-skill/reference/recipes.md` — the seed-plan recipe.
@@ -1523,14 +1665,44 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                              # clean
 bun run build:web-ui                            # clean (one self-contained index.html)
-bun test                                        # 2633 pass / 0 fail / 5 skip, 179 files
+bun test                                        # 2661 pass / 0 fail / 5 skip, 182 files
 bun run scripts/check-skill-drift.ts --strict   # OK (181 API rows, 182 routes)
-bun run scripts/lama346-seed-e2e.ts             # 53 pass / 0 fail / 3 GATED
+bun run scripts/lama346-seed-e2e.ts             # 66 pass / 0 fail / 3 GATED
 # the gated real-object-space suite, against a disposable MinIO:
 LAMASYNC_TEST_S3_ENDPOINT=… LAMASYNC_TEST_S3_BUCKET=… \
 LAMASYNC_TEST_S3_ACCESS_KEY=… LAMASYNC_TEST_S3_SECRET_KEY=… \
   bun test packages/daemon/src/seed-relay-s3.test.ts   # 7 pass / 0 fail
 ```
+
+Stage 2e suites:
+
+- `packages/daemon/src/seed-lease-supervisor.test.ts` — **17 tests** (§2.15): a
+  40-fake-minute stage against a 30 s lease with the reaper modelled from the
+  server's own predicate (160 renewals, 0 refusals, live at every step), the
+  same stage with no renewals losing the job as the control case, cancellation
+  and takeover reported as the job's state, the refusal/transport split, the
+  bounded grace window and its reset, overlapping ticks, `verifyAuthority`, the
+  abort signal, and `stop()` being clean.
+- `packages/daemon/src/seed-runner.test.ts` — **6 tests**: the source half
+  end to end against a fake server, a cancellation during the upload and during
+  the download (nothing published, nothing recorded, no job failure reported,
+  staging and work directory gone), the target never renewing while the source
+  owns the job, the fail-closed peer gate, and a completion with a real
+  zero-change baseline.
+- `packages/server/src/seed-lease-reaper.test.ts` — **5 tests**: a 60-minute run
+  in 1-minute steps is never reaped and its handover still succeeds; the same run
+  without renewals is reaped and every later write is refused; renewal at and
+  after expiry is refused, for the owner and for anyone else; the handover window
+  survives the grace and is reaped after it; the target's claim after a handover
+  and the source's refusal to renew into the target's half.
+
+The E2E's Stage 2e checks (inside the same 66): the source held a stage that
+outlived the lease TTL; **116 observations, 0 lapsed**; **12 distinct expiries**,
+~33 s of movement; the handover accepted afterwards; and an operator cancellation
+inside the target's 10 s hold ending as a STOP with the previous tree untouched,
+no `phase=publishing` for that job, no staging sibling and no work directory —
+plus the cancelled job's two relay objects left for, then removed by, the
+retention sweep.
 
 Stage 2d suites:
 
@@ -1705,9 +1877,13 @@ Focused suites:
    zero-change baseline afterwards).
 4. Confirm the target's archive tooling *and* staging proof are reported before
    the Run control is enabled for that device.
-5. Independent review of the Stage 2c + Stage 2d evidence. Only then may
-   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip; a released build keeps
-   `POST /seed-jobs` at 503 until it does.
+5. Independent review of the Stage 2c + Stage 2d + Stage 2e evidence. Only then
+   may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip; a released build keeps
+   `POST /seed-jobs` at 503 until it does. Two notes for that review, both
+   deliberate and both documented above: a party still cannot fail a job it does
+   not hold (the reaper ends it), and a stopped side leaves that job's relay
+   objects to the retention sweep rather than deleting objects a live owner might
+   still be reading.
 6. ~~Decide the retention/cleanup policy~~ — decided in §2.10: delete on the
    terminal phase, a 24 h window for abandoned objects, idempotent retries,
    namespace-confined sweeps, never delete on an unknown age.
@@ -1716,8 +1892,11 @@ Focused suites:
    The objects are gone, which is the safety-relevant part; the bookkeeping
    field stays `not_started` for a daemon-run job.)*
 
-Stages 1a, 1b, 2a, 2b, 2c and 2d are done: the local half of a seed, the
+Stages 1a, 1b, 2a, 2b, 2c, 2d and 2e are done: the local half of a seed, the
 transport contract and its real store, the manifest handoff, the lifecycle
-rules, per-role device authorization, and the shipped daemon's action-loop path
-are all implemented and provable. What remains is production configuration for
-the two seam-supplied inputs, and the live host proofs.
+rules, per-role device authorization, the shipped daemon's action-loop path, and
+the lease/abort supervision that keeps a long stage alive and a cancelled one
+from publishing are all implemented and provable. What remains is production
+configuration for the two seam-supplied inputs, and the live host proofs — with
+one thing explicitly NOT claimed: nothing here has been run between two real
+machines, against a real disk-full target, or against a copy of the live tree.

@@ -36,9 +36,11 @@ construction from the effective filter universe), Stage 1b's relay contract
 upload/download, cleanup/retention), Stage 2a's disposable two-host harness
 (archive → relay → publish → real bisync zero-change acceptance), Stage 2b's
 test-only lifecycle proof, Stage 2c's real network path (a real S3-compatible
-store and the manifest handoff through a disposable MinIO) and Stage 2d's
+store and the manifest handoff through a disposable MinIO), Stage 2d's
 shipped-daemon path (per-role device authorization, the `seed_job` queued action
-and a two-real-daemon E2E) are implemented and locally validated, while the
+and a two-real-daemon E2E) and Stage 2e's per-stage lease supervision (renewal
+alongside a long stage, abort-and-stop on cancellation or lease loss, and an
+authority check before publishing) are implemented and locally validated, while the
 production resync peer, the production relay-space configuration and the live
 host acceptance remain open — so it stays here rather than in the archive. The dashboard
 design reference and image artifacts remain here because the web UI assets
