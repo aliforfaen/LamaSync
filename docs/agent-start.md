@@ -55,7 +55,13 @@ credential, a real folder or dev-vm.
 `packages/server/src/seed-coordinator.ts` drives one seed job through the
 existing state machine (phases one at a time, lease renewal, archive-facts
 persistence, idempotent cleanup) with injected source/target sides and an
-injected local object store. No production module may import it —
+injected local object store, with **ownership-conditional** claim/report/finish
+writes (`claimSeedJobProgress`, `reportOwnedSeedJobProgress`,
+`finishOwnedSeedJob`) so a live owner's job cannot be stolen, a contender cannot
+write its outcome or delete its in-flight objects, and a lapsed lease reports
+`lease_lost` instead of an unrecordable result. Completion requires every phase
+entered and archive facts persisted. Never swap those for the device routes'
+last-writer-wins helpers. No production module may import it —
 `seed-coordinator-bounded.test.ts` asserts that from the module graph, and
 `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` must stay `false` while it is test-only.
 Never give it a configured backend, a credential or a live folder.

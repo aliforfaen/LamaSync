@@ -665,6 +665,92 @@ cannot satisfy or break the check), that execution is still unavailable, and
 that it invents no phase. `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false` and
 `POST /seed-jobs` still returns 503.
 
+#### 2.12.1 Review correction — the claim was last-writer-wins (fixed)
+
+Review found a real defect in the first Stage 2b cut, and it was the worst kind:
+the coordinator could **steal a job from a live owner**.
+
+`updateSeedJobProgress` (the device route's helper) updates any `planned`/`running`
+row with **no lease-owner predicate**, and it returns `getSeedJob(...)`
+unconditionally — so it returns a job even when the `UPDATE` changed **zero
+rows**. The coordinator's claim used it, so:
+
+* owner B's claim silently overwrote owner A's live lease (`lease_owner` → B);
+* `owned()` then answered `true` for B, because it only compared the owner string;
+* B walked the job to a terminal state and wrote **its own** error over A's run;
+* the `claimed === null` guard was unreachable, so the "another owner holds it"
+  branch could never fire;
+* `owned()` also treated a null owner as claimable and never consulted
+  `lease_expires_at`, so an expired lease blocked every later owner until the
+  reaper happened to run.
+
+Reproduced before fixing (SQL level, then coordinator level): after A claimed, a
+claim by B returned a job with `lease_owner = host-B`; B's `finishSeedJob` wrote
+`completed / stolen`; and a contender's run recorded *its* error where A's
+outcome belonged.
+
+**The fix — atomic conditional writes, not a check-then-write.**
+
+`packages/server/src/seed-jobs.ts` gains an ownership-conditional family, and
+`packages/core/src/folder-seed.ts` gains the pure rules they encode
+(`seedLeaseIsLive`, `seedJobClaimableBy`, `seedCleanupAllowed`):
+
+| Helper | Guard |
+|---|---|
+| `claimSeedJobProgress` | claimable per `seedJobClaimableBy`: unowned, ours-and-live, or a lease that has demonstrably lapsed |
+| `reportOwnedSeedJobProgress` | `status='running'` AND `lease_owner = me` AND `lease_expires_at > now` |
+| `finishOwnedSeedJob` | the same live-lease requirement — a coordinator that lost the job cannot write its outcome |
+
+Each decides **in the `WHERE` clause**, so the check and the write are one atomic
+statement, and each returns `null` when the statement changed **zero rows**,
+reading the row back only after success. A refusal is therefore impossible to
+mistake for a success.
+
+Consequences that are now enforced:
+
+* a live owner's job cannot be claimed by a contender (it is told so);
+* an **expired** lease *is* claimable, and a recorded owner with **no** expiry is
+  not (we cannot tell whether that owner is alive, so we fail closed and leave it
+  to the reaper);
+* a coordinator whose own lease lapsed stops reporting and reports `lease_lost`
+  rather than the outcome it intended — including on the failure path, where
+  "failed" would be a claim it can no longer make;
+* `owned()` requires a **live** lease of ours, not merely a matching string.
+
+**Cleanup is gated too.** `cleanupJobObjects` now takes the asking `owner` and
+refuses via `seedCleanupAllowed`: a terminal job is nobody's and its objects are
+done with, but while a job is in flight only a live owner may delete. A
+contender that merely lost a race leaves the relay untouched and records **no**
+cleanup state, because nothing was cleaned.
+
+**Two completion gates.** A passing baseline is a claim; the coordinator now
+requires the evidence:
+
+1. **every** phase in `SEED_COORDINATOR_PHASES` must have been entered and
+   persisted — a target that returns a passing verdict without entering a single
+   phase fails the job;
+2. archive facts must have been **persisted** (a non-null stored digest), not
+   merely returned in memory — and a source that reports success with no archive
+   facts fails *before* the target starts, so no target work happens on an
+   archive nothing recorded.
+
+**Route behavior is unchanged, deliberately.** The device routes keep using the
+last-writer-wins helpers; `seed-jobs.ts` is purely additive (0 deletions) and
+`routes/folder-seed.ts` is untouched. Making the shared helpers conditional would
+have silently changed a live contract — a device whose lease lapsed could no
+longer re-report — so the coordinator got its own family instead. The cost is two
+families of writers, which is why `seed-coordinator-bounded.test.ts` now asserts
+the coordinator imports **only** the conditional one and never calls
+`updateSeedJobProgress(`, `finishSeedJob(` or `renewSeedJobLease(`.
+
+**Load-bearing, verified by reverting:** removing the ownership predicates fails
+12 coordinator tests; removing the completion gates fails 3; removing the cleanup
+gate fails the in-flight-object test. New coverage: 6 adversarial tests in
+`seed-coordinator.test.ts` (an active delayed owner vs a contender, a crashed
+owner's expired lease vs a live one, a self-expiring owner, the three conditional
+helpers against a wrong owner, a lapsed-lease finish, and the in-flight object),
+3 evidence tests, and 4 pure-rule tests in `packages/core/src/folder-seed.test.ts`.
+
 #### What Stage 2b does NOT do, and what is still owed
 
 1. **No resume.** A failed job is not restarted from its persisted phase; the
@@ -916,7 +1002,7 @@ Daemon
   coordinator: it drives the existing state machine with injected sides and an
   injected cleanup step, and adds no state of its own.
 - `packages/server/src/seed-coordinator.test.ts` (new, Stage 2b) — the lifecycle
-  proof (16 tests).
+  proof (25 tests, including the concurrent-ownership and evidence suites).
 - `packages/server/src/seed-coordinator-bounded.test.ts` (new, Stage 2b) — reads
   the module graph to assert the coordinator stays test-only.
 - `packages/daemon/src/seed-archive.ts` — `createSeedArchive` now returns a
@@ -969,7 +1055,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2554 pass / 0 fail, 173 files
+bun test                                # 2568 pass / 0 fail, 173 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -1062,16 +1148,24 @@ Focused suites:
   acceptance with bidirectional edits, ignored content, an anti-vacuity pair of
   roots and a modtime sensitivity test; and the failure cases in §2.11. The
   gate test names the skip explicitly.
-- `packages/server/src/seed-coordinator.test.ts` — **16 tests**: the Stage 2b
+- `packages/server/src/seed-coordinator.test.ts` — **25 tests**: the Stage 2b
   lifecycle proof — a completed run through every phase with its archive facts,
   bounded progress and cleanup; a source failure (unrepresentable universe) and
   a throwing source; a target failure (tampered object) and a missing baseline
   verdict; operator cancellation, a lost lease and the existing reaper; cleanup
   idempotency and a retryable cleanup failure; an illegal phase transition that
   a side cannot ignore; lease renewal observed on a fake clock; and the schema
-  check proving no column was added.
-- `packages/server/src/seed-coordinator-bounded.test.ts` — **4 tests**: the
-  test-only invariant, read from the module graph.
+  check proving no column was added. Then §2.12.1's correction: an active delayed
+  owner versus a contender (with an in-flight object that must survive), a
+  crashed owner's expired lease versus a live one, a self-expiring owner that
+  stops instead of racing the reaper, the three conditional helpers against a
+  wrong owner, a lapsed-lease finish, a source with no archive facts, a passing
+  baseline over phases that were never entered, and the cleanup gate.
+- `packages/core/src/folder-seed.test.ts` — **4 tests**: the pure ownership rules
+  (`seedLeaseIsLive`, `seedJobClaimableBy`, `seedCleanupAllowed`).
+- `packages/server/src/seed-coordinator-bounded.test.ts` — **5 tests**: the
+  test-only invariant and the conditional-writes-only boundary, read from the
+  module graph.
 - `packages/server/src/seed-transport-state.test.ts` — **5 tests**: the
   transport state lives on the existing job row (round trip, cleanup recordable
   after the job ended, fail-closed read of a malformed row, and a schema check

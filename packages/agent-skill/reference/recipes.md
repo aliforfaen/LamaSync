@@ -384,7 +384,8 @@ The job **lifecycle** is proven test-only
 (`packages/server/src/seed-coordinator.ts` + its tests): phases one at a time,
 lease renewal, archive-facts persistence, cancellation, a lost lease, and
 idempotent cleanup — all on the existing job state machine, with no new table
-and no production wiring.
+and no production wiring. Ownership is enforced atomically: a contender cannot
+claim a live owner's job, write its outcome, or delete its in-flight objects.
 
 **Execution is still not available.** `POST /seed-jobs` returns
 `503 { executionAvailable: false, reason }` because the one remaining Stage 1

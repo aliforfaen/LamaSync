@@ -122,6 +122,21 @@ distributable binary build.
   gap: **the source manifest does not travel to the target** — the target
   verifies the archive and the extracted tree against it, so making the manifest
   available to the target is still owed.
+  *Ownership is atomic, not last-writer-wins.* The coordinator's claim, progress
+  report and terminal write go through the ownership-conditional helpers
+  (`claimSeedJobProgress` / `reportOwnedSeedJobProgress` / `finishOwnedSeedJob`),
+  which decide inside the `WHERE` clause and return `null` on a zero-row write, so
+  a refusal can never be mistaken for a success. A contender cannot claim a live
+  owner's job, cannot write its outcome, and **cannot delete relay objects another
+  owner may still be reading** (`seedCleanupAllowed` gates cleanup; a terminal job
+  is nobody's, an in-flight one belongs to its live owner). An expired lease is
+  claimable, a recorded owner with no expiry is not (fail closed, leave it to the
+  reaper), and a run whose own lease lapsed reports `lease_lost` rather than an
+  outcome it can no longer record. Completion additionally requires **every** seed
+  phase to have been entered and archive facts to have been persisted, so a
+  passing baseline cannot complete a job that never did the work. The device
+  routes keep their own last-writer-wins contract: `seed-jobs.ts` is purely
+  additive and `routes/folder-seed.ts` is untouched.
   *Explicitly unavailable execution:* no real store is wired to a running job
   and remote orchestration is **not implemented**, so
   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
