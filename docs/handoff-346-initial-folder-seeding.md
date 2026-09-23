@@ -751,6 +751,59 @@ owner's expired lease vs a live one, a self-expiring owner, the three conditiona
 helpers against a wrong owner, a lapsed-lease finish, and the in-flight object),
 3 evidence tests, and 4 pure-rule tests in `packages/core/src/folder-seed.test.ts`.
 
+#### 2.12.2 Second review — two remaining ownership gaps (fixed)
+
+The §2.12.1 correction made the **outcome** write conditional. Two paths were
+still unguarded, and both were reproduced before being fixed.
+
+**(1) The in-flight archive write was unguarded.** `updateSeedJobArchive` is
+deliberately status-blind (the cleanup state is written after the job ends), and
+the coordinator used it for the transport facts too — *after* an awaited
+source/target side returned. So a run whose lease lapsed during a long phase
+could overwrite the facts of the owner that had taken the job over. Reproduced:
+A stalled inside its source side, A's lease lapsed, B claimed and recorded
+`bbbb…/999 bytes`, then A returned and the row read **`aaaa…/111 bytes` with
+`lease_owner = host-B`** — A had corrupted the new owner's verification
+authority, the one thing the target extracts against.
+
+*Fix:* `updateOwnedSeedJobArchive` — the same live-lease predicate as the outcome
+write, `null` on a zero-row write. A refusal means the lease is gone, so the
+coordinator sets `leaseLost`, does not run the target, and does not let a
+baseline verdict complete the job. The **unguarded** write survives for exactly
+one caller, `cleanupJobObjects`, which records the cleanup state after the job
+has ended — and which now re-reads the row and only ever sets the `cleanup`
+field, so a caller's in-memory facts can never be written back. That closes the
+same leak on the cleanup path by construction rather than by care.
+`seed-coordinator-bounded.test.ts` asserts `updateSeedJobArchive(` appears
+**exactly once** in the coordinator, in cleanup.
+
+**(2) A live lease could be claimed by the same owner.** `seedJobClaimableBy`
+allowed `lease_owner = me` while the lease was live, reading as a renewal — but
+`owner` is a **host id**, not a run id, and `runSeedJob` always rewinds to
+`preflight`. Reproduced: a second invocation with the **same owner string**
+claimed a live job, saw itself as owner, reset the phase to `preflight`, ran
+concurrent work, and wrote its own error over the first run's outcome.
+
+*Fix:* a **live lease is never claimable — not even the caller's own.** Renewal
+is `reportOwnedSeedJobProgress`, which needs no claim; a new run claims exactly
+once. The residual risk is the lease's whole premise and is documented rather
+than hidden: a run that is merely *slow* past its lease can be taken over, which
+is what makes the window a crash detector. The recovery path is kept working and
+tested: the same host **may** take over once the lease has demonstrably lapsed
+(and the reaper's contract is unchanged).
+
+Two gaps that remain by design, and are recorded so nobody assumes otherwise: the
+cleanup write stays unguarded (post-terminal by definition), and a takeover is
+still possible after a lapse — the lease, not the owner string, is the boundary.
+
+New coverage: a **stalled source A returning late** after B took the job (B's
+facts, progress, owner and outcome all survive; A's in-flight object is not
+deleted), a **late write against an already-ended job**, a **second run from the
+same host** refused with nothing run, and a **same-host takeover after a lapse**
+that still works. Load-bearing by reverting: restoring the unguarded write fails
+the late-A test; restoring the same-owner claim fails the concurrent-same-host
+test and the core rule test.
+
 #### What Stage 2b does NOT do, and what is still owed
 
 1. **No resume.** A failed job is not restarted from its persisted phase; the
@@ -1002,7 +1055,8 @@ Daemon
   coordinator: it drives the existing state machine with injected sides and an
   injected cleanup step, and adds no state of its own.
 - `packages/server/src/seed-coordinator.test.ts` (new, Stage 2b) — the lifecycle
-  proof (25 tests, including the concurrent-ownership and evidence suites).
+  proof (29 tests, including the concurrent-ownership, late-writer and
+  evidence suites).
 - `packages/server/src/seed-coordinator-bounded.test.ts` (new, Stage 2b) — reads
   the module graph to assert the coordinator stays test-only.
 - `packages/daemon/src/seed-archive.ts` — `createSeedArchive` now returns a
@@ -1055,7 +1109,7 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                      # clean
 bun run build:web-ui                    # clean (one self-contained index.html)
-bun test                                # 2568 pass / 0 fail, 173 files
+bun test                                # 2572 pass / 0 fail, 173 files
 bun run scripts/check-skill-drift.ts --strict   # OK (180 API rows, 181 routes)
 ```
 
@@ -1148,7 +1202,7 @@ Focused suites:
   acceptance with bidirectional edits, ignored content, an anti-vacuity pair of
   roots and a modtime sensitivity test; and the failure cases in §2.11. The
   gate test names the skip explicitly.
-- `packages/server/src/seed-coordinator.test.ts` — **25 tests**: the Stage 2b
+- `packages/server/src/seed-coordinator.test.ts` — **29 tests**: the Stage 2b
   lifecycle proof — a completed run through every phase with its archive facts,
   bounded progress and cleanup; a source failure (unrepresentable universe) and
   a throwing source; a target failure (tampered object) and a missing baseline
@@ -1160,7 +1214,11 @@ Focused suites:
   crashed owner's expired lease versus a live one, a self-expiring owner that
   stops instead of racing the reaper, the three conditional helpers against a
   wrong owner, a lapsed-lease finish, a source with no archive facts, a passing
-  baseline over phases that were never entered, and the cleanup gate.
+  baseline over phases that were never entered, and the cleanup gate. Then
+  §2.12.2: a stalled source returning after the job was taken over (the new
+  owner's facts, progress, owner and outcome all survive), a late write against
+  an ended job, a second run from the same host refused, and a same-host takeover
+  after a lapse that still works.
 - `packages/core/src/folder-seed.test.ts` — **4 tests**: the pure ownership rules
   (`seedLeaseIsLive`, `seedJobClaimableBy`, `seedCleanupAllowed`).
 - `packages/server/src/seed-coordinator-bounded.test.ts` — **5 tests**: the

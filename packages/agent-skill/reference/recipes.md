@@ -385,7 +385,9 @@ The job **lifecycle** is proven test-only
 lease renewal, archive-facts persistence, cancellation, a lost lease, and
 idempotent cleanup — all on the existing job state machine, with no new table
 and no production wiring. Ownership is enforced atomically: a contender cannot
-claim a live owner's job, write its outcome, or delete its in-flight objects.
+claim a live owner's job, write its outcome or its in-flight archive facts, or
+delete its in-flight objects — and a live lease is not claimable even by the same
+owner, so one host cannot run two invocations against one job.
 
 **Execution is still not available.** `POST /seed-jobs` returns
 `503 { executionAvailable: false, reason }` because the one remaining Stage 1

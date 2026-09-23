@@ -136,7 +136,18 @@ distributable binary build.
   phase to have been entered and archive facts to have been persisted, so a
   passing baseline cannot complete a job that never did the work. The device
   routes keep their own last-writer-wins contract: `seed-jobs.ts` is purely
-  additive and `routes/folder-seed.ts` is untouched.
+  additive and `routes/folder-seed.ts` is untouched. **In-flight archive facts
+  are conditional too** (`updateOwnedSeedJobArchive`): a run whose lease lapsed
+  during a long source/target phase cannot overwrite the new owner's digest, so
+  the target's verification authority cannot be corrupted from underneath it. The
+  **cleanup** write stays deliberately unguarded (post-terminal by definition)
+  and now only ever sets the `cleanup` field on a freshly read row, so a caller's
+  stale in-memory facts can never be written back. And a **live lease is never
+  claimable — not even by the same owner**: `owner` is a host id, not a run id, so
+  allowing it let a second invocation on the same host claim a live job, rewind
+  the phase to `preflight` and work concurrently; renewal goes through
+  `reportOwnedSeedJobProgress`, which needs no claim. A same-host takeover after
+  the lease has demonstrably lapsed still works (that is the recovery path).
   *Explicitly unavailable execution:* no real store is wired to a running job
   and remote orchestration is **not implemented**, so
   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while

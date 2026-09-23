@@ -60,7 +60,10 @@ writes (`claimSeedJobProgress`, `reportOwnedSeedJobProgress`,
 `finishOwnedSeedJob`) so a live owner's job cannot be stolen, a contender cannot
 write its outcome or delete its in-flight objects, and a lapsed lease reports
 `lease_lost` instead of an unrecordable result. Completion requires every phase
-entered and archive facts persisted. Never swap those for the device routes'
+entered and archive facts persisted, in-flight archive facts are conditional too
+(so a lapsed run cannot overwrite the new owner's digest), cleanup only ever sets
+the `cleanup` field on a freshly read row, and a **live lease is never claimable
+even by the same owner** — `owner` is a host id, not a run id. Never swap those for the device routes'
 last-writer-wins helpers. No production module may import it —
 `seed-coordinator-bounded.test.ts` asserts that from the module graph, and
 `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` must stay `false` while it is test-only.
