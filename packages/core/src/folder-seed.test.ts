@@ -47,6 +47,10 @@ import {
   validateArchiveMembers,
   validateStagingLocation,
   type SeedPlan,
+  seedCleanupAllowed,
+  seedJobClaimableBy,
+  seedLeaseIsLive,
+  type SeedClaimFacts,
 } from "./folder-seed.ts";
 
 describe("recommendSeed — recommended, never automatic", () => {
@@ -691,5 +695,73 @@ describe("formatSeedBytes", () => {
     expect(formatSeedBytes(17_715_220)).toBe("16.9 MiB");
     expect(formatSeedBytes(14_864_173_809)).toBe("13.84 GiB");
     expect(formatSeedBytes(Number.NaN)).toBe("unknown");
+  });
+});
+
+
+describe("seed lease ownership rules (LAMA-346 Stage 2b)", () => {
+  const NOW = 1_000_000;
+  const running = (over: Partial<SeedClaimFacts> = {}): SeedClaimFacts => ({
+    status: "running",
+    phase: "uploading_archive",
+    leaseOwner: "host-a",
+    leaseExpiresAt: NOW + 600_000,
+    ...over,
+  });
+
+  test("a lease is live only for its own owner and only before it expires", () => {
+    const lease = { leaseOwner: "host-a", leaseExpiresAt: NOW + 1_000 };
+    expect(seedLeaseIsLive(lease, "host-a", NOW)).toBe(true);
+    expect(seedLeaseIsLive(lease, "host-a", NOW + 1_000)).toBe(false); // exactly at expiry
+    expect(seedLeaseIsLive(lease, "host-a", NOW + 1_001)).toBe(false);
+    expect(seedLeaseIsLive(lease, "host-b", NOW)).toBe(false);
+    // No expiry means "cannot tell", and the answer to "may I?" must be no.
+    expect(seedLeaseIsLive({ leaseOwner: "host-a", leaseExpiresAt: null }, "host-a", NOW)).toBe(false);
+    expect(seedLeaseIsLive({ leaseOwner: null, leaseExpiresAt: NOW + 1_000 }, "host-a", NOW)).toBe(false);
+  });
+
+  test("a live owner's job is not claimable, and an expired one is", () => {
+    // Someone else holds a live lease: no.
+    expect(seedJobClaimableBy(running(), "host-b", NOW)).toBe(false);
+    // The holder may re-claim (that is a renewal).
+    expect(seedJobClaimableBy(running(), "host-a", NOW)).toBe(true);
+    // Expired: yes, whoever asks.
+    expect(seedJobClaimableBy(running({ leaseExpiresAt: NOW }), "host-b", NOW)).toBe(true);
+    expect(seedJobClaimableBy(running({ leaseExpiresAt: NOW - 1 }), "host-b", NOW)).toBe(true);
+    // An owner with no expiry is NOT lapsed: fail closed and let the reaper decide.
+    expect(seedJobClaimableBy(running({ leaseExpiresAt: null }), "host-b", NOW)).toBe(false);
+    expect(seedJobClaimableBy(running({ leaseExpiresAt: null }), "host-a", NOW)).toBe(false);
+  });
+
+  test("an unclaimed job is claimable, and an ended one never is", () => {
+    expect(seedJobClaimableBy(running({ leaseOwner: null, leaseExpiresAt: null }), "host-b", NOW)).toBe(true);
+    expect(
+      seedJobClaimableBy({ ...running({ leaseOwner: null }), status: "planned" }, "host-b", NOW),
+    ).toBe(true);
+    // Terminal phase, whatever the status and lease say.
+    for (const phase of ["completed", "failed", "cancelled"] as const) {
+      expect(seedJobClaimableBy(running({ phase }), "host-b", NOW)).toBe(false);
+      expect(seedJobClaimableBy(running({ phase, leaseOwner: null }), "host-b", NOW)).toBe(false);
+    }
+    // A terminal status with a non-terminal phase is not claimable either.
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      expect(seedJobClaimableBy(running({ status }), "host-b", NOW)).toBe(false);
+    }
+  });
+
+  test("cleanup is allowed for a live owner, and for anyone once the job has ended", () => {
+    // Live owner: yes. Contender: no. Lapsed lease: no.
+    expect(seedCleanupAllowed(running(), "host-a", NOW)).toBe(true);
+    expect(seedCleanupAllowed(running(), "host-b", NOW)).toBe(false);
+    expect(seedCleanupAllowed(running({ leaseExpiresAt: NOW - 1 }), "host-a", NOW)).toBe(false);
+    expect(seedCleanupAllowed(running({ leaseExpiresAt: null }), "host-a", NOW)).toBe(false);
+    expect(seedCleanupAllowed(running({ leaseOwner: null, leaseExpiresAt: null }), "host-b", NOW)).toBe(false);
+    // A terminal job is nobody's: its temporary objects are done with.
+    for (const phase of ["completed", "failed", "cancelled"] as const) {
+      expect(seedCleanupAllowed(running({ phase }), "host-b", NOW)).toBe(true);
+    }
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      expect(seedCleanupAllowed(running({ status }), "host-b", NOW)).toBe(true);
+    }
   });
 });

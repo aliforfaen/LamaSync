@@ -6,6 +6,13 @@
 // already define. It invents no parallel state, adds no table and no column,
 // and it does not decide whether a seed is allowed — the plan and the job do.
 //
+// Its claim/report/finish writes are CONDITIONAL (the `*Owned*` helpers in
+// `seed-jobs.ts`), not last-writer-wins: a live owner's job cannot be claimed by
+// a contender, a contender cannot write the terminal state, an expired lease is
+// claimable and a lapsed one is not, and a contender never deletes relay objects
+// another owner may still be reading. The device routes keep their own
+// unguarded contract, which this module does not use.
+//
 // It exists to close the orchestration proof gap: Stage 2a proved the
 // primitives compose locally, and this proves the LIFECYCLE around them is
 // legal and safe — that a job moves one phase at a time, that its lease is
@@ -40,6 +47,9 @@ import {
   initialSeedRelayCleanup,
   isTerminalSeedPhase,
   seedArchiveObjectKey,
+  seedCleanupAllowed,
+  seedJobClaimableBy,
+  seedLeaseIsLive,
   seedProgressFraction,
   startSeedProgress,
   type SeedArchiveFormat,
@@ -51,10 +61,11 @@ import {
   type SeedRelayStore,
 } from "@lamasync/core";
 import {
-  finishSeedJob,
+  claimSeedJobProgress,
+  finishOwnedSeedJob,
   getSeedJob,
+  reportOwnedSeedJobProgress,
   updateSeedJobArchive,
-  updateSeedJobProgress,
 } from "./seed-jobs.ts";
 
 /**
@@ -252,7 +263,28 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
     throw new Error(`seed job ${options.jobId} does not exist`);
   }
 
-  /** Persist a progress record (and the lease) for the CURRENT phase. */
+  /** Build the progress record for one write. */
+  const progressFor = (
+    phase: SeedJobPhase,
+    message: string,
+    totals: SeedProgressTotals,
+    update: SeedProgressUpdate,
+    stamp: number,
+  ) => {
+    const progress = startSeedProgress(phase, stamp, boundedMessage(message), {
+      bytesTotal: totals.bytesTotal ?? null,
+      entriesTotal: totals.entriesTotal ?? null,
+    });
+    progress.bytesDone = Math.max(0, Math.trunc(update.bytesDone ?? 0));
+    progress.entriesDone = Math.max(0, Math.trunc(update.entriesDone ?? 0));
+    return progress;
+  };
+
+  /**
+   * Report progress for the CURRENT phase and renew the lease — CONDITIONALLY.
+   * A null result means we no longer hold the job (cancelled, reaped, or taken
+   * over), so the caller stops instead of writing over the new owner.
+   */
   const writeProgress = (
     phase: SeedJobPhase,
     message: string,
@@ -260,44 +292,53 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
     update: SeedProgressUpdate,
   ): SeedJob | null => {
     const stamp = now();
-    const progress = startSeedProgress(phase, stamp, boundedMessage(message), {
-      bytesTotal: totals.bytesTotal ?? null,
-      entriesTotal: totals.entriesTotal ?? null,
-    });
-    progress.bytesDone = Math.max(0, Math.trunc(update.bytesDone ?? 0));
-    progress.entriesDone = Math.max(0, Math.trunc(update.entriesDone ?? 0));
-    return updateSeedJobProgress(options.db, options.jobId, progress, {
-      owner: options.owner,
-      expiresAt: stamp + leaseMs,
-    });
+    return reportOwnedSeedJobProgress(
+      options.db,
+      options.jobId,
+      progressFor(phase, message, totals, update, stamp),
+      { owner: options.owner, expiresAt: stamp + leaseMs, now: stamp },
+    );
   };
 
   /**
-   * Ownership: this owner holds the lease AND the job has not ended. A job that
-   * is `planned` with no owner is claimable; anything else owned by someone
-   * else is not ours.
+   * Ownership: this owner holds a LIVE lease and the job has not ended.
+   *
+   * Deliberately strict. A recorded owner with a lapsed lease is not ours any
+   * more (we stop, and the reaper ends the job), and neither is a job with no
+   * owner but a terminal phase. The old rule — "no owner means mine" — let a
+   * coordinator adopt a running job nobody had released.
    */
   const owned = (): boolean => {
     const current = read();
     if (current === null) return false;
     if (isTerminalSeedPhase(current.phase)) return false;
-    if (current.leaseOwner === null) return true;
-    return current.leaseOwner === options.owner;
+    return seedLeaseIsLive(current, options.owner, now());
   };
 
-  // 1. CLAIM. Reporting `preflight` is legal (re-entering the current phase is
-  //    allowed) and is exactly what the device progress route does, so the
-  //    lease and the `running` status come from the existing contract.
-  const claimed = writeProgress("preflight", "Seed job claimed by the coordinator.", {}, {});
+  // 1. CLAIM. Re-entering `preflight` is a legal transition, and claiming is
+  //    what sets the lease and flips the job to `running`. Unlike the route's
+  //    write, this one is conditional: a live owner's lease is not in the
+  //    predicate, so a contender's claim changes nothing and it is told so.
+  const stamp = now();
+  const claimed = claimSeedJobProgress(
+    options.db,
+    options.jobId,
+    progressFor("preflight", "Seed job claimed by the coordinator.", {}, {}, stamp),
+    { owner: options.owner, expiresAt: stamp + leaseMs, now: stamp },
+  );
   if (claimed === null) {
-    // Another owner holds it, or it ended while we were starting.
+    // Either it ended while we were starting, or a live owner holds it. Both are
+    // `lease_lost`: this run produced no outcome, so it must not claim one. Only
+    // an operator's cancellation is reported as `cancelled`, and that is the
+    // operator's status, not ours.
     const current = read() ?? job;
+    const ended = isTerminalSeedPhase(current.phase);
     return {
-      status: isTerminalSeedPhase(current.phase) ? "cancelled" : "lease_lost",
+      status: current.status === "cancelled" ? "cancelled" : "lease_lost",
       job: current,
-      error: isTerminalSeedPhase(current.phase)
+      error: ended
         ? `the seed job already ended (${current.phase}) before this owner claimed it`
-        : "another owner holds this seed job's lease",
+        : `another owner holds this seed job's lease (${current.leaseOwner ?? "unknown"} until ${current.leaseExpiresAt ?? 0})`,
       cleanedKeys: [],
       phases,
     };
@@ -382,9 +423,13 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
       leaseLost = true;
     } else if (!source.ok) {
       failure = source.error ?? "the source side failed";
-    } else if (source.archive !== null) {
-      // The archive facts are the target's only authority for verification, so
-      // they are persisted before the target side is allowed to run.
+    } else if (source.archive === null) {
+      // The archive facts are the target's ONLY authority: they carry the
+      // digest and the member set. A source that reports success without them
+      // has nothing to transfer, so the target is never started on it.
+      failure = "the source side reported success without recording archive facts";
+    } else {
+      // Persisted before the target side is allowed to run.
       archiveFacts = source.archive;
       if (updateSeedJobArchive(options.db, options.jobId, source.archive, now()) !== null) {
         emit({
@@ -424,8 +469,30 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
     failure = boundedMessage(`the seed run threw: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // A latched illegal transition outranks a side's own success report.
-  if (failure === null && illegalTransition !== null) failure = illegalTransition;
+  // A latched illegal transition outranks every other reason. The side that
+  // asked for it is the root cause, and the failures that follow (a side that
+  // bailed out early, so no archive facts) are downstream of it — reporting the
+  // downstream symptom would hide the bug.
+  if (illegalTransition !== null) failure = illegalTransition;
+
+  // COMPLETION GATES. A passing baseline is a claim; these are the evidence.
+  // Without them a side that never entered a phase (or never persisted archive
+  // facts) could still be reported as a completed seed, which is precisely the
+  // failure mode a "seed succeeded" message must not have.
+  if (failure === null && !leaseLost) {
+    const missing = SEED_COORDINATOR_PHASES.filter((phase) => !phases.includes(phase));
+    if (missing.length > 0) {
+      failure = `the job cannot complete: phase(s) not entered: ${missing.join(", ")}`;
+    }
+  }
+  if (failure === null && !leaseLost) {
+    const persisted = read();
+    const recordedDigest = persisted === null ? null : persisted.archive.sha256;
+    if (archiveFacts === null || recordedDigest === null) {
+      failure =
+        "the job cannot complete: no archive facts were persisted for it, so nothing proves what was transferred";
+    }
+  }
   let outcome: { status: SeedCoordinatorStatus; error: string | null } = leaseLost
     ? { status: "lease_lost", error: "this owner lost the seed job before it finished" }
     : failure === null
@@ -448,7 +515,11 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
 
   let finalJob = read() ?? job;
   if (outcome.status !== "lease_lost" && outcome.status !== "cancelled") {
-    const finished = finishSeedJob(options.db, options.jobId, {
+    // CONDITIONAL: the terminal write requires a live lease of ours. A refusal
+    // means the job moved on while we were working, so we must not report the
+    // outcome we intended — "completed" is only true if it was persisted.
+    const finished = finishOwnedSeedJob(options.db, options.jobId, {
+      owner: options.owner,
       status: outcome.status,
       phase: outcome.status,
       summary:
@@ -458,7 +529,14 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
       error: outcome.status === "failed" ? (outcome.error ?? "the seed run failed") : null,
       now: now(),
     });
-    if (finished !== null) finalJob = finished;
+    if (finished === null) {
+      outcome = {
+        status: "lease_lost",
+        error: "this owner lost the seed job before it could record the outcome",
+      };
+    } else {
+      finalJob = finished;
+    }
   }
   emit({
     kind: outcome.status === "completed" ? "completed" : outcome.status === "cancelled" ? "cancelled" : outcome.status === "lease_lost" ? "lease_lost" : "failed",
@@ -473,6 +551,7 @@ export async function runSeedJob(options: SeedCoordinatorOptions): Promise<SeedC
     store: options.store,
     cleanup: options.cleanup,
     jobId: options.jobId,
+    owner: options.owner,
     job: finalJob,
     archiveFacts,
     now,
@@ -501,11 +580,29 @@ export async function cleanupJobObjects(input: {
   store: SeedRelayStore;
   cleanup: SeedCleanupStep;
   jobId: string;
+  /** The owner asking to clean up. Gates the delete; see `seedCleanupAllowed`. */
+  owner: string;
   job: SeedJob;
   archiveFacts: SeedJobArchiveFacts | null;
   now: () => number;
   onEvent?: (event: SeedCoordinatorEvent) => void;
 }): Promise<{ job: SeedJob; deletedKeys: string[]; cleanup: SeedRelayCleanup }> {
+  // DO NOT DELETE AN OBJECT ANOTHER LIVE OWNER MAY BE USING. A terminal job is
+  // nobody's and its objects are done with; a job still in flight is cleaned
+  // only by a live owner. A contender that merely lost a race therefore leaves
+  // the relay alone — and reports nothing as cleaned, because nothing was.
+  if (!seedCleanupAllowed(input.job, input.owner, input.now())) {
+    input.onEvent?.({
+      kind: "cleanup",
+      phase: input.job.phase,
+      message: `cleanup deferred: ${input.owner} does not hold ${input.jobId} and the job has not ended`,
+    });
+    return {
+      job: input.job,
+      deletedKeys: [],
+      cleanup: input.job.archive.cleanup ?? initialSeedRelayCleanup(),
+    };
+  }
   const facts = input.archiveFacts ?? input.job.archive;
   const format: SeedArchiveFormat = facts.format;
   const keys = new Set<string>();

@@ -537,6 +537,159 @@ export function finishSeedJob(
   return getSeedJob(database, jobId);
 }
 
+// ---------------------------------------------------------------------------
+// Ownership-conditional writes (the coordinator's family)
+// ---------------------------------------------------------------------------
+//
+// The three helpers above are LAST-WRITER-WINS, and they are the device routes'
+// contract: a report from a device whose lease owner differs still lands, and
+// that is deliberate — the routes are unchanged.
+//
+// The coordinator needs the opposite, so it uses the conditional family below.
+// Every one of them:
+//
+//   * decides in the WHERE clause, so the check and the write are ONE atomic
+//     statement (SQLite gives no useful row lock to take between two);
+//   * returns null when the statement changed ZERO rows, and only then reads
+//     the row back — a caller can therefore never mistake a refusal for a
+//     success, which is exactly what the unguarded `UPDATE ... ; SELECT` pair
+//     cannot express.
+//
+// The predicates they encode live in `@lamasync/core` (`seedJobClaimableBy`,
+// `seedLeaseIsLive`) so the rule is stated once and tested without a database.
+
+/** The lease a conditional write is asking for. */
+export interface SeedConditionalLease {
+  owner: string;
+  expiresAt: number;
+  now: number;
+}
+
+/**
+ * Claim a job — or renew our own claim — only if it is actually claimable.
+ *
+ * This is the write that makes "owner B steals owner A's running job"
+ * impossible: a live owner's lease is not in the predicate, so B's UPDATE
+ * matches nothing and B is told so.
+ */
+export function claimSeedJobProgress(
+  database: Database,
+  jobId: string,
+  progress: SeedJobProgress,
+  lease: SeedConditionalLease,
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET phase = ?, progress = ?, status = 'running',
+            started_at = COALESCE(started_at, ?),
+            lease_owner = ?, lease_expires_at = ?, updated_at = ?
+      WHERE id = ?
+        AND status IN ('planned', 'running')
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND (
+              lease_owner IS NULL
+           OR (lease_owner = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?)
+           OR (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+        )`,
+    [
+      progress.phase,
+      JSON.stringify(progress),
+      progress.updatedAt,
+      lease.owner,
+      lease.expiresAt,
+      progress.updatedAt,
+      jobId,
+      lease.owner,
+      lease.now,
+      lease.now,
+    ],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Report progress and renew the lease — but only while we still hold it.
+ *
+ * A zero-row result means the job was cancelled, reaped, or taken over while we
+ * were working. The caller must stop rather than keep writing.
+ */
+export function reportOwnedSeedJobProgress(
+  database: Database,
+  jobId: string,
+  progress: SeedJobProgress,
+  lease: SeedConditionalLease,
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET phase = ?, progress = ?, updated_at = ?,
+            lease_expires_at = ?
+      WHERE id = ?
+        AND status = 'running'
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND lease_owner = ?
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > ?`,
+    [
+      progress.phase,
+      JSON.stringify(progress),
+      progress.updatedAt,
+      lease.expiresAt,
+      jobId,
+      lease.owner,
+      lease.now,
+    ],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
+/**
+ * Terminal transition, conditional on still holding a live lease.
+ *
+ * A coordinator that lost the job must not be able to write the outcome: the
+ * row it would have written belongs to whoever holds it now. A lease that
+ * lapsed counts as lost, so the reaper (not a late writer) decides that job.
+ */
+export function finishOwnedSeedJob(
+  database: Database,
+  jobId: string,
+  input: {
+    owner: string;
+    status: Extract<SeedJobStatus, "completed" | "failed" | "cancelled">;
+    phase: SeedJobPhaseOrTerminal;
+    summary: string | null;
+    error: string | null;
+    now: number;
+  },
+): SeedJob | null {
+  const result = database.run(
+    `UPDATE folder_seed_jobs
+        SET status = ?, phase = ?, summary = ?, error = ?,
+            lease_owner = NULL, lease_expires_at = NULL,
+            updated_at = ?, finished_at = ?
+      WHERE id = ?
+        AND status = 'running'
+        AND phase NOT IN ('completed', 'failed', 'cancelled')
+        AND lease_owner = ?
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > ?`,
+    [
+      input.status,
+      input.phase,
+      input.summary,
+      input.error,
+      input.now,
+      input.now,
+      jobId,
+      input.owner,
+      input.now,
+    ],
+  );
+  if (Number(result.changes ?? 0) === 0) return null;
+  return getSeedJob(database, jobId);
+}
+
 /** Renew a live lease without changing progress. */
 export function renewSeedJobLease(
   database: Database,

@@ -95,6 +95,41 @@ describe("Stage 2b is test-only orchestration, not production wiring", () => {
     expect(execution.reason).toContain("temporary seed space");
   });
 
+  test("the coordinator uses only the ownership-conditional writes", () => {
+    // `seed-jobs.ts` has two families: the LAST-WRITER-WINS helpers the device
+    // routes use, and the conditional `*Owned*`/`claim*` ones. Reaching for the
+    // unguarded trio here would silently reintroduce the steal this correction
+    // fixed, so the boundary is asserted rather than remembered.
+    const coordinator = productionSources().find(
+      (file) => file.path.endsWith("/seed-coordinator.ts"),
+    )!;
+    // Find the import statement that targets seed-jobs.ts: split on `import` and
+    // take the one whose clause ends there, so a neighbouring import cannot be
+    // mistaken for it.
+    const block = coordinator.text
+      .split("\nimport ")
+      .find((part) => part.includes('} from "./seed-jobs.ts";'));
+    expect(block).toBeDefined();
+    const names = block!
+      .slice(0, block!.indexOf("} from"))
+      .replace(/^\{/, "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0);
+    expect(names.sort()).toEqual([
+      "claimSeedJobProgress",
+      "finishOwnedSeedJob",
+      "getSeedJob",
+      "reportOwnedSeedJobProgress",
+      "updateSeedJobArchive",
+    ]);
+    // And the unguarded trio appears nowhere in its body.
+    for (const unguarded of ["updateSeedJobProgress", "finishSeedJob", "renewSeedJobLease"]) {
+      expect(names).not.toContain(unguarded);
+      expect(stripComments(coordinator.text)).not.toContain(`${unguarded}(`);
+    }
+  });
+
   test("the coordinator invents no phase: it drives the machine's own list", () => {
     // A type-level and value-level check: every phase it names is one the job
     // machine defines, and it never adds a phase of its own.

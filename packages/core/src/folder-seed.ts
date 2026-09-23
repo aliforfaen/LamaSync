@@ -803,6 +803,74 @@ export function canTransitionSeedPhase(
   return seedPhaseIndex(to) === seedPhaseIndex(from) + 1;
 }
 
+/**
+ * The lease fields every ownership rule needs. Structural, so the rules apply
+ * to a `SeedJob` and to a row that was never materialised.
+ */
+export interface SeedLeaseFacts {
+  leaseOwner: string | null;
+  leaseExpiresAt: number | null;
+}
+
+/**
+ * Is `owner` holding a lease that has not lapsed?
+ *
+ * A lease with no expiry is NOT live: `updateSeedJobProgress` always writes one,
+ * so a null expiry means we cannot tell whether that owner is alive — and the
+ * answer to "may I take this?" must be no when the answer is unknown.
+ */
+export function seedLeaseIsLive(lease: SeedLeaseFacts, owner: string, now: number): boolean {
+  return (
+    lease.leaseOwner === owner && lease.leaseExpiresAt !== null && lease.leaseExpiresAt > now
+  );
+}
+
+/** The job facts a claim decision needs. */
+export interface SeedClaimFacts extends SeedLeaseFacts {
+  status: SeedJobStatus;
+  phase: SeedJobPhaseOrTerminal;
+}
+
+/**
+ * May `owner` claim (or re-claim) this job?
+ *
+ * The rules, in order:
+ *
+ *   1. a job that already ended is nobody's to claim;
+ *   2. only `planned`/`running` jobs can be claimed at all;
+ *   3. our own live lease may be renewed by re-claiming;
+ *   4. a job with no recorded owner has never been claimed;
+ *   5. someone else's lease is claimable only once it has demonstrably LAPSED —
+ *      a recorded owner with no expiry is left alone and left to the reaper.
+ *
+ * Rule 5 is the one that matters: the earlier rule ("the lease owner is me")
+ * made a live owner unstealable only by accident, and a lease that expired
+ * blocked every later owner until the reaper happened to run.
+ */
+export function seedJobClaimableBy(facts: SeedClaimFacts, owner: string, now: number): boolean {
+  if (isTerminalSeedPhase(facts.phase)) return false;
+  if (facts.status !== "planned" && facts.status !== "running") return false;
+  if (seedLeaseIsLive(facts, owner, now)) return true;
+  if (facts.leaseOwner === null) return true;
+  return facts.leaseExpiresAt !== null && facts.leaseExpiresAt <= now;
+}
+
+/**
+ * May `owner` delete this job's relay objects?
+ *
+ * A terminal job is nobody's, so its temporary objects are done with. While a
+ * job is still in flight, only a LIVE owner may delete: a contender must not
+ * remove an object another owner may still be reading, and an owner whose lease
+ * lapsed must not either — the reaper ends that job first, and cleanup follows.
+ */
+export function seedCleanupAllowed(facts: SeedClaimFacts, owner: string, now: number): boolean {
+  if (isTerminalSeedPhase(facts.phase)) return true;
+  if (facts.status === "completed" || facts.status === "failed" || facts.status === "cancelled") {
+    return true;
+  }
+  return seedLeaseIsLive(facts, owner, now);
+}
+
 export interface SeedJobProgress {
   phase: SeedJobPhase;
   phaseIndex: number;
