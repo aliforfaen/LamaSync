@@ -99,10 +99,18 @@ function assignment(hostId: string, localPath: string) {
   };
 }
 
-function hostConfig(hostId: string, localPath: string): HostConfig {
+function hostConfig(hostId: string, localPath: string, badPeer = false): HostConfig {
   return {
     host: { id: hostId, hostname: hostId, status: "online" },
-    assignments: [assignment(hostId, localPath)],
+    // `badPeer` makes the assignment's destination an absolute path, which the
+    // canonical destination rule refuses. That models "this device has no usable
+    // resync peer" deterministically, without needing rclone or a real remote.
+    assignments: [
+      {
+        ...assignment(hostId, localPath),
+        ...(badPeer ? { destination: "/absolute/path" } : {}),
+      },
+    ],
     folders: [{ id: FOLDER_ID, name: "runner-folder", type: "sync" }],
     apps: [],
     rcloneConfig: "",
@@ -332,6 +340,8 @@ function context(
     now: () => number;
     scheduler?: SeedLeaseScheduler;
     peer?: string;
+    /** Make the assignment's destination unresolvable (no usable peer). */
+    badPeer?: boolean;
   },
 ): Parameters<typeof runSeedAction>[0] {
   if (extras.peer !== undefined) process.env.LAMASYNC_SEED_DAEMON_PEER_PATH = extras.peer;
@@ -341,7 +351,7 @@ function context(
     hostId,
     jobId: JOB_ID,
     payloadRole: hostId === SOURCE_HOST ? "source" : "target",
-    getHostConfig: () => hostConfig(hostId, localPath),
+    getHostConfig: () => hostConfig(hostId, localPath, extras.badPeer === true),
     refreshConfig: async () => true,
     dataDir: DATA_DIR,
     log: () => {},
@@ -548,12 +558,12 @@ describe("the target's wait for the source", () => {
     target.pendingFacts = source.archive;
     target.refuseRenewBeforeClaim = true;
     const outcome = await runSeedAction(
-      context(target, TARGET_HOST, TARGET_ROOT, { store, now: () => clock.now }),
+      context(target, TARGET_HOST, TARGET_ROOT, { store, now: () => clock.now, badPeer: true }),
     );
-    // It got past the wait, claimed and published — and only the missing peer
+    // It got past the wait, claimed and published — and only the unusable peer
     // stopped it from completing, which is the fail-closed gate.
     expect(outcome.status).toBe("failed");
-    expect(outcome.result).toContain("no resync peer");
+    expect(outcome.result).toContain("could not be resolved");
     expect(target.progressReports[0]).toBe("downloading_archive");
     expect(target.refusals).toBe(0);
     expect(target.completions).toBe(0);
@@ -561,7 +571,7 @@ describe("the target's wait for the source", () => {
 });
 
 describe("the target's fail-closed completion gate", () => {
-  test("publishes the verified tree but refuses to complete without a resync peer", async () => {
+  test("publishes the verified tree but refuses to complete without a usable resync peer", async () => {
     openSeam();
     buildSource();
     rmSync(TARGET_ROOT, { recursive: true, force: true });
@@ -578,11 +588,11 @@ describe("the target's fail-closed completion gate", () => {
     target.archive = server.archive;
     target.phase = "downloading_archive";
     const outcome = await runSeedAction(
-      context(target, TARGET_HOST, TARGET_ROOT, { store, now: () => clock.now, peer: "" }),
+      context(target, TARGET_HOST, TARGET_ROOT, { store, now: () => clock.now, badPeer: true }),
     );
 
     expect(outcome.status).toBe("failed");
-    expect(outcome.result).toContain("no resync peer");
+    expect(outcome.result).toContain("could not be resolved");
     expect(target.completions).toBe(0);
     // It DID publish: the tree was verified first, and the missing proof is the
     // only thing that stopped the job from being reported complete.

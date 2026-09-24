@@ -700,7 +700,7 @@ distributable binary build.
 
 1. **LAMA-346 — the transport, remote orchestration and live acceptance.**
    Stages 1a, 1b, 2a, 2b and 2c are implemented and locally validated;
-   **Stages 2d and 2e are now implemented and passing on this host**. The job carries
+   **Stages 2d, 2e and 2f are now implemented and passing on this host**. The job carries
    `sourceHostId`, so each side of a seed has its own IDENTITY: a device key is
    authorized for the source half or the target half (`seedJobRoleFor` +
    `seedJobPhaseRole`), the archive facts are written exactly once by the
@@ -716,7 +716,7 @@ distributable binary build.
    zero-change verdict is REQUIRED before `completed` (no peer ⇒ the phase
    fails, never a false pass). `scripts/lama346-seed-e2e.ts` starts TWO REAL
    daemon processes, each with a device key minted through the pairing
-   exchange, and passes **66 checks / 0 fail / 3 GATED** — including four
+   exchange, and passes **80 checks / 0 fail / 3 GATED** — including four
    device-key denials (the target cannot rewrite the source's facts, a third
    device cannot read the job, a late report cannot reopen it, and the digest
    cannot be rewritten).
@@ -736,29 +736,54 @@ distributable binary build.
    source. The E2E proves it against two real daemons with a 30 s lease: a 35 s
    source stage was LIVE at all 116 observations and RENEWED 12 times, and an
    operator cancellation inside the target's 10 s hold published nothing.
-   Execution is still unavailable by default:
-   `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` and `POST /seed-jobs` still
-   returns 503 unless the seam is fully open on BOTH the server and the daemon.
+   **Stage 2f replaced the test seam with the operator's SEED PILOT and gave both
+   external inputs a production resolution.** Execution is no longer opened by an
+   environment variable: `packages/core/src/seed-pilot.ts` authorizes exactly ONE
+   folder and ONE ORDERED source/target pair, and requires the temporary seed
+   space — an EXISTING S3 backend row plus the operator's bucket (`lamasync-tmp`)
+   — to have been PROBED first. A swapped pair authorizes nothing, an unprobed or
+   failed space authorizes nothing, and the SERVER's doubly-gated seam is deleted
+   (a test environment alone opens nothing). `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
+   stays `false`: it now means "claimed as production-validated fleet-wide",
+   which nothing here claims. The space is decrypted on the server only and
+   delivered as `HostConfig.seedRelay` inside a party's OWN authenticated config,
+   bound to the job id and side; an idle device, a stranger and any host after
+   the job is terminal get nothing, and the runner refuses a space issued for
+   another job. The probe is BUCKET-SCOPED on purpose — an existing key may be
+   scoped to one bucket, and the generic backends test lists every bucket in the
+   account, which such a key cannot do — it writes and deletes one object under
+   the seed namespace, is retry-pinned and killed after 20 s, and its verdict is
+   persisted (a reconfiguration resets it). The target's resync PEER now resolves
+   from the assignment (`<remoteName>:<canonical destination>` plus the server's
+   rclone config in a private temp file); the env override is seam-gated. A
+   target that is not MEASURED as empty is refused at PLAN time as well as at
+   publish, and a terminal job's relay objects are deleted promptly with the
+   bucket's lifecycle as the independent backstop. The disposable E2E now creates
+   a real backend row, configures and probes the pilot through the real admin
+   routes, starts both daemons with NO relay environment at all, and asserts the
+   503 cases, the non-empty-target preflight, the issued-space and resolved-peer
+   evidence and prompt cleanup: **80 pass / 0 fail / 3 GATED**.
    Remaining work, in order:
-   (a) resolve the target's production resync peer (the assignment's own remote
-   + rclone config) inside the runner — today it is seam-supplied and the phase
-   fails closed without it; (b) decide where the fleet's temporary seed space
-   (endpoint/bucket/credentials) is configured; (c) the GATED host proofs — a
-   real two-MACHINE hop with a network partition and one retry/resume, real
-   ENOSPC on a bounded disposable volume, and the live dev-vm-shape run on a
-   **copy** of a large tree (no timeout kill while progressing, one correct
-   resume after a deliberate stall, a zero-change baseline afterwards); (d)
-   confirm the target's archive tooling **and** staging proof are reported
-   before the Run control is enabled for that device; (e) persist the cleanup
-   block server-side for a daemon-run job (the objects ARE deleted; the
-   bookkeeping field stays `not_started`; a STOPPED side also leaves that
-   job's relay objects to the retention sweep, asserted in the E2E). The
-   retention/cleanup policy is
+   (a) the GATED host proofs — a real two-MACHINE hop with a network partition and
+   one retry/resume, real ENOSPC on a bounded disposable volume, and the live
+   dev-vm-shape run on a **copy** of a large tree (no timeout kill while
+   progressing, one correct resume after a deliberate stall, a zero-change
+   baseline afterwards). This is what the pilot exists for: ONE real pair, dev-vm
+   as the target of `master`'s Projects, with `lamasync-tmp` as the seed space —
+   and before that run the operator must decide where dev-vm's existing PARTIAL
+   Projects content belongs and start from an EMPTY target directory (LamaSync
+   never moves, merges or deletes it) and run "Check this device now" on dev-vm
+   so the target-emptiness preflight has a measurement; (b) persist the cleanup
+   block server-side for a daemon-run job (the objects ARE deleted, promptly now;
+   the bookkeeping field stays `not_started`). The retention/cleanup policy is
    decided (delete on the terminal phase, 24 h for abandoned objects,
-   idempotent, namespace-confined). Only after (a)-(c) and an independent
-   review may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip. See
+   idempotent, namespace-confined), and the bucket's own lifecycle is the
+   independent backstop. Only after (a) and an independent review of the Stage
+   2c-2f evidence may `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` flip — and a released
+   build still keeps `POST /seed-jobs` at 503 for every folder the pilot does not
+   authorize. See
    [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md)
-   §2.14 and §2.15.
+   §2.14, §2.15 and §2.16.
 
 2. **LAMA-337 — release, and the one device-path question it leaves open.**
    The reconnect flow is merged with the

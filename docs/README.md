@@ -38,9 +38,12 @@ upload/download, cleanup/retention), Stage 2a's disposable two-host harness
 test-only lifecycle proof, Stage 2c's real network path (a real S3-compatible
 store and the manifest handoff through a disposable MinIO), Stage 2d's
 shipped-daemon path (per-role device authorization, the `seed_job` queued action
-and a two-real-daemon E2E) and Stage 2e's per-stage lease supervision (renewal
+and a two-real-daemon E2E) Stage 2e's per-stage lease supervision (renewal
 alongside a long stage, abort-and-stop on cancellation or lease loss, and an
-authority check before publishing) are implemented and locally validated, while the
+authority check before publishing) and Stage 2f's operator pilot (one authorized
+folder and ordered pair, a probed temporary seed space delivered host-scoped, the
+assignment-resolved resync peer, a non-empty-target preflight and prompt cleanup)
+are implemented and locally validated, while the
 production resync peer, the production relay-space configuration and the live
 host acceptance remain open — so it stays here rather than in the archive. The dashboard
 design reference and image artifacts remain here because the web UI assets

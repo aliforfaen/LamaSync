@@ -12,6 +12,7 @@ import { ConfirmDialog } from "../components/Modal.tsx";
 import { PairingModal } from "../components/PairingModal.tsx";
 import { MobileDevicesPanel } from "../components/MobileDevicesPanel.tsx";
 import { AccessKeysPanel } from "../components/AccessKeysPanel.tsx";
+import { SeedPilotPanel } from "../components/SeedPilotPanel.tsx";
 import { deployCardState, deployStageLabel } from "../server-deploy-ui.ts";
 import { useWebSocket } from "../hooks/useWebSocket.ts";
 
@@ -631,6 +632,11 @@ export function Admin() {
       <MobileDevicesPanel />
 
       <AccessKeysPanel />
+
+      {/* LAMA-346 Stage 2f: the operator's seed pilot. One folder, one ordered
+          source/target pair, one existing S3 backend and bucket — plus the
+          bucket-scoped readiness probe. Admin only, and secret-free. */}
+      <SeedPilotPanel />
 
       <section className="section">
         <h2>Backblaze B2 bucket management</h2>

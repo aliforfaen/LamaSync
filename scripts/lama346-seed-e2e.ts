@@ -216,7 +216,10 @@ let SOURCE_DEVICE_KEY = "";
 let TARGET_DEVICE_KEY = "";
 let S3 = {
   endpoint: "",
-  bucket: "lamasync-seed-e2e",
+  // The operator's real temporary seed bucket name. The PILOT names the bucket
+  // (the code hardcodes none), so using the real name here exercises the same
+  // value an operator would type.
+  bucket: "lamasync-tmp",
   region: "us-east-1",
   accessKeyId: "lamae2e",
   secretAccessKey: "lamae2e-secret",
@@ -540,7 +543,11 @@ async function startServer(): Promise<boolean> {
   const log = join(SANDBOX, "server.log");
   const proc = Bun.spawn(["bun", "run", "packages/server/src/index.ts"], {
     cwd: ROOT,
-    env: sandboxEnv({ LAMASYNC_SEED_E2E: "1" }),
+    // NOTE: no seed seam on the server. Stage 2f replaced it with the operator's
+    // pilot, and the harness configures a REAL pilot through the REAL admin
+    // routes below — so the sandbox cannot open anything a production server
+    // would not, and the pilot is exercised on its own.
+    env: sandboxEnv(),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -583,9 +590,19 @@ async function reportHealth(input: {
   isSource: boolean;
   filterFingerprint: string | null;
   patternCount: number;
+  /**
+   * The TARGET's own measurement of how many entries it already holds. A seed
+   * only publishes into an EMPTY target, so the preflight needs this to be 0 —
+   * and `undefined` means "never measured", which is refused too.
+   */
+  targetEntryCount?: number;
 }): Promise<void> {
   const tooling = await detectArchiveTooling();
-  const measurement = input.isSource ? measureLocalTree(input.root) : null;
+  const measurement = input.isSource
+    ? measureLocalTree(input.root)
+    : input.targetEntryCount === undefined
+      ? null
+      : { pathCount: input.targetEntryCount, totalBytes: 0, measuredAt: Date.now() };
   const free = statfsSync(existsSync(input.root) ? input.root : dirname(input.root));
   const res = await api("POST", "/folder-health", {
     hostId: input.hostId,
@@ -743,14 +760,15 @@ function daemonEnv(home: string, extra: Record<string, string> = {}): Record<str
     XDG_RUNTIME_DIR: runtimeDir,
     DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(runtimeDir, "no-session-bus")}`,
     LAMASYNC_SOCKET_PATH: join(runtimeDir, "lamasyncd.sock"),
-    // The doubly-gated seam, and the relay space the sandbox owns.
+    // The doubly-gated seam, for SANDBOX AFFORDANCES ONLY (a shortened lease, a
+    // held phase, a local resync peer). Note what is ABSENT: no
+    // LAMASYNC_SEED_S3_* at all. The relay space must therefore arrive the way
+    // production delivers it — inside this device's own authenticated host
+    // config, issued by the server for this job and this side. If the host-config
+    // path ever broke, the daemons here would have no relay space and every seed
+    // below would fail, which is exactly the check we want.
     LAMASYNC_SEED_E2E: "1",
     LAMASYNC_TEST: "1",
-    LAMASYNC_SEED_S3_ENDPOINT: S3.endpoint,
-    LAMASYNC_SEED_S3_BUCKET: S3.bucket,
-    LAMASYNC_SEED_S3_REGION: S3.region,
-    LAMASYNC_SEED_S3_ACCESS_KEY: S3.accessKeyId,
-    LAMASYNC_SEED_S3_SECRET_KEY: S3.secretAccessKey,
     ...extra,
   };
 }
@@ -1096,6 +1114,153 @@ async function main(): Promise<void> {
     filterFingerprint: universe.fingerprint,
     patternCount: universe.rules.length,
   });
+  // --- Stage 2f: the operator's seed pilot is the gate ----------------------
+  //
+  // The acceptance evidence for the pilot: with no pilot configured (or with one
+  // that names a different folder, a swapped pair, or an unprobed seed space)
+  // `POST /seed-jobs` refuses with 503 — even though this sandbox sets every seed
+  // environment variable it can, because the SERVER no longer has a seam at all.
+  // The pilot is then configured through the real admin routes with a REAL S3
+  // backend row pointing at the disposable object space, probed, and only then
+  // does a job become creatable.
+  section("Stage 2f: the seed pilot gates execution, and its space is probed");
+  const pilotBackend = await api("POST", "/backends", {
+    name: "e2e-seed-space",
+    kind: "s3",
+    s3Provider: "other",
+    s3Endpoint: S3.endpoint,
+    s3Region: S3.region,
+    s3AccessKeyId: S3.accessKeyId,
+    s3SecretAccessKey: S3.secretAccessKey,
+  });
+  const pilotBackendId = str(record(pilotBackend.body)["id"]);
+  check(
+    "an EXISTING S3 backend row can be reused as the temporary seed space",
+    pilotBackend.status < 300 && pilotBackendId.length > 0,
+    `status ${pilotBackend.status}`,
+  );
+
+  const pilotPlan = await api("POST", `/folders/${folderId}/seed-plans`, {
+    hostId: "seed-target",
+    sourceHostId: "seed-source",
+    confirm: true,
+  });
+  const pilotPlanId = str(record(record(pilotPlan.body)["plan"])["id"]);
+  const createPilotJob = async (): Promise<{ status: number; body: unknown }> =>
+    api("POST", "/seed-jobs", { planId: pilotPlanId, confirm: true });
+
+  const beforePilot = await createPilotJob();
+  check(
+    "with NO pilot, job creation answers 503 even with every seed environment variable set",
+    beforePilot.status === 503 && str(record(beforePilot.body)["error"]).includes("seed pilot"),
+    `status ${beforePilot.status}: ${str(record(beforePilot.body)["error"]).slice(0, 120)}`,
+  );
+
+  const swapped = await api("PUT", "/seed-pilot", {
+    enabled: true,
+    folderId,
+    // Deliberately the WRONG direction: the pair is ordered, so this authorizes
+    // nothing for the plan above.
+    sourceHostId: "seed-target",
+    targetHostId: "seed-source",
+    backendId: pilotBackendId,
+    bucket: S3.bucket,
+    confirm: true,
+  });
+  check("the pilot accepts a valid scope", swapped.status === 200, `status ${swapped.status}`);
+  const swappedJob = await createPilotJob();
+  check(
+    "a pilot for the SWAPPED pair authorizes nothing (the direction decides which tree wins)",
+    swappedJob.status === 503 && str(record(swappedJob.body)["error"]).includes("source of truth"),
+    `status ${swappedJob.status}`,
+  );
+
+  await api("PUT", "/seed-pilot", {
+    enabled: true,
+    folderId,
+    sourceHostId: "seed-source",
+    targetHostId: "seed-target",
+    backendId: pilotBackendId,
+    bucket: S3.bucket,
+    confirm: true,
+  });
+  const unprobedJob = await createPilotJob();
+  check(
+    "an UNPROBED seed space authorizes nothing",
+    unprobedJob.status === 503 && str(record(unprobedJob.body)["error"]).includes("has not been probed"),
+    `status ${unprobedJob.status}`,
+  );
+
+  const probe = await api("POST", "/seed-pilot/probe");
+  const probeBody = record(probe.body);
+  check(
+    "the readiness probe proves the configured backend can write to and delete from the bucket",
+    probe.status === 200 && record(probeBody["probe"])["ok"] === true,
+    JSON.stringify(record(probeBody["probe"])).slice(0, 200),
+  );
+  check(
+    "the probe's verdict is stored on the pilot, ready to be read back",
+    record(probeBody["config"])["readiness"] !== undefined &&
+      str(record(record(probeBody["config"])["readiness"])["state"]) === "ready",
+  );
+  // NO SECRET, anywhere. The access key id is an identifier the backends list
+  // already exposes; the SECRET must appear in no pilot response.
+  const pilotText = JSON.stringify(probe.body) + JSON.stringify((await api("GET", "/seed-pilot")).body);
+  check(
+    "no pilot response ever contains the storage secret",
+    !pilotText.includes(S3.secretAccessKey) && pilotText.includes("hasSecret"),
+    pilotText.includes(S3.secretAccessKey) ? "the secret appeared in a pilot response" : "",
+  );
+
+  // The operator's own preflight: a POPULATED target is refused before a plan
+  // can be approved, with a sentence that says what to do about it.
+  await reportHealth({
+    hostId: "seed-target",
+    folderId,
+    root: TARGET_ROOT,
+    isSource: false,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+    targetEntryCount: 5,
+  });
+  const populatedPlan = await api("POST", `/folders/${folderId}/seed-plans`, {
+    hostId: "seed-target",
+    sourceHostId: "seed-source",
+    confirm: true,
+  });
+  const populatedPlanBody = record(record(populatedPlan.body)["plan"]);
+  const populatedValidity = record(record(populatedPlan.body)["validity"]);
+  check(
+    "a target the operator KNOWS is populated is refused at plan time, with a clear explanation",
+    populatedPlan.status === 201 &&
+      populatedValidity["valid"] === false &&
+      str(populatedValidity["message"]).includes("already containing 5 entries"),
+    str(populatedValidity["message"]).slice(0, 160),
+  );
+  const populatedJob = await api("POST", "/seed-jobs", {
+    planId: str(populatedPlanBody["id"]),
+    confirm: true,
+  });
+  check(
+    "and the same populated target is refused at job creation, so nothing is ever merged",
+    populatedJob.status === 409,
+    `status ${populatedJob.status}`,
+  );
+  // Restore the empty-target measurement the daemon path needs.
+  await reportHealth({
+    hostId: "seed-target",
+    folderId,
+    root: TARGET_ROOT,
+    isSource: false,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+    targetEntryCount: 0,
+  });
+  check(
+    "the pilot is enabled, probed and scoped to exactly one folder and pair",
+    str(record((await api("GET", "/seed-pilot")).body)["summary"]).includes("lamasync-tmp"),
+  );
+
   const leaseSamples: Array<{ phase: string; leaseExpiresAt: number | null; at: number }> = [];
   const daemonSeed = await runDaemonSeed(folderId, daemons, {
     label: "daemon happy path",
@@ -1140,6 +1305,20 @@ async function main(): Promise<void> {
   check(
     "the TARGET daemon ran the baseline resync that gates completion",
     daemonLogs.includes("target baseline resync"),
+  );
+  // The relay space came through the DEVICE'S OWN HOST CONFIG, not an
+  // environment variable: the daemons are started with no LAMASYNC_SEED_S3_* at
+  // all, so this line can only have been produced by the server-issued space.
+  check(
+    "each daemon's relay space was ISSUED BY THE SERVER through its own host config",
+    daemonLogs.includes(`job=${daemonSeed.job.id} source relay space issued by the server`) &&
+      daemonLogs.includes(`job=${daemonSeed.job.id} target relay space issued by the server`),
+    "both sides logged the issued space (the daemons have no relay environment at all)",
+  );
+  check(
+    "the resolved resync peer is the assignment's own remote plus its canonical destination",
+    daemonLogs.includes(`target baseline resync peer=lamasync-${folderId}:e2e-seed-folder`),
+    `peer=lamasync-${folderId}:e2e-seed-folder (a seam override only replaces where it points)`,
   );
   check(
     "the job's terminal state released the lease",
@@ -1321,6 +1500,14 @@ async function main(): Promise<void> {
     isSource: false,
     filterFingerprint: universe.fingerprint,
     patternCount: universe.rules.length,
+    // The harness deliberately reports the SAME stale empty measurement an
+    // operator would still be holding from before the first seed published.
+    // This second job exists to prove that a cancellation publishes nothing, and
+    // that proof is stronger against the POPULATED target the first job left
+    // behind — so the stale measurement is the fixture, not a claim about the
+    // target. The publish-time guard remains the authority (asserted below), and
+    // a real operator preparing a second seed would be refused at plan time.
+    targetEntryCount: 0,
   });
   const targetTreeBefore = treeMap(TARGET_ROOT, () => false);
   const holdMarker = `holding phase=${TARGET_HOLD_PHASE}`;
@@ -1372,18 +1559,28 @@ async function main(): Promise<void> {
     `lease=${cancelledSeed.job.leaseOwner ?? "(none)"}`,
   );
 
-  // A cancelled job's relay objects are deliberately NOT deleted by the side that
-  // was stopped: the target never reached the terminal-phase cleanup, and only
-  // the retention sweep is entitled to remove objects a job may still be reading.
-  // Assert that, then sweep them so the diagnostic sections below start clean.
+  // A terminal job's relay objects are deleted PROMPTLY (Stage 2f), by whichever
+  // side observes the terminal state. Deleting on a stop is safe: the target is
+  // the only reader, it has stopped by definition, an S3 delete does not truncate
+  // a GET already streaming, and the keys are derived from this job's own
+  // namespace. The retention sweep and the bucket's lifecycle remain the backstop
+  // for anything a stopped side could not delete — asserted here too, so the
+  // backstop is exercised rather than assumed.
   const cancelledStore = createS3SeedRelayStore(S3);
   const cancelledNamespace = `lamasync/seed/${cancelledSeed.job.id}/`;
   const cancelledLeft = await cancelledStore.list(cancelledNamespace);
   check(
-    "a cancelled job's relay objects are left for the retention sweep, not deleted by the stopped side",
+    "a cancelled job's relay objects are deleted PROMPTLY by the stopped side, not left behind",
     cancelledLeft.ok &&
-      cancelledLeft.value.keys.filter((key) => key !== cancelledNamespace).length === 2,
-    cancelledLeft.ok ? `${cancelledLeft.value.keys.length} entry(ies)` : "list failed",
+      cancelledLeft.value.keys.filter((key) => key !== cancelledNamespace).length === 0,
+    cancelledLeft.ok ? `${cancelledLeft.value.keys.length} entry(ies) left` : "list failed",
+  );
+  // The previous (completed) job's namespace is untouched by that deletion: no
+  // sweep may ever reach outside its own job.
+  const otherNamespace = await cancelledStore.list(`lamasync/seed/${daemonSeed.job.id}/`);
+  check(
+    "deleting one job's objects never touches another job's namespace",
+    otherNamespace.ok && otherNamespace.value.keys.filter((key) => key !== `lamasync/seed/${daemonSeed.job.id}/`).length === 0,
   );
   const sweptCancelled = await cleanupSeedRelayObjects({
     store: cancelledStore,
@@ -1395,8 +1592,8 @@ async function main(): Promise<void> {
     now: Date.now(),
   });
   check(
-    "the retention sweep then removes exactly those objects",
-    sweptCancelled.complete && sweptCancelled.deleted.length === 2,
+    "the retention sweep is idempotent over an already-cleaned job (the backstop costs nothing)",
+    sweptCancelled.complete,
     `complete=${sweptCancelled.complete} deleted=${sweptCancelled.deleted.length}`,
   );
 
@@ -1427,6 +1624,9 @@ async function main(): Promise<void> {
     isSource: false,
     filterFingerprint: universe.fingerprint,
     patternCount: universe.rules.length,
+    // The target was just emptied above, and the preflight requires a MEASURED
+    // empty target, so this is the operator's real precondition.
+    targetEntryCount: 0,
   });
 
   // --- Lower-level diagnostic: the test-only workers (NOT daemon evidence) ---
@@ -1586,13 +1786,34 @@ async function main(): Promise<void> {
   check("a failed job still cleans up its relay objects", afterMismatch.ok && afterMismatch.value.keys.length === 0);
 
   // --- Failure: non-empty target -------------------------------------------
+  //
+  // Stage 2f refuses a POPULATED target at plan time (the operator's preflight,
+  // asserted in the Stage 2f section above). This is the LAST line of defence: a
+  // target that measured empty and was populated afterwards — a stale
+  // measurement — must still be refused at PUBLISH, so nothing is ever merged or
+  // overwritten by a race the preflight could not see.
+  writeFileSync(join(TARGET_ROOT, "appeared-after-the-measurement.txt"), "populated later\n");
+  await reportHealth({
+    hostId: "seed-target",
+    folderId,
+    root: TARGET_ROOT,
+    isSource: false,
+    filterFingerprint: universe.fingerprint,
+    patternCount: universe.rules.length,
+    targetEntryCount: 0,
+  });
   const nonEmpty = await runSeedJob(folderId, { label: "non-empty target", expect: "failed" });
-  check("a non-empty target refuses publication", nonEmpty.job.status === "failed", `phase=${nonEmpty.job.phase}`);
+  check(
+    "a target populated AFTER it measured empty is still refused at publication",
+    nonEmpty.job.status === "failed",
+    `phase=${nonEmpty.job.phase}`,
+  );
   check(
     "the refusal names the non-empty target",
     (nonEmpty.job.error ?? "").toLowerCase().includes("target") || nonEmpty.target.events.some((e) => String(e["message"] ?? "").includes("target")),
     nonEmpty.job.error ?? "",
   );
+  rmSync(join(TARGET_ROOT, "appeared-after-the-measurement.txt"), { force: true });
 
   // --- Cancellation ---------------------------------------------------------
   const cancelled = await runSeedJob(folderId, { label: "operator cancellation", expect: "cancelled", cancelAfterMs: 900 });

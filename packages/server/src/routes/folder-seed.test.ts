@@ -257,7 +257,12 @@ describe("seed plan creation", () => {
     insertHealth("a1", "f1", "host-a", {
       measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: Date.now() },
     });
-    insertHealth("a2", "f1", "host-b", { freeSpaceBytes: 200_000_000_000 });
+    // The target MEASURES the folder as empty, which is the only state a seed
+    // may publish into (Stage 2f). An unmeasured target would be refused first.
+    insertHealth("a2", "f1", "host-b", {
+      freeSpaceBytes: 200_000_000_000,
+      measurement: { pathCount: 0, totalBytes: 0, measuredAt: Date.now() },
+    });
 
     const response = await createPlan(adminToken, "host-b");
     expect(response.status).toBe(201);
@@ -312,18 +317,17 @@ describe("seed plan creation", () => {
     expect(body.plan.filterUniverse.patternCount).toBe(2);
     expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(true);
     expect(body.plan.filterUniverse.archiveImplemented).toBe(true);
-    // Execution is explicitly unavailable.
+    // Execution is explicitly unavailable: no operator pilot authorizes this
+    // folder and pair, and the capability constant still refuses fleet-wide.
     expect(body.plan.execution.available).toBe(SEED_ARCHIVE_TRANSPORT_IMPLEMENTED);
     expect(body.plan.execution.available).toBe(false);
-    expect(body.plan.execution.reason).toContain("not available yet");
-    expect(body.plan.execution.reason).toContain("effective-filter-universe construction");
-    expect(body.plan.execution.reason).toContain("one Stage 1 prerequisite is still open");
-    // The plan is NOT runnable while the one remaining Stage 1 prerequisite
-    // (the transport) is open, and the reason says so rather than pretending.
+    expect(body.plan.execution.reason).toContain("seed pilot");
+    expect(body.plan.execution.reason).toContain("ONE folder and ONE source/target pair");
+    // The plan is NOT runnable while nothing authorizes it, and the reason says
+    // so rather than pretending.
     expect(body.validity.valid).toBe(false);
     expect(body.validity.reason).toBe("not_runnable");
-    expect(body.validity.message).toContain("not available yet");
-    expect(body.validity.message).toContain("temporary seed space");
+    expect(body.validity.message).toContain("seed pilot");
   });
 
   test("an UNPROVEN same-filesystem verdict makes the plan not runnable", async () => {
@@ -467,8 +471,7 @@ describe("seed job creation is explicitly unavailable", () => {
       planId: string;
     };
     expect(body.executionAvailable).toBe(false);
-    expect(body.error).toContain("not available yet");
-    expect(body.error).toContain("temporary seed space");
+    expect(body.error).toContain("seed pilot");
     expect(body.planId).toBe(created.plan.id);
     // No job row was created.
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM folder_seed_jobs").get()?.n).toBe(0);

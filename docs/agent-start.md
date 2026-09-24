@@ -114,19 +114,18 @@ away and strand the target (a footgun the E2E found, not inspection).
 enqueued automatically by `POST /seed-jobs`, one per party — it is NOT accepted
 on `POST /hosts/:hostId/actions`), re-derives its role from the job, refuses a
 disagreeing payload, and loads `packages/daemon/src/seed-runner.ts` by DYNAMIC
-`import()` only after the seam check. The runner reuses the existing primitives
-and the real S3 store, and its `baseline_validation` phase runs a real
-`rclone bisync --resync` whose zero-change verdict (`seedBaselineVerdict`) is
-REQUIRED before `completed`: with no peer configured the phase FAILS. The seam
-is now two-sided — `seedDaemonE2eEnabled()` (daemon) and
-`seedTransportE2eEnabled()` (server), each requiring BOTH
-`LAMASYNC_SEED_E2E=1` and `LAMASYNC_TEST=1` — and
-`seed-transport-bounded.test.ts` now asserts the restated invariant: the
-transport and the store have exactly ONE production importer (`seed-runner.ts`),
-the daemon reaches it only through that seam-guarded dynamic import, there is
-exactly one daemon seam module, and the flags stay `false`. Do not add a static
-import, a second importer, or a seam that accepts one variable. Also: never let
-the runner resolve a production remote or read a credential outside the seam.
+`import()`. The runner reuses the existing primitives and the real S3 store, and
+its `baseline_validation` phase runs a real `rclone bisync --resync` whose
+zero-change verdict (`seedBaselineVerdict`) is REQUIRED before `completed`: with
+no usable peer the phase FAILS. (Stage 2f removed the seam check from the
+dispatcher and the seam from the server entirely — see the Stage 2f paragraph
+below; the daemon's `seedDaemonE2eEnabled()` now gates sandbox AFFORDANCES only.)
+`seed-transport-bounded.test.ts` asserts the restated invariant: the transport
+and the store have exactly ONE production importer (`seed-runner.ts`), the daemon
+reaches it only through a dynamic import, there is exactly one daemon seam
+module, `seed-jobs.ts` reads no seed environment variable, and the flags stay
+`false`. Do not add a static import, a second importer, or a seam that accepts
+one variable.
 
 **Stage 2e made a long stage safe, and a cancelled one harmless.** A seed stage
 is routinely longer than the 10-minute job lease (the incident was 43.5
@@ -156,26 +155,60 @@ must not treat the handover window (facts recorded, lease cleared, still
 `SEED_JOB_HANDOVER_GRACE_MS`. The ACTION lease (`ACTION_LEASE_MS`, renewed by the
 daemon's action timer) is a DIFFERENT lease and neither implies the other.
 
-Two inputs are deliberately still SEAM-SUPPLIED, and both are required before
-the constant may flip: the target's resync PEER (in production the assignment's
-resolved remote + the daemon's rclone config) and the relay SPACE
-(`LAMASYNC_SEED_S3_*`). The relay contract carries no credential by design, and
-where the fleet's temporary seed space lives is an owner decision. A daemon-run
-job deletes its relay objects but does not yet persist the `cleanup` block
-server-side (no device route for it); the objects are gone, the bookkeeping
-field stays `not_started`. A STOPPED side deletes nothing at all and leaves its
-objects to the retention sweep, which the E2E asserts.
+**Stage 2f replaced the test seam with the operator's SEED PILOT, and gave both
+external inputs a production resolution.** The gate is no longer an environment
+variable: `packages/core/src/seed-pilot.ts` authorizes exactly ONE folder and ONE
+ORDERED source/target pair — a swapped pair authorizes nothing, because the
+direction decides which tree wins — and `seedPilotExecutionEligibility` also
+requires the temporary seed space to have been PROBED. `seedPlanExecution({ pilot })`
+is the single consumer, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false` (it now
+means "claimed as production-validated fleet-wide"), and the SERVER's doubly-gated
+seam is deleted, so a test environment alone opens nothing. The disposable E2E
+therefore configures a real pilot through the real admin routes.
 
-**Execution is deliberately unavailable by default**:
+The temporary seed space is an EXISTING S3 backend row plus a bucket — no second
+secret entry, no hardcoded bucket, nothing inferred from the folder being seeded.
+`seedRelaySpaceForHost` decrypts the backend's secret on the SERVER only, for
+exactly the two parties of a NON-TERMINAL job of the pilot's folder, and delivers
+it as `HostConfig.seedRelay` inside that device's own authenticated config (the
+same channel that already carries the folder backend's secret and the restic
+password) — never in a list DTO, a URL, a log, a summary, a doc or a test. The
+space names the `jobId` and `role` it was issued for, and the runner refuses one
+issued for anything else (one refresh, then fail closed), so an idle device never
+holds a relay credential and a stale one is useless. Because an existing key may
+be BUCKET-SCOPED — the generic backends test lists every bucket in the account,
+which such a key cannot do — the readiness probe is bucket-scoped (write then
+delete one object under `lamasync/seed/`), retry-pinned, killed after 20 s, and
+its verdict is persisted; reconfiguring the pilot RESETS it.
+
+The target's resync PEER now resolves from the assignment:
+`resolveSeedBaselinePeer` joins `<remoteName (or the documented per-folder
+default)>` to the canonical destination, and the bisync child gets the server's
+rclone config in a private 0600 temp file. `LAMASYNC_SEED_DAEMON_PEER_PATH` is
+SEAM-GATED and only substitutes where the bisync points. A target that is not
+MEASURED as empty is refused at PLAN time (`null` — never measured — is not
+empty), as well as at publish. A terminal job's relay objects are deleted
+PROMPTLY by whichever side observes the terminal state, namespace-confined and
+idempotent, with the retention sweep and the bucket's own lifecycle as the
+independent backstop; the daemon-run `cleanup` block is still not persisted
+server-side (no device route for it), which remains an open bookkeeping item.
+The daemon's seam survives for SANDBOX AFFORDANCES only (a shortened lease, a
+held phase, a local peer, an environment-supplied relay space) and no longer
+gates reachability — `seed-transport-bounded.test.ts` asserts that the dispatcher
+consults no seam, that `seed-jobs.ts` reads no seed environment variable, and
+that the transport and store still have exactly one production importer.
+
+**Execution is unavailable by default, and openable only per pilot**:
 `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
 `SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`), `POST /seed-jobs` returns
-`503 { executionAvailable: false, reason }`, and the Folders page shows a
-disabled control. The path IS reachable behind the doubly-gated seam, and the
-disposable E2E proves it with two real daemons — do not flip the transport
-constant without the §2.11/§2.14.6 host proofs (a real two-machine hop, real
-ENOSPC, the live large-tree run) on record and reviewed, and do not add a
-credential to the relay contract: the store is constructed by whoever owns the
-configuration.
+`503 { executionAvailable: false, reason }` for every folder the pilot does not
+authorize, and the Folders page shows a disabled control. The path IS reachable
+for ONE operator-authorized folder+pair whose seed space has been probed, and the
+disposable E2E proves the whole path with two real daemons that hold no relay
+credential of their own — do not flip the transport constant without the
+§2.11/§2.14.6 host proofs (a real two-machine hop, real ENOSPC, the live
+large-tree run) on record and reviewed, and do not add a credential to the relay
+contract: the store is constructed by whoever owns the configuration.
 
 The archive primitives (create/validate/extract/verify/atomic-publish) are
 implemented and fixture-tested end-to-end with the host's real GNU tar, and

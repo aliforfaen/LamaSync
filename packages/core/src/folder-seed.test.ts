@@ -467,6 +467,7 @@ describe("plan validity", () => {
     | "stagingPolicy"
     | "sourceAuthority"
     | "filterUniverse"
+    | "target"
   > {
     return {
       expiresAt: 2_000,
@@ -488,6 +489,16 @@ describe("plan validity", () => {
         insideTarget: false,
         sameFilesystem: true,
         message: "sibling",
+      },
+      // LAMA-346 Stage 2f: the target's own measurement. Empty is the only
+      // passing state, so this fixture is an empty target.
+      target: {
+        freeBytes: 200_000_000_000,
+        freeBytesMeasuredAt: 1_000,
+        measuredOnHostId: "dev-vm",
+        stagingRoot: "/home/dev",
+        stagingSameFilesystem: true,
+        measuredEntries: 0,
       },
       sourceAuthority: {
         hostId: "master",
@@ -525,7 +536,7 @@ describe("plan validity", () => {
     // reported as runnable.
     expect(validity.valid).toBe(false);
     expect(validity.reason).toBe("not_runnable");
-    expect(validity.message).toContain("temporary seed space");
+    expect(validity.message).toContain("seed pilot");
     expect(validity.message).not.toBe("Seed plan is current and runnable.");
   });
 
@@ -643,6 +654,14 @@ describe("seed prerequisites are listed, not collapsed into a boolean", () => {
         sameFilesystem: true,
         message: "sibling",
       },
+      target: {
+        freeBytes: 1_000_000_000,
+        freeBytesMeasuredAt: 0,
+        measuredOnHostId: "dev-vm",
+        stagingRoot: "/home/dev",
+        stagingSameFilesystem: true,
+        measuredEntries: 0,
+      },
       archive: {
         format: "tar.zstd",
         tooling: { tar: true, zstd: true, gzip: true },
@@ -657,30 +676,31 @@ describe("seed prerequisites are listed, not collapsed into a boolean", () => {
       "source_authority",
       "filter_universe",
       "staging_same_filesystem",
+      "target_empty",
       "target_tooling",
       "target_space",
       "transport",
     ]);
     // Filter-aware archiving is implemented (Stage 1a), so the only open gate
-    // on this fully-specified plan is the transport.
+    // on this fully-specified plan is the transport — which is now opened per
+    // folder+pair by the operator's seed pilot, not by a build flag.
     expect(prerequisites.find((p) => p.id === "filter_universe")!.ok).toBe(true);
     expect(prerequisites.find((p) => p.id === "transport")!.ok).toBe(false);
     expect(prerequisites.find((p) => p.id === "staging_same_filesystem")!.ok).toBe(true);
+    expect(prerequisites.find((p) => p.id === "target_empty")!.ok).toBe(true);
     expect(execution.available).toBe(false);
   });
 });
 
 describe("execution capability is explicit, not a fake button", () => {
-  test("execution stays unavailable while the transport is unimplemented", () => {
+  test("execution stays unavailable with no pilot, and opens only for the authorized pair", () => {
     const execution = seedPlanExecution();
     expect(SEED_ARCHIVE_TRANSPORT_IMPLEMENTED).toBe(false);
     // Stage 1a is done, and doing it must NOT have enabled execution.
     expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(true);
     expect(execution.available).toBe(false);
-    expect(execution.reason).toContain("not available yet");
-    expect(execution.reason).toContain("one Stage 1 prerequisite is still open");
-    expect(execution.reason).toContain("temporary seed space");
-    expect(execution.reason).toContain("no live archive transfer is claimed");
+    expect(execution.reason).toContain("seed pilot");
+    expect(execution.reason).toContain("switched off for every folder");
     // The timeout change is stated precisely: an existing baseline is NOT
     // silently re-scoped.
     expect(execution.reason).toContain("existing baseline keeps its exact fixed timeout");

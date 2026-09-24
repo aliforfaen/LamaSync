@@ -20,6 +20,11 @@ export * from "./folder-seed.ts";
 // remote or live host is wired, and the local object store used by the tests
 // lives in the daemon. Dependency-free so the web UI can import it.
 export * from "./seed-relay.ts";
+// LAMA-346 Stage 2f: the operator's SEED PILOT — the single, pure statement
+// that execution is authorized for exactly ONE folder and ONE source/target
+// pair, plus the temporary seed space (an existing S3 backend + bucket) and its
+// readiness verdict. Dependency-free so the web UI can import it.
+export * from "./seed-pilot.ts";
 export * from "./retention.ts";
 export { SERVER_SCHEMA, MIGRATIONS, LEGACY_S3_DROP_MIGRATIONS } from "./db/schema.ts";
 export { initDb } from "./db/client.ts";

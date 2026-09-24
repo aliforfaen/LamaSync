@@ -750,6 +750,16 @@ describe("failure: insufficient space is refused before anything is written", ()
         sameFilesystem: true,
         message: "ok",
       },
+      // LAMA-346 Stage 2f: the target must be MEASURED as empty before a plan
+      // is runnable, so this fixture's target reports zero entries.
+      target: {
+        freeBytes: 1_000_000_000_000,
+        freeBytesMeasuredAt: 1,
+        measuredOnHostId: "target",
+        stagingRoot: "/home/t",
+        stagingSameFilesystem: true,
+        measuredEntries: 0,
+      },
       archive: {
         format: FORMAT,
         tooling,
@@ -993,6 +1003,14 @@ describe("the plan gate still refuses a live seed", () => {
           sameFilesystem: true,
           message: "ok",
         },
+        target: {
+          freeBytes: 1_000_000_000_000,
+          freeBytesMeasuredAt: 1,
+          measuredOnHostId: "target",
+          stagingRoot: "/home/t",
+          stagingSameFilesystem: true,
+          measuredEntries: 0,
+        },
         sourceAuthority: {
           hostId: SOURCE_ID.hostId,
           assignmentId: SOURCE_ID.assignmentId,
@@ -1025,6 +1043,7 @@ describe("the plan gate still refuses a live seed", () => {
         | "stagingPolicy"
         | "sourceAuthority"
         | "filterUniverse"
+        | "target"
       >,
       {
         now: Date.now(),
@@ -1035,7 +1054,7 @@ describe("the plan gate still refuses a live seed", () => {
     );
     expect(validity.valid).toBe(false);
     expect(validity.reason).toBe("not_runnable");
-    expect(validity.message).toContain("temporary seed space");
+    expect(validity.message).toContain("seed pilot");
   });
 });
 

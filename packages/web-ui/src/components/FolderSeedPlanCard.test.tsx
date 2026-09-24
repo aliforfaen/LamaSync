@@ -86,7 +86,7 @@ function plan(overrides: Partial<SeedPlan> = {}): SeedPlan {
       message: "Source authority: master — measured 91,660 entries 1 minutes ago.",
     },
     source: { fileCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1, measuredOnHostId: "master", manifestFingerprint: null },
-    target: { freeBytes: 200_000_000_000, freeBytesMeasuredAt: 1, measuredOnHostId: "dev-vm", stagingRoot: "/home/b", stagingSameFilesystem: null },
+    target: { freeBytes: 200_000_000_000, freeBytesMeasuredAt: 1, measuredOnHostId: "dev-vm", stagingRoot: "/home/b", stagingSameFilesystem: null, measuredEntries: 0 },
     space: {
       sourceBytes: 14_864_173_809,
       sourceFiles: 91_660,
@@ -229,7 +229,7 @@ describe("SeedPlanSummary", () => {
     );
     expect(html).toContain("Before this seed can run:");
     expect(html).toContain("effective filter universe");
-    expect(html).toContain("temporary seed space");
+    expect(html).toContain("seed pilot");
   });
 
   test("an unproven same-filesystem verdict is shown as a blocker", () => {

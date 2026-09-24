@@ -7,12 +7,26 @@
 // rather than dropped:
 //
 //   the transport and the S3 store have exactly ONE production importer
-//   (`seed-runner.ts`), the runner is reached only through a DYNAMIC import in
-//   the daemon dispatcher, that call site is guarded by the doubly-gated seam,
-//   and the capability flags stay `false` so the API still refuses by default.
+//   (`seed-runner.ts`); the runner is reached only through a DYNAMIC import in
+//   the daemon dispatcher, never a static one; and every sandbox affordance the
+//   runner reads from the environment is gated by the doubly-gated seam, so a
+//   production build cannot be redirected by it.
+//
+// Stage 2f RESTATED the authorization half, because it changed: seed work is no
+// longer opened by an environment variable but by the JOB — the server creates a
+// seed job only inside the operator's seed pilot and issues this device a relay
+// space for that job and role inside its own host config. So the assertion is no
+// longer "the dispatcher guards the import with the seam"; it is:
+//
+//   * the runner requires a server-ISSUED relay space (bound to the job id and
+//     the side) before it touches the network;
+//   * the environment can only SUBSTITUTE that space, and only when the seam is
+//     open;
+//   * the capability flag stays `false`, so nothing is opened fleet-wide.
 //
 // If someone later loosens any of that — a static import, a seam with one
-// variable, a third importer — this test fails, which is the point.
+// variable, a third importer, an ungated environment read — this test fails,
+// which is the point.
 
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "fs";
@@ -99,27 +113,44 @@ describe("the seed transport is reachable only through the seam-gated runner", (
     expect(importers).toEqual(["packages/daemon/src/seed-runner.ts"]);
   });
 
-  test("the runner is reached only by a dynamic import guarded by the shared seam", () => {
+  test("the runner is reached only by a dynamic import, and the daemon dispatcher does not gate it on the seam", () => {
     const runner = sourceAt(SEED_RUNNER);
-    // The runner itself reads the shared seam predicate.
+    // The runner itself reads the shared seam predicate for its sandbox
+    // affordances.
     expect(runner.text).toContain('from "./seed-daemon-seam.ts"');
     expect(runner.text).toContain("seedDaemonE2eEnabled()");
 
     const index = sourceAt(DAEMON_INDEX);
     // The daemon dispatcher must NOT statically import the runner...
     expect(/from "\.\/seed-runner\.ts"/.test(index.text)).toBe(false);
-    // ...only dynamically, and only after the seam check.
-    const dynamic = index.text.indexOf('import("./seed-runner.ts")');
-    const guard = index.text.indexOf("if (!seedDaemonE2eEnabled())");
-    expect(dynamic).toBeGreaterThan(-1);
-    expect(guard).toBeGreaterThan(-1);
-    expect(guard).toBeLessThan(dynamic);
+    // ...only dynamically. And the authorization is NOT an environment check:
+    // the dispatcher must not consult the seam at all any more, because what
+    // opens a run is the server-issued relay space the runner requires.
+    expect(index.text).toContain('import("./seed-runner.ts")');
+    expect(index.text).not.toContain("seedDaemonE2eEnabled");
+  });
+
+  test("the runner requires a SERVER-ISSUED relay space, and the environment can only substitute it", () => {
+    const runner = sourceAt(SEED_RUNNER).text;
+    // The issued space is matched on the job id AND the side, so a space issued
+    // for another job (or the other half) is refused rather than used.
+    expect(runner).toContain("seedRelaySpaceFromHostConfig");
+    expect(runner).toContain("space.jobId !== jobId || space.role !== role");
+    // The environment fallback is read ONLY behind the seam, and only after the
+    // issued space has been tried (the production path wins).
+    const seamGate = runner.indexOf("export function seedDaemonRelayConfigFromEnv");
+    expect(seamGate).toBeGreaterThan(-1);
+    const envFallback = runner.indexOf("const relay = seedDaemonRelayConfigFromEnv();");
+    const issuedSpace = runner.indexOf("seedRelaySpaceFromHostConfig(ctx.getHostConfig()");
+    expect(issuedSpace).toBeGreaterThan(-1);
+    expect(envFallback).toBeGreaterThan(issuedSpace);
+    // Without either, the run fails closed with a sentence about the space.
+    expect(runner).toContain("holds no seed relay space for this job");
   });
 
   test("there is exactly one daemon seam implementation, and it needs BOTH variables", () => {
-    // The server has its own (separate package) seam; on the daemon side there
-    // must be exactly one module that reads the seed variables, so the
-    // dispatcher's check and the runner's check cannot drift.
+    // Exactly one module on the daemon side reads the seed variables, so the
+    // sandbox affordances cannot drift apart.
     const daemonSeams = productionSources()
       .filter((file) => rel(file).startsWith("packages/daemon/"))
       .filter((file) => file.text.includes('process.env["LAMASYNC_SEED_E2E"]'))
@@ -131,11 +162,12 @@ describe("the seed transport is reachable only through the seam-gated runner", (
     expect(seam).toContain('process.env["LAMASYNC_TEST"] === "1"');
     expect(seam).toContain("&&");
 
-    // The server's seam is the same shape (it is pinned independently by
-    // seed-e2e-seam.test.ts); assert it here too so one cannot loosen alone.
-    const serverSeam = sourceAt(SERVER_SEED_JOBS).text;
-    expect(serverSeam).toContain('process.env["LAMASYNC_SEED_E2E"] === "1"');
-    expect(serverSeam).toContain('process.env["LAMASYNC_TEST"] === "1"');
+    // The SERVER no longer has a seed seam at all: its gate is the operator's
+    // pilot, so a test environment cannot open anything there. `seed-jobs.ts`
+    // must therefore contain no seed environment read.
+    const serverSeedJobs = sourceAt(SERVER_SEED_JOBS).text;
+    expect(serverSeedJobs).not.toContain('process.env["LAMASYNC_SEED_E2E"]');
+    expect(serverSeedJobs).not.toContain('process.env["LAMASYNC_TEST"]');
   });
 
   test("credential-shaped seed configuration is confined to the store and the runner", () => {
@@ -148,23 +180,28 @@ describe("the seed transport is reachable only through the seam-gated runner", (
       "packages/daemon/src/seed-relay-s3.ts",
       "packages/daemon/src/seed-runner.ts",
     ]);
-    // ...and the runner reads it from the seam environment, never a file.
     const runner = sourceAt(SEED_RUNNER).text;
+    // The relay secret reaches the runner through the ISSUED space (which the
+    // server fills in from the backend row)...
+    expect(runner).toContain("secretAccessKey: space.secretAccessKey");
+    // ...with the seam-gated environment as the sandbox substitute only.
     expect(runner).toContain("LAMASYNC_SEED_S3_SECRET_KEY");
     expect(runner).toContain("LAMASYNC_SEED_S3_ENDPOINT");
-    // The resync peer is seam-gated too: with no peer the baseline phase FAILS,
-    // because a seed may never be reported completed without that proof.
+    // The resync peer OVERRIDE is seam-gated, and the production peer is the
+    // assignment's own remote plus its canonical destination.
     expect(runner).toContain("LAMASYNC_SEED_DAEMON_PEER_PATH");
-    expect(runner).toContain("zero-change baseline could not be proven");
+    expect(runner).toContain("resolveSeedBaselinePeer");
+    expect(runner).toContain("--config");
+    // A seed may never be reported completed without the zero-change proof.
+    expect(runner).toContain("the post-seed resync");
   });
 
-  test("execution is still unavailable and the UI control is still disabled", () => {
+  test("execution is still unavailable by default and the UI control is still disabled", () => {
     expect(SEED_ARCHIVE_TRANSPORT_IMPLEMENTED).toBe(false);
     expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(true);
     const execution = seedPlanExecution();
     expect(execution.available).toBe(false);
-    expect(execution.reason).toContain("temporary seed space");
-    expect(execution.reason).toContain("no live archive transfer is claimed");
+    expect(execution.reason).toContain("seed pilot");
   });
 
   test("the seed relay namespace is separate from the managed-folder namespace", () => {

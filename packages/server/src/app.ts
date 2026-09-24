@@ -24,6 +24,7 @@ import { reportRoutes } from "./routes/report.ts";
 import { syncProgressRoutes } from "./routes/sync-progress.ts";
 import { folderHealthRoutes } from "./routes/folder-health.ts";
 import { folderSeedRoutes } from "./routes/folder-seed.ts";
+import { seedPilotRoutes } from "./routes/seed-pilot.ts";
 import { sharesRoutes } from "./routes/shares.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { resticRoutes } from "./routes/restic.ts";
@@ -109,6 +110,11 @@ export function createServerApp() {
               name: "Folder Seed",
               description:
                 "LAMA-346 initial large-folder seeding: operator-approved seed plans (never automatic), the staging/space preflight, the resumable seed job state machine with progress and lease, and the explicit execution-availability verdict.",
+            },
+            {
+              name: "Seed Pilot",
+              description:
+                "LAMA-346 Stage 2f: the operator's explicit authorization of ONE folder and ONE source/target pair, the temporary seed space (an existing S3 backend plus a bucket) it may use, and the readiness probe that proves that space works. Admin only; no credential is ever returned.",
             },
             {
               name: "Health",
@@ -207,6 +213,7 @@ export function createServerApp() {
     .use(syncProgressRoutes)
     .use(folderHealthRoutes)
     .use(folderSeedRoutes)
+    .use(seedPilotRoutes)
     .use(sharesRoutes)
     .use(adminRoutes)
     .use(resticRoutes)

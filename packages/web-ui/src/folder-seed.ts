@@ -79,7 +79,10 @@ export function seedFilterUniverseSentence(plan: Pick<SeedPlan, "filterUniverse"
 
 /** Every prerequisite of the plan, so the panel can list what is missing. */
 export function seedPrerequisites(
-  plan: Pick<SeedPlan, "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space">,
+  plan: Pick<
+    SeedPlan,
+    "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space" | "target"
+  >,
 ): SeedPrerequisite[] {
   return seedPlanPrerequisites(plan);
 }
@@ -217,7 +220,10 @@ export function seedRunnableVerdict(
 
 /** The unmet prerequisites, in the order they gate execution. */
 export function seedUnmetPrerequisites(
-  plan: Pick<SeedPlan, "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space">,
+  plan: Pick<
+    SeedPlan,
+    "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space" | "target"
+  >,
 ): SeedPrerequisite[] {
   return seedPrerequisites(plan).filter((item) => !item.ok);
 }
@@ -295,13 +301,20 @@ export function seedProgressPercent(job: Pick<SeedJob, "progress">): number | nu
   return fraction === null ? null : Math.round(fraction * 100);
 }
 
-/** The single sentence shown when a seed plan exists but cannot run yet. */
+/**
+ * The single sentence shown when a seed plan exists but cannot run yet.
+ *
+ * The gate is the operator's SEED PILOT, not a missing feature: the transport
+ * exists, but it has never run between two real machines, so nothing is opened
+ * fleet-wide. The sentence therefore names what the operator can DO about it.
+ */
 export function seedUnavailableHelp(): string {
   return (
-    "Seeding is not switched on yet, because the archive transfer itself — uploading it to temporary seed space " +
-    "and unpacking it on the target — is not implemented. Preparing a plan is safe and read-only: it names the " +
-    "source device, checks that the archive would be built from the folder's effective ignore rules, checks the " +
-    "target's free space and archive tools, and shows exactly what would be reserved. " +
+    "Seeding runs only inside the operator's seed pilot, which authorizes ONE folder and ONE " +
+    "source/target pair at a time and requires the temporary seed space to be probed first. " +
+    "Preparing a plan is safe and read-only: it names the source device, checks that the archive would be " +
+    "built from the folder's effective ignore rules, checks that the target is empty, its free space and its " +
+    "archive tools, and shows exactly what would be reserved. " +
     "Sync with an existing baseline is untouched and keeps its fixed timeout; a FIRST sync with no baseline yet is " +
     "supervised by the progress-aware stall budget, so a large first transfer is no longer killed at 10 minutes " +
     "while it is still moving data."

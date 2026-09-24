@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
+import { seedRelaySpaceForHost } from "../seed-pilot.ts";
 import type {
   EffectivePause,
   Folder,
@@ -676,6 +677,16 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
     // / pause-skip logic; older daemons keep working.
     const pause = resolveEffectivePause(activeDb, hostId);
 
+    // LAMA-346 Stage 2f: the TEMPORARY SEED SPACE, delivered to the ONLY hosts
+    // that may use it — the two parties of a non-terminal seed job of the folder
+    // the operator's pilot authorizes — and only through this device's own
+    // authenticated config (the same channel that already carries the folder
+    // backend's secret and the restic password). It is null for every other
+    // host, for every host when the pilot is off, and once the job is terminal,
+    // so an idle device never holds a relay credential. The resolved secret is
+    // never logged and never leaves this response.
+    const seedRelay = seedRelaySpaceForHost(activeDb, hostId);
+
     const response: HostConfig = {
       host: {
         id: host.id,
@@ -693,6 +704,7 @@ export const configRoutes = new Elysia({ prefix: "/api/v1" }).get(
       serverTailnetIp,
       peers: generated.peers,
       pause,
+      seedRelay,
     };
     return response;
   },

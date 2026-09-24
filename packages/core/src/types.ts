@@ -5,6 +5,7 @@
 import type { FolderHealthRecord, FolderSyncPlan } from "./folder-health.ts";
 import type { SeedJob, SeedPlan } from "./folder-seed.ts";
 import type { FleetHealthSummary, UpdateStatus } from "./fleet-health.ts";
+import type { SeedRelaySpace } from "./seed-pilot.ts";
 
 export type { FolderHealthRecord, FolderSyncPlan, FleetHealthSummary, UpdateStatus };
 
@@ -748,6 +749,14 @@ export interface HostConfig {
   // bandwidthSchedule plumbing. Additive: existing daemons without the
   // pause handler ignore it without any change in behavior.
   pause?: EffectivePause | null;
+  // LAMA-346 Stage 2f: the TEMPORARY SEED SPACE this device may use, present
+  // only when the host is a party to a non-terminal seed job of the folder the
+  // operator's seed pilot authorizes. It carries a decrypted S3 secret, which is
+  // why it travels here — inside the device's own authenticated host config,
+  // the same channel that already carries the folder backend's secret and the
+  // restic password — and never in a list DTO, a URL or a log. Absent for every
+  // other host, and for every host when the pilot is off.
+  seedRelay?: SeedRelaySpace | null;
 }
 
 // LAN direct peer entry — server-detected same-/24 host that can be reached

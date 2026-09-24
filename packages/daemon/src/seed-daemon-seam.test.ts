@@ -1,19 +1,26 @@
-// LAMA-346 Stage 2d — the daemon's seed seam and its fail-closed gates.
+// LAMA-346 — the daemon's seed seam, its fail-closed gates, and the peer rule.
 //
-// The seed path is reachable only when BOTH `LAMASYNC_SEED_E2E=1` and
-// `LAMASYNC_TEST=1` are set. These tests pin that, pin the relay-config
-// fail-closed rule, and pin the baseline verdict — the pure rule that decides
-// whether the post-seed resync proved a zero-change baseline. A seed may be
-// reported completed ONLY on a passing verdict, so this rule is a safety
-// boundary rather than a statistic.
+// Stage 2f moved the AUTHORIZATION for seed work to the server: the daemon runs
+// a side because the server issued it a relay space for that job and role, not
+// because an environment variable is set. What remains seam-gated are sandbox
+// affordances only — a shortened lease, a held phase, an environment-supplied
+// relay space, and a local resync peer. These tests pin the seam (BOTH
+// variables), the relay-config fail-closed rule, the production peer rule
+// (`<remoteName>:<canonical destination>`), and the baseline verdict — the pure
+// rule that decides whether the post-seed resync proved a zero-change baseline.
+// A seed may be reported completed ONLY on a passing verdict, so that rule is a
+// safety boundary rather than a statistic.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import type { HostConfig, SeedRelaySpace } from "@lamasync/core";
 import { seedDaemonE2eEnabled } from "./seed-daemon-seam.ts";
 import {
+  resolveSeedBaselinePeer,
   runSeedAction,
   seedBaselineVerdict,
   seedDaemonPeerPathFromEnv,
   seedDaemonRelayConfigFromEnv,
+  seedRelaySpaceFromHostConfig,
 } from "./seed-runner.ts";
 
 const saved = { ...process.env };
@@ -76,61 +83,126 @@ describe("the relay configuration fails closed", () => {
     }
   });
 
-  test("there is no configured peer by default", () => {
+  test("the peer OVERRIDE is seam-gated: production can never be redirected by it", () => {
     clearSeam();
-    expect(seedDaemonPeerPathFromEnv()).toBeNull();
     process.env.LAMASYNC_SEED_DAEMON_PEER_PATH = "/tmp/peer";
+    expect(seedDaemonPeerPathFromEnv()).toBeNull();
+    process.env.LAMASYNC_SEED_E2E = "1";
+    process.env.LAMASYNC_TEST = "1";
     expect(seedDaemonPeerPathFromEnv()).toBe("/tmp/peer");
   });
 });
 
-describe("the runner refuses before it reaches anything", () => {
-  test("with the seam off it fails without touching the client or a store", async () => {
-    clearSeam();
-    let called = false;
-    const outcome = await runSeedAction({
-      client: {
-        getSeedJob: () => {
-          called = true;
-          throw new Error("must not be reached");
-        },
-      } as never,
-      hostId: "h1",
-      jobId: "j1",
-      payloadRole: "source",
-      getHostConfig: () => null,
-      refreshConfig: async () => false,
-      dataDir: "/tmp/does-not-matter",
-      log: () => {},
-    });
-    expect(outcome.status).toBe("failed");
-    expect(outcome.result).toContain("seam is off");
-    expect(called).toBe(false);
+describe("the production resync peer comes from the assignment", () => {
+  const folder = (type: "sync" | "backup"): never =>
+    ({ id: "f1", name: "Projects", type }) as never;
+  const assignment = (over: Record<string, unknown> = {}): never =>
+    ({ hostId: "dev-vm", remoteName: null, destination: null, resticRepository: null, resticPassword: null, ...over }) as never;
+
+  test("the default is the per-folder remote the server emits, plus the folder's canonical destination", () => {
+    const resolved = resolveSeedBaselinePeer(folder("sync"), assignment());
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.peer).toBe("lamasync-f1:Projects");
   });
 
-  test("with the seam on but no relay configured it fails before touching the client", async () => {
-    clearSeam();
-    process.env.LAMASYNC_SEED_E2E = "1";
-    process.env.LAMASYNC_TEST = "1";
-    let called = false;
-    const outcome = await runSeedAction({
-      client: {
-        getSeedJob: () => {
+  test("an explicit remoteName and destination are honored exactly", () => {
+    const resolved = resolveSeedBaselinePeer(
+      folder("sync"),
+      assignment({ remoteName: "b2-projects", destination: "team/Projects" }),
+    );
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.peer).toBe("b2-projects:team/Projects");
+  });
+
+  test("a malformed destination or remote name fails closed", () => {
+    const bad = resolveSeedBaselinePeer(folder("sync"), assignment({ destination: "/absolute" }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.message).toContain("destination");
+    const spaced = resolveSeedBaselinePeer(folder("sync"), assignment({ remoteName: "has space" }));
+    expect(spaced.ok).toBe(false);
+    const colons = resolveSeedBaselinePeer(folder("sync"), assignment({ remoteName: "a:b" }));
+    expect(colons.ok).toBe(false);
+  });
+
+  test("a non-sync folder has no resync peer", () => {
+    expect(resolveSeedBaselinePeer(folder("backup"), assignment()).ok).toBe(false);
+  });
+});
+
+describe("the issued relay space is bound to the job and the side", () => {
+  const space = (jobId: string, role: "source" | "target"): SeedRelaySpace => ({
+    jobId,
+    role,
+    backendId: "b1",
+    endpoint: "https://s3.example",
+    bucket: "lamasync-tmp",
+    region: "us-east-1",
+    accessKeyId: "k",
+    secretAccessKey: "s",
+  });
+  const host = (seedRelay: SeedRelaySpace | null): HostConfig =>
+    ({
+      host: { id: "h1", hostname: "h1", status: "online" },
+      assignments: [],
+      folders: [],
+      apps: [],
+      rcloneConfig: "",
+      serverTailnetIp: null,
+      peers: [],
+      seedRelay,
+    }) as HostConfig;
+
+  test("a space issued for this job and side is used; any other is refused", () => {
+    expect(seedRelaySpaceFromHostConfig(host(space("j1", "source")), "j1", "source")?.bucket).toBe("lamasync-tmp");
+    expect(seedRelaySpaceFromHostConfig(host(space("j1", "source")), "j2", "source")).toBeNull();
+    expect(seedRelaySpaceFromHostConfig(host(space("j1", "source")), "j1", "target")).toBeNull();
+    expect(seedRelaySpaceFromHostConfig(host(null), "j1", "source")).toBeNull();
+    expect(seedRelaySpaceFromHostConfig(null, "j1", "source")).toBeNull();
+  });
+
+  test("an incomplete space is no space", () => {
+    expect(
+      seedRelaySpaceFromHostConfig(host({ ...space("j1", "source"), bucket: "" }), "j1", "source"),
+    ).toBeNull();
+    expect(
+      seedRelaySpaceFromHostConfig(host({ ...space("j1", "source"), secretAccessKey: "" }), "j1", "source"),
+    ).toBeNull();
+  });
+});
+
+describe("the runner refuses before it reaches anything", () => {
+  const refusingClient = (onCall: () => void): never =>
+    ({
+      getSeedJob: () => {
+        onCall();
+        throw new Error("must not be reached");
+      },
+    }) as never;
+
+  test("with NO issued relay space it fails before touching the client, seam on or off", async () => {
+    for (const seam of [false, true]) {
+      clearSeam();
+      if (seam) {
+        process.env.LAMASYNC_SEED_E2E = "1";
+        process.env.LAMASYNC_TEST = "1";
+      }
+      let called = false;
+      const outcome = await runSeedAction({
+        client: refusingClient(() => {
           called = true;
-          throw new Error("must not be reached");
-        },
-      } as never,
-      hostId: "h1",
-      jobId: "j1",
-      payloadRole: "source",
-      getHostConfig: () => null,
-      refreshConfig: async () => false,
-      dataDir: "/tmp/does-not-matter",
-      log: () => {},
-    });
-    expect(outcome.status).toBe("failed");
-    expect(outcome.result).toContain("relay space");
-    expect(called).toBe(false);
+        }),
+        hostId: "h1",
+        jobId: "j1",
+        payloadRole: "source",
+        getHostConfig: () => null,
+        refreshConfig: async () => false,
+        dataDir: "/tmp/does-not-matter",
+        log: () => {},
+      });
+      expect(outcome.status).toBe("failed");
+      expect(outcome.result).toContain("relay space");
+      expect(called).toBe(false);
+    }
   });
 });
 

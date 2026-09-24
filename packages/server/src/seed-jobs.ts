@@ -32,6 +32,7 @@ import {
   SEED_JOB_PHASE_COUNT,
   SEED_PLAN_TTL_MS,
   SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
+  seedPilotExecutionEligibility,
   type SeedArchiveFormat,
   type SeedArchiveTooling,
   type SeedFilterUniverseFacts,
@@ -51,6 +52,7 @@ import {
   type SeedTargetFacts,
 } from "@lamasync/core";
 import { loadDerivedFolderHealth } from "./folder-health.ts";
+import { getSeedPilotConfig } from "./seed-pilot.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -90,6 +92,7 @@ interface SeedPlanRow {
   target_host_id: string | null;
   staging_root: string | null;
   staging_same_filesystem: number | null;
+  target_measured_entries: number | null;
   space: string;
   archive_format: string;
   archive_tooling: string;
@@ -166,6 +169,7 @@ function rowToSeedPlan(row: SeedPlanRow): SeedPlan {
       measuredOnHostId: row.target_host_id,
       stagingRoot: row.staging_root,
       stagingSameFilesystem: row.staging_same_filesystem === null ? null : row.staging_same_filesystem === 1,
+      measuredEntries: row.target_measured_entries,
     },
     space: isRecord(space) ? (space as unknown as SeedSpacePlan) : computeSeedSpacePlan({
       sourceBytes: 0,
@@ -239,7 +243,7 @@ const SEED_PLAN_SELECT = `SELECT id, folder_id, host_id, assignment_id, recommen
        recommendation, source_file_count, source_bytes, source_measured_at,
        source_authority_host_id, source_authority, filter_universe, source_host_id,
        source_manifest_fingerprint, target_free_bytes, target_free_measured_at, target_host_id,
-       staging_root, staging_same_filesystem, space, archive_format, archive_tooling,
+       staging_root, staging_same_filesystem, target_measured_entries, space, archive_format, archive_tooling,
        archive_tooling_ready, archive_estimate_bytes, archive_choice_reason, archive_fallback,
        staging_policy, config_revision, filter_fingerprint, baseline_fingerprint,
        execution_available, execution_reason, created_at, expires_at
@@ -252,11 +256,11 @@ export function recordSeedPlan(database: Database, plan: SeedPlan): void {
         source_file_count, source_bytes, source_measured_at,
         source_authority_host_id, source_authority, filter_universe, source_host_id,
         source_manifest_fingerprint, target_free_bytes, target_free_measured_at, target_host_id,
-        staging_root, staging_same_filesystem, space, archive_format, archive_tooling,
+        staging_root, staging_same_filesystem, target_measured_entries, space, archive_format, archive_tooling,
         archive_tooling_ready, archive_estimate_bytes, archive_choice_reason, archive_fallback,
         staging_policy, config_revision, filter_fingerprint, baseline_fingerprint,
         execution_available, execution_reason, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        recommendation = excluded.recommendation,
        source_file_count = excluded.source_file_count,
@@ -268,6 +272,7 @@ export function recordSeedPlan(database: Database, plan: SeedPlan): void {
        source_host_id = excluded.source_host_id,
        target_free_bytes = excluded.target_free_bytes,
        target_free_measured_at = excluded.target_free_measured_at,
+       target_measured_entries = excluded.target_measured_entries,
        space = excluded.space,
        archive_format = excluded.archive_format,
        archive_tooling = excluded.archive_tooling,
@@ -304,6 +309,7 @@ export function recordSeedPlan(database: Database, plan: SeedPlan): void {
       plan.target.measuredOnHostId,
       plan.target.stagingRoot,
       plan.target.stagingSameFilesystem === null ? null : plan.target.stagingSameFilesystem ? 1 : 0,
+      plan.target.measuredEntries,
       JSON.stringify(plan.space),
       plan.archive.format,
       JSON.stringify(plan.archive.tooling),
@@ -1184,6 +1190,10 @@ export function buildSeedPlan(
     measuredOnHostId: targetRecord === null ? null : target.host_id,
     stagingRoot: dirnameOf(target.local_path),
     stagingSameFilesystem: targetRecord?.facts.seedStaging?.sameFilesystem ?? null,
+    // The TARGET's own deep measurement of the folder it would receive into.
+    // `null` (never measured) is NOT "empty": the preflight refuses it, because
+    // publishing into a target nobody has looked at could silently merge.
+    measuredEntries: targetRecord?.facts.measurement?.pathCount ?? null,
   };
 
   const baseSpace = computeSeedSpacePlan({
@@ -1259,9 +1269,29 @@ export function buildSeedPlan(
     baselineFingerprint: targetRecord?.facts.baseline.fingerprint ?? null,
     createdAt: now,
     expiresAt: now + SEED_PLAN_TTL_MS,
-    execution: seedPlanExecution({ transportImplemented: seedTransportE2eEnabled() }),
+    execution: seedPlanExecution({ pilot: seedPilotEligibilityForPlan(database, input.folderId, sourceAssignment.host_id, target.host_id) }),
   };
   return { ok: true, plan };
+}
+
+/**
+ * The operator's pilot verdict for one folder+pair.
+ *
+ * Read from the stored pilot on every call rather than cached on the plan: the
+ * authorization can be switched off between preparing a plan and approving it,
+ * and a plan must never carry a stale "authorized".
+ */
+export function seedPilotEligibilityForPlan(
+  database: Database,
+  folderId: string,
+  sourceHostId: string,
+  targetHostId: string,
+): ReturnType<typeof seedPilotExecutionEligibility> {
+  return seedPilotExecutionEligibility(getSeedPilotConfig(database), {
+    folderId,
+    sourceHostId,
+    targetHostId,
+  });
 }
 
 /** Validity of a stored seed plan against the live assignment state. */
@@ -1283,25 +1313,24 @@ export function seedPlanValidityFor(
       filterFingerprint: record?.facts.filter.fingerprint ?? plan.filterFingerprint,
       baselineFingerprint: record?.facts.baseline.fingerprint ?? plan.baselineFingerprint,
     },
-    { transportImplemented: seedTransportE2eEnabled() },
+    { pilot: seedPilotEligibilityForPlan(database, plan.folderId, plan.sourceHostId, plan.hostId) },
   );
 }
 
-/**
- * LAMA-346 Stage 2c — the TEST-ONLY transport seam.
- *
- * `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false` and production must keep
- * refusing job creation. The disposable E2E harness is the only caller that
- * opens this, and it must set BOTH variables, so a stray `LAMASYNC_TEST=1` (or
- * a stray `LAMASYNC_SEED_E2E=1`) alone changes nothing. Opening the seam only
- * makes a plan runnable and `POST /seed-jobs` create a job; it does NOT wire a
- * store or an executor into the server — no production module imports the
- * coordinator, the S3 store or the seed sides, and no daemon polls for seed
- * work. Without the seam the route still answers 503, unchanged.
- */
-export function seedTransportE2eEnabled(): boolean {
-  return process.env["LAMASYNC_SEED_E2E"] === "1" && process.env["LAMASYNC_TEST"] === "1";
-}
+// LAMA-346 Stage 2f: the server-side test seam is GONE.
+//
+// Through Stage 2e the server opened `POST /seed-jobs` and the archive route
+// only when BOTH `LAMASYNC_SEED_E2E=1` and `LAMASYNC_TEST=1` were set, because
+// there was no production authorization to consult. There is now: the operator's
+// seed pilot (`./seed-pilot.ts`), which authorizes one folder and one
+// source/target pair after its temporary seed space has been probed. A test
+// environment alone therefore opens NOTHING here — it can only exercise the
+// surface by configuring a real pilot through the real admin route, exactly as
+// an operator would, which is what the disposable E2E now does. The daemon keeps
+// its own doubly-gated seam, for sandbox affordances only (a shortened lease, a
+// held phase, a local resync peer, an environment-supplied relay space); the
+// server has none, and `seed-transport-bounded.test.ts` asserts that this module
+// reads no seed environment variable at all.
 
 /** Build the starting progress record for a newly created job. */
 export function initialSeedJobProgress(phase: SeedJobPhase, now: number): SeedJobProgress {

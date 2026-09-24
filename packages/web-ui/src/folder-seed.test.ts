@@ -94,7 +94,7 @@ function plan(overrides: Partial<SeedPlan> = {}): SeedPlan {
       message: "Source authority: master — measured 91,660 entries (14864173809 bytes) 1 minutes ago.",
     },
     source: { fileCount: 91_660, totalBytes: 14_864_173_809, measuredAt: 1, measuredOnHostId: "master", manifestFingerprint: null },
-    target: { freeBytes: 200_000_000_000, freeBytesMeasuredAt: 1, measuredOnHostId: "dev-vm", stagingRoot: "/home/b", stagingSameFilesystem: null },
+    target: { freeBytes: 200_000_000_000, freeBytesMeasuredAt: 1, measuredOnHostId: "dev-vm", stagingRoot: "/home/b", stagingSameFilesystem: null, measuredEntries: 0 },
     space: {
       sourceBytes: 14_864_173_809,
       sourceFiles: 91_660,
@@ -210,12 +210,15 @@ describe("plan wording", () => {
     expect(seedRunnableVerdict(ready, { valid: false, message: "expired" }).message).toBe("expired");
   });
 
-  test("the help text is explicit that nothing is enabled yet, and states the timeout change precisely", () => {
+  test("the help text names the pilot as the gate, and states the timeout change precisely", () => {
     const help = seedUnavailableHelp();
-    expect(help).toContain("not switched on yet");
-    // Stage 1a is implemented, so the help names what is ACTUALLY missing
-    // rather than implying the whole feature is unwired.
-    expect(help).toContain("archive transfer itself");
+    // Stage 2f: the gate is the operator's pilot, not a missing feature, so the
+    // help names what the operator can DO rather than implying the transport is
+    // unwired.
+    expect(help).toContain("seed pilot");
+    expect(help).toContain("ONE folder and ONE source/target pair");
+    expect(help).toContain("probed");
+    expect(help).toContain("target is empty");
     expect(help).toContain("effective ignore rules");
     // The correction: a first sync with no baseline IS supervised differently.
     expect(help).toContain("existing baseline is untouched and keeps its fixed timeout");

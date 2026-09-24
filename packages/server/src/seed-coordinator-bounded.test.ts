@@ -92,7 +92,7 @@ describe("Stage 2b is test-only orchestration, not production wiring", () => {
     expect(SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED).toBe(true);
     const execution = seedPlanExecution();
     expect(execution.available).toBe(false);
-    expect(execution.reason).toContain("temporary seed space");
+    expect(execution.reason).toContain("seed pilot");
   });
 
   test("the coordinator uses only the ownership-conditional writes", () => {

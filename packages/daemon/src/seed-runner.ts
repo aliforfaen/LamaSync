@@ -2,10 +2,15 @@
 //
 // This is the SHIPPED daemon's seed executor. It is reached only from the
 // `seed_job` case in the daemon's queued-action dispatcher, only through a
-// dynamic `import()`, and only when the doubly-gated seam is on, so a build that
-// never sets `LAMASYNC_SEED_E2E=1` AND `LAMASYNC_TEST=1` cannot reach the relay
-// transport or the S3 store at all. `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays
-// `false`, so the API still refuses to create a job by default.
+// dynamic `import()`. What authorizes a run is the JOB, not an environment
+// variable: the server creates a seed job only inside the operator's seed pilot
+// (one folder, one source/target pair, a probed temporary seed space) and issues
+// this device the relay space FOR THAT JOB AND ROLE inside its own authenticated
+// host config. A test environment alone therefore opens nothing. The daemon's
+// doubly-gated seam (`LAMASYNC_SEED_E2E=1` AND `LAMASYNC_TEST=1`) is retained
+// only for sandbox affordances that cannot affect a production build: a
+// shortened lease, a deliberately held phase, a local resync peer, and a relay
+// space supplied from the environment instead of the host config.
 //
 // It reuses the primitives that already exist and are already tested:
 //   * `buildSeedSourceManifest` / `buildSeedFilterUniverse` (the effective
@@ -23,19 +28,21 @@
 // the job's. The two sides never talk to each other — only to the server and the
 // object space — so a second host is a real second host.
 //
-// TWO DELIBERATE, DOCUMENTED LIMITS
+// WHERE THE TWO EXTERNAL INPUTS COME FROM (LAMA-346 Stage 2f)
 //
-//   1. The resync peer for the target's `baseline_validation` phase comes from
-//      the seam (`LAMASYNC_SEED_DAEMON_PEER_PATH`). In production the peer is
-//      the assignment's resolved rclone remote
-//      (`<remote>:<destination>` + the daemon's rclone config), and resolving it
-//      inside this runner is the remaining orchestration item. Until then the
-//      phase fails closed when no peer is supplied: the daemon NEVER reports a
-//      seed completed without a real zero-change baseline.
-//   2. The relay store's credentials come from the seam environment. That is
-//      deliberate: the relay contract has no credential parameter, and where the
-//      fleet's temporary seed space is configured is a product decision. A build
-//      without the seam cannot construct a store.
+//   1. The RESYNC PEER is resolved from the assignment itself:
+//      `<assignment.remoteName (or the documented per-folder default)>:<canonical
+//      destination>` — the same remote path the executor syncs to — plus the
+//      server-supplied rclone config, written to a private temp file and removed
+//      afterwards. The seam may SUBSTITUTE a local peer in a disposable sandbox
+//      (which has no real remote); it never changes what production resolves.
+//   2. The RELAY SPACE comes from the device's own authenticated host config
+//      (`HostConfig.seedRelay`), which the server populates only for a party to a
+//      non-terminal job of the pilot-authorized folder. The space names the job
+//      and role it was issued for, and this runner refuses one issued for
+//      anything else. A build with no pilot and no issued space cannot construct
+//      a store, and the seam may substitute an environment-supplied space only
+//      when it is open.
 //
 // THE JOB LEASE IS KEPT ALIVE DURING A STAGE, NOT BETWEEN STAGES
 //
@@ -52,12 +59,15 @@ import { join } from "node:path";
 import {
   SEED_EMPTY_FILTER_FINGERPRINT,
   isTerminalSeedPhase,
+  resolveDestination,
   seedArchiveFactsComplete,
   seedJobPhaseRole,
   seedJobRoleFor,
   seedRelayArchiveKey,
   seedRelayManifestKey,
   seedStagingPath,
+  type Folder,
+  type FolderAssignment,
   type HostConfig,
   type SeedJob,
   type SeedJobArchiveFacts,
@@ -66,6 +76,7 @@ import {
   type SeedJobProgress,
   type SeedJobRole,
   type SeedManifestDocument,
+  type SeedRelaySpace,
   type SeedRelayStore,
 } from "@lamasync/core";
 import {
@@ -79,6 +90,7 @@ import {
 import { buildSeedFilterUniverse, buildSeedSourceManifest } from "./seed-filter-universe.ts";
 import { createS3SeedRelayStore } from "./seed-relay-s3.ts";
 import { seedDaemonE2eEnabled } from "./seed-daemon-seam.ts";
+import { getRemoteName, writeRcloneConfig } from "./rclone.ts";
 import {
   SeedJobLeaseSupervisor,
   SeedStopped,
@@ -124,9 +136,86 @@ export function seedDaemonRelayConfigFromEnv(): SeedDaemonRelayConfig | null {
   return { endpoint, bucket, region: envValue("LAMASYNC_SEED_S3_REGION") ?? "us-east-1", accessKeyId, secretAccessKey };
 }
 
-/** The resync peer the target validates its zero-change baseline against. */
+/**
+ * The resync peer a SANDBOX substitutes for the assignment's real remote.
+ *
+ * Production resolves the peer from the assignment (see
+ * `resolveSeedBaselinePeer`); a disposable sandbox has no real remote to sync
+ * against, so the E2E may point the bisync at a local path instead. Seam-gated,
+ * so a production build can never be redirected by an environment variable.
+ */
 export function seedDaemonPeerPathFromEnv(): string | null {
+  if (!seedDaemonE2eEnabled()) return null;
   return envValue("LAMASYNC_SEED_DAEMON_PEER_PATH");
+}
+
+/**
+ * The relay space this device was ISSUED for this exact job and side.
+ *
+ * The server puts it in the host's own authenticated config, and only for a
+ * party to a non-terminal job of the pilot-authorized folder. Matching on the
+ * job id and the role is what makes a stale space useless: a config fetched for
+ * another job (or for the other side) is refused, and the caller refreshes
+ * instead of using it.
+ */
+export function seedRelaySpaceFromHostConfig(
+  config: HostConfig | null,
+  jobId: string,
+  role: SeedJobRole,
+): SeedRelaySpace | null {
+  const space = config?.seedRelay ?? null;
+  if (space === null) return null;
+  if (space.jobId !== jobId || space.role !== role) return null;
+  if (space.endpoint.length === 0 || space.bucket.length === 0) return null;
+  if (space.accessKeyId.length === 0 || space.secretAccessKey.length === 0) return null;
+  return space;
+}
+
+/** The store settings the S3 relay store takes. */
+function storeConfigFromSpace(space: SeedRelaySpace): SeedDaemonRelayConfig {
+  return {
+    endpoint: space.endpoint,
+    bucket: space.bucket,
+    region: space.region ?? "us-east-1",
+    accessKeyId: space.accessKeyId,
+    secretAccessKey: space.secretAccessKey,
+  };
+}
+
+/**
+ * Resolve the target's post-seed resync peer from the ASSIGNMENT.
+ *
+ * This is the production rule, and it is the same one the executor applies to
+ * every ordinary sync: the connection alias (`remoteName`, or the documented
+ * per-folder default the server's rclone config emits) joined to the canonical
+ * destination prefix. Getting this wrong would resync the target against a
+ * different namespace than the one it is assigned to, so every part is
+ * validated and the failure is a sentence rather than a guess.
+ */
+export function resolveSeedBaselinePeer(
+  folder: Folder,
+  assignment: FolderAssignment,
+): { ok: true; peer: string } | { ok: false; message: string } {
+  if (folder.type !== "sync") {
+    return { ok: false, message: "only a sync assignment has a resync peer" };
+  }
+  const remoteName = getRemoteName(assignment.remoteName, folder.id);
+  if (remoteName.length === 0 || remoteName.includes(":") || /\s/.test(remoteName)) {
+    return {
+      ok: false,
+      message: `the assignment's rclone remote name is not usable (${remoteName || "empty"})`,
+    };
+  }
+  let destination: string;
+  try {
+    destination = resolveDestination(folder, assignment);
+  } catch (err) {
+    return { ok: false, message: `the assignment's destination is not a valid remote prefix: ${reason(err)}` };
+  }
+  if (destination.length === 0) {
+    return { ok: false, message: "the assignment resolves to an empty destination prefix" };
+  }
+  return { ok: true, peer: `${remoteName}:${destination}` };
 }
 
 /**
@@ -172,9 +261,10 @@ export interface SeedActionContext {
   log: (message: string) => void;
   now?: () => number;
   /**
-   * The relay store. Production builds the S3 store from the seam environment;
-   * the field exists so a test can pass a deterministic store (the local object
-   * store, or a wrapper that gates one call) without touching the seam env.
+   * The relay store. Production builds the S3 store from the space the SERVER
+   * issued inside this device's host config; the field exists so a test can pass
+   * a deterministic store (the local object store, or a wrapper that gates one
+   * call) without a server, a bucket or the seam environment.
    */
   store?: SeedRelayStore;
   /** Lease tuning. Defaults to the shipped values; tests shrink them. */
@@ -315,19 +405,48 @@ function seamLeaseIntervalMs(): number | undefined {
 export async function runSeedAction(ctx: SeedActionContext): Promise<SeedActionOutcome> {
   const now = ctx.now ?? (() => Date.now());
   const log = ctx.log;
-  if (!seedDaemonE2eEnabled()) {
+  // The relay space is the AUTHORIZATION ARTIFACT, so it is resolved first: with
+  // none issued for this job and side there is nothing this side could do, and
+  // it must fail before touching the network at all. One refresh is attempted
+  // because the config the daemon booted with predates the job that was just
+  // created for it.
+  let store = ctx.store ?? null;
+  if (store === null) {
+    let space = seedRelaySpaceFromHostConfig(ctx.getHostConfig(), ctx.jobId, ctx.payloadRole);
+    if (space === null) {
+      try {
+        await ctx.refreshConfig();
+      } catch (err) {
+        log(`[seed] job=${ctx.jobId} config refresh failed: ${reason(err)}`);
+      }
+      space = seedRelaySpaceFromHostConfig(ctx.getHostConfig(), ctx.jobId, ctx.payloadRole);
+    }
+    if (space !== null) {
+      // Bounded and credential-free: the backend id and the bucket are
+      // identifiers, never the secret. This line is what lets the disposable E2E
+      // assert that the space arrived through the HOST CONFIG (the production
+      // path) rather than through an environment variable.
+      log(
+        `[seed] job=${ctx.jobId} ${ctx.payloadRole} relay space issued by the server ` +
+          `(backend=${space.backendId} bucket=${space.bucket})`,
+      );
+      store = createS3SeedRelayStore(storeConfigFromSpace(space));
+    }
+  }
+  if (store === null) {
+    // Sandbox-only fallback: the E2E's lower-level worker drives a side with an
+    // environment-supplied space. Seam-gated, so it cannot open a production
+    // build, and it is tried only AFTER the server-issued space.
+    const relay = seedDaemonRelayConfigFromEnv();
+    if (relay !== null) store = createS3SeedRelayStore(relay);
+  }
+  if (store === null) {
     return {
       status: "failed",
-      result: "seed execution is not enabled on this build (the seed seam is off)",
+      result:
+        "this device holds no seed relay space for this job: only the source and target of a seed job the " +
+        "operator's pilot authorizes are issued one",
     };
-  }
-  const relay = seedDaemonRelayConfigFromEnv();
-  // Resolve the store BEFORE reading the job: with neither an injected store nor
-  // a complete relay configuration there is nothing this side could do, so it
-  // must fail without touching the network at all.
-  const store = ctx.store ?? (relay === null ? null : createS3SeedRelayStore(relay));
-  if (store === null) {
-    return { status: "failed", result: "this device has no seed relay space configured" };
   }
 
   let job: SeedJob;
@@ -363,11 +482,18 @@ export async function runSeedAction(ctx: SeedActionContext): Promise<SeedActionO
       // ACTION is done (the job is the server's to finish), and the staging this
       // run created is released by the runner's own cleanup.
       log(`[seed] job=${ctx.jobId} stopped: ${err.message}`);
+      await runner.cleanupRelayObjects();
       return { status: "done", result: bounded(`the seed job ended while this side was working: ${err.message}`) };
     }
     const message = bounded(reason(err));
     log(`[seed] job=${ctx.jobId} ${role} failed: ${message}`);
     await runner.failJob(message);
+    // The job is terminal now, so this job's relay objects have no further
+    // reader. Deleting them promptly is what keeps a 14 GB archive from sitting
+    // in the temporary bucket for a day; the bucket's own lifecycle and the
+    // retention sweep remain the backstop for anything that could not be
+    // deleted here (offline, revoked credentials, a crash).
+    await runner.cleanupRelayObjects();
     return { status: "failed", result: message };
   } finally {
     await runner.release();
@@ -406,6 +532,8 @@ class SeedSideRunner {
   private stagingDir: string | null = null;
   /** Once the rename has happened the staged tree IS the target. */
   private published = false;
+  /** Relay cleanup runs at most once per run, whichever terminal path reaches it. */
+  private cleaned = false;
 
   constructor(
     private readonly ctx: SeedActionContext,
@@ -800,7 +928,7 @@ class SeedSideRunner {
         `Seed transfer completed: ${document.fileCount} file(s) verified against the transported manifest, and the following resync moved nothing.`,
       ),
     });
-    await this.cleanup();
+    await this.cleanupRelayObjects();
     return { status: "done", result: bounded(`seed target finished: ${document.fileCount} file(s) verified, zero-change baseline confirmed`) };
   }
 
@@ -824,20 +952,26 @@ class SeedSideRunner {
    *     zero-change one.
    */
   private async runBaselineValidation(signal: AbortSignal): Promise<SeedBaselineVerdict> {
-    const peer = seedDaemonPeerPathFromEnv();
-    if (peer === null) {
+    const hostConfig = this.ctx.getHostConfig();
+    const folder = hostConfig?.folders.find((f) => f.id === this.job.folderId) ?? null;
+    const assignment = this.assignmentRecord();
+    if (hostConfig === null || folder === null || assignment === null) {
       return {
         ok: false,
-        message:
-          "no resync peer is configured for this device, so the zero-change baseline could not be proven",
+        message: "this device has no assignment for the seeded folder, so there is no peer to validate against",
         transfers: null,
         bytes: null,
       };
     }
-    const assignment = this.assignmentRecord();
-    if (assignment === null) {
-      return { ok: false, message: "this device is not assigned the seeded folder", transfers: null, bytes: null };
+    // The production peer: the assignment's OWN rclone remote plus its canonical
+    // destination, exactly as an ordinary sync resolves it. `null` from the seam
+    // means "no override", not "no peer".
+    const resolved = resolveSeedBaselinePeer(folder, assignment);
+    if (!resolved.ok) {
+      return { ok: false, message: `the resync peer could not be resolved: ${resolved.message}`, transfers: null, bytes: null };
     }
+    const override = seedDaemonPeerPathFromEnv();
+    const peer = override ?? resolved.peer;
     const universe = buildSeedFilterUniverse(assignment, "sync");
     const rulesPath = join(this.workDir, "filter-rules.txt");
     writeFileSync(rulesPath, universe.rules.length > 0 ? `${universe.rules.join("\n")}\n` : "");
@@ -845,11 +979,17 @@ class SeedSideRunner {
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const localPath = assignment.localPath;
+    // The peer names a remote, so rclone needs the server-supplied config. It is
+    // written to a private 0600 temp file and removed in the finally below —
+    // never left on disk, and never logged.
+    const { configPath, cleanup } = writeRcloneConfig(hostConfig.rcloneConfig);
     const args = [
       "rclone",
       "bisync",
       peer,
       localPath,
+      "--config",
+      configPath,
       "--workdir",
       stateDir,
       "--filter-from",
@@ -862,25 +1002,49 @@ class SeedSideRunner {
       "10m",
       "--resync",
     ];
-    this.log(`[seed] job=${this.ctx.jobId} target baseline resync over ${universe.rules.length} rule(s)`);
-    const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
-    const onAbort = (): void => {
-      try {
-        proc.kill();
-      } catch {
-        /* already gone */
-      }
-    };
-    if (signal.aborted) onAbort();
-    else signal.addEventListener("abort", onAbort, { once: true });
-    const stderr = await new Response(proc.stderr).text();
-    const exitCode = await proc.exited;
-    signal.removeEventListener("abort", onAbort);
-    return seedBaselineVerdict({ exitCode, stderr });
+    this.log(
+      `[seed] job=${this.ctx.jobId} target baseline resync peer=${resolved.peer}` +
+        `${override === null ? "" : " (seam override)"} over ${universe.rules.length} rule(s)`,
+    );
+    try {
+      const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+      const onAbort = (): void => {
+        try {
+          proc.kill();
+        } catch {
+          /* already gone */
+        }
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+      const stderr = await new Response(proc.stderr).text();
+      const exitCode = await proc.exited;
+      signal.removeEventListener("abort", onAbort);
+      return seedBaselineVerdict({ exitCode, stderr });
+    } finally {
+      cleanup();
+    }
   }
 
-  /** Delete this job's relay objects. Idempotent, and safe to retry. */
-  private async cleanup(): Promise<void> {
+  /**
+   * Delete THIS JOB's relay objects. Idempotent, namespace-confined, and safe to
+   * retry.
+   *
+   * Called on every terminal outcome — completed, failed, and a STOP — because
+   * a terminal job has no further reader and leaving a multi-gigabyte archive in
+   * the temporary bucket for a day is exactly what the bucket's lifecycle rules
+   * should not have to clean up for us. Deleting on a STOP is safe rather than
+   * merely convenient: the TARGET is the only side that ever reads the archive,
+   * it has stopped by definition (that is what a stop is), an S3 delete does not
+   * truncate a GET that is already streaming, and the keys are derived from this
+   * job's own namespace so nothing outside it can be touched. Whatever this
+   * cannot delete — a crash, a revoked key, an offline device — is left to the
+   * retention sweep and the bucket's lifecycle, which is why the deletion is
+   * best-effort and never throws.
+   */
+  async cleanupRelayObjects(): Promise<void> {
+    if (this.cleaned) return;
+    this.cleaned = true;
     try {
       const result = await cleanupSeedRelayObjects({
         store: this.store,

@@ -56,8 +56,8 @@ import {
   reportSeedJobArchiveOnce,
   reportSeedJobProgressGuarded,
   renewSeedJobLeaseGuarded,
+  seedPilotEligibilityForPlan,
   seedPlanValidityFor,
-  seedTransportE2eEnabled,
 } from "../seed-jobs.ts";
 
 let activeDb: Database = defaultDb;
@@ -144,8 +144,9 @@ function roleLabel(role: SeedJobRole): string {
  * make a device act outside its half, and no path, flag or credential travels
  * in the queue.
  *
- * Only reachable from `POST /seed-jobs`, which is itself 503 without the test
- * seam, so a production build enqueues nothing.
+ * Only reachable from `POST /seed-jobs`, which itself refuses unless the
+ * operator's seed pilot authorizes this exact folder and pair, so a build with
+ * no pilot enqueues nothing.
  */
 function enqueueSeedJobActions(job: SeedJob): void {
   const parties: Array<{ hostId: string; role: SeedJobRole }> = [];
@@ -321,10 +322,14 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 404;
         return { error: "Seed plan not found" };
       }
-      const execution = seedPlanExecution({ transportImplemented: seedTransportE2eEnabled() });
+      // The gate is the OPERATOR'S SEED PILOT, not a build flag: it authorizes
+      // one folder and one source/target pair, and only after the temporary
+      // seed space has been probed. A plan for any other folder, pair, or an
+      // unprobed space is refused here with the exact reason.
+      const execution = seedPlanExecution({
+        pilot: seedPilotEligibilityForPlan(activeDb, plan.folderId, plan.sourceHostId, plan.hostId),
+      });
       if (!execution.available) {
-        // Explicitly unavailable — never a fake button. The plan, space
-        // calculation and progress model are reviewed; the transport is not.
         set.status = 503;
         return {
           error: execution.reason,
@@ -590,24 +595,26 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
   .post(
     "/seed-jobs/:jobId/archive",
     ({ params, body, set, request }) => {
-      // LAMA-346 Stage 2c, TEST-ONLY. Recording the source's immutable archive
-      // facts is a real remote-orchestration need, but the whole seed surface
-      // stays inert until the E2E is reviewed: without the seam this answers
-      // 503 exactly like POST /seed-jobs. The body is normalized fail-closed,
-      // so a malformed digest becomes null and the target then refuses to
-      // download rather than trusting a shape it cannot verify.
-      if (!seedTransportE2eEnabled()) {
-        set.status = 503;
-        return {
-          error: "Seed execution is not available yet.",
-          executionAvailable: false,
-          jobId: params.jobId,
-        };
-      }
       const job = getSeedJob(activeDb, params.jobId);
       if (!job) {
         set.status = 404;
         return { error: "Seed job not found" };
+      }
+      // The same gate as `POST /seed-jobs`, re-checked at the write that
+      // actually moves the handover: recording the source's immutable archive
+      // facts is only meaningful for a job the operator's pilot authorized. The
+      // body is normalized fail-closed, so a malformed digest becomes null and
+      // the target then refuses to download rather than trusting a shape it
+      // cannot verify.
+      const pilot = seedPilotEligibilityForPlan(
+        activeDb,
+        job.folderId,
+        job.sourceHostId ?? "",
+        job.hostId,
+      );
+      if (!pilot.eligible) {
+        set.status = 503;
+        return { error: pilot.reason, executionAvailable: false, jobId: job.id };
       }
       const authority = seedJobAuthority(request, job);
       if (authority.kind === "denied") {
@@ -673,14 +680,14 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
       params: t.Object({ jobId: t.String() }),
       body: t.Record(t.String(), t.Unknown()),
       detail: {
-        summary: "Record a seed job's immutable archive/manifest facts (device → server; test-gated)",
+        summary: "Record a seed job's immutable archive/manifest facts (device → server; pilot-authorized jobs only)",
         tags: ["Folder Seed"],
         responses: {
           200: { description: "Seed job with the recorded archive facts" },
           403: { description: "Device may not report for this job" },
           404: { description: "Seed job not found" },
           409: { description: "Job already finished" },
-          503: { description: "Seed execution is not available yet" },
+          503: { description: "The seed pilot does not authorize this job's folder and device pair" },
         },
       },
     },

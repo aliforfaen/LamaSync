@@ -5,9 +5,10 @@
 // to touch the source's half (or vice versa), a stranger must be refused, and the
 // archive facts must be written exactly once and never rewritten.
 //
-// The archive route is the doubly-gated test-only surface (`LAMASYNC_SEED_E2E=1`
-// AND `LAMASYNC_TEST=1`), so this suite toggles the seam per test and proves the
-// 503 default is intact — the role rules must hold on BOTH sides of the gate.
+// LAMA-346 Stage 2f moved the archive route's gate from the doubly-gated test
+// seam to the operator's SEED PILOT, so this suite configures a real pilot for
+// the folder and pair it exercises and proves the 503 default is intact — the
+// role rules must hold on BOTH sides of the gate.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -29,6 +30,7 @@ const { getAuthPlugin } = await import("./auth.ts");
 const { insertManagedApiKey, __setApiKeysDb, __resetApiKeysDb } = await import("./api-keys.ts");
 const { folderSeedRoutes, __setDb: __setSeedDb } = await import("./routes/folder-seed.ts");
 const { createSeedJob, getSeedJob } = await import("./seed-jobs.ts");
+const { clearSeedPilotConfig, recordSeedPilotReadiness, setSeedPilotConfig } = await import("./seed-pilot.ts");
 
 const SOURCE = "seed-source";
 const TARGET = "seed-target";
@@ -121,6 +123,18 @@ beforeEach(() => {
   targetToken = insertManagedApiKey({ name: "target", kind: "device", hostId: TARGET }).token;
   strangerToken = insertManagedApiKey({ name: "stranger", kind: "device", hostId: STRANGER }).token;
   __setSeedDb(db);
+  // The operator's pilot, as the admin route would have written it: ONE folder
+  // (f1) and ONE ordered pair (SOURCE → TARGET), with a probed seed space. This
+  // is what opens the archive route now.
+  setSeedPilotConfig(db, {
+    enabled: true,
+    folderId: "f1",
+    sourceHostId: SOURCE,
+    targetHostId: TARGET,
+    backendId: "b1",
+    bucket: "lamasync-tmp",
+  });
+  recordSeedPilotReadiness(db, { ok: true, detail: "probe passed" });
   app = new Elysia().use(getAuthPlugin()).use(folderSeedRoutes);
 });
 
@@ -149,26 +163,66 @@ function get(path: string, token: string): Promise<Response> {
   return app.handle(request(path, { headers: { Authorization: `Bearer ${token}` } }));
 }
 
-describe("the archive route stays test-gated", () => {
-  test("without the seam it answers 503, and one variable alone is not the seam", async () => {
+describe("the archive route is gated by the pilot, never by the environment", () => {
+  beforeEach(() => {
+    // The job must exist for the gate to be the thing that answers: a missing
+    // job is a 404, which would prove nothing about the pilot.
+    createSeedJob(db, jobInPhase("uploading_archive", { owner: SOURCE, expiresAt: Date.now() + 600_000 }));
+  });
+
+  test("with no pilot it answers 503 even when every seed environment variable is set", async () => {
+    clearSeedPilotConfig(db);
+    process.env.LAMASYNC_SEED_E2E = "1";
+    process.env.LAMASYNC_TEST = "1";
+    const response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: string; executionAvailable: boolean };
+    expect(body.executionAvailable).toBe(false);
+    expect(body.error).toContain("seed pilot");
+  });
+
+  test("a pilot for another folder, another source or another target answers 503", async () => {
+    for (const wrong of [
+      { folderId: "other" },
+      { sourceHostId: STRANGER },
+      { targetHostId: STRANGER },
+    ]) {
+      setSeedPilotConfig(db, {
+        enabled: true,
+        folderId: "f1",
+        sourceHostId: SOURCE,
+        targetHostId: TARGET,
+        backendId: "b1",
+        bucket: "lamasync-tmp",
+        ...wrong,
+      });
+      recordSeedPilotReadiness(db, { ok: true, detail: "probe passed" });
+      const response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
+      expect(response.status).toBe(503);
+    }
+  });
+
+  test("an UNPROBED seed space answers 503, and a failed probe does too", async () => {
+    setSeedPilotConfig(db, {
+      enabled: true,
+      folderId: "f1",
+      sourceHostId: SOURCE,
+      targetHostId: TARGET,
+      backendId: "b1",
+      bucket: "lamasync-tmp",
+    });
     let response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
     expect(response.status).toBe(503);
-
-    process.env.LAMASYNC_SEED_E2E = "1";
+    recordSeedPilotReadiness(db, { ok: false, detail: "access denied" });
     response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
     expect(response.status).toBe(503);
-
-    delete process.env.LAMASYNC_SEED_E2E;
-    process.env.LAMASYNC_TEST = "1";
-    response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
-    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("access denied");
   });
 });
 
 describe("the source records its own facts, once", () => {
   beforeEach(() => {
-    process.env.LAMASYNC_SEED_E2E = "1";
-    process.env.LAMASYNC_TEST = "1";
     createSeedJob(db, jobInPhase("uploading_archive", { owner: SOURCE, expiresAt: Date.now() + 600_000 }));
   });
 

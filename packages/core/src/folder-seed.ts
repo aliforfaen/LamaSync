@@ -22,14 +22,21 @@
 //
 // A seed archives exactly the EFFECTIVE FILTER UNIVERSE the following bisync
 // baseline syncs — never the raw source tree. That universe is an explicit,
-// fingerprinted input to the archive primitives, and it is now IMPLEMENTED
+// fingerprinted input to the archive primitives, and it is IMPLEMENTED
 // (`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED`): the daemon compiles the same
 // `--filter-from` rule lines the executor writes and hands tar only the
-// manifest's members. What is still missing is the transport
-// (`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is false), so execution stays
-// unavailable and no folder is presented as seedable.
+// manifest's members. The transport is implemented and proven in the
+// disposable E2E too, but it has never run between two real machines, so
+// `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false` and execution is opened
+// per folder+pair by the operator's SEED PILOT (see `./seed-pilot.ts`).
 //
 // It must stay free of node built-ins so the web UI can import it unchanged.
+
+import {
+  SEED_PILOT_AUTHORIZED_REASON,
+  SEED_PILOT_NOT_CONFIGURED_REASON,
+  type SeedPilotEligibility,
+} from "./seed-pilot.ts";
 
 // ---------------------------------------------------------------------------
 // Limits and thresholds
@@ -1187,6 +1194,49 @@ export interface SeedTargetFacts {
   /** Directory the staging sibling will live in (the target's parent). */
   stagingRoot: string | null;
   stagingSameFilesystem: boolean | null;
+  /**
+   * LAMA-346 Stage 2f: how many entries the TARGET device last measured in the
+   * folder it would receive a seed into. A seed only ever publishes into an
+   * EMPTY target, so a target the operator knows to be populated must be
+   * refused at PLAN time rather than after a multi-hour transfer. `null` means
+   * the target has never measured the folder, which is also refused: an unknown
+   * target is not an empty one.
+   */
+  measuredEntries: number | null;
+}
+
+/**
+ * Whether the target may receive a seed, from the target's OWN measurement.
+ *
+ * Pure, and deliberately three-valued in wording rather than in outcome: empty
+ * is the only passing state, and both "populated" and "never measured" fail
+ * with the exact action the operator has to take. Nothing here moves, merges or
+ * deletes anything — a populated target is a decision for its owner.
+ */
+export function seedTargetEmptiness(
+  target: Pick<SeedTargetFacts, "measuredEntries" | "measuredOnHostId">,
+): { ok: boolean; message: string } {
+  const host = target.measuredOnHostId ?? "the target device";
+  if (target.measuredEntries === null) {
+    return {
+      ok: false,
+      message:
+        `${host} has not measured this folder, so LamaSync cannot confirm the target is empty. A seed only ` +
+        "publishes into an empty target, so an unmeasured target is refused rather than assumed. Open the " +
+        "folder on that device and choose Check this device now.",
+    };
+  }
+  if (target.measuredEntries !== 0) {
+    return {
+      ok: false,
+      message:
+        `${host} measures this folder as already containing ${target.measuredEntries.toLocaleString("en-US")} ` +
+        "entries. A seed only publishes into an empty target: nothing is merged, moved or overwritten. Decide " +
+        "where that content belongs (keep it, or copy it somewhere else first) and start the seed from an " +
+        "empty directory.",
+    };
+  }
+  return { ok: true, message: `${host} measures this folder as empty, so it can receive a seed.` };
 }
 
 export interface SeedPlanExecution {
@@ -1210,6 +1260,7 @@ export type SeedPrerequisiteId =
   | "source_authority"
   | "filter_universe"
   | "staging_same_filesystem"
+  | "target_empty"
   | "target_tooling"
   | "target_space"
   | "transport";
@@ -1224,11 +1275,11 @@ export interface SeedPrerequisite {
 export function seedPlanPrerequisites(
   plan: Pick<
     SeedPlan,
-    "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space"
+    "sourceAuthority" | "filterUniverse" | "stagingPolicy" | "archive" | "space" | "target"
   >,
-  options: { transportImplemented?: boolean } = {},
+  options: SeedPlanExecutionOptions = {},
 ): SeedPrerequisite[] {
-  const transportImplemented = options.transportImplemented ?? SEED_ARCHIVE_TRANSPORT_IMPLEMENTED;
+  const emptiness = seedTargetEmptiness(plan.target);
   return [
     { id: "source_authority", ok: plan.sourceAuthority.measurementUsable, message: plan.sourceAuthority.message },
     {
@@ -1245,6 +1296,7 @@ export function seedPlanPrerequisites(
         plan.stagingPolicy.sameFilesystem === true,
       message: plan.stagingPolicy.message,
     },
+    { id: "target_empty", ok: emptiness.ok, message: emptiness.message },
     {
       id: "target_tooling",
       ok: plan.archive.toolingReady,
@@ -1253,7 +1305,7 @@ export function seedPlanPrerequisites(
         : "The target device has not reported that it has tar and the archive compressor.",
     },
     { id: "target_space", ok: plan.space.ok, message: plan.space.message },
-    { id: "transport", ok: transportImplemented, message: SEED_EXECUTION_UNAVAILABLE_REASON },
+    { id: "transport", ok: seedPlanExecution(options).available, message: SEED_EXECUTION_UNAVAILABLE_REASON },
   ];
 }
 
@@ -1569,19 +1621,17 @@ export function isSeedLeaseExpired(job: Pick<SeedJob, "leaseExpiresAt">, now: nu
 }
 
 /**
- * The explicit execution capability. Flipped to `true` only when the archive
- * transport (temporary S3 seed space → target staging) is implemented and
- * validated end-to-end; until then the API refuses job creation and the UI
- * must show a disabled control with this reason — never a fake button.
+ * Whether the archive transport is claimed as PRODUCTION-VALIDATED.
+ *
+ * It stays `false`. The transport IS implemented and proven in the disposable
+ * E2E (Stages 2c–2e), but it has never run between two real machines, so no
+ * build claims it fleet-wide. That is exactly why LAMA-346 Stage 2f added the
+ * operator's SEED PILOT: execution is reachable ONLY through
+ * `seedPlanExecution({ pilot })`, which authorizes one folder and one
+ * source/target pair at a time, and with no pilot every caller stays unavailable
+ * and `POST /seed-jobs` answers 503.
  */
 export const SEED_ARCHIVE_TRANSPORT_IMPLEMENTED = false;
-
-export const SEED_EXECUTION_UNAVAILABLE_REASON =
-  "Seed execution is not available yet. The plan, space calculation, staging rules, archive primitives, " +
-  "effective-filter-universe construction and progress model are ready and reviewed, but one Stage 1 " +
-  "prerequisite is still open: the archive must be uploaded to temporary seed space and staged on the target. " +
-  "That transport has not been implemented or validated end-to-end, so no folder can be seeded today — and no " +
-  "live archive transfer is claimed.";
 
 /**
  * The timeout change, stated precisely. It is NOT "ordinary sync is
@@ -1600,15 +1650,42 @@ export const SEED_TIMEOUT_CHANGE_SCOPE =
   "initialization case that hit the dev-vm timeout — is now supervised by a progress-aware stall budget instead, " +
   "so it is stopped when it genuinely stalls rather than when it runs long.";
 
-export function seedPlanExecution(options: { transportImplemented?: boolean } = {}): SeedPlanExecution {
+/**
+ * Why execution is refused when nothing has authorized it. The pilot is the
+ * gate, so the reason names the pilot and the exact thing the operator can do
+ * about it — never a bare "not available yet".
+ */
+export const SEED_EXECUTION_UNAVAILABLE_REASON = `${SEED_PILOT_NOT_CONFIGURED_REASON} ${SEED_TIMEOUT_CHANGE_SCOPE}`;
+
+/**
+ * The options every execution/validity verdict reads.
+ *
+ * `pilot` is the operator's authorization for the folder+pair in question (see
+ * `seed-pilot.ts`). `transportImplemented` remains as the build-wide override a
+ * test can use to model a fully released transport; production never sets it.
+ */
+export interface SeedPlanExecutionOptions {
+  transportImplemented?: boolean;
+  pilot?: SeedPilotEligibility | null;
+}
+
+export function seedPlanExecution(options: SeedPlanExecutionOptions = {}): SeedPlanExecution {
   const transportImplemented = options.transportImplemented ?? SEED_ARCHIVE_TRANSPORT_IMPLEMENTED;
-  return {
-    available: transportImplemented && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
-    reason:
-      transportImplemented && SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED
-        ? "Seed execution is available."
-        : `${SEED_EXECUTION_UNAVAILABLE_REASON} ${SEED_TIMEOUT_CHANGE_SCOPE}`,
-  };
+  const pilot = options.pilot ?? null;
+  const pilotEligible = pilot !== null && pilot.eligible;
+  const available = transportImplemented || pilotEligible;
+  if (available) {
+    return {
+      available: true,
+      reason: pilotEligible ? SEED_PILOT_AUTHORIZED_REASON : "Seed execution is available.",
+    };
+  }
+  // The pilot's own sentence is more actionable than the generic one whenever a
+  // pilot exists but does not cover this folder+pair, so it wins when present.
+  const reason = pilot !== null && pilot.reason.length > 0
+    ? pilot.reason
+    : `${SEED_EXECUTION_UNAVAILABLE_REASON}`;
+  return { available: false, reason };
 }
 
 // ---------------------------------------------------------------------------
@@ -1624,7 +1701,8 @@ export function seedPlanExecution(options: { transportImplemented?: boolean } = 
  * The not-runnable checks are ordered by how fundamental they are: a wrong or
  * unusable SOURCE authority and an unwired FILTER-AWARE archive come first,
  * because neither can be fixed on the target device, then the staging proof,
- * then the target's own tooling and space.
+ * then whether the target is EMPTY (a populated target cannot receive a seed at
+ * all), then the target's own tooling and space.
  */
 export function checkSeedPlanValidity(
   plan: Pick<
@@ -1638,6 +1716,7 @@ export function checkSeedPlanValidity(
     | "stagingPolicy"
     | "sourceAuthority"
     | "filterUniverse"
+    | "target"
   >,
   live: {
     now: number;
@@ -1645,7 +1724,7 @@ export function checkSeedPlanValidity(
     filterFingerprint: string | null;
     baselineFingerprint: string | null;
   },
-  options: { transportImplemented?: boolean } = {},
+  options: SeedPlanExecutionOptions = {},
 ): SeedPlanValidity {
   if (live.now >= plan.expiresAt) {
     return { valid: false, reason: "expired", message: "This seed plan has expired — prepare a new one." };
@@ -1708,6 +1787,15 @@ export function checkSeedPlanValidity(
     plan.stagingPolicy.sameFilesystem !== true
   ) {
     return { valid: false, reason: "not_runnable", message: plan.stagingPolicy.message };
+  }
+  // The target must be MEASURED as empty. A populated target is refused here,
+  // before a plan can be approved, rather than after a multi-hour transfer: the
+  // publish step refuses a non-empty target anyway, and discovering that at the
+  // end wastes the whole archive. Nothing is moved, merged or deleted — where a
+  // populated target's content belongs is its owner's decision.
+  const emptiness = seedTargetEmptiness(plan.target);
+  if (!emptiness.ok) {
+    return { valid: false, reason: "not_runnable", message: emptiness.message };
   }
   // Finally, execution itself. A plan whose facts are all consistent is still
   // not "runnable" while the operation is unavailable, and saying otherwise

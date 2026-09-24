@@ -347,6 +347,29 @@ CREATE TABLE IF NOT EXISTS b2_management_config (
     updated_at          INTEGER NOT NULL
 );
 
+-- LAMA-346 Stage 2f: the operator's SEED PILOT — the explicit authorization of
+-- exactly ONE folder and ONE source/target pair, plus the temporary seed space
+-- it may use. A single row (id = 'default'); an absent row means the pilot is
+-- off, which is the shipped default. backend_id references an EXISTING
+-- backends row (no second secret entry) and bucket names the fleet's temporary
+-- seed bucket; neither is inferred from the folder being seeded. The
+-- readiness_* columns store the last probe verdict so a restart cannot silently
+-- turn an unprobed space into an authorized one. No credential is stored here.
+CREATE TABLE IF NOT EXISTS seed_pilot_config (
+    id                  TEXT PRIMARY KEY,
+    enabled             INTEGER NOT NULL DEFAULT 0,
+    folder_id           TEXT,
+    source_host_id      TEXT,
+    target_host_id      TEXT,
+    backend_id          TEXT,
+    bucket              TEXT,
+    readiness_state     TEXT NOT NULL DEFAULT 'unknown',
+    readiness_bucket    TEXT,
+    readiness_checked_at INTEGER,
+    readiness_message   TEXT,
+    updated_at          INTEGER NOT NULL
+);
+
 -- LAMA-226: Data Browser write operations (copy/move/upload/rename/mkdir).
 -- Rows are created when an operation starts and updated as it progresses,
 -- giving the UI a pollable + WS-driven progress source. A terminal
@@ -469,6 +492,10 @@ CREATE TABLE IF NOT EXISTS folder_seed_plans (
     target_host_id              TEXT,
     staging_root                TEXT,
     staging_same_filesystem     INTEGER,
+    -- LAMA-346 Stage 2f: how many entries the TARGET device last measured. A
+    -- seed only publishes into an EMPTY target, so a populated target is
+    -- refused at plan time (NULL = never measured = also refused).
+    target_measured_entries     INTEGER,
     space                       TEXT NOT NULL,
     archive_format              TEXT NOT NULL,
     archive_tooling             TEXT NOT NULL,
@@ -1110,6 +1137,12 @@ export const MIGRATIONS: string[] = [
   "ALTER TABLE folder_seed_jobs ADD COLUMN source_host_id TEXT",
   "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_folder ON folder_seed_jobs(folder_id, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_status_lease ON folder_seed_jobs(status, lease_expires_at)",
+  // LAMA-346 Stage 2f: the operator's seed pilot (single row) and the target's
+  // own measurement of how many entries it already holds. The pilot is what
+  // opens execution for one folder+pair; the measurement is what refuses a
+  // populated target at PLAN time instead of at the end of a transfer.
+  "CREATE TABLE IF NOT EXISTS seed_pilot_config (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, folder_id TEXT, source_host_id TEXT, target_host_id TEXT, backend_id TEXT, bucket TEXT, readiness_state TEXT NOT NULL DEFAULT 'unknown', readiness_bucket TEXT, readiness_checked_at INTEGER, readiness_message TEXT, updated_at INTEGER NOT NULL)",
+  "ALTER TABLE folder_seed_plans ADD COLUMN target_measured_entries INTEGER",
 ];
 
 /**

@@ -23,6 +23,7 @@ import type {
   RetentionPolicy,
   RetentionRule,
   RetentionDecision,
+  SeedPilotView,
   HealthResponse,
   Host,
   HostClass,
@@ -1209,6 +1210,21 @@ export const api = {
   seedJob: (jobId: string) => apiGet<SeedJob>(`/seed-jobs/${encodeURIComponent(jobId)}`),
   createSeedJob: (body: { planId: string; confirm: true }) =>
     apiPost<SeedJob>("/seed-jobs", body),
+  // LAMA-346 Stage 2f: the operator's seed pilot. Admin only, and NONE of these
+  // responses carries a credential — the temporary seed space is an existing S3
+  // backend row plus a bucket, and the server resolves the secret itself.
+  seedPilot: () => apiGet<SeedPilotView>("/seed-pilot"),
+  saveSeedPilot: (body: {
+    enabled: boolean;
+    folderId?: string | null;
+    sourceHostId?: string | null;
+    targetHostId?: string | null;
+    backendId?: string | null;
+    bucket?: string | null;
+    confirm: true;
+  }) => apiPut<SeedPilotView>("/seed-pilot", body),
+  clearSeedPilot: () => apiDelete<SeedPilotView>("/seed-pilot"),
+  probeSeedPilot: () => apiPost<SeedPilotView>("/seed-pilot/probe"),
   cancelSeedJob: (jobId: string) =>
     apiPost<SeedJob>(`/seed-jobs/${encodeURIComponent(jobId)}/cancel`),
   listShares: () => apiGet<Share[]>("/shares"),
