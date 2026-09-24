@@ -158,6 +158,15 @@ describe("cheapEffectiveFilter", () => {
     // added at run time, so this is a floor and must not be read as the whole
     // universe.
     expect(report.facts.filter.patternCount).toBe(3);
+    // A new source has no acknowledged baseline yet, but the seed planner
+    // still needs the current filter fingerprint.
+    expect(report.facts.filter.fingerprint).toBeNull();
+    expect(report.facts.filter.liveFingerprint).toBe(
+      liveFilterFingerprint(
+        assignment({ localPath: local, ignorePath: ".lamasyncignore", ignoreGitMetadata: true }),
+        "sync",
+      ).fingerprint,
+    );
     rmSync(local, { recursive: true, force: true });
     rmSync(state, { recursive: true, force: true });
   });

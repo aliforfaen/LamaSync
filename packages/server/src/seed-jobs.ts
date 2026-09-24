@@ -1167,13 +1167,15 @@ export function buildSeedPlan(
   // The archive must be built from the SOURCE's effective filter universe — the
   // same universe the following sync baseline uses — and must not contradict an
   // already-established target baseline.
-  const sourceFilterFingerprint = sourceRecord?.facts.filter.fingerprint ?? null;
-  const targetFilterFingerprint = targetRecord?.facts.filter.fingerprint ?? null;
+  const sourceFilterFingerprint = sourceRecord?.facts.filter.liveFingerprint;
+  const targetFilterFingerprint = targetRecord?.facts.filter.liveFingerprint;
   const filterMatch =
-    targetFilterFingerprint === null || targetFilterFingerprint === sourceFilterFingerprint;
+    sourceFilterFingerprint !== undefined &&
+    targetFilterFingerprint !== undefined &&
+    targetFilterFingerprint === sourceFilterFingerprint;
   const filterUniverse: SeedFilterUniverseFacts = {
-    fingerprint: sourceFilterFingerprint,
-    targetFingerprint: targetFilterFingerprint,
+    fingerprint: sourceFilterFingerprint ?? null,
+    targetFingerprint: targetFilterFingerprint ?? null,
     match: filterMatch,
     // The source device's countable rule lines (a floor: the Git-ignore
     // snapshot is only built during a run). Reported rather than left at zero
@@ -1182,9 +1184,10 @@ export function buildSeedPlan(
     archiveImplemented: SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED,
     message: !SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED
       ? SEED_FILTER_UNIVERSE_REQUIRED_REASON
+      : sourceFilterFingerprint === undefined || targetFilterFingerprint === undefined
+        ? "A device has not reported its current ignore rules. Update both daemons and check both devices before preparing a seed plan."
       : !filterMatch
-        ? "The target device's saved sync baseline was built with a different filter set than the source device's, " +
-          "so a seed would be re-synced afterwards. Make both devices use the same ignore rules, then prepare a new plan."
+        ? "The source and target currently use different ignore rules. Make both devices use the same rules, then prepare a new plan."
         : `The archive will be built from ${sourceAssignment.host_id}'s effective filter universe ` +
           `(fingerprint ${sourceFilterFingerprint ?? "none"}).`,
   };
@@ -1282,7 +1285,7 @@ export function buildSeedPlan(
     },
     stagingPolicy,
     configRevision: revisionRow?.config_revision ?? 0,
-    filterFingerprint: targetFilterFingerprint,
+    filterFingerprint: targetFilterFingerprint ?? null,
     baselineFingerprint: targetRecord?.facts.baseline.fingerprint ?? null,
     createdAt: now,
     expiresAt: now + SEED_PLAN_TTL_MS,
@@ -1325,7 +1328,9 @@ export function seedPlanValidityFor(
     {
       now,
       configRevision: revisionRow?.config_revision ?? 0,
-      filterFingerprint: record?.facts.filter.fingerprint ?? plan.filterFingerprint,
+      filterFingerprint: record?.facts.filter.liveFingerprint === undefined
+        ? plan.filterFingerprint
+        : record.facts.filter.liveFingerprint,
       baselineFingerprint: record?.facts.baseline.fingerprint ?? plan.baselineFingerprint,
     },
     { pilot: seedPilotEligibilityForPlan(database, plan.folderId, plan.sourceHostId, plan.hostId) },

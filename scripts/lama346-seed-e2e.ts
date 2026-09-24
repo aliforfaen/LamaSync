@@ -644,7 +644,11 @@ async function reportHealth(input: {
       freeSpaceThresholdBytes: 0,
       watcher: null,
       filter: {
-        fingerprint: input.filterFingerprint,
+        // The fixture has no baseline yet, so only the CURRENT rules have a
+        // fingerprint. This is the live source/target shape that exposed the
+        // planner's old acknowledged-vs-current mix-up.
+        fingerprint: null,
+        liveFingerprint: input.filterFingerprint,
         source: "lamasyncignore",
         changedSinceBaseline: false,
         patternCount: input.patternCount,

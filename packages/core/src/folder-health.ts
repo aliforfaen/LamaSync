@@ -158,8 +158,10 @@ export interface FolderHealthWatcherFacts {
 }
 
 export interface FolderHealthFilterFacts {
-  /** Fingerprint of the effective filter universe, or null when no filter. */
+  /** Fingerprint acknowledged by the saved bisync baseline, if any. */
   fingerprint: string | null;
+  /** Current rules for seed preflight: absent means not measured, null means no rules. */
+  liveFingerprint?: string | null;
   /** Which source produced the effective filter. */
   source: "none" | "lamasyncignore" | "gitignore" | "combined";
   /** True when the fingerprint differs from the acknowledged baseline. */

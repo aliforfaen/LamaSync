@@ -327,6 +327,14 @@ export function probeFolderHealth(opts: FolderHealthProbeOptions): FolderHealthP
       // reporting the live cheap value here would claim a state the listings
       // do not have.
       fingerprint: acknowledged,
+      // The seed planner needs CURRENT rules, not the rules acknowledged by a
+      // potentially missing baseline. Git-ignore snapshots walk the tree, so
+      // leave those unknown on cheap heartbeats rather than scanning nonstop.
+      ...(!assignment.respectGitignore
+        ? { liveFingerprint: filterInfo.patterns.length === 0
+            ? null
+            : effectiveFilterFingerprint(null, filterInfo.patterns) }
+        : {}),
       source: filterInfo.source,
       changedSinceBaseline: pending !== null,
       // Countable without a tree walk; the Git-ignore snapshot is added at run
