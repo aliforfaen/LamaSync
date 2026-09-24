@@ -94,7 +94,7 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     freeSpaceBytes: 100_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
     watcher: { enabled: false, running: false, quietSec: 30 },
-    filter: { fingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 2 },
+    filter: { fingerprint: "fp-1", liveFingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 2 },
     baseline: {
       present: false,
       ready: false,
@@ -309,7 +309,7 @@ describe("seed plan creation", () => {
     expect(body.plan.stagingPolicy.insideTarget).toBe(false);
     expect(body.plan.stagingPolicy.sameFilesystem).toBe(true);
     // The filter universe comes from the source device, is IMPLEMENTED
-    // (Stage 1a) and matches the target's established baseline.
+    // (Stage 1a) and matches the target's current rules.
     expect(body.plan.filterUniverse.fingerprint).toBe("fp-1");
     expect(body.plan.filterUniverse.match).toBe(true);
     // The countable rule lines the source device reported (a floor: the
@@ -328,6 +328,39 @@ describe("seed plan creation", () => {
     expect(body.validity.valid).toBe(false);
     expect(body.validity.reason).toBe("not_runnable");
     expect(body.validity.message).toContain("seed pilot");
+  });
+
+  test("uses live rules when the source has no baseline", async () => {
+    insertHealth("a1", "f1", "host-a", {
+      filter: { fingerprint: null, liveFingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 2 },
+      measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: Date.now() },
+    });
+    insertHealth("a2", "f1", "host-b", {
+      filter: { fingerprint: "old-baseline", liveFingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 2 },
+      measurement: { pathCount: 0, totalBytes: 0, measuredAt: Date.now() },
+    });
+    const body = (await (await createPlan(adminToken, "host-b")).json()) as {
+      plan: { filterUniverse: { fingerprint: string | null; match: boolean } };
+    };
+    expect(body.plan.filterUniverse.fingerprint).toBe("fp-1");
+    expect(body.plan.filterUniverse.match).toBe(true);
+  });
+
+  test("an old daemon without a live filter report cannot authorize a seed", async () => {
+    insertHealth("a1", "f1", "host-a", {
+      filter: { fingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 2 },
+      measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: Date.now() },
+    });
+    insertHealth("a2", "f1", "host-b", {
+      measurement: { pathCount: 0, totalBytes: 0, measuredAt: Date.now() },
+    });
+    const body = (await (await createPlan(adminToken, "host-b")).json()) as {
+      plan: { filterUniverse: { match: boolean; message: string } };
+      validity: { valid: boolean };
+    };
+    expect(body.plan.filterUniverse.match).toBe(false);
+    expect(body.plan.filterUniverse.message).toContain("has not reported its current ignore rules");
+    expect(body.validity.valid).toBe(false);
   });
 
   test("an UNPROVEN same-filesystem verdict makes the plan not runnable", async () => {
@@ -366,13 +399,13 @@ describe("seed plan creation", () => {
     expect(body.validity.message).toContain("has not confirmed");
   });
 
-  test("a target whose baseline used a different filter set is refused", async () => {
+  test("a target currently using a different filter set is refused", async () => {
     insertHealth("a1", "f1", "host-a", {
       measurement: { pathCount: 91_660, totalBytes: 14_864_173_809, measuredAt: Date.now() },
     });
     insertHealth("a2", "f1", "host-b", {
       freeSpaceBytes: 200_000_000_000,
-      filter: { fingerprint: "fp-other", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 0 },
+      filter: { fingerprint: "fp-other", liveFingerprint: "fp-other", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 0 },
     });
     const body = (await (await createPlan(adminToken, "host-b")).json()) as {
       plan: { filterUniverse: { fingerprint: string | null; targetFingerprint: string | null; match: boolean } };

@@ -184,6 +184,7 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
   const lastRun = isRecord(value["lastRun"]) ? value["lastRun"] : null;
   const measurement = isRecord(value["measurement"]) ? value["measurement"] : null;
   const filterSource = filter["source"];
+  const liveFilterFingerprint = filter["liveFingerprint"];
   // LAMA-346: archive tooling is reported by the heartbeat. A missing or
   // malformed block is `null` ("not verified"), never an invented `true`.
   const archiveRaw = isRecord(value["archive"]) ? value["archive"] : null;
@@ -234,6 +235,10 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
       : null,
     filter: {
       fingerprint: clampString(filter["fingerprint"], 128),
+      ...(liveFilterFingerprint === null ||
+      (typeof liveFilterFingerprint === "string" && liveFilterFingerprint.length > 0 && liveFilterFingerprint.length <= 128)
+        ? { liveFingerprint: liveFilterFingerprint }
+        : {}),
       source:
         typeof filterSource === "string" && FILTER_SOURCES.has(filterSource)
           ? (filterSource as FolderHealthFacts["filter"]["source"])

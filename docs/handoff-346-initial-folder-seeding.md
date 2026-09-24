@@ -2361,3 +2361,17 @@ Independent review also added a duplicate-run guard: while a nonterminal seed
 exists for the pilot's exact folder and source/target pair, a new run returns
 409 with the active job ID. Host config issues one relay credential per party,
 so overlapping jobs for that pair must not compete for it.
+
+The first live preflight exposed a distinction the sandbox did not exercise:
+the source `cachy` has current `.lamasyncignore` rules but no saved bisync
+baseline, so its *acknowledged* filter fingerprint is null. Seed planning now
+uses a separately reported current-rule fingerprint on both devices, while
+ordinary health continues to report the baseline-acknowledged value. An older
+daemon or a Git-ignore snapshot not measured on the heartbeat leaves this new
+field absent and the seed fails closed instead of guessing. The `dev-vm`
+assignment's `~/lamasync/projects` path also failed the server's absolute
+staging-sibling check; production uses the equivalent absolute path for this
+pilot. Its former 20 MB partial tree was preserved at
+`~/lamasync/projects.pre-seed-2026-09-24`, with its ignore file temporarily
+used from that sibling while the target is empty. Restore the relative
+`.lamasyncignore` assignment setting once the seeded tree is published.
