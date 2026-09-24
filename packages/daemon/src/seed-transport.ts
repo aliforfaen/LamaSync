@@ -29,9 +29,9 @@
 //     object, the downloaded file), and never reports success if that cleanup
 //     itself failed silently.
 //
-// NO LIVE SEED RUNS BECAUSE OF THIS FILE: `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED`
-// is still `false`, `POST /seed-jobs` still refuses, and nothing here is wired
-// to a configured S3 backend, an rclone remote or a live host.
+// Production calls are reached only through the operator-authorized seed pilot
+// and the job's role-scoped lease. This module itself has no policy authority:
+// it receives an already-authorized relay store and never loads credentials.
 
 import { existsSync, readFileSync, rmSync, statSync } from "fs";
 import {
