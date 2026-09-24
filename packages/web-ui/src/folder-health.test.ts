@@ -47,7 +47,7 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     freeSpaceBytes: 10_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
     watcher: { enabled: false, running: false, quietSec: 30 },
-    filter: { fingerprint: "fp", source: "lamasyncignore", changedSinceBaseline: false },
+    filter: { fingerprint: "fp", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 0 },
     baseline: {
       present: true,
       ready: true,
@@ -131,7 +131,7 @@ describe("availableHealthActions — the intervention gates", () => {
       record({
         state: "resync_required",
         facts: facts({
-          filter: { fingerprint: "fp", source: "combined", changedSinceBaseline: true },
+          filter: { fingerprint: "fp", source: "combined", changedSinceBaseline: true, patternCount: 0 },
         }),
       }),
     );
@@ -278,7 +278,7 @@ describe("baseline / filter / watcher wording", () => {
   test("a changed ignore set is stated without jargon", () => {
     expect(
       filterSentence(
-        record({ facts: facts({ filter: { fingerprint: "f", source: "combined", changedSinceBaseline: true } }) }),
+        record({ facts: facts({ filter: { fingerprint: "f", source: "combined", changedSinceBaseline: true, patternCount: 0 } }) }),
       ),
     ).toContain("changed since the last sync");
   });

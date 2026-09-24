@@ -12,6 +12,10 @@ import {
 import { homedir, tmpdir } from "os";
 import type { AppCaptureAssignment, ConflictStrategy, EffectivePause, Folder, FolderAssignment, FolderType, HostConfig, LamaSyncApiClient, OperationReport, OperationStatus, ResticSnapshot } from "@lamasync/core";
 import { resolveDestination } from "@lamasync/core";
+// LAMA-346: the progress-aware seed-stage deadline decision is shared with
+// the server and the web UI, so the daemon cannot disagree with them about
+// when a stage is stalled.
+import { SEED_STAGE_HARD_CAP_MS, shouldExtendSeedDeadline } from "@lamasync/core";
 import { runHook } from "./hooks.ts";
 import { writeFileAtomic } from "./atomic-file.ts";
 import {
@@ -66,6 +70,10 @@ export interface ExecuteOptions {
   // by the allowlisted queued-action grammar — the executor still derives
   // every rclone argv element itself.
   bisync?: BisyncRunControl;
+  // LAMA-346: force the progress-aware seed-stage watchdog for this run. Set
+  // by the seed-job executor (whose stages are initial seed stages by
+  // definition); an ordinary sync never sets it.
+  seedStage?: boolean;
 }
 
 /** LAMA-345: how one bisync run should treat the existing baseline. */
@@ -288,6 +296,137 @@ export function selectRunTimeoutSec(input: {
 }
 const DISK_SPACE_DEFAULT = 1_000_000_000;
 const BISYNC_CORRUPTION_MARKERS = ["bisync aborted", "inconsistent state", "must use --resync", "state corruption"];
+
+// ---------------------------------------------------------------------------
+// LAMA-346: progress-aware process supervision
+// ---------------------------------------------------------------------------
+
+/**
+ * A seed-stage watchdog. When present, the run is NOT killed at the nominal
+ * wall-clock timeout; it is killed when measurable progress stops for
+ * `stallMs`, or at the absolute `hardCapMs` ceiling.
+ */
+export interface ProcessWatchdog {
+  stallMs: number;
+  hardCapMs: number;
+  /** How often the deadline is evaluated. Defaults to 5 s. */
+  tickMs?: number;
+}
+
+export interface ProcessSupervisor {
+  /** Report measurable progress (a parsed rclone phase or stats line). */
+  progress(): void;
+  /** Stop supervising — the process has exited. */
+  stop(): void;
+  timedOut(): boolean;
+  abortReason(): string | undefined;
+}
+
+/**
+ * LAMA-346: the watchdog for an initial seed stage.
+ *
+ * The stall budget is the assignment's own timeout (600 s by default): the
+ * old wall-clock limit is reinterpreted as "no progress for this long", not
+ * "this stage may not take longer than this". The absolute ceiling is
+ * `SEED_STAGE_HARD_CAP_MS` so a stage that reports progress forever still
+ * ends. Pure and exported so the selection is unit-tested.
+ */
+export function seedStageWatchdog(assignmentTimeoutSec?: number | null): ProcessWatchdog {
+  return {
+    stallMs: (assignmentTimeoutSec ?? DEFAULT_TIMEOUT_SEC) * 1000,
+    hardCapMs: SEED_STAGE_HARD_CAP_MS,
+  };
+}
+
+/**
+ * LAMA-346: does THIS sync run get the progress-aware deadline?
+ *
+ * The scope is deliberately narrow, and it is the exact rule the docs state:
+ *
+ *   * a sync against an EXISTING, ready baseline keeps its exact fixed
+ *     wall-clock timeout — nothing about ordinary steady-state sync changed;
+ *   * a FIRST run with no usable baseline (the dev-vm shape: the fixed 600 s
+ *     timeout killed a healthy initial transfer at exit 143), an explicit
+ *     `initialize`/`seed` intervention, or a caller-flagged seed stage gets
+ *     the stall budget plus the hard ceiling.
+ *
+ * Pure and exported so the selection is unit-tested rather than inferred from
+ * the surrounding control flow.
+ */
+export function syncRunIsProgressAware(input: {
+  seedStage?: boolean | undefined;
+  bisyncMode?: BisyncRunControl["mode"] | null | undefined;
+  baselineReady: boolean;
+}): boolean {
+  if (input.seedStage === true) return true;
+  if (input.bisyncMode === "initialize" || input.bisyncMode === "seed") return true;
+  return !input.baselineReady;
+}
+
+/**
+ * Supervise one child process.
+ *
+ * Without a watchdog this is the historical fixed wall-clock kill. With one,
+ * the decision comes from the shared, pure `shouldExtendSeedDeadline`
+ * contract: continue while progress keeps arriving, fail on a stall or the
+ * hard cap. Ordinary runs are therefore completely unchanged.
+ */
+export function superviseProcess(
+  proc: { kill: () => void },
+  opts: { timeoutSec: number; watchdog?: ProcessWatchdog | undefined; now?: () => number },
+): ProcessSupervisor {
+  const now = opts.now ?? Date.now;
+  const startedAt = now();
+  let lastProgressAt = startedAt;
+  let timedOut = false;
+  let reason: string | undefined;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let interval: ReturnType<typeof setInterval> | null = null;
+
+  const kill = (why: string): void => {
+    if (timedOut) return;
+    timedOut = true;
+    reason = why;
+    try {
+      proc.kill();
+    } catch {
+      // Already gone.
+    }
+  };
+
+  if (opts.watchdog) {
+    const watchdog = opts.watchdog;
+    const stallMs = watchdog.stallMs > 0 ? watchdog.stallMs : opts.timeoutSec * 1000;
+    const tickMs = watchdog.tickMs !== undefined && watchdog.tickMs > 0 ? watchdog.tickMs : 5_000;
+    interval = setInterval(() => {
+      const verdict = shouldExtendSeedDeadline({
+        startedAt,
+        lastProgressAt,
+        now: now(),
+        stallMs,
+        hardCapMs: watchdog.hardCapMs,
+      });
+      if (verdict.action === "fail") kill(`seed-stage ${verdict.reason}: ${verdict.message}`);
+    }, tickMs);
+    (interval as unknown as { unref?: () => void }).unref?.();
+  } else {
+    timer = setTimeout(() => kill(`timed out after ${opts.timeoutSec}s`), opts.timeoutSec * 1000);
+  }
+
+  return {
+    progress(): void {
+      lastProgressAt = now();
+    },
+    stop(): void {
+      if (timer !== null) clearTimeout(timer);
+      if (interval !== null) clearInterval(interval);
+      timer = null;
+      interval = null;
+    },
+    timedOut: () => timedOut,
+    abortReason: () => reason,
+  };
+}
 
 // LAMA-294: rclone's documented exit codes (lib/exitcode/exitcode.go).
 //   0 Success          5 RetryError (temporary, may retry)
@@ -814,6 +953,11 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
 
   let command: string[];
   let timeoutSec: number;
+  // LAMA-346: true when this run is an initial seed stage (a first run with
+  // no usable baseline, or an explicit initialize/seed intervention, or a
+  // caller-flagged seed stage). Such a run is supervised by the
+  // progress-aware deadline instead of the fixed wall-clock timeout.
+  let progressAware = opts.seedStage === true;
   const dry = opts.dryRun === true;
   // LAMA-302/LAMA-345: `respectGitignore` builds a deterministic Git-ignore
   // filter snapshot and, if the effective filter universe changed, forces a
@@ -958,6 +1102,16 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           command.push("--resync", "--resync-mode", resyncPlan.resyncMode);
         }
         timeoutSec = assignment.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
+        // LAMA-346: the dev-vm incident was a FIRST run with no usable
+        // baseline, so "initial seed stage" is `!inspection.ready` as well as
+        // an explicit initialize/seed. A planned resync on an established
+        // baseline keeps the ordinary wall-clock timeout. `syncRunIsProgressAware`
+        // is the single, unit-tested expression of that rule.
+        progressAware = syncRunIsProgressAware({
+          seedStage: opts.seedStage,
+          bisyncMode: bisync.mode,
+          baselineReady: inspection.ready,
+        });
       }
       break;
     }
@@ -1089,7 +1243,13 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
         }
       }
       try {
-        runResult = await runCommand(command, timeoutSec, opts.signal, opts.progress);
+        runResult = await runCommand(
+          command,
+          timeoutSec,
+          opts.signal,
+          opts.progress,
+          progressAware ? seedStageWatchdog(assignment.timeoutSec) : undefined,
+        );
       } catch (err) {
         return report(hostId, folder.id, folder.type, "failed", start, { summary: `executor error: ${err instanceof Error ? err.message : String(err)}`, details: { attempt, error: String(err) } });
       }
@@ -1100,7 +1260,13 @@ export async function executeAssignment(opts: ExecuteOptions): Promise<Operation
           console.warn(`[executor] folder=${folder.id} bisync state corrupted; archived=${corrupted}; retrying with --resync`);
           mkdirSync(sd, { recursive: true });
           if (!command.includes("--resync")) command.push("--resync");
-          runResult = await runCommand(command, timeoutSec, opts.signal, opts.progress);
+          runResult = await runCommand(
+            command,
+            timeoutSec,
+            opts.signal,
+            opts.progress,
+            progressAware ? seedStageWatchdog(assignment.timeoutSec) : undefined,
+          );
           isRecovery = true;
         } catch (err) {
           return report(hostId, folder.id, folder.type, "failed", start, { summary: `bisync recovery failed: ${err instanceof Error ? err.message : String(err)}`, details: { attempt, phase: "recovery", error: String(err) } });
@@ -1398,17 +1564,22 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
   timeoutSec: number,
   signal?: AbortSignal,
   progress?: SyncProgressReporter,
+  // LAMA-346: when present the run is supervised by the progress-aware seed
+  // deadline instead of the fixed wall-clock timeout. Ordinary runs omit it
+  // and keep their exact previous behaviour.
+  watchdog?: ProcessWatchdog,
 ): Promise<CommandResult> {
   const t0 = Date.now();
   const proc = Bun.spawn(["rclone", ...command], { stdout: "pipe", stderr: "pipe" });
-  let timedOut = false;
   let aborted = false;
   let abortReason: string | undefined;
-  const timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, timeoutSec * 1000);
+  const supervisor = superviseProcess(proc, {
+    timeoutSec,
+    ...(watchdog ? { watchdog } : {}),
+  });
   const onAbort = (): void => {
     aborted = true;
     abortReason = typeof signal?.reason === "string" ? signal.reason : "aborted";
-    timedOut = true;
     try { proc.kill(); } catch {}
   };
   if (signal) {
@@ -1462,6 +1633,10 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
       if (phase) progress?.report({ phase, ...counters });
       else progress?.report({ ...counters });
     }
+    // LAMA-346: a recognisable phase or stats block is MEASURABLE progress.
+    // Only these reset the seed-stage stall budget, so an rclone that emits
+    // unrelated chatter cannot keep a dead stage alive forever.
+    if (signal?.phase !== undefined || obj?.stats !== undefined) supervisor.progress();
   };
 
   // Consume both pipes in parallel, feeding every line exactly once.
@@ -1472,11 +1647,12 @@ export function buildRcloneCommand(opts: RcloneCommandOptions): string[] {
 
   const { wouldCopy, wouldDelete, wouldMkdir, ...stats } = acc;
   const exitCode = await proc.exited;
-  clearTimeout(timer);
+  supervisor.stop();
+  const timedOut = supervisor.timedOut() || aborted;
   if (signal) {
     signal.removeEventListener("abort", onAbort);
   }
-  return { exitCode, timedOut, aborted, abortReason, stats, stdoutTail: stdoutTail.tail(), stderrTail: stderrTail.tail(), durationMs: Date.now() - t0, wouldCopy, wouldDelete, wouldMkdir };
+  return { exitCode, timedOut, aborted, abortReason: abortReason ?? supervisor.abortReason(), stats, stdoutTail: stdoutTail.tail(), stderrTail: stderrTail.tail(), durationMs: Date.now() - t0, wouldCopy, wouldDelete, wouldMkdir };
 }
 
 // ---------------------------------------------------------------------------

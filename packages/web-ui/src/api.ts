@@ -23,6 +23,7 @@ import type {
   RetentionPolicy,
   RetentionRule,
   RetentionDecision,
+  SeedPilotView,
   HealthResponse,
   Host,
   HostClass,
@@ -52,6 +53,10 @@ import type {
   // LAMA-345: managed-folder health + reviewed plans.
   FolderHealthResponse,
   FolderPlanWithValidity,
+  // LAMA-346: initial large-folder seeding.
+  SeedJob,
+  SeedPlan,
+  SeedPlanValidity,
   MobileClientType,
   MobileEnrollmentCreateRequest,
   MobileEnrollmentCreateResponse,
@@ -1188,6 +1193,40 @@ export const api = {
     apiGet<FolderPlanWithValidity[]>(
       `/folders/${encodeURIComponent(folderId)}/plans?limit=${limit}`,
     ),
+  // LAMA-346: seed plans (operator-approved, read-only preflight) and seed
+  // jobs. `createSeedJob` is expected to fail with 503 while the archive
+  // transport is unimplemented — the caller surfaces the server's own reason.
+  seedPlans: (folderId: string, limit = 5) =>
+    apiGet<Array<{ plan: SeedPlan; validity: SeedPlanValidity }>>(
+      `/folders/${encodeURIComponent(folderId)}/seed-plans?limit=${limit}`,
+    ),
+  createSeedPlan: (folderId: string, body: { hostId: string; sourceHostId: string; confirm: true }) =>
+    apiPost<{ plan: SeedPlan; validity: SeedPlanValidity }>(
+      `/folders/${encodeURIComponent(folderId)}/seed-plans`,
+      body,
+    ),
+  seedJobs: (folderId: string, limit = 5) =>
+    apiGet<SeedJob[]>(`/folders/${encodeURIComponent(folderId)}/seed-jobs?limit=${limit}`),
+  seedJob: (jobId: string) => apiGet<SeedJob>(`/seed-jobs/${encodeURIComponent(jobId)}`),
+  createSeedJob: (body: { planId: string; confirm: true }) =>
+    apiPost<SeedJob>("/seed-jobs", body),
+  // LAMA-346 Stage 2f: the operator's seed pilot. Admin only, and NONE of these
+  // responses carries a credential — the temporary seed space is an existing S3
+  // backend row plus a bucket, and the server resolves the secret itself.
+  seedPilot: () => apiGet<SeedPilotView>("/seed-pilot"),
+  saveSeedPilot: (body: {
+    enabled: boolean;
+    folderId?: string | null;
+    sourceHostId?: string | null;
+    targetHostId?: string | null;
+    backendId?: string | null;
+    bucket?: string | null;
+    confirm: true;
+  }) => apiPut<SeedPilotView>("/seed-pilot", body),
+  clearSeedPilot: () => apiDelete<SeedPilotView>("/seed-pilot"),
+  probeSeedPilot: () => apiPost<SeedPilotView>("/seed-pilot/probe"),
+  cancelSeedJob: (jobId: string) =>
+    apiPost<SeedJob>(`/seed-jobs/${encodeURIComponent(jobId)}/cancel`),
   listShares: () => apiGet<Share[]>("/shares"),
   listResticSnapshots: () => apiGet<ResticSnapshot[]>("/restic/snapshots"),
   pruneOperations: (olderThanMs: number) =>

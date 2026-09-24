@@ -26,6 +26,7 @@ import {
   parseFolderDiagnosePayload,
   parseFolderInterventionPayload,
   parseFolderPlanRequestPayload,
+  parseSeedJobActionPayload,
   planHasContentChanges,
   resolveDestination,
   resolveWatchQuietSec,
@@ -1530,6 +1531,39 @@ async function main(): Promise<void> {
               : "intervention did not run",
           );
           await ack(outcome.status, outcome.result);
+          return;
+        }
+        case "seed_job": {
+          // LAMA-346: run ONE side of an initial seed. This is the shipped
+          // daemon's seed path.
+          //
+          // What authorizes it is the JOB, not an environment variable: the
+          // server creates a seed job only inside the operator's seed pilot and
+          // issues the relay space for that job and role in this device's own
+          // host config, which `runSeedAction` requires before it touches the
+          // network. A test environment alone therefore opens nothing.
+          //
+          // The runner is imported DYNAMICALLY so a build never statically links
+          // the relay transport or the S3 store into the dispatcher — that
+          // reachability is what `seed-transport-bounded.test.ts` asserts from
+          // this module graph.
+          const parsedSeed = parseSeedJobActionPayload(payload);
+          if (!parsedSeed.ok) {
+            await ack("failed", parsedSeed.error);
+            return;
+          }
+          const { runSeedAction } = await import("./seed-runner.ts");
+          const seedOutcome = await runSeedAction({
+            client,
+            hostId,
+            jobId: parsedSeed.payload.jobId,
+            payloadRole: parsedSeed.payload.role,
+            getHostConfig: () => hostConfig,
+            refreshConfig,
+            dataDir: clientConfig.dataDir,
+            log: (message) => console.log(message),
+          });
+          await ack(seedOutcome.status, seedOutcome.result);
           return;
         }
         default: {

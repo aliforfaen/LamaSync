@@ -21,6 +21,7 @@ import { nextRunSentence } from "../next-run.ts";
 import { AssignmentEditor } from "../components/AssignmentEditor.tsx";
 // LAMA-345: the per-assignment health card + its pure presentation rules.
 import { FolderHealthCard } from "../components/FolderHealthCard.tsx";
+import { FolderSeedPlanCard } from "../components/FolderSeedPlanCard.tsx";
 import { healthLabel, healthTone } from "../folder-health.ts";
 // LAMA-345 follow-up: honour /folders?folder=<id>&host=<id> links from the
 // Fleet health card.
@@ -1460,6 +1461,18 @@ export function Folders() {
                                       // reports it.
                                       void refreshHealth(folder.id);
                                     }}
+                                  />
+                                  {/* LAMA-346: the large-initial-transfer
+                                      panel. It is self-contained (it reads
+                                      its own plans) and only renders for
+                                      sync assignments; execution is
+                                      explicitly unavailable until the
+                                      archive transport ships. */}
+                                  <FolderSeedPlanCard
+                                    folderId={folder.id}
+                                    hostId={assignment.hostId}
+                                    record={assignmentHealth}
+                                    siblingRecords={Object.values(health)}
                                   />
                                   </div>
                                 </td>

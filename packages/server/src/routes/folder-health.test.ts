@@ -76,7 +76,7 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     freeSpaceBytes: 50_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
     watcher: { enabled: false, running: false, quietSec: 30 },
-    filter: { fingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false },
+    filter: { fingerprint: "fp-1", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 0 },
     baseline: {
       present: true,
       ready: true,

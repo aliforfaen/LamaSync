@@ -82,6 +82,96 @@ For isolated Docker tests of the `curl | bash` install and update paths:
 ./scripts/test-update.sh
 ```
 
+For the LAMA-346 seed vertical path (an isolated server, a disposable MinIO
+container, **two real `lamasyncd` processes each with its own device key minted
+through the pairing exchange**, the real queued-action loop, real GNU tar and a
+real `rclone bisync` zero-change baseline), run:
+
+```bash
+bun run scripts/lama346-seed-e2e.ts --json /tmp/lama346-e2e.json
+```
+
+That is the acceptance evidence for the daemon wiring. The same file also runs
+the older test-only workers as a labelled **lower-level diagnostic** (they can
+drive failure injection cheaply); they are not the daemon evidence. It needs
+Docker (for MinIO) and rclone; a missing one is reported as `GATED`, never as a
+pass.
+
+### Opening seed execution: the operator's pilot, not an environment variable
+
+Stage 2f replaced the server-side test seam with the **seed pilot**. Execution is
+authorized for exactly ONE folder and ONE ORDERED source/target pair, and only
+after the temporary seed space has been probed:
+
+```bash
+# 1. Pick an EXISTING S3 backend (no second secret entry) and authorize the pair.
+curl -sX PUT http://server:8080/api/v1/seed-pilot   -H "Authorization: Bearer $LAMASYNC_API_KEY" -H 'Content-Type: application/json'   -d '{"enabled":true,"folderId":"<folder>","sourceHostId":"master","targetHostId":"dev-vm",
+       "backendId":"<backend row id>","bucket":"lamasync-tmp","confirm":true}'
+# 2. Prove that backend can WRITE and DELETE in that bucket. The verdict is
+#    stored, and reconfiguring the pilot resets it.
+curl -sX POST http://server:8080/api/v1/seed-pilot/probe   -H "Authorization: Bearer $LAMASYNC_API_KEY"
+# 3. Read the state (never a secret) and, when done, switch it off.
+curl -s http://server:8080/api/v1/seed-pilot -H "Authorization: Bearer $LAMASYNC_API_KEY"
+curl -sX DELETE http://server:8080/api/v1/seed-pilot -H "Authorization: Bearer $LAMASYNC_API_KEY"
+```
+
+The probe is **bucket-scoped on purpose**: an existing key may be scoped to one
+bucket, and the generic backends "test connection" lists every bucket in the
+account, which such a key cannot do. It does four things, because a seed needs
+all four: it uploads a probe object with **multipart forced**
+(`--s3-upload-cutoff 5M --s3-chunk-size 5M`, so a key that can only do simple
+PUTs fails), reads its **size** back, reads its **bytes** back and compares the
+SHA-256, and deletes it. Retries are pinned, each command is killed after 20 s and
+the whole probe after 90 s, and every failure — including a missing rclone — is a
+stored verdict rather than a 500. A verdict is bound to the exact probed target,
+so **rotating a backend key, endpoint or region invalidates it** and the verdict
+must be taken again. The server then
+delivers the space — decrypted on the server only — inside each party's own
+`GET /api/v1/config/:hostId` response (`seedRelay`), bound to the job id and
+side. An idle device, a stranger and any host after the job is terminal receive
+nothing.
+
+The daemon keeps a doubly-gated seam (`seedDaemonE2eEnabled()` in
+`packages/daemon/src/seed-daemon-seam.ts`, needing BOTH `LAMASYNC_SEED_E2E=1` and
+`LAMASYNC_TEST=1`) for SANDBOX AFFORDANCES only: `LAMASYNC_SEED_S3_*` to
+substitute a relay space from the environment, `LAMASYNC_SEED_DAEMON_PEER_PATH` to
+point the post-seed bisync at a local path instead of the assignment's remote, and
+the lease/delay variables below. It no longer gates reachability, and the SERVER
+has no seam at all — which is why the disposable E2E configures a real pilot
+through the real admin routes and starts its daemons with no relay environment.
+
+The production resync peer resolves from the assignment itself
+(`resolveSeedBaselinePeer`: `<remoteName (or the per-folder default)>:<canonical
+destination>`), with the server-supplied rclone config in a private 0600 temp
+file. Without a usable peer the `baseline_validation` phase FAILS rather than
+passing, so a seed is never reported complete without the zero-change proof.
+
+Three more variables exist ONLY to make the lease provable in a sandbox, and are
+read only when the seam is open:
+
+| Variable | What it does |
+|---|---|
+| `LAMASYNC_SEED_LEASE_MS` | shortens the seed JOB lease (floored at the route's 30 s minimum), so a test can outlive it without waiting ten minutes |
+| `LAMASYNC_SEED_LEASE_INTERVAL_MS` | how often the lease supervisor renews (clamped to at most half the lease) |
+| `LAMASYNC_SEED_STAGE_DELAY_PHASE` + `LAMASYNC_SEED_STAGE_DELAY_MS` | holds ONE named phase still for N ms (E2E only), which can only ever make a stage slower |
+| `LAMASYNC_SEED_S3_PART_BYTES` (+ `…_MULTIPART_THRESHOLD_BYTES`) | lowers the multipart part size so the E2E's ~12 MiB archive really uploads in parts (the store clamps it to S3's 5 MiB–512 MiB range, so a bad value cannot produce an invalid upload) |
+
+They are what lets the E2E prove the review's requirement: a 35 s source stage
+against a 30 s lease completes because the lease is renewed from a timer running
+alongside the stage. The deterministic coverage of the same behaviour lives in
+`packages/daemon/src/seed-lease-supervisor.test.ts` (a fake clock),
+`packages/daemon/src/seed-runner.test.ts` (a fake server that enforces the
+role/phase/lease rules) and `packages/server/src/seed-lease-reaper.test.ts` (the
+real schema) — all of which run in the normal `bun test`, with no Docker and no
+rclone. The real S3 store's own gated integration test runs against an
+existing MinIO with `LAMASYNC_TEST_S3_ENDPOINT`,
+`LAMASYNC_TEST_S3_BUCKET`, `LAMASYNC_TEST_S3_ACCESS_KEY` and
+`LAMASYNC_TEST_S3_SECRET_KEY` set (it skips explicitly otherwise):
+
+```bash
+bun test packages/daemon/src/seed-relay-s3.test.ts
+```
+
 For a full client end-to-end sandbox (install, registration, normal backup,
 dotfile backup, operation-log verification) in Docker Compose:
 

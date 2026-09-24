@@ -184,6 +184,31 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
   const lastRun = isRecord(value["lastRun"]) ? value["lastRun"] : null;
   const measurement = isRecord(value["measurement"]) ? value["measurement"] : null;
   const filterSource = filter["source"];
+  // LAMA-346: archive tooling is reported by the heartbeat. A missing or
+  // malformed block is `null` ("not verified"), never an invented `true`.
+  const archiveRaw = isRecord(value["archive"]) ? value["archive"] : null;
+  const archive: FolderHealthFacts["archive"] = archiveRaw
+    ? {
+        tar: archiveRaw["tar"] === true,
+        zstd: archiveRaw["zstd"] === true,
+        gzip: archiveRaw["gzip"] === true,
+      }
+    : null;
+  // LAMA-346: the target's own same-filesystem proof for the staging sibling.
+  // Normalized fail-closed: `sameFilesystem` is only true when the device
+  // reported the boolean true, so an unknown or malformed block can never be
+  // read as "proven".
+  const seedStagingRaw = isRecord(value["seedStaging"]) ? value["seedStaging"] : null;
+  const seedStaging: FolderHealthFacts["seedStaging"] = seedStagingRaw
+    ? {
+        targetPath: clampString(seedStagingRaw["targetPath"], 4096),
+        targetParent: clampString(seedStagingRaw["targetParent"], 4096),
+        stagingParent: clampString(seedStagingRaw["stagingParent"], 4096),
+        sameFilesystem: seedStagingRaw["sameFilesystem"] === true ? true : null,
+        device: clampInt(seedStagingRaw["device"], 0, Number.MAX_SAFE_INTEGER),
+        checkedAt: clampInt(seedStagingRaw["checkedAt"], 0, Number.MAX_SAFE_INTEGER) ?? 0,
+      }
+    : null;
   return {
     folderType: clampString(value["folderType"], 32) ?? effectiveType,
     effectiveType,
@@ -191,6 +216,8 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
     paused: value["paused"] === true,
     runInProgress: value["runInProgress"] === true,
     rcloneAvailable: value["rcloneAvailable"] !== false,
+    archive,
+    seedStaging,
     localDir: localDir as FolderHealthFacts["localDir"],
     freeSpaceBytes: clampInt(value["freeSpaceBytes"], 0, Number.MAX_SAFE_INTEGER),
     freeSpaceThresholdBytes: clampInt(
@@ -212,6 +239,7 @@ export function normalizeFolderHealthFacts(value: unknown): FolderHealthFacts | 
           ? (filterSource as FolderHealthFacts["filter"]["source"])
           : "none",
       changedSinceBaseline: filter["changedSinceBaseline"] === true,
+      patternCount: clampInt(filter["patternCount"], 0, 100_000) ?? 0,
     },
     baseline: {
       present: baseline["present"] === true,

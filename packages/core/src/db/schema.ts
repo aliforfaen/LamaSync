@@ -347,6 +347,38 @@ CREATE TABLE IF NOT EXISTS b2_management_config (
     updated_at          INTEGER NOT NULL
 );
 
+-- LAMA-346 Stage 2f: the operator's SEED PILOT — the explicit authorization of
+-- exactly ONE folder and ONE source/target pair, plus the temporary seed space
+-- it may use. A single row (id = 'default'); an absent row means the pilot is
+-- off, which is the shipped default. backend_id references an EXISTING
+-- backends row (no second secret entry) and bucket names the fleet's temporary
+-- seed bucket; neither is inferred from the folder being seeded. The
+-- readiness_* columns store the last probe verdict so a restart cannot silently
+-- turn an unprobed space into an authorized one. No credential is stored here.
+CREATE TABLE IF NOT EXISTS seed_pilot_config (
+    id                  TEXT PRIMARY KEY,
+    enabled             INTEGER NOT NULL DEFAULT 0,
+    folder_id           TEXT,
+    source_host_id      TEXT,
+    target_host_id      TEXT,
+    backend_id          TEXT,
+    bucket              TEXT,
+    readiness_state     TEXT NOT NULL DEFAULT 'unknown',
+    readiness_bucket    TEXT,
+    readiness_checked_at INTEGER,
+    readiness_message   TEXT,
+    -- The exact probe target the verdict is about (provider/endpoint/region/
+    -- access-key-id, a hash of the secret, and the bucket). A verdict whose
+    -- fingerprint no longer matches the live backend authorizes nothing, so
+    -- rotating a key invalidates it without touching the pilot.
+    readiness_target_fingerprint TEXT,
+    -- Monotonic revision, bumped on every write. A probe records its verdict
+    -- with a compare-and-set on this, so a verdict about one configuration can
+    -- never be stored against another.
+    config_revision     INTEGER NOT NULL DEFAULT 0,
+    updated_at          INTEGER NOT NULL
+);
+
 -- LAMA-226: Data Browser write operations (copy/move/upload/rename/mkdir).
 -- Rows are created when an operation starts and updated as it progresses,
 -- giving the UI a pollable + WS-driven progress source. A terminal
@@ -438,6 +470,95 @@ CREATE TABLE IF NOT EXISTS folder_sync_plans (
 );
 CREATE INDEX IF NOT EXISTS idx_folder_sync_plans_assignment
     ON folder_sync_plans(assignment_id, created_at);
+
+-- LAMA-346: operator-approved seed plans for a first large-folder transfer.
+-- A plan is a reviewed intent with a short TTL, exactly like a sync plan, and
+-- is NEVER created automatically: the recommended flag records that the
+-- file-count threshold was crossed, while the row only exists because an
+-- admin asked for it. The space/staging columns are the deterministic
+-- preflight result.
+CREATE TABLE IF NOT EXISTS folder_seed_plans (
+    id                          TEXT PRIMARY KEY,
+    folder_id                   TEXT NOT NULL,
+    host_id                     TEXT NOT NULL,
+    assignment_id               TEXT NOT NULL,
+    recommended                 INTEGER NOT NULL,
+    threshold_files             INTEGER NOT NULL,
+    recommendation              TEXT NOT NULL,
+    source_file_count           INTEGER NOT NULL,
+    source_bytes                INTEGER NOT NULL,
+    source_measured_at          INTEGER NOT NULL,
+    -- LAMA-346 correction: the SOURCE AUTHORITY is named explicitly by the
+    -- operator and persisted as its own column. It is never inferred from a
+    -- size, because a wrong source produces a seed of the wrong tree.
+    source_authority_host_id    TEXT,
+    source_authority            TEXT,
+    filter_universe             TEXT,
+    source_host_id              TEXT,
+    source_manifest_fingerprint TEXT,
+    target_free_bytes           INTEGER,
+    target_free_measured_at     INTEGER,
+    target_host_id              TEXT,
+    staging_root                TEXT,
+    staging_same_filesystem     INTEGER,
+    -- LAMA-346 Stage 2f: how many entries the TARGET device last measured. A
+    -- seed only publishes into an EMPTY target, so a populated target is
+    -- refused at plan time (NULL = never measured = also refused).
+    target_measured_entries     INTEGER,
+    space                       TEXT NOT NULL,
+    archive_format              TEXT NOT NULL,
+    archive_tooling             TEXT NOT NULL,
+    archive_tooling_ready       INTEGER NOT NULL,
+    archive_estimate_bytes      INTEGER NOT NULL,
+    archive_choice_reason       TEXT NOT NULL,
+    archive_fallback            INTEGER NOT NULL,
+    staging_policy              TEXT NOT NULL,
+    config_revision             INTEGER NOT NULL,
+    filter_fingerprint          TEXT,
+    baseline_fingerprint        TEXT,
+    execution_available         INTEGER NOT NULL,
+    execution_reason            TEXT NOT NULL,
+    created_at                  INTEGER NOT NULL,
+    expires_at                  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_folder_seed_plans_folder
+    ON folder_seed_plans(folder_id, created_at);
+
+-- LAMA-346: the resumable seed job. Phase/progress/source/archive/staging are
+-- JSON blobs already bounded by the shared contract; the scalar columns exist
+-- so the stale-lease sweep and the UI list never have to parse them. A job is
+-- created only from a valid plan, and the lease is renewable so a long seed
+-- cannot be reclaimed and re-executed while it is still running.
+CREATE TABLE IF NOT EXISTS folder_seed_jobs (
+    id               TEXT PRIMARY KEY,
+    plan_id          TEXT NOT NULL,
+    folder_id        TEXT NOT NULL,
+    host_id          TEXT NOT NULL,
+    -- LAMA-346 Stage 2d: the SOURCE host, copied from the plan at creation.
+    -- It is what lets a device key be authorized for the source side of the job
+    -- without joining folder_seed_plans (whose rows are pruned) and without a
+    -- master key. NULL only on a pre-Stage-2d row.
+    source_host_id   TEXT,
+    assignment_id    TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    phase            TEXT NOT NULL,
+    progress         TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    archive          TEXT NOT NULL,
+    staging          TEXT NOT NULL,
+    lease_owner      TEXT,
+    lease_expires_at INTEGER,
+    error            TEXT,
+    summary          TEXT,
+    created_at       INTEGER NOT NULL,
+    started_at       INTEGER,
+    updated_at       INTEGER NOT NULL,
+    finished_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_folder
+    ON folder_seed_jobs(folder_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_status_lease
+    ON folder_seed_jobs(status, lease_expires_at);
 
 -- LAMA-294: locks are keyed by the canonical destination/repository key so
 -- two assignments that write the same physical destination (or share a Restic
@@ -1005,6 +1126,38 @@ export const MIGRATIONS: string[] = [
   // executing. Nullable: pre-existing rows fall back to taken_at + the lease
   // window in the reaper.
   "ALTER TABLE queued_actions ADD COLUMN lease_expires_at INTEGER",
+  // LAMA-346: operator-approved seed plans + resumable seed jobs. Schema
+  // lives in SERVER_SCHEMA for fresh DBs; these CREATE TABLE IF NOT EXISTS
+  // entries are the idempotent safety net for existing databases ("already
+  // exists" is swallowed by initDb's try/catch wrapper).
+  "CREATE TABLE IF NOT EXISTS folder_seed_plans (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, recommended INTEGER NOT NULL, threshold_files INTEGER NOT NULL, recommendation TEXT NOT NULL, source_file_count INTEGER NOT NULL, source_bytes INTEGER NOT NULL, source_measured_at INTEGER NOT NULL, source_authority_host_id TEXT, source_authority TEXT, filter_universe TEXT, source_host_id TEXT, source_manifest_fingerprint TEXT, target_free_bytes INTEGER, target_free_measured_at INTEGER, target_host_id TEXT, staging_root TEXT, staging_same_filesystem INTEGER, space TEXT NOT NULL, archive_format TEXT NOT NULL, archive_tooling TEXT NOT NULL, archive_tooling_ready INTEGER NOT NULL, archive_estimate_bytes INTEGER NOT NULL, archive_choice_reason TEXT NOT NULL, archive_fallback INTEGER NOT NULL, staging_policy TEXT NOT NULL, config_revision INTEGER NOT NULL, filter_fingerprint TEXT, baseline_fingerprint TEXT, execution_available INTEGER NOT NULL, execution_reason TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+  // LAMA-346 correction: explicit source authority + the filter universe the
+  // archive must be built from. Added after the table shipped in the same
+  // unreleased branch; duplicate-column errors are ignored by the runner.
+  "ALTER TABLE folder_seed_plans ADD COLUMN source_authority_host_id TEXT",
+  "ALTER TABLE folder_seed_plans ADD COLUMN source_authority TEXT",
+  "ALTER TABLE folder_seed_plans ADD COLUMN filter_universe TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_folder_seed_plans_folder ON folder_seed_plans(folder_id, created_at)",
+  "CREATE TABLE IF NOT EXISTS folder_seed_jobs (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, folder_id TEXT NOT NULL, host_id TEXT NOT NULL, assignment_id TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, progress TEXT NOT NULL, source TEXT NOT NULL, archive TEXT NOT NULL, staging TEXT NOT NULL, lease_owner TEXT, lease_expires_at INTEGER, error TEXT, summary TEXT, created_at INTEGER NOT NULL, started_at INTEGER, updated_at INTEGER NOT NULL, finished_at INTEGER)",
+  // LAMA-346 Stage 2d: the source host is part of the job identity so a device
+  // key can be authorized for the source side without a plan join. Added after
+  // the table shipped in the same unreleased branch; duplicate-column errors
+  // are ignored by the runner.
+  "ALTER TABLE folder_seed_jobs ADD COLUMN source_host_id TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_folder ON folder_seed_jobs(folder_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_folder_seed_jobs_status_lease ON folder_seed_jobs(status, lease_expires_at)",
+  // LAMA-346 Stage 2f: the operator's seed pilot (single row) and the target's
+  // own measurement of how many entries it already holds. The pilot is what
+  // opens execution for one folder+pair; the measurement is what refuses a
+  // populated target at PLAN time instead of at the end of a transfer.
+  "CREATE TABLE IF NOT EXISTS seed_pilot_config (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, folder_id TEXT, source_host_id TEXT, target_host_id TEXT, backend_id TEXT, bucket TEXT, readiness_state TEXT NOT NULL DEFAULT 'unknown', readiness_bucket TEXT, readiness_checked_at INTEGER, readiness_message TEXT, readiness_target_fingerprint TEXT, config_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)",
+  // LAMA-346 Stage 2f review: the verdict is bound to the EXACT probe target and
+  // to a monotonic revision, so a concurrent reconfigure (or a backend rotation)
+  // cannot inherit a verdict that was about something else. Added after the table
+  // shipped in the same unreleased branch; duplicate-column errors are ignored.
+  "ALTER TABLE seed_pilot_config ADD COLUMN readiness_target_fingerprint TEXT",
+  "ALTER TABLE seed_pilot_config ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE folder_seed_plans ADD COLUMN target_measured_entries INTEGER",
 ];
 
 /**

@@ -32,7 +32,7 @@ function facts(overrides: Partial<FolderHealthFacts> = {}): FolderHealthFacts {
     freeSpaceBytes: 10_000_000_000,
     freeSpaceThresholdBytes: 1_000_000_000,
     watcher: { enabled: false, running: false, quietSec: 30 },
-    filter: { fingerprint: "abc", source: "lamasyncignore", changedSinceBaseline: false },
+    filter: { fingerprint: "abc", source: "lamasyncignore", changedSinceBaseline: false, patternCount: 0 },
     baseline: {
       present: true,
       ready: true,
@@ -97,7 +97,7 @@ describe("deriveFolderHealth", () => {
   test("an rclone critical error is unsafe and outranks resync_required", () => {
     const { state, reasons } = deriveFolderHealth(
       facts({
-        filter: { fingerprint: "abc", source: "none", changedSinceBaseline: true },
+        filter: { fingerprint: "abc", source: "none", changedSinceBaseline: true, patternCount: 0 },
         baseline: {
           present: true,
           ready: false,
@@ -133,7 +133,7 @@ describe("deriveFolderHealth", () => {
 
   test("a changed filter universe requires a resync", () => {
     const { state, reasons } = deriveFolderHealth(
-      facts({ filter: { fingerprint: "abc", source: "combined", changedSinceBaseline: true } }),
+      facts({ filter: { fingerprint: "abc", source: "combined", changedSinceBaseline: true, patternCount: 0 } }),
     );
     expect(state).toBe("resync_required");
     expect(reasons.map((r) => r.code)).toContain("filter_changed");
@@ -212,7 +212,7 @@ describe("reason remediation copy", () => {
       "Set up this device from the remote, or fill the remote from this device.",
     ],
     [
-      facts({ filter: { fingerprint: "f", source: "combined", changedSinceBaseline: true } }),
+      facts({ filter: { fingerprint: "f", source: "combined", changedSinceBaseline: true, patternCount: 0 } }),
       "Changing the ignore set moved the file universe; preview a rebuild and approve it.",
     ],
     [

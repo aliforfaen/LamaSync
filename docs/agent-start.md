@@ -4,6 +4,253 @@ Read this after `AGENTS.md` when entering a coding worktree.
 
 ## Current work
 
+LAMA-346's first vertical slice (initial large-folder seeding and
+progress-aware sync timeouts) is implemented in this worktree and awaits
+review, after an independent-review correction pass. Several things are
+load-bearing and easy to break.
+
+The **progress-aware deadline** lives in `shouldExtendSeedDeadline`
+(`@lamasync/core/folder-seed`), and *which runs get it* is the single pure
+`syncRunIsProgressAware({ seedStage?, bisyncMode?, baselineReady })` in
+`packages/daemon/src/executor.ts`: a sync against an **existing, ready
+baseline must keep its exact fixed wall-clock timeout**, while a first run
+with no usable baseline (the dev-vm shape), an explicit `initialize`/`seed`
+intervention, or `seedStage: true` is supervised progress-aware. Do not widen
+that scope.
+
+**Stage 1a (filter-aware archive construction) is implemented**:
+`packages/daemon/src/seed-filter-universe.ts` compiles the exact
+`--filter-from` rule lines the executor writes into a `SeedSourceFilterUniverse`
+with rclone's own semantics (pinned by a cross-check test against the host's
+real rclone), and `buildSeedSourceManifest(assignment, type)` is the single
+assignment → universe → manifest entry point. tar is given the manifest's
+member list, churn is measured inside the universe, and a filter-included
+symlink or special file still fails closed before tar runs.
+
+**Stage 1b's foundation is implemented, but nothing is wired to a running job.**
+`@lamasync/core/seed-relay` is the relay contract (dedicated
+`lamasync/seed/<jobId>/` namespace, key validation with prefix containment,
+immutable archive metadata, cleanup/retention state);
+`packages/daemon/src/seed-relay-local.ts` is a local object store that is also
+the integration fixture; `packages/daemon/src/seed-transport.ts` uploads with a
+locally computed digest, verifies the store's read-back, and **re-hashes the
+downloaded bytes on disk before anything may extract**. There is no credential,
+endpoint or bucket in that interface, and no configured S3, rclone remote or
+live host is touched. `seed-transport-bounded.test.ts` asserts from the module
+graph that no production module imports the transport yet — keep it that way
+while the flag is `false`.
+
+**Stage 2a is implemented**: `packages/daemon/src/seed-e2e.test.ts` is a
+disposable two-host harness (one temp sandbox, two daemon-shaped identities,
+test-only local object store) that drives source archive → relay → target
+extract/verify/atomic-publish → a **real `rclone bisync --resync` reporting zero
+files changed**, then bidirectional edits and ignored-content checks, with the
+failure cases. It is gated on rclone and force-skipped by
+`LAMASYNC_TEST_RCLONE=1`; the gate is a named test, and handoff §2.11 lists the
+host proofs still required (real network hop, real ENOSPC, the daemon
+orchestration, a live copy run). Never make it touch a configured backend, a
+credential, a real folder or dev-vm.
+
+**Stage 2b is implemented, and it is TEST-ONLY.**
+`packages/server/src/seed-coordinator.ts` drives one seed job through the
+existing state machine (phases one at a time, lease renewal, archive-facts
+persistence, idempotent cleanup) with injected source/target sides and an
+injected local object store, with **ownership-conditional** claim/report/finish
+writes (`claimSeedJobProgress`, `reportOwnedSeedJobProgress`,
+`finishOwnedSeedJob`) so a live owner's job cannot be stolen, a contender cannot
+write its outcome or delete its in-flight objects, and a lapsed lease reports
+`lease_lost` instead of an unrecordable result. Completion requires every phase
+entered and archive facts persisted, in-flight archive facts are conditional too
+(so a lapsed run cannot overwrite the new owner's digest), cleanup only ever sets
+the `cleanup` field on a freshly read row, and a **live lease is never claimable
+even by the same owner** — `owner` is a host id, not a run id. Never swap those for the device routes'
+last-writer-wins helpers. No production module may import it —
+`seed-coordinator-bounded.test.ts` asserts that from the module graph, and
+`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` must stay `false` while it is test-only.
+Never give it a configured backend, a credential or a live folder.
+
+**Stage 2c's first slice is implemented, and it is TEST-ONLY.**
+`packages/daemon/src/seed-relay-s3.ts` is a real S3-compatible relay store
+(SigV4 over `fetch`, digest written as `x-amz-meta-sha256`, immutability, abort
+safety); `seed-transport.ts` gained the **manifest handoff**
+(`uploadSeedManifest` / `downloadSeedManifest`: the target re-derives the content
+fingerprint from the received entries and refuses a mismatch, so it
+independently knows the source universe); `SeedJobArchiveFacts` carries the
+manifest object key/bytes/digest (additive, no migration); and
+`scripts/lama346-seed-e2e.ts` runs the whole vertical path in one disposable
+sandbox — a real isolated server, a disposable MinIO container, TWO INDEPENDENT
+WORKER PROCESSES (`scripts/lama346-seed-worker.ts`) driving the real job API,
+real GNU tar and a real `rclone bisync --resync` that reports zero changed
+files, plus manifest-mismatch, non-empty-target, cancellation, aborted-upload
+and orphan-cleanup cases. `POST /seed-jobs` and `POST /seed-jobs/:jobId/archive`
+open only under the doubly-gated seam (`LAMASYNC_SEED_E2E=1` **and**
+`LAMASYNC_TEST=1`); `seed-e2e-seam.test.ts` pins that. The GATED host proofs (a real two-machine
+hop, real ENOSPC on a bounded volume, the live large-tree run) remain. Never
+give the store, the worker or the seam a production credential, endpoint,
+rclone config or live folder. Stage 2d demoted those workers to a **lower-level
+diagnostic** and fixed the two gaps this paragraph used to list — see the next
+paragraph.
+
+**Stage 2d is implemented: the shipped daemon runs a seed side, and each side has
+its own identity.** The seed job now carries `sourceHostId`
+(`folder_seed_jobs.source_host_id`), so a device key is authorized for its OWN
+half without a plan join and without a master key. `@lamasync/core/folder-seed`
+states the rules once (`seedJobRoleFor`, `seedJobPhaseRole`,
+`seedJobRoleMayEnterPhase`, `seedJobRoleMayReportArchive`,
+`seedJobRoleMayComplete`, `seedArchiveFactsComplete`, `seedArchiveFactsEqual`)
+and the routes enforce them: the source owns
+`preflight → uploading_archive` and the target the other six; only the source
+authors the immutable archive facts and ONLY ONCE (a compare-and-set whose
+predicate also clears the lease, which is the single source→target HANDOVER);
+only the target may report `completed`; either party may report its own half
+`failed`; a stranger is refused everywhere; and the lease owner is always the
+AUTHENTICATED host, so a device cannot forge another host's lease. Every
+device-facing write is ONE atomic statement with a compare-and-set on the phase
+the route read, so a stale writer or a lost race is a 409. A source report after
+the handover is refused — otherwise it would re-claim the lease it just gave
+away and strand the target (a footgun the E2E found, not inspection).
+
+`lamasyncd`'s dispatcher handles a `seed_job` queued action (`{ jobId, role }`,
+enqueued automatically by `POST /seed-jobs`, one per party — it is NOT accepted
+on `POST /hosts/:hostId/actions`), re-derives its role from the job, refuses a
+disagreeing payload, and loads `packages/daemon/src/seed-runner.ts` by DYNAMIC
+`import()`. The runner reuses the existing primitives and the real S3 store, and
+its `baseline_validation` phase runs a real `rclone bisync --resync` whose
+zero-change verdict (`seedBaselineVerdict`) is REQUIRED before `completed`: with
+no usable peer the phase FAILS. (Stage 2f removed the seam check from the
+dispatcher and the seam from the server entirely — see the Stage 2f paragraph
+below; the daemon's `seedDaemonE2eEnabled()` now gates sandbox AFFORDANCES only.)
+`seed-transport-bounded.test.ts` asserts the restated invariant: the transport
+and the store have exactly ONE production importer (`seed-runner.ts`), the daemon
+reaches it only through a dynamic import, there is exactly one daemon seam
+module, `seed-jobs.ts` reads no seed environment variable, and the flags stay
+`false`. Do not add a static import, a second importer, or a seam that accepts
+one variable.
+
+**Stage 2e made a long stage safe, and a cancelled one harmless.** A seed stage
+is routinely longer than the 10-minute job lease (the incident was 43.5
+minutes), so `packages/daemon/src/seed-lease-supervisor.ts` renews the JOB lease
+from a TIMER that runs ALONGSIDE each stage — never merely between stages — with
+the interval clamped to at most half the lease, and a grace window
+(`SEED_JOB_LEASE_STOP_GRACE_MS`) bounded strictly INSIDE the lease, so a side
+that can no longer reach the server stops on its own rather than discovering the
+loss from a refused write. A 4xx latches a stop (and the job is re-read to report
+the real reason); a 5xx is tolerated inside the grace. The stop is an
+`AbortSignal` threaded into tar, extraction, the manifest/extracted-tree
+verification, both object transfers and the `rclone bisync` child (which has no
+graceful cancel, so it is killed — its workdir lives in this run's work
+directory and `--resync` is restartable). `verifyAuthority()` — a real GET —
+runs immediately BEFORE `publishStagedTree` and immediately BEFORE the completion
+report, so a cancellation that lands during a long stage can never publish or
+complete, and a stage that throws while aborted is a STOP rather than a job
+failure. The staging sibling is recorded before the first byte lands in it and
+removed on failure only while nothing was published.
+
+Two traps worth remembering: the TARGET must NOT renew while the SOURCE owns the
+job (during its wait for the facts the lease route correctly refuses, and reading
+that refusal as "the job is lost" would abandon a healthy wait) — it reads the
+job instead and starts the supervisor when its own half begins; and the reaper
+must not treat the handover window (facts recorded, lease cleared, still
+`running`) as stale, so a no-lease running job is only reaped after
+`SEED_JOB_HANDOVER_GRACE_MS`. The ACTION lease (`ACTION_LEASE_MS`, renewed by the
+daemon's action timer) is a DIFFERENT lease and neither implies the other.
+
+**Stage 2f replaced the test seam with the operator's SEED PILOT, and gave both
+external inputs a production resolution.** The gate is no longer an environment
+variable: `packages/core/src/seed-pilot.ts` authorizes exactly ONE folder and ONE
+ORDERED source/target pair — a swapped pair authorizes nothing, because the
+direction decides which tree wins — and `seedPilotExecutionEligibility` also
+requires the temporary seed space to have been PROBED. `seedPlanExecution({ pilot })`
+is the single consumer, `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false` (it now
+means "claimed as production-validated fleet-wide"), and the SERVER's doubly-gated
+seam is deleted, so a test environment alone opens nothing. The disposable E2E
+therefore configures a real pilot through the real admin routes.
+
+The temporary seed space is an EXISTING S3 backend row plus a bucket — no second
+secret entry, no hardcoded bucket, nothing inferred from the folder being seeded.
+`seedRelaySpaceForHost` decrypts the backend's secret on the SERVER only, for
+exactly the two parties of a NON-TERMINAL job of the pilot's folder, and delivers
+it as `HostConfig.seedRelay` inside that device's own authenticated config (the
+same channel that already carries the folder backend's secret and the restic
+password) — never in a list DTO, a URL, a log, a summary, a doc or a test. The
+space names the `jobId` and `role` it was issued for, and the runner refuses one
+issued for anything else (one refresh, then fail closed), so an idle device never
+holds a relay credential and a stale one is useless. Because an existing key may
+be BUCKET-SCOPED — the generic backends test lists every bucket in the account,
+which such a key cannot do — the readiness probe is bucket-scoped (write then
+delete one object under `lamasync/seed/`), retry-pinned, killed after 20 s, and
+its verdict is persisted; reconfiguring the pilot RESETS it.
+
+**A review of that stage then found four ways a `ready` verdict could still
+authorize more than it proved, and all four are fixed.** (1) A 14.86 GB archive
+needs MULTIPART — Backblaze documents a 5 GB ceiling for a single-request upload
+— so `seed-relay-s3.ts` now switches transport above a configurable part size and
+NEVER sends more than 4 GiB in one request; the whole-file digest still goes on
+the initiate request, each part carries its own signature, progress spans the
+parts, and a failure or cancellation ABORTS the unfinished upload
+(`DELETE ?uploadId`). The part size is injectable for tests, which is how a
+12 MiB object with a 5 MiB part proves three real parts against MinIO instead of
+allocating gigabytes. (2) The readiness probe proves the WHOLE path: upload with
+multipart FORCED, size read-back, byte-exact GET read-back (stdout kept as BYTES
+— decoding it first made every binary object look corrupt), then delete. (3) A
+verdict is bound to the EXACT probe target by a `config_revision` +
+backend + bucket compare-and-set AND a one-way fingerprint
+(provider/endpoint/region/access-key-id/hash-of-secret/bucket), so a concurrent
+reconfigure or a key rotation DISCARDS it instead of inheriting it — and
+`seedRelaySpaceForHost` refuses to deliver a credential without a current verdict
+and an `s3` kind. (4) A failing probe is a VERDICT, never a 500: no rclone, a
+hung endpoint and a refused credential all become stored failures with a bounded
+sentence, redacted LITERALLY (the exact secret and access key id) rather than by
+a regex that mangled ordinary diagnostics. Also worth remembering: `Bun.which`
+CACHES without an explicit `PATH`. The probe sets `no_check_bucket = true`
+because `rclone` can otherwise create a misspelled bucket when credentials
+allow it, leaving temporary data outside the lifecycle-managed bucket.
+
+The target's resync PEER now resolves from the assignment:
+`resolveSeedBaselinePeer` joins `<remoteName (or the documented per-folder
+default)>` to the canonical destination, and the bisync child gets the server's
+rclone config in a private 0600 temp file. `LAMASYNC_SEED_DAEMON_PEER_PATH` is
+SEAM-GATED and only substitutes where the bisync points. A target that is not
+MEASURED as empty is refused at PLAN time (`null` — never measured — is not
+empty), as well as at publish. A terminal job's relay objects are deleted
+PROMPTLY by whichever side observes the terminal state, namespace-confined and
+idempotent, with the retention sweep and the bucket's own lifecycle as the
+independent backstop; the daemon-run `cleanup` block is still not persisted
+server-side (no device route for it), which remains an open bookkeeping item.
+The daemon's seam survives for SANDBOX AFFORDANCES only (a shortened lease, a
+held phase, a local peer, an environment-supplied relay space) and no longer
+gates reachability — `seed-transport-bounded.test.ts` asserts that the dispatcher
+consults no seam, that `seed-jobs.ts` reads no seed environment variable, and
+that the transport and store still have exactly one production importer.
+
+**Execution is unavailable by default, and openable only per pilot**:
+`SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` is `false` (while
+`SEED_FILTER_AWARE_ARCHIVE_IMPLEMENTED` is `true`), `POST /seed-jobs` returns
+`503 { executionAvailable: false, reason }` for every folder the pilot does not
+authorize, and the Folders page shows a disabled control. The path IS reachable
+for ONE operator-authorized folder+pair whose seed space has been probed, and the
+disposable E2E proves the whole path with two real daemons that hold no relay
+credential of their own — do not flip the transport constant without the
+§2.11/§2.14.6 host proofs (a real two-machine hop, real ENOSPC, the live
+large-tree run) on record and reviewed, and do not add a credential to the relay
+contract: the store is constructed by whoever owns the configuration.
+
+The archive primitives (create/validate/extract/verify/atomic-publish) are
+implemented and fixture-tested end-to-end with the host's real GNU tar, and
+mtimes must survive the archive, or the following bisync reports every file as
+changed (`File changed: time`) instead of a clean zero-change baseline — and
+with a whole tree of changed mtimes its safety check aborts the run. The Stage
+2a harness asserts "no file is reported as changed", not merely "no bytes
+moved". The **manifest is the authority for what may be archived**: it is built
+from the folder's effective filter universe, a member a seed cannot represent
+blocks the run before tar starts, and the produced archive's member set must
+equal the manifest's. The **source device is named by the operator**
+(`sourceHostId`), never inferred from a size, and the staging verdict must be a
+true sibling with a same-filesystem proof reported by the target device —
+unknown fails closed. Design, space math, failure/recovery table, threat rules
+and the rollout plan are in
+[`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md).
+
 LAMA-345's follow-up (Dashboard fleet-health summary with the evidence-based
 update verdict, one derived health read path, the far-future-cron scheduler fix,
 and the in-page scroll + Folders deep-link corrections) is implemented in this

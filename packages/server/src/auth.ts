@@ -130,6 +130,19 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   { method: "POST", pattern: "/api/v1/folder-health" },
   { method: "POST", pattern: "/api/v1/folder-plans" },
   { method: "GET", pattern: "/api/v1/folder-plans/*" },
+  // LAMA-346: seed plan read (the daemon needs the plan it was approved for),
+  // and the seed job progress/lease/complete surface. Every handler gates on
+  // the job's or plan's own host, so a device can only ever touch its own.
+  { method: "GET", pattern: "/api/v1/seed-plans/*" },
+  { method: "GET", pattern: "/api/v1/seed-jobs/*" },
+  { method: "POST", pattern: "/api/v1/seed-jobs/*/progress" },
+  // LAMA-346 Stage 2d: the SOURCE device records its own immutable archive
+  // facts. The route admits only the job's source (never the target, never a
+  // stranger), the write is one-shot and compare-and-set, and it doubles as the
+  // lease handover — so the target may start only once the facts exist.
+  { method: "POST", pattern: "/api/v1/seed-jobs/*/archive" },
+  { method: "POST", pattern: "/api/v1/seed-jobs/*/lease" },
+  { method: "POST", pattern: "/api/v1/seed-jobs/*/complete" },
   // its own config (embeds assignments, pause state, dotfile manifests)
   { method: "GET", pattern: "/api/v1/config/*" },
   // folder operation locks (own host only — enforced in the route)

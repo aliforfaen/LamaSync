@@ -25,8 +25,10 @@ import type {
   FolderHealthState,
   FolderHealthWatcherFacts,
   FolderType,
+  SeedArchiveTooling,
+  SeedStagingProof,
 } from "@lamasync/core";
-import { deriveFolderHealth } from "@lamasync/core";
+import { deriveFolderHealth, parentPathOf, seedStagingPath } from "@lamasync/core";
 import { expandHomePath } from "./config.ts";
 import {
   baselineFingerprint,
@@ -46,6 +48,62 @@ export const HEALTH_DISK_SPACE_DEFAULT = 1_000_000_000;
  *  scheduled probe forever. Reaching it still reports the partial total and
  *  is honest about being a floor. */
 export const DEEP_MEASURE_ENTRY_CAP = 500_000;
+
+/** LAMA-346: archive tooling present on this device. */
+let cachedArchiveTooling: SeedArchiveTooling | null = null;
+
+/**
+ * Detect `tar`/`zstd`/`gzip` on PATH once per process.
+ *
+ * These are plain PATH lookups (no spawn), and they are reported with the
+ * ordinary heartbeat so a seed plan can be built for this device without a
+ * second round-trip. `force` is for tests and for an explicit re-diagnose.
+ */
+export function archiveToolingCached(force = false): SeedArchiveTooling {
+  if (force || cachedArchiveTooling === null) {
+    cachedArchiveTooling = {
+      tar: Bun.which("tar") !== null,
+      zstd: Bun.which("zstd") !== null,
+      gzip: Bun.which("gzip") !== null,
+    };
+  }
+  return cachedArchiveTooling;
+}
+
+/**
+ * LAMA-346: the target's own proof that a seed's staging sibling can be
+ * published with one atomic rename.
+ *
+ * The server cannot stat the target's filesystem, so it cannot prove this; the
+ * device can. `seedStagingPath` always derives a sibling, so the proof reduces
+ * to: the staging sibling's parent IS the target's parent, and that directory
+ * is readable (one `statSync`, no walk). When it is not readable the verdict is
+ * `null` — unknown, which the plan refuses rather than assumes.
+ */
+export function seedStagingProofFor(localPath: string, now: number = Date.now()): SeedStagingProof {
+  const targetPath = expandHomePath(localPath);
+  const targetParent = parentPathOf(targetPath);
+  const staging = seedStagingPath(targetPath, "probe");
+  const stagingParent = staging === null ? null : parentPathOf(staging);
+  let device: number | null = null;
+  if (targetParent !== null && stagingParent === targetParent) {
+    try {
+      device = statSync(targetParent).dev;
+    } catch {
+      device = null;
+    }
+  }
+  const sameFilesystem =
+    targetParent !== null && stagingParent === targetParent && device !== null ? true : null;
+  return {
+    targetPath: targetParent === null ? null : targetPath,
+    targetParent,
+    stagingParent,
+    sameFilesystem,
+    device,
+    checkedAt: now,
+  };
+}
 
 export interface FolderHealthProbeOptions {
   assignment: FolderAssignment;
@@ -258,6 +316,8 @@ export function probeFolderHealth(opts: FolderHealthProbeOptions): FolderHealthP
     paused: opts.paused,
     runInProgress: opts.runInProgress,
     rcloneAvailable: opts.rcloneAvailable,
+    archive: archiveToolingCached(),
+    seedStaging: seedStagingProofFor(assignment.localPath, now),
     localDir,
     freeSpaceBytes: free,
     freeSpaceThresholdBytes: threshold,
@@ -269,6 +329,9 @@ export function probeFolderHealth(opts: FolderHealthProbeOptions): FolderHealthP
       fingerprint: acknowledged,
       source: filterInfo.source,
       changedSinceBaseline: pending !== null,
+      // Countable without a tree walk; the Git-ignore snapshot is added at run
+      // time, so this is a floor and is labelled as one.
+      patternCount: filterInfo.patterns.length,
     },
     baseline: {
       present: baseline.present,

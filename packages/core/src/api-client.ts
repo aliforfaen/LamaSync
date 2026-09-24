@@ -53,6 +53,16 @@ import type {
   FolderPlanWithValidity,
   FolderSyncPlan,
 } from "./folder-health.ts";
+// LAMA-346: the seed plan/job contract. The daemon drives one side of a seed
+// through these routes with its OWN device key; the payloads are the shared
+// bounded grammars, never an rclone flag, path or credential.
+import type {
+  SeedJob,
+  SeedJobArchiveFacts,
+  SeedJobPhase,
+  SeedPlan,
+  SeedPlanValidity,
+} from "./folder-seed.ts";
 
 export class LamaSyncApiError extends Error {
   status: number;
@@ -391,6 +401,86 @@ export class LamaSyncApiClient {
     return this.request<FolderPlanWithValidity[]>(
       "GET",
       `/api/v1/folders/${encodeURIComponent(folderId)}/plans?limit=${limit}`,
+    );
+  }
+
+  // LAMA-346 Stage 2d: the seed job surface a DAEMON uses, with its own device
+  // key. The SOURCE reads the job it was enqueued for and records the immutable
+  // archive facts it produced (the one-shot write is also the lease handover);
+  // the TARGET reads the same job, waits for those facts, reports its phases,
+  // renews its lease and reports the terminal outcome. Neither side ever sends a
+  // path, an rclone flag or a credential — the bodies are the shared contract.
+  getSeedJob(jobId: string): Promise<SeedJob> {
+    return this.request<SeedJob>("GET", `/api/v1/seed-jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  /**
+   * Read the plan a seed job was created from. Both parties may read it: the
+   * source needs the filter universe it must archive, the target the format and
+   * staging decisions it must honor.
+   */
+  getSeedPlan(planId: string): Promise<{ plan: SeedPlan; validity: SeedPlanValidity }> {
+    return this.request<{ plan: SeedPlan; validity: SeedPlanValidity }>(
+      "GET",
+      `/api/v1/seed-plans/${encodeURIComponent(planId)}`,
+    );
+  }
+
+  reportSeedProgress(
+    jobId: string,
+    body: {
+      phase: SeedJobPhase;
+      message?: string;
+      bytesDone?: number;
+      bytesTotal?: number | null;
+      entriesDone?: number;
+      entriesTotal?: number | null;
+      leaseMs?: number;
+    },
+  ): Promise<SeedJob> {
+    return this.request<SeedJob>(
+      "POST",
+      `/api/v1/seed-jobs/${encodeURIComponent(jobId)}/progress`,
+      JSON.stringify(body),
+      "application/json",
+    );
+  }
+
+  /**
+   * Record the SOURCE's immutable archive facts. One-shot: the server refuses a
+   * second, differing report, and the same write hands the lease to the target.
+   */
+  recordSeedArchiveFacts(jobId: string, facts: SeedJobArchiveFacts): Promise<SeedJob> {
+    return this.request<SeedJob>(
+      "POST",
+      `/api/v1/seed-jobs/${encodeURIComponent(jobId)}/archive`,
+      JSON.stringify(facts),
+      "application/json",
+    );
+  }
+
+  renewSeedJobLease(jobId: string, leaseMs?: number): Promise<SeedJob> {
+    return this.request<SeedJob>(
+      "POST",
+      `/api/v1/seed-jobs/${encodeURIComponent(jobId)}/lease`,
+      JSON.stringify(leaseMs === undefined ? {} : { leaseMs }),
+      "application/json",
+    );
+  }
+
+  completeSeedJob(
+    jobId: string,
+    body: {
+      status: "completed" | "failed";
+      summary?: string | null;
+      error?: string | null;
+    },
+  ): Promise<SeedJob> {
+    return this.request<SeedJob>(
+      "POST",
+      `/api/v1/seed-jobs/${encodeURIComponent(jobId)}/complete`,
+      JSON.stringify(body),
+      "application/json",
     );
   }
 

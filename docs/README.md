@@ -26,7 +26,26 @@ do not treat old handoffs as current requirements.
 
 `handoff-302-event-triggered-sync.md` is retained as completed implementation
 and soak evidence. `handoff-315-path-classification.md` remains here because the
-path-classification implementation it proposes has not started. The dashboard
+path-classification implementation it proposes has not started.
+[Initial large-folder seeding](handoff-346-initial-folder-seeding.md) is the
+live design record for LAMA-346: its first vertical slice (contract, explicit
+source authority, plan, space calculation, staging proof, job state machine,
+progress-aware deadline, archive primitives), Stage 1a (filter-aware archive
+construction from the effective filter universe), Stage 1b's relay contract
+(per-job namespace, key containment, immutable metadata, verified
+upload/download, cleanup/retention), Stage 2a's disposable two-host harness
+(archive → relay → publish → real bisync zero-change acceptance), Stage 2b's
+test-only lifecycle proof, Stage 2c's real network path (a real S3-compatible
+store and the manifest handoff through a disposable MinIO), Stage 2d's
+shipped-daemon path (per-role device authorization, the `seed_job` queued action
+and a two-real-daemon E2E) Stage 2e's per-stage lease supervision (renewal
+alongside a long stage, abort-and-stop on cancellation or lease loss, and an
+authority check before publishing) and Stage 2f's operator pilot (one authorized
+folder and ordered pair, a probed temporary seed space delivered host-scoped, the
+assignment-resolved resync peer, a non-empty-target preflight and prompt cleanup)
+are implemented and locally validated, while the
+production resync peer, the production relay-space configuration and the live
+host acceptance remain open — so it stays here rather than in the archive. The dashboard
 design reference and image artifacts remain here because the web UI assets
 link to them directly.
 

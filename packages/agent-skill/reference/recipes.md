@@ -303,6 +303,101 @@ curl "${AUTH[@]}" -X POST "$BASE/backups/legacy-root/prune" \
 - Restic and sftp folders are skipped; only S3 / local / nfs `backup`
   folders are scanned.
 
+## Recipe 11 — Prepare a seed plan for a very large first sync (LAMA-346)
+
+A first full sync of a very large folder is not a normal sync: on 2026-09-17 a
+91,660-entry / 14.86 GB tree was killed by the fixed 600-second wall-clock
+timeout (exit 143) before a single transfer completed. LamaSync now
+**recommends** a one-time seed transfer above 3,000 entries, and supervises
+initial seed stages with a progress-aware deadline.
+
+The timeout change is narrow, and it is worth stating exactly:
+
+- a sync against an **existing, ready baseline keeps its exact fixed
+  wall-clock timeout** — steady-state sync is unchanged;
+- a **first run with no usable baseline** (the dev-vm case), an explicit
+  `initialize`/`seed` intervention, or a flagged seed stage keeps running while
+  it makes measurable progress and is stopped when it genuinely stalls (or at
+  the 6-hour ceiling).
+
+A seed plan is **always operator-approved** and always names its source: the
+source device is never inferred from a size.
+
+```bash
+# 1. Make sure the DEVICE THAT HOLDS THE DATA has reported a measurement.
+#    On that device (or from the Folders page) queue a read-only check:
+curl "${AUTH[@]}" -X POST "$BASE/hosts/$SOURCE_HOST/actions" \
+  -d '{"type":"diagnose_folder","payload":{"folderId":"<folderId>"}}'
+
+# 2. Prepare the plan for the DEVICE BEING SEEDED. `confirm` AND `sourceHostId`
+#    are both mandatory — name the device that holds the data yourself.
+curl "${AUTH[@]}" -X POST "$BASE/folders/<folderId>/seed-plans" \
+  -d '{"hostId":"<target-hostId>","sourceHostId":"<source-hostId>","confirm":true}'
+
+# 3. Read it back with its validity verdict.
+curl "${AUTH[@]}" "$BASE/folders/<folderId>/seed-plans?limit=5"
+```
+
+The plan reports the named source device and its measurement freshness, the
+target's free space, the reservation (`archive + extracted tree` × 1.25 +
+64 MiB), the archive format (`tar + zstd` when the device has zstd, else the
+documented `tar + gzip` fallback), the effective filter universe the archive
+would be built from, and the staging rule (a sibling in the target's own
+parent directory, on a filesystem the target itself proved).
+
+Errors worth knowing:
+
+| Response | Meaning |
+|---|---|
+| 422 | `confirm` is not literally `true`, or `sourceHostId` is missing |
+| 400 | `sourceHostId` is the same device as `hostId` — a device cannot seed itself |
+| 404 | the named source device is not assigned to this folder |
+| 201 + `validity.valid: false` | the plan exists but is not runnable; `validity.message` names the first blocker and the plan's prerequisite list names them all |
+
+The archive **is** now built from the folder's **effective filter universe**
+(Stage 1a): the same `--filter-from` rules rclone receives for the sync, and
+tar is given only the manifest's members — as NUL-separated NAMES, so ignored
+content cannot enter the archive and a file name beginning with `-` is never
+read as a tar option. A member the universe *includes* but a seed cannot represent (a
+symlink or special file — rclone's local backend skips those too) still fails
+closed rather than being dropped silently, and the remedy is the folder's own
+ignore rules. Directories that end up holding nothing are not archived, because
+rclone transfers no empty directories.
+
+The transport **contract** now exists (`@lamasync/core/seed-relay`): a
+dedicated per-job namespace (`lamasync/seed/<jobId>/`), key validation with
+prefix containment — lexical AND actual, so a symlinked path component cannot
+redirect a seed outside the relay root — immutable archive metadata (format,
+byte count, SHA-256, manifest fingerprint, member count), verified upload and
+download, and an idempotent cleanup/retention state. A seed archive is transport, not data:
+everything in that namespace is deletable at any time and no credential is ever
+part of the contract.
+
+The local chain is proven end to end by a disposable harness
+(`packages/daemon/src/seed-e2e.test.ts`, rclone-gated): archive → relay →
+publish → a real `rclone bisync --resync` over the same filters reporting zero
+files changed. It runs in a temp sandbox with two daemon-shaped identities and
+a test-only object store, and it never touches a configured backend, credential
+or real folder.
+
+The job **lifecycle** is proven test-only
+(`packages/server/src/seed-coordinator.ts` + its tests): phases one at a time,
+lease renewal, archive-facts persistence, cancellation, a lost lease, and
+idempotent cleanup — all on the existing job state machine, with no new table
+and no production wiring. Ownership is enforced atomically: a contender cannot
+claim a live owner's job, write its outcome or its in-flight archive facts, or
+delete its in-flight objects — and a live lease is not claimable even by the same
+owner, so one host cannot run two invocations against one job.
+
+**Execution is still not available.** `POST /seed-jobs` returns
+`503 { executionAvailable: false, reason }` because the one remaining Stage 1
+prerequisite is open: no real store is wired to a running job, so nothing
+uploads or downloads an archive yet. The Web UI shows a disabled control with
+that reason, and a plan whose facts are all consistent is still reported as
+**not runnable**. Do not expect a seed to run, and do not point the relay at a
+configured S3 backend or an rclone remote: the value today is the honest
+preflight plus the progress-aware timeout for first runs.
+
 ## See also
 
 - `reference/troubleshooting.md` — what to do when something fails.

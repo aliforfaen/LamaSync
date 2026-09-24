@@ -3,7 +3,9 @@
 // LAMA-345: managed-folder health contract. `folder-health.ts` is
 // dependency-free and never imports this file, so this is a one-way edge.
 import type { FolderHealthRecord, FolderSyncPlan } from "./folder-health.ts";
+import type { SeedJob, SeedPlan } from "./folder-seed.ts";
 import type { FleetHealthSummary, UpdateStatus } from "./fleet-health.ts";
+import type { SeedRelaySpace } from "./seed-pilot.ts";
 
 export type { FolderHealthRecord, FolderSyncPlan, FleetHealthSummary, UpdateStatus };
 
@@ -247,7 +249,14 @@ export type QueuedActionType =
   // path or command. Older daemons ack all three as unknown action types.
   | "diagnose_folder"
   | "plan_folder"
-  | "folder_intervention";
+  | "folder_intervention"
+  // LAMA-346 Stage 2d: run ONE side of an initial seed. The payload is the
+  // bounded `{ jobId, role }` grammar in ./folder-seed.ts — never a path, an
+  // rclone flag or a credential. The daemon re-derives its role from the job +
+  // plan and refuses if the payload disagrees, and the whole action is inert
+  // unless the doubly-gated seed seam is on, so an older daemon and a build
+  // without the seam both ack it as an unknown/refused action.
+  | "seed_job";
 
 export type QueuedActionStatus = "pending" | "taken" | "done" | "failed";
 
@@ -740,6 +749,14 @@ export interface HostConfig {
   // bandwidthSchedule plumbing. Additive: existing daemons without the
   // pause handler ignore it without any change in behavior.
   pause?: EffectivePause | null;
+  // LAMA-346 Stage 2f: the TEMPORARY SEED SPACE this device may use, present
+  // only when the host is a party to a non-terminal seed job of the folder the
+  // operator's seed pilot authorizes. It carries a decrypted S3 secret, which is
+  // why it travels here — inside the device's own authenticated host config,
+  // the same channel that already carries the folder backend's secret and the
+  // restic password — and never in a list DTO, a URL or a log. Absent for every
+  // other host, and for every host when the pilot is off.
+  seedRelay?: SeedRelaySpace | null;
 }
 
 // LAN direct peer entry — server-detected same-/24 host that can be reached
@@ -945,7 +962,13 @@ export type WSEvent =
   // carries a newly-reported sync plan. Both are advisory UI updates — the
   // REST reads stay authoritative.
   | { kind: "folder_health"; record: FolderHealthRecord }
-  | { kind: "folder_plan"; plan: FolderSyncPlan };
+  | { kind: "folder_plan"; plan: FolderSyncPlan }
+  // LAMA-346: initial large-folder seeding. `seed_plan` carries a newly
+  // created operator-approved seed plan; `seed_job` carries a phase/progress
+  // update for a running seed job (or its terminal outcome). Both are
+  // advisory UI updates — the REST reads stay authoritative.
+  | { kind: "seed_plan"; plan: SeedPlan }
+  | { kind: "seed_job"; job: SeedJob };
 
 export interface PruneResult {
   deleted: number;

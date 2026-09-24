@@ -15,6 +15,10 @@
 // staleness rules, and the allowlisted intervention payload grammar. It must
 // stay free of node built-ins so the web UI can import it unchanged.
 
+// LAMA-346: the archive tooling reported with a health fact is defined by the
+// seed contract, so both modules share one shape.
+import type { SeedArchiveTooling, SeedStagingProof } from "./folder-seed.ts";
+
 // ---------------------------------------------------------------------------
 // Health states
 // ---------------------------------------------------------------------------
@@ -160,6 +164,14 @@ export interface FolderHealthFilterFacts {
   source: "none" | "lamasyncignore" | "gitignore" | "combined";
   /** True when the fingerprint differs from the acknowledged baseline. */
   changedSinceBaseline: boolean;
+  /**
+   * Rule lines the device can count WITHOUT walking the tree: the
+   * `.lamasyncignore` patterns plus the generated `- .git/**`. The Git-ignore
+   * snapshot component is only computed during a real run (it walks the
+   * worktree), so this is a floor, not the whole universe — LAMA-346 uses it
+   * to describe a seed plan's filter universe without a second round-trip.
+   */
+  patternCount: number;
 }
 
 /**
@@ -203,6 +215,20 @@ export interface FolderHealthFacts {
   paused: boolean;
   runInProgress: boolean;
   rcloneAvailable: boolean;
+  /**
+   * LAMA-346: archive tooling present on this device, detected cheaply and
+   * reported with the ordinary heartbeat so a seed plan can be built for it
+   * without a second round-trip. `null` when the device has not reported it
+   * (older daemons), which the plan treats as "not verified".
+   */
+  archive?: SeedArchiveTooling | null;
+  /**
+   * LAMA-346: the target's own proof that the staging sibling shares the
+   * target's parent directory and filesystem, so publishing is one atomic
+   * rename. `null`/absent means the device has not proven it, which makes a
+   * seed plan not runnable rather than optimistically runnable.
+   */
+  seedStaging?: SeedStagingProof | null;
   localDir: FolderHealthLocalDirState;
   freeSpaceBytes: number | null;
   freeSpaceThresholdBytes: number | null;

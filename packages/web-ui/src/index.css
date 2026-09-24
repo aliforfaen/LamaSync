@@ -5353,6 +5353,182 @@ html[data-density="compact"] .settings-row {
   color: var(--accent-warn);
 }
 
+/* LAMA-346 — the large-initial-transfer (seed) panel. It sits directly under
+ * the folder-health card inside the same assignment row and reuses that
+ * panel's tone idiom: a left accent border plus explicit words, never colour
+ * alone. */
+.folder-seed {
+  border: 1px solid var(--badge-border);
+  border-left-width: 3px;
+  border-left-color: var(--accent-info);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin: var(--space-2) 0;
+  background: rgba(var(--text-muted-rgb), 0.06);
+}
+
+.folder-seed > details > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.folder-seed-title {
+  font-weight: 600;
+}
+
+.folder-seed-badge--ok {
+  background: var(--accent-ok-bg);
+  color: var(--accent-ok);
+}
+
+.folder-seed-badge--warn {
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
+.folder-seed-badge--bad {
+  background: var(--accent-critical-bg);
+  color: var(--accent-critical);
+}
+
+.folder-seed-badge--info {
+  background: var(--accent-info-bg);
+  color: var(--accent-info);
+}
+
+.folder-seed-recommendation {
+  margin: var(--space-2) 0;
+}
+
+.folder-seed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.folder-seed-disabled-reason {
+  font-size: var(--font-size-xs);
+}
+
+/* LAMA-346: the explicit source-device picker. The operator names the device
+   that holds the data; the panel never picks one. */
+.folder-seed-source {
+  display: block;
+  font-weight: var(--font-weight-medium, 500);
+  margin-bottom: var(--space-1);
+}
+
+.folder-seed-source-select {
+  min-width: 18rem;
+  max-width: 100%;
+  margin-bottom: var(--space-1);
+}
+
+.folder-seed-source-help {
+  display: block;
+  font-size: var(--font-size-xs);
+  margin: 0 0 var(--space-2);
+}
+
+/* The unmet prerequisites: every blocker, not just the first. */
+.folder-seed-prerequisites {
+  border-radius: var(--radius-sm, var(--radius-md));
+  padding: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.folder-seed-prerequisites ul {
+  margin: var(--space-1) 0 0;
+  padding-left: 1.25rem;
+}
+
+.folder-seed-prerequisites li {
+  font-size: var(--font-size-sm, inherit);
+  margin-bottom: var(--space-1);
+}
+
+.folder-seed-verdict {
+  border-radius: var(--radius-sm, var(--radius-md));
+  padding: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.folder-seed-verdict--ok {
+  background: var(--accent-ok-bg);
+}
+
+.folder-seed-verdict--bad {
+  background: var(--accent-warn-bg);
+}
+
+.folder-seed-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-2);
+}
+
+.folder-seed-facts dt {
+  font-size: var(--font-size-xs);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.folder-seed-facts dd {
+  margin: 0;
+}
+
+.folder-seed-space--ok {
+  color: var(--accent-ok);
+}
+
+.folder-seed-space--bad,
+.folder-seed-warning {
+  color: var(--accent-warn);
+}
+
+.folder-seed-progressbar {
+  width: 100%;
+  height: 0.6rem;
+}
+
+.folder-seed-job-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.folder-seed-glossary,
+.folder-seed-technical {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
+}
+
+.folder-seed-glossary > dl {
+  margin: 0;
+}
+
+.folder-seed-glossary dl > div {
+  margin-bottom: var(--space-2);
+}
+
+.folder-seed-glossary dt {
+  font-weight: 600;
+}
+
+.folder-seed-glossary dd,
+.folder-seed-technical li {
+  margin: 0;
+  color: var(--text-dim);
+}
+
 /* Visually hidden but announced by screen readers. */
 .visually-hidden {
   position: absolute;
