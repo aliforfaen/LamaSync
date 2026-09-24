@@ -20,6 +20,7 @@ import {
   SEED_ARCHIVE_TRANSPORT_IMPLEMENTED,
   seedPilotEligibility,
   seedPilotExecutionEligibility,
+  seedPilotReadinessVerdict,
   seedPilotSummary,
   seedPlanExecution,
   type SeedPilotConfig,
@@ -38,6 +39,8 @@ afterEach(() => {
 });
 
 const REQUEST = { folderId: "projects", sourceHostId: "master", targetHostId: "dev-vm" };
+/** The live fingerprint the stored verdict must match to authorize anything. */
+const LIVE_FINGERPRINT = "f".repeat(64);
 
 function pilot(over: Partial<SeedPilotConfig> = {}): SeedPilotConfig {
   return {
@@ -48,7 +51,13 @@ function pilot(over: Partial<SeedPilotConfig> = {}): SeedPilotConfig {
     backendId: "b2-tmp",
     bucket: "lamasync-tmp",
     updatedAt: 1,
-    readiness: { state: "ready", bucket: "lamasync-tmp", checkedAt: 1, message: "probe passed" },
+    readiness: {
+      state: "ready",
+      bucket: "lamasync-tmp",
+      checkedAt: 1,
+      message: "probe passed",
+      targetFingerprint: LIVE_FINGERPRINT,
+    },
     ...over,
   };
 }
@@ -64,8 +73,14 @@ describe("no environment variable opens seed execution on the server", () => {
   });
 
   test("an eligible pilot is what opens a plan, not the environment", () => {
-    expect(seedPlanExecution({ pilot: seedPilotExecutionEligibility(pilot(), REQUEST) }).available).toBe(true);
-    expect(seedPlanExecution({ pilot: seedPilotExecutionEligibility(emptySeedPilotConfig(), REQUEST) }).available).toBe(false);
+    expect(
+      seedPlanExecution({ pilot: seedPilotExecutionEligibility(pilot(), REQUEST, LIVE_FINGERPRINT) }).available,
+    ).toBe(true);
+    expect(
+      seedPlanExecution({
+        pilot: seedPilotExecutionEligibility(emptySeedPilotConfig(), REQUEST, LIVE_FINGERPRINT),
+      }).available,
+    ).toBe(false);
   });
 });
 
@@ -102,13 +117,26 @@ describe("an unprobed seed space authorizes nothing", () => {
     const scope = seedPilotEligibility(pilot(), REQUEST);
     expect(scope.eligible).toBe(true);
 
-    const unknown = seedPilotExecutionEligibility(pilot({ readiness: emptySeedPilotConfig().readiness }), REQUEST);
+    const unknown = seedPilotExecutionEligibility(
+      pilot({ readiness: emptySeedPilotConfig().readiness }),
+      REQUEST,
+      LIVE_FINGERPRINT,
+    );
     expect(unknown.eligible).toBe(false);
     expect(unknown.reason).toContain("has not been probed");
 
     const failed = seedPilotExecutionEligibility(
-      pilot({ readiness: { state: "failed", bucket: "lamasync-tmp", checkedAt: 2, message: "access denied" } }),
+      pilot({
+        readiness: {
+          state: "failed",
+          bucket: "lamasync-tmp",
+          checkedAt: 2,
+          message: "access denied",
+          targetFingerprint: LIVE_FINGERPRINT,
+        },
+      }),
       REQUEST,
+      LIVE_FINGERPRINT,
     );
     expect(failed.eligible).toBe(false);
     expect(failed.reason).toContain("access denied");
@@ -116,11 +144,59 @@ describe("an unprobed seed space authorizes nothing", () => {
 
   test("a verdict about a DIFFERENT bucket does not authorize this one", () => {
     const stale = seedPilotExecutionEligibility(
-      pilot({ readiness: { state: "ready", bucket: "some-other-bucket", checkedAt: 1, message: "ok" } }),
+      pilot({
+        readiness: {
+          state: "ready",
+          bucket: "some-other-bucket",
+          checkedAt: 1,
+          message: "ok",
+          targetFingerprint: LIVE_FINGERPRINT,
+        },
+      }),
       REQUEST,
+      LIVE_FINGERPRINT,
     );
     expect(stale.eligible).toBe(false);
     expect(stale.reason).toContain("has not been probed");
+  });
+
+  test("a verdict about a DIFFERENT probe target is STALE, and says so", () => {
+    // The backend was rotated (endpoint, key or secret) after the probe. The
+    // stored verdict is a real `ready`, about a target that no longer exists.
+    const rotated = seedPilotExecutionEligibility(pilot(), REQUEST, "a".repeat(64));
+    expect(rotated.eligible).toBe(false);
+    expect(rotated.reason).toContain("STALE");
+    expect(rotated.reason).toContain("Test seed space again");
+  });
+
+  test("a verdict with NO fingerprint authorizes nothing, and so does an unresolvable target", () => {
+    const legacy = seedPilotExecutionEligibility(
+      pilot({
+        readiness: { state: "ready", bucket: "lamasync-tmp", checkedAt: 1, message: "ok", targetFingerprint: null },
+      }),
+      REQUEST,
+      LIVE_FINGERPRINT,
+    );
+    expect(legacy.eligible).toBe(false);
+    // `null` means "the backend cannot be resolved at all" (missing, non-S3, or
+    // without a stored secret) — never a match.
+    const unresolvable = seedPilotExecutionEligibility(pilot(), REQUEST, null);
+    expect(unresolvable.eligible).toBe(false);
+  });
+});
+
+describe("the readiness verdict is bound to the exact probe target", () => {
+  test("a verdict records the fingerprint it was produced for", () => {
+    const verdict = seedPilotReadinessVerdict("lamasync-tmp", LIVE_FINGERPRINT, { ok: true, detail: "fine" }, 5);
+    expect(verdict.state).toBe("ready");
+    expect(verdict.targetFingerprint).toBe(LIVE_FINGERPRINT);
+    expect(verdict.checkedAt).toBe(5);
+  });
+
+  test("a verdict produced without a resolvable target carries no fingerprint", () => {
+    const verdict = seedPilotReadinessVerdict(null, null, { ok: false, detail: "backend gone" }, 5);
+    expect(verdict.state).toBe("failed");
+    expect(verdict.targetFingerprint).toBeNull();
   });
 });
 

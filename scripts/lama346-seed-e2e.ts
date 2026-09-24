@@ -34,6 +34,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { statfsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import {
   seedRelayArchiveKey,
   seedRelayManifestKey,
@@ -295,6 +296,9 @@ async function startObjectSpace(): Promise<boolean> {
 
 const IGNORE_LINES = ["- node_modules/", "- *.log", "- tmp/"];
 const FIXTURE_FILE_COUNT = 60;
+/** S3's minimum part size, and a blob larger than it so the archive is multipart. */
+const MULTIPART_PART_BYTES = 5 * 1024 * 1024;
+const MULTIPART_BLOB_BYTES = 12 * 1024 * 1024;
 
 function pseudoBytes(seed: number, length: number): Buffer {
   const out = Buffer.alloc(length);
@@ -314,7 +318,16 @@ function buildSourceFixture(): void {
     writeFileSync(join(dir, `file-${String(i).padStart(3, "0")}.ts`), `export const n${i} = ${i};\n`);
   }
   mkdirSync(join(SOURCE_ROOT, "assets"), { recursive: true });
-  writeFileSync(join(SOURCE_ROOT, "assets", "blob-a.bin"), pseudoBytes(7, 256 * 1024));
+  // LAMA-346 Stage 2f review: the blob is deliberately larger than one S3 part,
+  // so the archive the daemon uploads exceeds the multipart threshold and the
+  // REAL multipart path is exercised (with the seam lowering the part size to
+  // S3's 5 MiB minimum, that is three parts) — without allocating anything near
+  // Backblaze's 5 GB single-request ceiling. The bytes are incompressible, so
+  // the archive is genuinely this large.
+  // NOTE: `pseudoBytes` is NOT incompressible — its LCG's low bits repeat with a
+  // short period, so gzip collapses 12 MiB of it to ~20 KB. A multipart proof
+  // needs bytes that really occupy the archive, so this one blob is random.
+  writeFileSync(join(SOURCE_ROOT, "assets", "blob-a.bin"), randomBytes(MULTIPART_BLOB_BYTES));
   writeFileSync(join(SOURCE_ROOT, "README.md"), "# E2E fixture\n");
   utimesSync(join(SOURCE_ROOT, "README.md"), 1_700_000_000, 1_700_000_000);
   // Ignored content that must never reach the target.
@@ -769,6 +782,11 @@ function daemonEnv(home: string, extra: Record<string, string> = {}): Record<str
     // below would fail, which is exactly the check we want.
     LAMASYNC_SEED_E2E: "1",
     LAMASYNC_TEST: "1",
+    // Lower the multipart part size to S3's own minimum, so the ~12 MiB archive
+    // really is uploaded in parts. The store clamps this, so a bad value here
+    // cannot produce an invalid upload.
+    LAMASYNC_SEED_S3_PART_BYTES: String(MULTIPART_PART_BYTES),
+    LAMASYNC_SEED_S3_MULTIPART_THRESHOLD_BYTES: String(MULTIPART_PART_BYTES),
     ...extra,
   };
 }
@@ -1309,6 +1327,18 @@ async function main(): Promise<void> {
   // The relay space came through the DEVICE'S OWN HOST CONFIG, not an
   // environment variable: the daemons are started with no LAMASYNC_SEED_S3_* at
   // all, so this line can only have been produced by the server-issued space.
+  // The archive went MULTIPART, over the real object space, through the shipped
+  // daemon — the transport a 14.86 GB Projects archive actually needs, proven
+  // here with a 12 MiB archive and a 5 MiB part size rather than gigabytes.
+  check(
+    "the daemon uploaded the archive in MULTIPLE parts (the transport a real archive needs)",
+    daemonLogs.includes("multipart upload") && /multipart upload of [^:]+: 3 part\(s\)/.test(daemonLogs),
+    (daemonLogs.match(/multipart upload of [^\n]*/g) ?? ["(no multipart line)"]).join(" | ").slice(0, 200),
+  );
+  check(
+    "the small manifest still travelled in a single request",
+    daemonLogs.includes("single-request upload") && daemonLogs.includes("manifest.json"),
+  );
   check(
     "each daemon's relay space was ISSUED BY THE SERVER through its own host config",
     daemonLogs.includes(`job=${daemonSeed.job.id} source relay space issued by the server`) &&

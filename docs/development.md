@@ -117,9 +117,15 @@ curl -sX DELETE http://server:8080/api/v1/seed-pilot -H "Authorization: Bearer $
 
 The probe is **bucket-scoped on purpose**: an existing key may be scoped to one
 bucket, and the generic backends "test connection" lists every bucket in the
-account, which such a key cannot do. It writes and deletes one object under
-`lamasync/seed/`, retries are pinned and the command is killed after 20 s, so a
-wrong endpoint yields a verdict instead of a pending request. The server then
+account, which such a key cannot do. It does four things, because a seed needs
+all four: it uploads a probe object with **multipart forced**
+(`--s3-upload-cutoff 5M --s3-chunk-size 5M`, so a key that can only do simple
+PUTs fails), reads its **size** back, reads its **bytes** back and compares the
+SHA-256, and deletes it. Retries are pinned, each command is killed after 20 s and
+the whole probe after 90 s, and every failure — including a missing rclone — is a
+stored verdict rather than a 500. A verdict is bound to the exact probed target,
+so **rotating a backend key, endpoint or region invalidates it** and the verdict
+must be taken again. The server then
 delivers the space — decrypted on the server only — inside each party's own
 `GET /api/v1/config/:hostId` response (`seedRelay`), bound to the job id and
 side. An idle device, a stranger and any host after the job is terminal receive
@@ -148,6 +154,7 @@ read only when the seam is open:
 | `LAMASYNC_SEED_LEASE_MS` | shortens the seed JOB lease (floored at the route's 30 s minimum), so a test can outlive it without waiting ten minutes |
 | `LAMASYNC_SEED_LEASE_INTERVAL_MS` | how often the lease supervisor renews (clamped to at most half the lease) |
 | `LAMASYNC_SEED_STAGE_DELAY_PHASE` + `LAMASYNC_SEED_STAGE_DELAY_MS` | holds ONE named phase still for N ms (E2E only), which can only ever make a stage slower |
+| `LAMASYNC_SEED_S3_PART_BYTES` (+ `…_MULTIPART_THRESHOLD_BYTES`) | lowers the multipart part size so the E2E's ~12 MiB archive really uploads in parts (the store clamps it to S3's 5 MiB–512 MiB range, so a bad value cannot produce an invalid upload) |
 
 They are what lets the E2E prove the review's requirement: a 35 s source stage
 against a 30 s lease completes because the lease is renewed from a timer running

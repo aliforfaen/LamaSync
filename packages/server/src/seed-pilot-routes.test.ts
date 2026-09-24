@@ -34,7 +34,32 @@ const { getAuthPlugin } = await import("./auth.ts");
 const { insertManagedApiKey, __setApiKeysDb, __resetApiKeysDb } = await import("./api-keys.ts");
 const { seedPilotRoutes, __setDb: __setPilotRouteDb } = await import("./routes/seed-pilot.ts");
 const { createSeedJob } = await import("./seed-jobs.ts");
-const { getSeedPilotConfig, seedRelaySpaceForHost } = await import("./seed-pilot.ts");
+const {
+  getSeedPilotConfig,
+  getSeedPilotRevision,
+  liveSeedRelayTargetFingerprint,
+  recordSeedPilotReadiness,
+  seedRelaySpaceForHost,
+} = await import("./seed-pilot.ts");
+
+/**
+ * Record a PASSING verdict for the current configuration, exactly as the probe
+ * would: against the revision it read and the live target fingerprint. The
+ * delivery rule requires a current verdict, so a test that wants an issued space
+ * must have one.
+ */
+function recordReadyProbe(): void {
+  const config = getSeedPilotConfig(db);
+  if (config === null) throw new Error("no pilot configured");
+  recordSeedPilotReadiness(db, {
+    configRevision: getSeedPilotRevision(db) ?? 0,
+    backendId: config.backendId,
+    bucket: config.bucket,
+    verdictBucket: config.bucket,
+    targetFingerprint: liveSeedRelayTargetFingerprint(db),
+    outcome: { ok: true, detail: "probe passed" },
+  });
+}
 
 const SOURCE = "pilot-source";
 const TARGET = "pilot-target";
@@ -263,6 +288,7 @@ describe("the relay space is delivered to exactly the two parties of a live job"
 
   test("the two parties get it, bound to the job and their side, and a stranger never does", async () => {
     await enablePilot();
+    recordReadyProbe();
     createSeedJob(db, seedJobInPhase("uploading_archive"));
 
     const source = seedRelaySpaceForHost(db, SOURCE);
@@ -279,6 +305,7 @@ describe("the relay space is delivered to exactly the two parties of a live job"
 
   test("the space disappears once the job is terminal", async () => {
     await enablePilot();
+    recordReadyProbe();
     for (const phase of ["completed", "failed", "cancelled"]) {
       db.run("DELETE FROM folder_seed_jobs");
       createSeedJob(db, seedJobInPhase(phase));
@@ -289,6 +316,7 @@ describe("the relay space is delivered to exactly the two parties of a live job"
 
   test("a job whose pair is not the pilot's pair issues nothing", async () => {
     await enablePilot();
+    recordReadyProbe();
     const foreign = seedJobInPhase("uploading_archive");
     createSeedJob(db, { ...foreign, sourceHostId: STRANGER, hostId: TARGET });
     expect(seedRelaySpaceForHost(db, STRANGER)).toBeNull();
@@ -297,6 +325,7 @@ describe("the relay space is delivered to exactly the two parties of a live job"
 
   test("switching the pilot off revokes the space immediately", async () => {
     await enablePilot();
+    recordReadyProbe();
     createSeedJob(db, seedJobInPhase("uploading_archive"));
     expect(seedRelaySpaceForHost(db, SOURCE)).not.toBeNull();
     await call("DELETE", "/api/v1/seed-pilot", adminToken);

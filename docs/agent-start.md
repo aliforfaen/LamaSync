@@ -181,6 +181,30 @@ which such a key cannot do — the readiness probe is bucket-scoped (write then
 delete one object under `lamasync/seed/`), retry-pinned, killed after 20 s, and
 its verdict is persisted; reconfiguring the pilot RESETS it.
 
+**A review of that stage then found four ways a `ready` verdict could still
+authorize more than it proved, and all four are fixed.** (1) A 14.86 GB archive
+needs MULTIPART — Backblaze documents a 5 GB ceiling for a single-request upload
+— so `seed-relay-s3.ts` now switches transport above a configurable part size and
+NEVER sends more than 4 GiB in one request; the whole-file digest still goes on
+the initiate request, each part carries its own signature, progress spans the
+parts, and a failure or cancellation ABORTS the unfinished upload
+(`DELETE ?uploadId`). The part size is injectable for tests, which is how a
+12 MiB object with a 5 MiB part proves three real parts against MinIO instead of
+allocating gigabytes. (2) The readiness probe proves the WHOLE path: upload with
+multipart FORCED, size read-back, byte-exact GET read-back (stdout kept as BYTES
+— decoding it first made every binary object look corrupt), then delete. (3) A
+verdict is bound to the EXACT probe target by a `config_revision` +
+backend + bucket compare-and-set AND a one-way fingerprint
+(provider/endpoint/region/access-key-id/hash-of-secret/bucket), so a concurrent
+reconfigure or a key rotation DISCARDS it instead of inheriting it — and
+`seedRelaySpaceForHost` refuses to deliver a credential without a current verdict
+and an `s3` kind. (4) A failing probe is a VERDICT, never a 500: no rclone, a
+hung endpoint and a refused credential all become stored failures with a bounded
+sentence, redacted LITERALLY (the exact secret and access key id) rather than by
+a regex that mangled ordinary diagnostics. Also worth remembering: `Bun.which`
+CACHES without an explicit `PATH`, and `rclone` CREATES a missing bucket when the
+credentials allow it.
+
 The target's resync PEER now resolves from the assignment:
 `resolveSeedBaselinePeer` joins `<remoteName (or the documented per-folder
 default)>` to the canonical destination, and the bisync child gets the server's

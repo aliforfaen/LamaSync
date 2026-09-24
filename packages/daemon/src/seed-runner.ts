@@ -183,6 +183,37 @@ function storeConfigFromSpace(space: SeedRelaySpace): SeedDaemonRelayConfig {
 }
 
 /**
+ * The transport TUNING for the relay store (part size, multipart threshold).
+ *
+ * These are not credentials and not authorization: the defaults are already
+ * safe for a 14.86 GB archive (64 MiB parts, multipart above one part). The seam
+ * exists so a disposable sandbox can lower the part size to S3's own minimum and
+ * drive the REAL multipart path with a 12 MiB object instead of allocating more
+ * than Backblaze's whole single-request ceiling. Read only when the seam is
+ * open, and the store clamps whatever it gets to S3's limits.
+ */
+function seedDaemonRelayTuning(): { partSizeBytes?: number; multipartThresholdBytes?: number } {
+  if (!seedDaemonE2eEnabled()) return {};
+  const tuning: { partSizeBytes?: number; multipartThresholdBytes?: number } = {};
+  const partSize = Number(envValue("LAMASYNC_SEED_S3_PART_BYTES") ?? Number.NaN);
+  if (Number.isFinite(partSize) && partSize > 0) tuning.partSizeBytes = partSize;
+  const threshold = Number(envValue("LAMASYNC_SEED_S3_MULTIPART_THRESHOLD_BYTES") ?? Number.NaN);
+  if (Number.isFinite(threshold) && threshold > 0) tuning.multipartThresholdBytes = threshold;
+  return tuning;
+}
+
+/** Build the S3 relay store for whichever space this side was given. */
+function relayStoreFor(
+  config: SeedDaemonRelayConfig,
+  log: (message: string) => void,
+): SeedRelayStore {
+  // The store reports which TRANSPORT it used and how many parts, so a log can
+  // answer the one question that matters about a 14 GB archive: did this really
+  // go multipart? The message is bounded and credential-free.
+  return createS3SeedRelayStore({ ...config, ...seedDaemonRelayTuning(), log });
+}
+
+/**
  * Resolve the target's post-seed resync peer from the ASSIGNMENT.
  *
  * This is the production rule, and it is the same one the executor applies to
@@ -430,7 +461,7 @@ export async function runSeedAction(ctx: SeedActionContext): Promise<SeedActionO
         `[seed] job=${ctx.jobId} ${ctx.payloadRole} relay space issued by the server ` +
           `(backend=${space.backendId} bucket=${space.bucket})`,
       );
-      store = createS3SeedRelayStore(storeConfigFromSpace(space));
+      store = relayStoreFor(storeConfigFromSpace(space), log);
     }
   }
   if (store === null) {
@@ -438,7 +469,7 @@ export async function runSeedAction(ctx: SeedActionContext): Promise<SeedActionO
     // environment-supplied space. Seam-gated, so it cannot open a production
     // build, and it is tried only AFTER the server-issued space.
     const relay = seedDaemonRelayConfigFromEnv();
-    if (relay !== null) store = createS3SeedRelayStore(relay);
+    if (relay !== null) store = relayStoreFor(relay, log);
   }
   if (store === null) {
     return {

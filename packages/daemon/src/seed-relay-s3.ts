@@ -28,6 +28,21 @@
 //   * STREAMING VERIFICATION. `put` hashes the source before it sends it and
 //     refuses a mismatch; `get` hashes while it writes and deletes a partial or
 //     wrong download.
+//   * BOUNDED CHUNK TRANSPORT ABOVE THE SINGLE-REQUEST CEILING. Backblaze's
+//     S3-compatible API documents a 5 GB ceiling for a single-request upload,
+//     and a real Projects archive is ~14.86 GB before compression, so a
+//     one-shot PUT is not a transport. `put` therefore switches to a
+//     MULTIPART upload above a configurable threshold (default: one part), with
+//     a hard rule that no single request may approach that ceiling. Multipart
+//     keeps every other property: the whole-file digest is still computed
+//     first and written as object metadata on the INITIATE request, each part is
+//     hashed and sent with its own `x-amz-content-sha256`, the finished object
+//     is HEADed back for its metadata digest, progress is reported across the
+//     parts, an abort signal cancels the in-flight part, and ANY failure ABORTS
+//     the upload (`DELETE ?uploadId`) and best-effort deletes the key so an
+//     unfinished upload is never left for a target to find. The bucket's own
+//     lifecycle (cancel unfinished large uploads) is the independent backstop
+//     for a process that dies outright.
 //   * IDEMPOTENT DELETE. A 404 is a success (`alreadyAbsent`).
 //   * NAMESPACE CONTAINMENT. Every key/prefix is validated before a request is
 //     built; a key outside `lamasync/seed/` never reaches the endpoint.
@@ -70,9 +85,83 @@ export interface S3SeedRelayStoreOptions {
   fetchImpl?: typeof fetch;
   /** Bound on list pages, so a sweep can never walk forever. */
   maxListPages?: number;
+  /**
+   * The size of one multipart part. Clamped to S3's own limits
+   * (`SEED_RELAY_S3_MIN_PART_BYTES` … `SEED_RELAY_S3_MAX_PART_BYTES`), so a
+   * misconfiguration cannot produce an upload S3 will reject. Tests lower it to
+   * prove the multipart path without allocating gigabytes.
+   */
+  partSizeBytes?: number;
+  /**
+   * Above this many bytes an upload uses multipart. Defaults to one part, i.e.
+   * "anything that does not fit in a single part". A deployment may raise it to
+   * keep small objects on a single PUT; it can never LOWER the effective
+   * threshold below one part, because a first part under the S3 minimum is
+   * invalid.
+   */
+  multipartThresholdBytes?: number;
+  /**
+   * A bounded, credential-free progress line. The caller owns logging; the
+   * store only reports which transport it used and how many parts, because
+   * "did this actually go multipart?" is the one question a log must be able to
+   * answer about a 14.86 GB archive.
+   */
+  log?: (message: string) => void;
 }
 
 const MAX_LIST_PAGES = 100;
+/** S3 requires every part except the last to be at least 5 MiB. */
+export const SEED_RELAY_S3_MIN_PART_BYTES = 5 * 1024 * 1024;
+/** A 64 MiB part puts a 15 GB archive at ~230 parts, far under the 10 000 cap. */
+export const SEED_RELAY_S3_DEFAULT_PART_BYTES = 64 * 1024 * 1024;
+export const SEED_RELAY_S3_MAX_PART_BYTES = 512 * 1024 * 1024;
+/** S3's hard cap on the number of parts in one upload. */
+export const SEED_RELAY_S3_MAX_PARTS = 10_000;
+/**
+ * The largest object this store will ever send in ONE request.
+ *
+ * Backblaze documents a 5 GB ceiling for a single-request upload; this stays
+ * well under it, so the ceiling is unreachable even if someone configures a
+ * huge part size. Above it, multipart is used regardless of the threshold.
+ */
+export const SEED_RELAY_S3_MAX_SINGLE_PUT_BYTES = 4 * 1024 * 1024 * 1024;
+
+function resolvePartSize(
+  options: Pick<S3SeedRelayStoreOptions, "partSizeBytes" | "multipartThresholdBytes">,
+): number {
+  const requested = options.partSizeBytes ?? SEED_RELAY_S3_DEFAULT_PART_BYTES;
+  const clamped = Math.max(SEED_RELAY_S3_MIN_PART_BYTES, Math.min(SEED_RELAY_S3_MAX_PART_BYTES, requested));
+  return Math.floor(clamped);
+}
+
+/**
+ * Whether a multipart upload is possible at all for this size. Pure, so the
+ * refusal is testable without allocating a 50 GB object.
+ */
+export function seedRelayS3MultipartProblem(bytes: number, partSize: number): string | null {
+  const parts = Math.ceil(bytes / partSize);
+  if (parts > SEED_RELAY_S3_MAX_PARTS) {
+    return `the object would need ${parts} parts, above S3's limit of ${SEED_RELAY_S3_MAX_PARTS}; raise the part size`;
+  }
+  return null;
+}
+
+/** Whether this object needs multipart, and why. Pure, so it is testable. */
+export function seedRelayS3Transport(
+  bytes: number,
+  options: Pick<S3SeedRelayStoreOptions, "partSizeBytes" | "multipartThresholdBytes"> = {},
+): { multipart: boolean; partSize: number; parts: number; reason: string } {
+  const partSize = resolvePartSize(options);
+  const threshold = Math.max(partSize, options.multipartThresholdBytes ?? partSize);
+  const parts = Math.max(1, Math.ceil(bytes / partSize));
+  if (bytes > SEED_RELAY_S3_MAX_SINGLE_PUT_BYTES) {
+    return { multipart: true, partSize, parts, reason: "the object exceeds the single-request ceiling" };
+  }
+  if (bytes > threshold) {
+    return { multipart: true, partSize, parts, reason: "the object is larger than one part" };
+  }
+  return { multipart: false, partSize, parts: 1, reason: "the object fits in one request" };
+}
 const EMPTY_SHA256 = createHash("sha256").update("").digest("hex");
 
 function bestEffortRm(path: string): void {
@@ -241,6 +330,46 @@ export async function ensureS3SeedRelayBucket(options: S3SeedRelayStoreOptions):
 }
 
 /**
+ * Read exactly one byte range from a local file into memory.
+ *
+ * Bounded by the caller's part size, and it FAILS rather than returning a short
+ * buffer: a source that changed under us must not produce a part that silently
+ * omits bytes.
+ */
+async function readFileRange(path: string, start: number, length: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let got = 0;
+  const stream = createReadStream(path, { start, end: start + length - 1 });
+  for await (const chunk of stream) {
+    const buffer = chunk as Buffer;
+    chunks.push(buffer);
+    got += buffer.length;
+  }
+  if (got !== length) {
+    throw new Error("the source file changed while it was being uploaded");
+  }
+  return Buffer.concat(chunks, length);
+}
+
+/** The CompleteMultipartUpload request body. ETags are echoed exactly as sent. */
+function completeMultipartXml(parts: Array<{ partNumber: number; etag: string }>): string {
+  const body = parts
+    .map((part) => `<Part><PartNumber>${part.partNumber}</PartNumber><ETag>${part.etag}</ETag></Part>`)
+    .join("");
+  return `<CompleteMultipartUpload>${body}</CompleteMultipartUpload>`;
+}
+
+/**
+ * A 200 from CompleteMultipartUpload can still carry an `<Error>` body (a known
+ * S3 quirk), so a successful status alone is not success.
+ */
+function multipartCompleteProblem(body: string): string | null {
+  if (!/<Error>/.test(body)) return null;
+  const code = /<Code>([^<]{1,80})<\/Code>/.exec(body);
+  return `the object space refused to complete the upload${code ? ` (${code[1]})` : ""}`;
+}
+
+/**
  * Create an S3-compatible seed relay store.
  *
  * The caller owns the configuration. This module never reads an environment
@@ -305,6 +434,142 @@ export function createS3SeedRelayStore(options: S3SeedRelayStoreOptions): SeedRe
     } catch {
       // The caller is already reporting the real failure.
     }
+  };
+
+  /**
+   * Abort an in-progress multipart upload, never throwing.
+   *
+   * This is the piece that keeps "nothing is left to find" true for a large
+   * archive: a failed or cancelled multipart upload leaves invisible PARTS
+   * behind until they are aborted, and they would be billed and counted against
+   * the bucket's lifecycle. The bucket's own "cancel unfinished large uploads"
+   * rule is the backstop for a process that dies before it can get here.
+   */
+  const bestEffortAbortMultipart = async (key: string, uploadId: string): Promise<void> => {
+    try {
+      await send({
+        method: "DELETE",
+        key,
+        query: { uploadId },
+        payloadSha256: EMPTY_SHA256,
+        now: now(),
+      });
+    } catch {
+      // The caller is already reporting the real failure.
+    }
+  };
+
+  const log = options.log ?? ((): void => {});
+
+  /**
+   * Upload a large object in bounded parts.
+   *
+   * Every part is read into memory (bounded by `partSizeBytes`), hashed, and
+   * sent with its own `x-amz-content-sha256` — so the signature covers the bytes
+   * that actually travel, and S3 verifies them. The whole-file digest was
+   * already computed by the caller and is written as object metadata on the
+   * INITIATE request, which is the request whose metadata the finished object
+   * carries.
+   */
+  const multipartPut = async (input: {
+    key: string;
+    sourcePath: string;
+    digest: { bytes: number; sha256: string };
+    partSize: number;
+    signal?: AbortSignal;
+    onProgress?: (progress: { bytesDone: number; bytesTotal: number }) => void;
+  }): Promise<SeedRelayResult<SeedRelayObjectHead> & { parts?: number }> => {
+    const { key, sourcePath, digest, partSize } = input;
+    const problem = seedRelayS3MultipartProblem(digest.bytes, partSize);
+    if (problem !== null) return seedRelayFailure(problem);
+    const totalParts = Math.ceil(digest.bytes / partSize);
+    let response: Response;
+    try {
+      response = await send(
+        {
+          method: "POST",
+          key,
+          query: { uploads: "" },
+          headers: {
+            "content-type": "application/octet-stream",
+            "x-amz-meta-sha256": digest.sha256,
+          },
+          payloadSha256: EMPTY_SHA256,
+          now: now(),
+        },
+        undefined,
+        input.signal,
+      );
+    } catch (err) {
+      return seedRelayFailure(
+        `starting the multipart upload of ${key} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!response.ok) return seedRelayFailure(await s3Error(response));
+    const uploadId = xmlTag(await response.text(), "UploadId");
+    if (uploadId === null || uploadId.length === 0) {
+      return seedRelayFailure("the object space did not return an upload id for the multipart upload");
+    }
+
+    const completed: Array<{ partNumber: number; etag: string }> = [];
+    let bytesSent = 0;
+    try {
+      for (let partNumber = 1; partNumber <= totalParts; partNumber += 1) {
+        if (input.signal?.aborted) throw new Error("the upload was cancelled");
+        const start = (partNumber - 1) * partSize;
+        const length = Math.min(partSize, digest.bytes - start);
+        const part = await readFileRange(sourcePath, start, length);
+        const partSha = createHash("sha256").update(part).digest("hex");
+        const partResponse = await send(
+          {
+            method: "PUT",
+            key,
+            query: { partNumber: String(partNumber), uploadId },
+            headers: { "content-length": String(length), "content-type": "application/octet-stream" },
+            payloadSha256: partSha,
+            now: now(),
+          },
+          new Uint8Array(part),
+          input.signal,
+        );
+        if (!partResponse.ok) throw new Error(await s3Error(partResponse));
+        const etag = partResponse.headers.get("etag");
+        if (etag === null || etag.length === 0) {
+          throw new Error(`the object space did not report an ETag for part ${partNumber}`);
+        }
+        completed.push({ partNumber, etag });
+        bytesSent += length;
+        input.onProgress?.({ bytesDone: bytesSent, bytesTotal: digest.bytes });
+      }
+
+      const body = completeMultipartXml(completed);
+      const done = await send(
+        {
+          method: "POST",
+          key,
+          query: { uploadId },
+          headers: { "content-type": "application/xml" },
+          payloadSha256: createHash("sha256").update(body).digest("hex"),
+          now: now(),
+        },
+        body,
+        input.signal,
+      );
+      if (!done.ok) throw new Error(await s3Error(done));
+      const problem = multipartCompleteProblem(await done.text());
+      if (problem !== null) throw new Error(problem);
+    } catch (err) {
+      // The upload is unfinished: ABORT it, and remove the key too in case the
+      // complete call succeeded and the connection dropped before the response.
+      await bestEffortAbortMultipart(key, uploadId);
+      await bestEffortDeleteKey(key);
+      return seedRelayFailure(
+        `storing ${key} in ${totalParts} part(s) failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const head = await headKey(key);
+    return head.ok ? { ...head, parts: totalParts } : head;
   };
 
   return {
@@ -373,6 +638,26 @@ export function createS3SeedRelayStore(options: S3SeedRelayStoreOptions): SeedRe
         if (digest.sha256 !== input.expected.sha256) {
           return seedRelayFailure("the source SHA-256 does not match the recorded digest");
         }
+
+        // Which transport? A real Projects archive (~14.86 GB before
+        // compression) is far past Backblaze's 5 GB single-request ceiling, so
+        // above the threshold this is a MULTIPART upload, and above the ceiling
+        // it is multipart no matter what the threshold says.
+        const transport = seedRelayS3Transport(digest.bytes, options);
+        if (transport.multipart) {
+          log(
+            `[seed-relay] multipart upload of ${input.key}: ${transport.parts} part(s) of ${transport.partSize} bytes (${transport.reason})`,
+          );
+          return await multipartPut({
+            key: input.key,
+            sourcePath,
+            digest,
+            partSize: transport.partSize,
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
+            ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+          });
+        }
+        log(`[seed-relay] single-request upload of ${input.key}: ${digest.bytes} bytes (${transport.reason})`);
 
         let bytesSent = 0;
         const meter = new Transform({

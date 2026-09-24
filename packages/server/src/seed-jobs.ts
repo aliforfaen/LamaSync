@@ -32,7 +32,7 @@ import {
   SEED_JOB_PHASE_COUNT,
   SEED_PLAN_TTL_MS,
   SEED_SOURCE_MEASUREMENT_MAX_AGE_MS,
-  seedPilotExecutionEligibility,
+  type SeedPilotEligibility,
   type SeedArchiveFormat,
   type SeedArchiveTooling,
   type SeedFilterUniverseFacts,
@@ -52,7 +52,7 @@ import {
   type SeedTargetFacts,
 } from "@lamasync/core";
 import { loadDerivedFolderHealth } from "./folder-health.ts";
-import { getSeedPilotConfig } from "./seed-pilot.ts";
+import { seedPilotEligibilityForFolderPair } from "./seed-pilot.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -1286,12 +1286,10 @@ export function seedPilotEligibilityForPlan(
   folderId: string,
   sourceHostId: string,
   targetHostId: string,
-): ReturnType<typeof seedPilotExecutionEligibility> {
-  return seedPilotExecutionEligibility(getSeedPilotConfig(database), {
-    folderId,
-    sourceHostId,
-    targetHostId,
-  });
+): SeedPilotEligibility {
+  // Delegated to the server's pilot module, which is the only place that can
+  // resolve the LIVE backend fingerprint the readiness verdict is bound to.
+  return seedPilotEligibilityForFolderPair(database, { folderId, sourceHostId, targetHostId });
 }
 
 /** Validity of a stored seed plan against the live assignment state. */

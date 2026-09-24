@@ -26,11 +26,39 @@ process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "seed-role-
 delete process.env.LAMASYNC_SEED_E2E;
 delete process.env.LAMASYNC_TEST;
 
+const { encryptSecret } = await import("./crypto.ts");
 const { getAuthPlugin } = await import("./auth.ts");
 const { insertManagedApiKey, __setApiKeysDb, __resetApiKeysDb } = await import("./api-keys.ts");
 const { folderSeedRoutes, __setDb: __setSeedDb } = await import("./routes/folder-seed.ts");
 const { createSeedJob, getSeedJob } = await import("./seed-jobs.ts");
-const { clearSeedPilotConfig, recordSeedPilotReadiness, setSeedPilotConfig } = await import("./seed-pilot.ts");
+const {
+  clearSeedPilotConfig,
+  getSeedPilotConfig,
+  getSeedPilotRevision,
+  liveSeedRelayTargetFingerprint,
+  recordSeedPilotReadiness,
+  setSeedPilotConfig,
+} = await import("./seed-pilot.ts");
+
+/**
+ * Record a passing verdict for the CURRENT pilot configuration.
+ *
+ * A verdict is bound to the exact probe target (Stage 2f review), so a test that
+ * wants a working pilot has to record one the way the probe does: with the live
+ * fingerprint, against the revision it read.
+ */
+function recordReadyProbe(database: Database): void {
+  const config = getSeedPilotConfig(database);
+  if (config === null) throw new Error("no pilot to record a verdict for");
+  recordSeedPilotReadiness(database, {
+    configRevision: getSeedPilotRevision(database) ?? 0,
+    backendId: config.backendId,
+    bucket: config.bucket,
+    verdictBucket: config.bucket,
+    targetFingerprint: liveSeedRelayTargetFingerprint(database),
+    outcome: { ok: true, detail: "probe passed" },
+  });
+}
 
 const SOURCE = "seed-source";
 const TARGET = "seed-target";
@@ -116,6 +144,11 @@ beforeEach(() => {
     INSERT INTO hosts (id, hostname, config_revision) VALUES ('${TARGET}', 'target', 1);
     INSERT INTO hosts (id, hostname, config_revision) VALUES ('${STRANGER}', 'stranger', 1);
     INSERT INTO folders (id, name, type) VALUES ('f1', 'Projects', 'sync');
+    -- The pilot's temporary seed space must resolve to a real S3 backend row:
+    -- its live fingerprint is what the readiness verdict is bound to.
+    INSERT INTO backends (id, name, kind, s3_provider, s3_endpoint, s3_region, s3_access_key_id, s3_secret_key_enc, created_at)
+      VALUES ('b1', 'b2 tmp', 's3', 'b2', 'https://s3.us-east-005.backblazeb2.com', 'us-east-005', 'keyid-1',
+              '${encryptSecret("role-secret")}', 1);
   `);
   __setApiKeysDb(db);
   adminToken = insertManagedApiKey({ name: "admin", kind: "admin", hostId: null }).token;
@@ -134,7 +167,7 @@ beforeEach(() => {
     backendId: "b1",
     bucket: "lamasync-tmp",
   });
-  recordSeedPilotReadiness(db, { ok: true, detail: "probe passed" });
+  recordReadyProbe(db);
   app = new Elysia().use(getAuthPlugin()).use(folderSeedRoutes);
 });
 
@@ -196,7 +229,7 @@ describe("the archive route is gated by the pilot, never by the environment", ()
         bucket: "lamasync-tmp",
         ...wrong,
       });
-      recordSeedPilotReadiness(db, { ok: true, detail: "probe passed" });
+      recordReadyProbe(db);
       const response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
       expect(response.status).toBe(503);
     }
@@ -213,7 +246,15 @@ describe("the archive route is gated by the pilot, never by the environment", ()
     });
     let response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
     expect(response.status).toBe(503);
-    recordSeedPilotReadiness(db, { ok: false, detail: "access denied" });
+    const failing = getSeedPilotConfig(db);
+    recordSeedPilotReadiness(db, {
+      configRevision: getSeedPilotRevision(db) ?? 0,
+      backendId: failing?.backendId ?? null,
+      bucket: failing?.bucket ?? null,
+      verdictBucket: failing?.bucket ?? null,
+      targetFingerprint: liveSeedRelayTargetFingerprint(db),
+      outcome: { ok: false, detail: "access denied" },
+    });
     response = await post("/api/v1/seed-jobs/job-1/archive", sourceToken, facts());
     expect(response.status).toBe(503);
     const body = (await response.json()) as { error: string };

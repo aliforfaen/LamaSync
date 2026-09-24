@@ -1378,6 +1378,123 @@ the issued-space log line for BOTH sides, the exact resolved peer string, prompt
 cleanup on cancellation, and no deletion outside a job's own namespace.
 **80 checks pass / 0 fail / 3 GATED.**
 
+### 2.17 Stage 2f review corrections (done)
+
+An independent inspection of Stage 2f (`1734f66`) found four ways a `ready`
+verdict, or the upload path behind it, could still authorize something it had
+not proved. All four are fixed, in the same branch, with tests.
+
+#### 2.17.1 A 14.86 GB archive needs multipart, and now gets it
+
+Backblaze's S3-compatible API documents a **5 GB ceiling for a single-request
+upload**; `put` sent the whole archive in one PUT. Compression is not a
+guarantee — and the E2E's own fixture proved how weak that assumption is (§2.17.5).
+
+`seed-relay-s3.ts` now switches to a **multipart upload** above a configurable
+threshold (default: one part) and **regardless of the threshold** above
+`SEED_RELAY_S3_MAX_SINGLE_PUT_BYTES` (4 GiB, deliberately under the documented
+ceiling), so no configuration can produce an invalid upload:
+
+| Property | How multipart keeps it |
+|---|---|
+| whole-file SHA-256 | computed first, and written as `x-amz-meta-sha256` on the **initiate** request — the one whose metadata the finished object carries — then HEADed back |
+| per-request verification | each part is read into memory (bounded by the part size), hashed, and signed with its own `x-amz-content-sha256` |
+| immutability | the HEAD-before-write check is unchanged and runs before either transport |
+| progress | reported across parts, monotonically, ending at the whole-file total |
+| cancellation | the `AbortSignal` aborts the in-flight part |
+| unfinished uploads | any failure or abort issues **AbortMultipartUpload** (`DELETE ?uploadId`), plus a best-effort key delete; the bucket's own "cancel unfinished large uploads" rule is the independent backstop |
+| namespace confinement | unchanged — keys are validated before any request is built |
+| limits | the part size is clamped to S3's own [5 MiB, 512 MiB], and a part count above 10 000 fails closed with the numbers instead of uploading something S3 will reject |
+
+The part size is injectable **for tests only**, which is how the review asked for
+this to be proven: the gated MinIO suite uses S3's own 5 MiB minimum and a 12 MiB
+object — **three real parts over the real wire** — and asserts the protocol it
+observed (one initiate, three part PUTs, one complete), the digest metadata, the
+monotonic progress, immutability, and that a cancelled or failed multipart
+upload leaves **no object** and **issues an abort**. The disposable E2E now
+drives the same path through the SHIPPED daemon: its archive is deliberately
+larger than one part, and the daemon logs
+`multipart upload of …/payload.tar.zst: 3 part(s) of 5242880 bytes`.
+
+#### 2.17.2 The probe proves the WHOLE seed path, not just write+delete
+
+A seed needs HEAD and GET as much as PUT. The probe now, in order:
+
+1. **uploads** a 6 MiB probe object with multipart **forced**
+   (`--s3-upload-cutoff 5M --s3-chunk-size 5M`). A key that can only do simple
+   PUTs is not ready for a real archive, and this is the step that fails it.
+2. **sizes it back** (`rclone size --json`) — the object is readable and its
+   length is what was written;
+3. **reads it back** (`rclone cat`) and compares the **SHA-256 of the bytes**
+   with the bytes written;
+4. **deletes** it.
+
+Step 3 exposed a real bug while it was being written: the command's stdout was
+decoded as UTF-8 before hashing, so any binary object looked corrupt and the
+probe reported a false "not trustworthy". Stdout is now kept as bytes.
+
+Everything is bounded: 20 s per command, 90 s for the whole probe, retries
+pinned to 1. An unprobed, failed or **stale** space authorizes nothing.
+
+#### 2.17.3 The verdict is bound to the EXACT target, and cannot be inherited
+
+Two races, both closed:
+
+* **Concurrent reconfigure.** `probeAndRecordSeedRelayReadiness` used to resolve
+  pilot A, await the probe, and then read *the current* config — so A's outcome
+  could be stored as B's readiness. Every write now bumps a monotonic
+  `seed_pilot_config.config_revision`, and the verdict is recorded with a
+  **compare-and-set** on `config_revision` + `backend_id` + `bucket` + `enabled`.
+  If any of them moved, the result is **discarded** and the current row keeps its
+  own reset (`unknown`) verdict.
+* **Backend rotation.** A `ready` verdict about the old endpoint/key survived a
+  key rotation, an endpoint move or a repointing. The verdict now stores a
+  one-way `readiness_target_fingerprint` — provider, endpoint, region, access key
+  id, a **hash** of the secret, and the bucket — and it only authorizes when it
+  equals the fingerprint of the backend **as it is now**. A rotation therefore
+  invalidates it without the pilot being touched, and the refusal says `STALE`
+  rather than pretending it was never probed. The same comparison is applied a
+  second time at record time, so a rotation *during* a probe discards that probe
+  too.
+
+`seedRelaySpaceForHost` (the host-scoped credential delivery) now requires a
+CURRENT verdict **and** an `s3` backend kind, on top of the existing rules
+(enabled, exact scope, non-terminal job, resolvable backend).
+
+#### 2.17.4 A failing probe is a VERDICT, never a 500
+
+`runProbeCommand` could not be started (no rclone, an unexecutable binary), the
+endpoint hung, the store refused — every one of those used to be able to escape
+as an exception and become an HTTP 500. `probeSeedRelayBucket` and
+`probeAndRecordSeedRelayReadiness` now never throw: each failure becomes a
+stored `failed` verdict with a bounded sentence, and the route answers 200 with
+`probe.ok: false`. Two details found while testing this:
+
+* `Bun.which` **caches** its answer when it is not given an explicit `PATH`, so a
+  long-lived server could keep reporting rclone present after the environment
+  changed. The check now passes the current `PATH`.
+* The failure detail is redacted **literally** (the exact secret and access key
+  id the probe used), not by a shape-based regex. The first attempt used a regex
+  and mangled ordinary diagnostics — `…StatusCode: 0…` looked like a
+  `key:secret` pair — making every failure reason worse than useless.
+
+#### 2.17.5 What the corrections found in the harness itself
+
+* **A compressible "incompressible" fixture.** The E2E's `pseudoBytes` is an LCG
+  whose low bits repeat with a short period, so gzip collapsed a 12 MiB blob into
+  a **21 KB** archive — which is exactly why "compression will keep us under
+  5 GB" is not a transport. The multipart proof uses random bytes for that one
+  blob.
+* **A decoded binary readback.** See §2.17.2.
+* **`rclone` creates a missing bucket** when the credentials allow it, so a wrong
+  bucket name is not a reliable failure; the probe's failure test uses refused
+  credentials instead.
+
+What this still does NOT claim: the three host proofs (a real two-machine hop,
+real ENOSPC, the live dev-vm-shape run) remain GATED, and the multipart path has
+been proven against a disposable MinIO and the shipped daemon's own code path —
+not against Backblaze itself. Nothing here has been run against the real fleet.
+
 ## 3. Space calculation
 
 The peak staging footprint is `archive + extracted tree`, because the archive
@@ -1614,7 +1731,9 @@ time.
 | A production resync peer (the assignment's resolved remote + rclone config) for `baseline_validation` | **implemented + tested** — `resolveSeedBaselinePeer` joins the assignment's `remoteName` (or the documented per-folder default) to its canonical destination, and the bisync child gets the server's rclone config in a private 0600 temp file. The env override is seam-gated, so production cannot be redirected by it |
 | A production relay-space configuration surface (endpoint/bucket/credentials) | **implemented + tested** — the operator's pilot names an EXISTING S3 backend row plus a bucket; the server decrypts the secret and delivers it inside a party's own host config, bound to the job id and side. No second secret entry, no hardcoded bucket |
 | The seed pilot as the execution gate (one folder, one ORDERED pair, probed space) | **implemented + tested** — `seedPilotEligibility`/`seedPilotExecutionEligibility`/`seedPlanExecution`, the admin routes, the panel, and the E2E's 503 cases (no pilot, swapped pair, unprobed space) |
-| A bucket-scoped readiness probe for the seed space | **implemented + tested** — write-then-delete one object under the seed namespace, bounded and retried-pinned, with a persisted verdict that a reconfiguration resets |
+| A bucket-scoped readiness probe for the seed space | **implemented + tested** — upload (multipart FORCED), size read-back, byte-exact GET read-back, then delete; bounded (20 s per command, 90 s total), retries pinned, never throws, with a persisted verdict that a reconfiguration OR a backend rotation invalidates |
+| Multipart upload of a large archive (Backblaze documents a 5 GB single-request ceiling; a Projects archive is ~14.86 GB) | **implemented + tested** — bounded parts, whole-file digest as object metadata on the initiate request, per-part `x-amz-content-sha256`, progress across parts, abort on cancel/failure, part size clamped to S3's limits, and a hard multipart rule above 4 GiB. Proven against MinIO with a 5 MiB part size and a 12 MiB object, and through the shipped daemon in the E2E |
+| A verdict bound to the exact probe target (concurrent reconfigure + backend rotation) | **implemented + tested** — `config_revision` + backend + bucket compare-and-set, and a one-way target fingerprint (provider/endpoint/region/access-key-id/secret-hash/bucket) that must match the LIVE backend |
 | A non-empty target refused at PLAN time | **implemented + tested** — `seedTargetEmptiness` from the target's own measurement; `null` (never measured) is refused too. The publish-time refusal remains the last line of defence, asserted against a target populated after it measured empty |
 | Prompt cleanup of a terminal job's relay objects, with the bucket's lifecycle as the independent backstop | **implemented + tested** — the side that observes the terminal state deletes the job's keys (idempotent, namespace-confined), asserted for a cancellation too |
 | Post-seed zero-change bisync validation as an automated gate | **implemented for the daemon path** — `seedBaselineVerdict` gates `completed`, and the harness independently re-runs `bisync --resync` |
@@ -1898,6 +2017,33 @@ Stage 2f (the operator's pilot, the production relay path and the peer)
   resolved-peer evidence, prompt cleanup, and the daemons started with NO relay
   environment.
 
+Stage 2f review corrections (§2.17)
+- `packages/daemon/src/seed-relay-s3.ts` — multipart upload: the transport
+  decision (`seedRelayS3Transport`, `seedRelayS3MultipartProblem`), bounded part
+  reads, per-part signatures, `CompleteMultipartUpload`, `AbortMultipartUpload`
+  on failure, the 4 GiB single-request rule, injectable part size/threshold, and
+  a credential-free transport log line.
+- `packages/daemon/src/seed-relay-s3.test.ts` — the pure transport-decision tests
+  (always run) and the gated MinIO multipart suite (3 parts, digest metadata,
+  progress, immutability, cancellation + abort, part failure + retry).
+- `packages/daemon/src/seed-runner.ts` — seam-gated part-size tuning and the
+  store's transport log.
+- `packages/server/src/seed-pilot.ts` — the target fingerprint
+  (`seedRelayTargetFingerprint`, `liveSeedRelayTargetFingerprint`), the
+  revision+fingerprint compare-and-set in `recordSeedPilotReadiness`, the
+  rebuilt probe (multipart + size + byte-exact read-back + delete, bounded,
+  never throwing, literal redaction), `seedPilotEligibilityForFolderPair`, and
+  readiness+kind gating in `seedRelaySpaceForHost`.
+- `packages/server/src/seed-pilot-probe.test.ts` (new) — the fingerprint binding,
+  the concurrent-reconfigure and rotation discards, the failure-as-verdict paths,
+  and the gated MinIO probe.
+- `packages/core/src/seed-pilot.ts`, `packages/core/src/db/schema.ts` — the
+  readiness `targetFingerprint`, the three-argument readiness/execution
+  predicates, `config_revision`, `readiness_target_fingerprint`, and the migration
+  entries.
+- `packages/server/src/seed-jobs.ts`, `packages/server/src/routes/seed-pilot.ts`,
+  and the affected tests — the new verdict signatures.
+
 Docs / skill
 - `packages/agent-skill/reference/api.md` — every new route + the contract.
 - `packages/agent-skill/reference/recipes.md` — the seed-plan recipe.
@@ -1909,14 +2055,36 @@ Docs / skill
 ```bash
 bun x tsc --noEmit                              # clean
 bun run build:web-ui                            # clean (one self-contained index.html)
-bun test                                        # 2702 pass / 0 fail / 5 skip, 185 files
+bun test                                        # 2724 pass / 0 fail / 11 skip, 186 files
 bun run scripts/check-skill-drift.ts --strict   # OK (185 API rows, 186 routes)
-bun run scripts/lama346-seed-e2e.ts             # 80 pass / 0 fail / 3 GATED
+bun run scripts/lama346-seed-e2e.ts             # 82 pass / 0 fail / 3 GATED
 # the gated real-object-space suite, against a disposable MinIO:
 LAMASYNC_TEST_S3_ENDPOINT=… LAMASYNC_TEST_S3_BUCKET=… \
 LAMASYNC_TEST_S3_ACCESS_KEY=… LAMASYNC_TEST_S3_SECRET_KEY=… \
-  bun test packages/daemon/src/seed-relay-s3.test.ts   # 7 pass / 0 fail
+  bun test packages/daemon/src/seed-relay-s3.test.ts   # 15 pass / 0 fail
+  bun test packages/server/src/seed-pilot-probe.test.ts # 16 pass / 0 fail
 ```
+
+Stage 2f review suites (§2.17):
+
+- `packages/daemon/src/seed-relay-s3.test.ts` — **6 pure + 5 gated = 15 tests**:
+  the transport decision (a small object stays single-request; a 14.86 GB archive
+  is hundreds of parts; the 4 GiB ceiling forces multipart even with an absurd
+  threshold; the part size is clamped; a part count over 10 000 fails closed) and,
+  against MinIO, a 3-part round trip asserting the observed protocol, digest
+  metadata, monotonic progress and a byte-exact download, plus immutability, a
+  cancelled upload that leaves no object and issues an abort, and a failing part
+  that aborts and lets a retry start clean.
+- `packages/server/src/seed-pilot-probe.test.ts` — **16 tests**: rotating the
+  secret, endpoint, region or access key id invalidates a passing verdict (and
+  says `STALE`); the fingerprint is one-way and bucket-scoped; an unresolvable
+  backend authorizes nothing; a stale revision is discarded and the current row
+  stays `unknown`; a REAL probe reconfigured mid-flight (deterministically, in
+  its first await window) discards its own verdict; a backend rotated mid-flight
+  does too; an unreachable endpoint and a **missing rclone** fail as verdicts
+  rather than throwing; a failed probe never contains the secret; delivery
+  requires a current verdict AND an `s3` kind; and, gated on MinIO, the real
+  probe passes (including the multipart step) and refused credentials fail it.
 
 Stage 2f suites:
 
@@ -2154,7 +2322,11 @@ Focused suites:
    a bounded disposable volume, and the live dev-vm-shape run on a **copy** of a
    large tree (no timeout kill while progressing, one correct resume after a
    deliberate stall, a zero-change baseline afterwards). These are what the
-   pilot exists to make possible, one folder at a time.
+   pilot exists to make possible, one folder at a time — and one of them now has
+   a sharper question to answer: the multipart path is proven against a
+   disposable MinIO and the shipped daemon, NOT against Backblaze's own
+   implementation of the S3 multipart protocol, and not with a real multi-GB
+   object. The pilot's first real run is where that gets confirmed.
 4. Confirm the target's archive tooling *and* staging proof are reported before
    the Run control is enabled for that device. Stage 2f added a third target
    fact to the same preflight: the target must be MEASURED as empty (§2.16.5).

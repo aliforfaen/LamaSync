@@ -367,6 +367,15 @@ CREATE TABLE IF NOT EXISTS seed_pilot_config (
     readiness_bucket    TEXT,
     readiness_checked_at INTEGER,
     readiness_message   TEXT,
+    -- The exact probe target the verdict is about (provider/endpoint/region/
+    -- access-key-id, a hash of the secret, and the bucket). A verdict whose
+    -- fingerprint no longer matches the live backend authorizes nothing, so
+    -- rotating a key invalidates it without touching the pilot.
+    readiness_target_fingerprint TEXT,
+    -- Monotonic revision, bumped on every write. A probe records its verdict
+    -- with a compare-and-set on this, so a verdict about one configuration can
+    -- never be stored against another.
+    config_revision     INTEGER NOT NULL DEFAULT 0,
     updated_at          INTEGER NOT NULL
 );
 
@@ -1141,7 +1150,13 @@ export const MIGRATIONS: string[] = [
   // own measurement of how many entries it already holds. The pilot is what
   // opens execution for one folder+pair; the measurement is what refuses a
   // populated target at PLAN time instead of at the end of a transfer.
-  "CREATE TABLE IF NOT EXISTS seed_pilot_config (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, folder_id TEXT, source_host_id TEXT, target_host_id TEXT, backend_id TEXT, bucket TEXT, readiness_state TEXT NOT NULL DEFAULT 'unknown', readiness_bucket TEXT, readiness_checked_at INTEGER, readiness_message TEXT, updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS seed_pilot_config (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, folder_id TEXT, source_host_id TEXT, target_host_id TEXT, backend_id TEXT, bucket TEXT, readiness_state TEXT NOT NULL DEFAULT 'unknown', readiness_bucket TEXT, readiness_checked_at INTEGER, readiness_message TEXT, readiness_target_fingerprint TEXT, config_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)",
+  // LAMA-346 Stage 2f review: the verdict is bound to the EXACT probe target and
+  // to a monotonic revision, so a concurrent reconfigure (or a backend rotation)
+  // cannot inherit a verdict that was about something else. Added after the table
+  // shipped in the same unreleased branch; duplicate-column errors are ignored.
+  "ALTER TABLE seed_pilot_config ADD COLUMN readiness_target_fingerprint TEXT",
+  "ALTER TABLE seed_pilot_config ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE folder_seed_plans ADD COLUMN target_measured_entries INTEGER",
 ];
 

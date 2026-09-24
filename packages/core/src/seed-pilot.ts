@@ -54,10 +54,23 @@ export interface SeedPilotReadiness {
   checkedAt: number | null;
   /** Bounded, credential-free. `null` while `unknown`. */
   message: string | null;
+  /**
+   * A one-way fingerprint of the EXACT probe target this verdict is about — the
+   * backend's provider/endpoint/region/access-key-id, a hash of its secret, and
+   * the bucket. The server computes it (it is the only place the secret is
+   * decrypted) and this module only ever compares two of them for equality.
+   *
+   * It exists because "the verdict is `ready`" is not enough: an operator can
+   * rotate a backend's key, move its endpoint or point the pilot at a different
+   * backend row WITHOUT touching the pilot, and a verdict about the old target
+   * must stop authorizing the new one. A verdict with no fingerprint (an older
+   * row, or a failure that could not resolve a target) authorizes nothing.
+   */
+  targetFingerprint: string | null;
 }
 
 export function unknownSeedPilotReadiness(): SeedPilotReadiness {
-  return { state: "unknown", bucket: null, checkedAt: null, message: null };
+  return { state: "unknown", bucket: null, checkedAt: null, message: null, targetFingerprint: null };
 }
 
 /**
@@ -282,6 +295,7 @@ export interface SeedPilotProbeOutcome {
  */
 export function seedPilotReadinessVerdict(
   bucket: string | null,
+  targetFingerprint: string | null,
   outcome: SeedPilotProbeOutcome,
   now: number,
 ): SeedPilotReadiness {
@@ -290,18 +304,29 @@ export function seedPilotReadinessVerdict(
     bucket,
     checkedAt: now,
     message: outcome.detail.trim().slice(0, 300),
+    targetFingerprint,
   };
 }
 
-/** True when the stored readiness verdict is current AND passing. */
+/**
+ * True when the stored readiness verdict is current AND passing.
+ *
+ * "Current" means all three of: it passed, it is about THIS bucket, and it is
+ * about THIS probe target. Any of the three differing is a refusal, so rotating
+ * a backend's key, moving its endpoint or repointing the pilot silently
+ * invalidates the verdict instead of inheriting it.
+ */
 export function seedPilotReadinessIsCurrent(
   config: SeedPilotConfig,
   bucket: string | null,
+  liveTargetFingerprint: string | null,
 ): boolean {
   return (
     config.readiness.state === "ready" &&
     bucket !== null &&
-    config.readiness.bucket === bucket
+    liveTargetFingerprint !== null &&
+    config.readiness.bucket === bucket &&
+    config.readiness.targetFingerprint === liveTargetFingerprint
   );
 }
 
@@ -319,18 +344,27 @@ export function seedPilotReadinessIsCurrent(
 export function seedPilotExecutionEligibility(
   config: SeedPilotConfig | null,
   request: SeedPilotRequest,
+  liveTargetFingerprint: string | null,
 ): SeedPilotEligibility {
   const scope = seedPilotEligibility(config, request);
   if (!scope.eligible || config === null) return scope;
-  if (!seedPilotReadinessIsCurrent(config, config.bucket)) {
+  if (!seedPilotReadinessIsCurrent(config, config.bucket, liveTargetFingerprint)) {
+    // A verdict that exists but is about a DIFFERENT target (or a bucket that
+    // no longer resolves) is reported as stale rather than as "never probed",
+    // so an operator who rotated a key is told what actually happened.
+    const stale =
+      config.readiness.state === "ready" && config.readiness.targetFingerprint !== liveTargetFingerprint;
     return {
       eligible: false,
       reason:
         config.readiness.state === "failed"
           ? `The seed pilot's temporary seed space could not be used: ${config.readiness.message ?? "the probe failed"} ` +
             "Run Test seed space in Settings → Seed pilot after fixing the backend's access to that bucket."
-          : "The seed pilot's temporary seed space has not been probed, so LamaSync cannot know whether the " +
-            "configured backend can write to that bucket. Run Test seed space in Settings → Seed pilot.",
+          : stale
+            ? "The seed pilot's stored readiness verdict is STALE: the storage backend (or its endpoint, region, key or " +
+              "secret) changed after it was probed, so it no longer authorizes this seed space. Run Test seed space again."
+            : "The seed pilot's temporary seed space has not been probed, so LamaSync cannot know whether the " +
+              "configured backend can write to that bucket. Run Test seed space in Settings → Seed pilot.",
     };
   }
   return scope;

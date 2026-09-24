@@ -25,7 +25,13 @@ function view(over: Partial<SeedPilotView["config"]> = {}, probe?: { ok: boolean
       backendId: "b2-tmp",
       bucket: "lamasync-tmp",
       updatedAt: 1,
-      readiness: { state: "ready", bucket: "lamasync-tmp", checkedAt: 1, message: "probe passed" },
+      readiness: {
+        state: "ready",
+        bucket: "lamasync-tmp",
+        checkedAt: 1,
+        message: "probe passed",
+        targetFingerprint: "f".repeat(64),
+      },
       ...over,
     },
     summary: "The seed pilot authorizes f1 (master → dev-vm).",
@@ -82,7 +88,7 @@ describe("the pilot form's draft round-trips through the API grammar", () => {
 describe("the readiness line never overstates the probe", () => {
   test("an unprobed space says so and names the action", () => {
     const sentence = seedPilotReadinessSentence(
-      view({ readiness: { state: "unknown", bucket: null, checkedAt: null, message: null } }),
+      view({ readiness: { state: "unknown", bucket: null, checkedAt: null, message: null, targetFingerprint: null } }),
     );
     expect(sentence).toContain("has not been probed");
     expect(sentence).toContain("Test seed space");
@@ -94,7 +100,15 @@ describe("the readiness line never overstates the probe", () => {
 
   test("a failure carries the reason and is not softened", () => {
     const sentence = seedPilotReadinessSentence(
-      view({ readiness: { state: "failed", bucket: "lamasync-tmp", checkedAt: 2, message: "access denied" } }),
+      view({
+        readiness: {
+          state: "failed",
+          bucket: "lamasync-tmp",
+          checkedAt: 2,
+          message: "access denied",
+          targetFingerprint: "f".repeat(64),
+        },
+      }),
     );
     expect(sentence).toContain("FAILED");
     expect(sentence).toContain("access denied");

@@ -762,7 +762,25 @@ distributable binary build.
    a real backend row, configures and probes the pilot through the real admin
    routes, starts both daemons with NO relay environment at all, and asserts the
    503 cases, the non-empty-target preflight, the issued-space and resolved-peer
-   evidence and prompt cleanup: **80 pass / 0 fail / 3 GATED**.
+   evidence and prompt cleanup: **82 pass / 0 fail / 3 GATED** (including a real
+   3-part multipart upload of the archive through the shipped daemon).
+   **A review of that stage found four more gaps, all now fixed and tested:**
+   (i) a real archive is ~14.86 GB and Backblaze documents a **5 GB ceiling for a
+   single-request upload**, while the store sent the whole archive in one PUT —
+   it now uses **multipart** (bounded parts, whole-file digest as object metadata
+   on the initiate request, a per-part signature, progress across parts, and an
+   **abort** of the unfinished upload on failure or cancellation), with a hard
+   rule that no single request exceeds 4 GiB and a part size clamped to S3's own
+   limits; proven with a 12 MiB object and a 5 MiB part size against MinIO and
+   through the shipped daemon; (ii) the readiness probe proved only write+delete,
+   so it now also proves **multipart, size read-back and a byte-exact GET
+   read-back**; (iii) the verdict could be inherited by a concurrent reconfigure
+   or survive a backend key rotation — it is now recorded with a
+   `config_revision` + backend + bucket **compare-and-set** and bound to a one-way
+   fingerprint of the exact probe target, so either change DISCARDS it, and the
+   host-scoped delivery additionally requires a current verdict and an `s3`
+   backend; (iv) a failing probe could escape as a 500 — it is now always a
+   stored verdict with a bounded, literally-redacted sentence.
    Remaining work, in order:
    (a) the GATED host proofs — a real two-MACHINE hop with a network partition and
    one retry/resume, real ENOSPC on a bounded disposable volume, and the live
@@ -783,7 +801,7 @@ distributable binary build.
    build still keeps `POST /seed-jobs` at 503 for every folder the pilot does not
    authorize. See
    [`handoff-346-initial-folder-seeding.md`](handoff-346-initial-folder-seeding.md)
-   §2.14, §2.15 and §2.16.
+   §2.14, §2.15, §2.16 and §2.17.
 
 2. **LAMA-337 — release, and the one device-path question it leaves open.**
    The reconnect flow is merged with the

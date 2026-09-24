@@ -20,6 +20,7 @@ import { Elysia, t } from "elysia";
 import type { Database } from "bun:sqlite";
 import { db as defaultDb } from "../db.ts";
 import {
+  emptySeedPilotConfig,
   parseSeedPilotUpdatePayload,
   seedPilotEligibility,
   seedPilotSummary,
@@ -102,16 +103,7 @@ function seedPilotOptions(): {
 
 /** The wire shape: the config, one summary sentence, and the pickable options. */
 function seedPilotView(config: SeedPilotConfig | null): Record<string, unknown> {
-  const empty = config ?? {
-    enabled: false,
-    folderId: null,
-    sourceHostId: null,
-    targetHostId: null,
-    backendId: null,
-    bucket: null,
-    updatedAt: null,
-    readiness: { state: "unknown", bucket: null, checkedAt: null, message: null },
-  };
+  const empty = config ?? emptySeedPilotConfig();
   return {
     config: empty,
     summary: seedPilotSummary(empty),
