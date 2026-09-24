@@ -29,7 +29,7 @@ process.env.LAMASYNC_SECRET_KEY = process.env.LAMASYNC_SECRET_KEY ?? "folder-see
 const { getAuthPlugin } = await import("../auth.ts");
 const { insertManagedApiKey, __setApiKeysDb, __resetApiKeysDb } = await import("../api-keys.ts");
 const { folderSeedRoutes, __setDb: __setSeedDb } = await import("./folder-seed.ts");
-const { createSeedJob, getSeedJob, reapStaleSeedJobs } = await import("../seed-jobs.ts");
+const { activeSeedJobForPair, createSeedJob, getSeedJob, reapStaleSeedJobs } = await import("../seed-jobs.ts");
 
 let db: Database;
 let app: { handle(request: Request): Promise<Response> };
@@ -476,6 +476,15 @@ describe("seed job creation is explicitly unavailable", () => {
     // No job row was created.
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM folder_seed_jobs").get()?.n).toBe(0);
   });
+});
+
+test("only nonterminal jobs for the exact folder and pair block a retry", () => {
+  createSeedJob(db, seedJobFixture());
+  expect(activeSeedJobForPair(db, "f1", "host-a", "host-b")).toBe("job-1");
+  expect(activeSeedJobForPair(db, "f1", "host-b", "host-a")).toBeNull();
+  expect(activeSeedJobForPair(db, "other-folder", "host-a", "host-b")).toBeNull();
+  db.run("UPDATE folder_seed_jobs SET phase = 'cancelled' WHERE id = 'job-1'");
+  expect(activeSeedJobForPair(db, "f1", "host-a", "host-b")).toBeNull();
 });
 
 describe("seed job progress, lease and terminal states", () => {

@@ -480,6 +480,23 @@ export function getSeedJob(database: Database, jobId: string): SeedJob | null {
   return row ? rowToSeedJob(row) : null;
 }
 
+/** A pilot pair can run only one seed at a time; host config carries one job credential. */
+export function activeSeedJobForPair(
+  database: Database,
+  folderId: string,
+  sourceHostId: string,
+  targetHostId: string,
+): string | null {
+  return database
+    .query<{ id: string }, [string, string, string]>(
+      `SELECT id FROM folder_seed_jobs
+       WHERE folder_id = ? AND source_host_id = ? AND host_id = ?
+         AND phase NOT IN ('completed', 'failed', 'cancelled')
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(folderId, sourceHostId, targetHostId)?.id ?? null;
+}
+
 export function listSeedJobs(database: Database, folderId: string, limit = 10): SeedJob[] {
   const capped = Math.min(Math.max(1, limit), 50);
   return database

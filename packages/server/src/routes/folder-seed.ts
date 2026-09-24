@@ -47,6 +47,7 @@ import {
   finishSeedJobOwnedBy,
   getSeedJob,
   getSeedPlan,
+  activeSeedJobForPair,
   initialSeedJobProgress,
   listSeedJobs,
   listSeedPlans,
@@ -342,6 +343,16 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
         set.status = 409;
         return { error: validity.message };
       }
+      const activeJobId = activeSeedJobForPair(
+        activeDb,
+        plan.folderId,
+        plan.sourceHostId,
+        plan.hostId,
+      );
+      if (activeJobId !== null) {
+        set.status = 409;
+        return { error: "A seed is already active for this folder and host pair", activeJobId };
+      }
       const now = Date.now();
       const job: SeedJob = {
         id: crypto.randomUUID(),
@@ -395,7 +406,7 @@ export const folderSeedRoutes = new Elysia({ prefix: "/api/v1" })
           400: { description: "Invalid request" },
           403: { description: "Admin only" },
           404: { description: "Seed plan not found" },
-          409: { description: "Plan is stale or not runnable" },
+          409: { description: "Plan is stale, not runnable, or this pair already has an active seed" },
           422: { description: "Body failed schema validation (confirm must be true)" },
           503: { description: "Seed execution is not available yet" },
           401: { description: "Unauthorized" },

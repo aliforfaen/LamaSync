@@ -2356,3 +2356,8 @@ configuration for the two inputs Stage 2f moved to production (an operator's
 pilot, one folder at a time), and the live host proofs — with one thing
 explicitly NOT claimed: nothing here has been run between two real machines,
 against a real disk-full target, or against a copy of the live tree.
+
+Independent review also added a duplicate-run guard: while a nonterminal seed
+exists for the pilot's exact folder and source/target pair, a new run returns
+409 with the active job ID. Host config issues one relay credential per party,
+so overlapping jobs for that pair must not compete for it.
