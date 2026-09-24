@@ -401,6 +401,9 @@ function probeRcloneConfig(target: SeedRelayProbeTarget): string {
   const lines = [`[${PROBE_REMOTE}]`, "type = s3", `provider = ${target.provider}`, `access_key_id = ${target.accessKeyId}`];
   lines.push(`secret_access_key = ${target.secretAccessKey}`);
   lines.push(`endpoint = ${target.endpoint}`);
+  // A typo must not create a new bucket without the temporary bucket's
+  // lifecycle rule when the backend key also has bucket-management access.
+  lines.push("no_check_bucket = true");
   if (target.region !== null && target.region.length > 0) lines.push(`region = ${target.region}`);
   return `${lines.join("\n")}\n`;
 }

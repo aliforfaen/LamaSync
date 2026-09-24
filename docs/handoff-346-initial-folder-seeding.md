@@ -1486,9 +1486,10 @@ stored `failed` verdict with a bounded sentence, and the route answers 200 with
   5 GB" is not a transport. The multipart proof uses random bytes for that one
   blob.
 * **A decoded binary readback.** See §2.17.2.
-* **`rclone` creates a missing bucket** when the credentials allow it, so a wrong
-  bucket name is not a reliable failure; the probe's failure test uses refused
-  credentials instead.
+* **`rclone` can create a missing bucket** when the credentials allow it. The
+  probe now sets `no_check_bucket = true`, so a typo fails instead of creating
+  a new bucket without the temporary bucket's lifecycle rule. A disposable
+  MinIO test exercises that refusal.
 
 What this still does NOT claim: the three host proofs (a real two-machine hop,
 real ENOSPC, the live dev-vm-shape run) remain GATED, and the multipart path has

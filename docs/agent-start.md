@@ -202,8 +202,9 @@ and an `s3` kind. (4) A failing probe is a VERDICT, never a 500: no rclone, a
 hung endpoint and a refused credential all become stored failures with a bounded
 sentence, redacted LITERALLY (the exact secret and access key id) rather than by
 a regex that mangled ordinary diagnostics. Also worth remembering: `Bun.which`
-CACHES without an explicit `PATH`, and `rclone` CREATES a missing bucket when the
-credentials allow it.
+CACHES without an explicit `PATH`. The probe sets `no_check_bucket = true`
+because `rclone` can otherwise create a misspelled bucket when credentials
+allow it, leaving temporary data outside the lifecycle-managed bucket.
 
 The target's resync PEER now resolves from the assignment:
 `resolveSeedBaselinePeer` joins `<remoteName (or the documented per-folder

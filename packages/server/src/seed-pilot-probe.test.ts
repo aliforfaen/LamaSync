@@ -376,10 +376,6 @@ describe.skipIf(!MINIO)("the probe against a real object space", () => {
   });
 
   test("credentials the object space refuses fail the verdict, and the reason is usable", async () => {
-    // NOTE: a WRONG BUCKET NAME is not a reliable failure with rclone, because
-    // rclone CREATES a missing bucket when the credentials allow it — so the
-    // refusal that matters here is the credential one, which is also what a
-    // bucket-scoped B2 key hits when it is scoped to a different bucket.
     configureBackend({
       endpoint: S3_ENDPOINT,
       region: "us-east-1",
@@ -405,5 +401,22 @@ describe.skipIf(!MINIO)("the probe against a real object space", () => {
     expect(message).not.toContain("not-a-known-secret");
     // ...and it stays a bounded sentence.
     expect(message.length).toBeLessThanOrEqual(300);
+  });
+
+  test("a misspelled bucket fails instead of being created by rclone", async () => {
+    configureBackend({ endpoint: S3_ENDPOINT, region: "us-east-1", accessKeyId: S3_ACCESS_KEY, secret: S3_SECRET_KEY });
+    const missingBucket = `seed-missing-${crypto.randomUUID()}`;
+    setSeedPilotConfig(db, {
+      enabled: true,
+      folderId: REQUEST.folderId,
+      sourceHostId: REQUEST.sourceHostId,
+      targetHostId: REQUEST.targetHostId,
+      backendId: "b1",
+      bucket: missingBucket,
+    });
+    const result = await probeAndRecordSeedRelayReadiness(db);
+    expect(result.ok).toBe(false);
+    expect(getSeedPilotConfig(db)?.readiness.state).toBe("failed");
+    expect(seedPilotEligibilityForFolderPair(db, REQUEST).eligible).toBe(false);
   });
 });
