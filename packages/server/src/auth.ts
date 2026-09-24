@@ -118,6 +118,7 @@ const DEVICE_ALLOWED_ROUTES: Array<{ method: string; pattern: string }> = [
   // own action queue + work-ack
   { method: "GET", pattern: "/api/v1/actions/pending" },
   { method: "GET", pattern: "/api/v1/actions/taken" },
+  { method: "POST", pattern: "/api/v1/actions/*/lease" },
   { method: "POST", pattern: "/api/v1/actions/*/complete" },
   // heartbeat + operation reports
   { method: "POST", pattern: "/api/v1/report/health" },

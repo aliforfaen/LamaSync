@@ -197,6 +197,17 @@ describe("own-host access works for device keys", () => {
     expect(await statusOf(deviceA, "POST", "/api/v1/actions/act-a/complete", { status: "done" })).toBe(200);
   });
 
+  test("device key can renew only its own queued-action lease", async () => {
+    const now = Date.now();
+    seedRow(
+      "UPDATE queued_actions SET status = 'taken', taken_at = ?, lease_expires_at = ? WHERE id = 'act-a'",
+      [now, now + 30_000],
+    );
+
+    expect(await statusOf(deviceA, "POST", "/api/v1/actions/act-a/lease", {})).toBe(200);
+    expect(await statusOf(deviceA, "POST", "/api/v1/actions/act-b/lease", {})).toBe(403);
+  });
+
   test("may change only its own assignment mode", async () => {
     expect(
       await statusOf(deviceA, "PATCH", "/api/v1/folders/f1/assign/host-a", { mode: "mount" }),
