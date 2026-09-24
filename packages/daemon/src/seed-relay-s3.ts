@@ -6,13 +6,10 @@
 // archive and its manifest can make a genuine network hop between two machines
 // instead of moving between two directories on one host.
 //
-// It is deliberately TEST-ONLY until the Stage 2c E2E evidence is reviewed:
-// `seed-relay-s3-bounded.test.ts` reads the module graph to assert no production
-// module imports it, and `SEED_ARCHIVE_TRANSPORT_IMPLEMENTED` stays `false`, so
-// `POST /seed-jobs` still refuses. Nothing here reads the environment, an rclone
-// config, or a daemon config: the CALLER constructs it with an explicit
-// endpoint/bucket/credential, which is what keeps a configured production
-// backend out of the library and out of every log line.
+// The daemon constructs it only from a server-issued relay space for a
+// non-terminal job authorized by the operator's seed pilot. Nothing here reads
+// the environment, an rclone config, or a daemon config: the CALLER supplies
+// the endpoint/bucket/credential, and this module never logs credentials.
 //
 // SigV4 is implemented locally (no SDK dependency) over `fetch`. That keeps the
 // store honest about what it signs and what it streams, and it is what the

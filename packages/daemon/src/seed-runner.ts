@@ -172,9 +172,25 @@ export function seedRelaySpaceFromHostConfig(
 }
 
 /** The store settings the S3 relay store takes. */
+export function normalizeSeedRelayEndpoint(endpoint: string): string {
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint)
+    ? endpoint
+    : `https://${endpoint}`;
+  const parsed = new URL(candidate);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("the seed relay endpoint must use HTTP or HTTPS");
+  }
+  return parsed.toString();
+}
+
 function storeConfigFromSpace(space: SeedRelaySpace): SeedDaemonRelayConfig {
   return {
-    endpoint: space.endpoint,
+    // LamaSync's reusable S3 backends store endpoint hostnames in the form
+    // expected by rclone (for example `s3.eu-central-003.backblazeb2.com`).
+    // The seed relay uses fetch + URL, which requires an absolute URL. Keep an
+    // explicitly configured scheme (notably http for local S3-compatible
+    // services), and default a bare hostname to HTTPS.
+    endpoint: normalizeSeedRelayEndpoint(space.endpoint),
     bucket: space.bucket,
     region: space.region ?? "us-east-1",
     accessKeyId: space.accessKeyId,

@@ -39,7 +39,11 @@ import {
 } from "@lamasync/core";
 import { detectArchiveTooling } from "./seed-archive.ts";
 import { createLocalSeedRelayStore } from "./seed-relay-local.ts";
-import { runSeedAction, type SeedRunnerClient } from "./seed-runner.ts";
+import {
+  normalizeSeedRelayEndpoint,
+  runSeedAction,
+  type SeedRunnerClient,
+} from "./seed-runner.ts";
 import type { SeedLeaseScheduler } from "./seed-lease-supervisor.ts";
 
 const SANDBOX = mkdtempSync(join(tmpdir(), "lama346-runner-"));
@@ -66,6 +70,17 @@ const RCLONE_AVAILABLE = Bun.which("rclone") !== null;
 
 afterAll(() => {
   rmSync(SANDBOX, { recursive: true, force: true });
+});
+
+test("bare S3 relay endpoints default to HTTPS; explicit schemes are retained", () => {
+  expect(normalizeSeedRelayEndpoint("s3.eu-central-003.backblazeb2.com")).toBe(
+    "https://s3.eu-central-003.backblazeb2.com/",
+  );
+  expect(normalizeSeedRelayEndpoint("http://127.0.0.1:39001")).toBe("http://127.0.0.1:39001/");
+  expect(normalizeSeedRelayEndpoint("https://s3.example.com")).toBe("https://s3.example.com/");
+  expect(() => normalizeSeedRelayEndpoint("ftp://s3.example.com")).toThrow(
+    "the seed relay endpoint must use HTTP or HTTPS",
+  );
 });
 
 /** The Projects shape in miniature: content, an ignored subtree and git metadata. */
