@@ -15,3 +15,6 @@ android/local.properties
 android/credentials/
 android/.kotlin/
 android/captures/
+
+# Codex CLI local artifacts
+.codex/
